@@ -8,6 +8,7 @@ use crate::{
 };
 use axum::Router;
 use basilica_validator::{api::types::RentalStatus, ValidatorClient};
+use basilica_payments::client::PaymentsClient;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use tokio::signal;
@@ -48,6 +49,9 @@ pub struct AppState {
 
     /// Database pool for user rental tracking
     pub db: PgPool,
+
+    /// Payments service client
+    pub payments_client: Option<Arc<PaymentsClient>>,
 }
 
 /// Process health check for a single rental
@@ -205,6 +209,30 @@ impl Server {
                 message: format!("Failed to run migrations: {}", e),
             })?;
 
+        // Initialize payments service client if enabled
+        let payments_client = if config.payments.enabled {
+            info!(
+                "Initializing payments service client at {}",
+                config.payments.endpoint
+            );
+            match PaymentsClient::new(&config.payments.endpoint).await {
+                Ok(client) => {
+                    info!("Successfully connected to payments service");
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to connect to payments service: {}. Payments features will be disabled.",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            info!("Payments service integration is disabled");
+            None
+        };
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -214,6 +242,7 @@ impl Server {
             validator_hotkey: config.bittensor.validator_hotkey.clone(),
             http_client: http_client.clone(),
             db,
+            payments_client,
         };
 
         // Start optional health check task using HTTP client
