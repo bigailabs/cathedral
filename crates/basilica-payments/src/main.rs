@@ -171,8 +171,10 @@ async fn main() -> Result<()> {
 
     let price = PriceConverter::new(oracle, cfg.treasury.tao_decimals);
 
-    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead).into_service();
-    let dispatcher = OutboxDispatcher::new(repos.clone(), billing, price);
+    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead, metrics_system.clone())
+        .into_service();
+
+    let dispatcher = OutboxDispatcher::new(repos.clone(), billing, price, metrics_system.clone());
 
     info!(
         "Connecting to substrate node at: {}",
@@ -180,7 +182,8 @@ async fn main() -> Result<()> {
     );
     let mut endpoints = vec![cfg.blockchain.websocket_url.clone()];
     endpoints.extend(cfg.blockchain.fallback_websocket_urls.clone());
-    let monitor = ChainMonitor::new(repos.clone(), endpoints)
+
+    let monitor = ChainMonitor::new(repos.clone(), endpoints, metrics_system.clone())
         .await
         .context("Failed to initialize blockchain monitor")?;
 
