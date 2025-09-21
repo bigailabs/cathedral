@@ -380,6 +380,7 @@ impl ValidationExecutor {
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_lightweight_validation(
         &self,
+        miner_uid: u16,
         executor_info: &ExecutorInfoDetailed,
         ssh_details: &SshConnectionDetails,
         _session_info: &basilica_protocol::miner_discovery::InitiateSshSessionResponse,
@@ -391,12 +392,14 @@ impl ValidationExecutor {
         _config: &crate::config::VerificationConfig,
     ) -> Result<ExecutorVerificationResult> {
         info!(
+            miner_uid = miner_uid,
             executor_id = %executor_info.id,
             previous_score = previous_score,
             "[EVAL_FLOW] Executing lightweight validation"
         );
 
         let total_start = Instant::now();
+        let executor_id = executor_info.id.to_string();
 
         let connectivity_successful = match self
             .ssh_client
@@ -416,6 +419,7 @@ impl ValidationExecutor {
                 let gpus_detected = lines.iter().filter(|l| l.starts_with("GPU-")).count();
                 let gpu_present = gpus_detected > 0;
                 info!(
+                    miner_uid = miner_uid,
                     executor_id = %executor_info.id,
                     gpu_present = gpu_present,
                     gpus_detected = gpus_detected,
@@ -425,6 +429,7 @@ impl ValidationExecutor {
             }
             Err(e) => {
                 warn!(
+                    miner_uid = miner_uid,
                     executor_id = %executor_info.id,
                     error = %e,
                     "[EVAL_FLOW] Lightweight connectivity check failed"
@@ -433,9 +438,48 @@ impl ValidationExecutor {
             }
         };
 
+        let nat_validation_successful = if !connectivity_successful {
+            false
+        } else {
+            let nat_collector = self.nat_collector.clone();
+
+            match nat_collector
+                .collect_with_fallback(&executor_id, miner_uid, ssh_details)
+                .await
+            {
+                Some(result) if result.is_accessible => {
+                    info!(
+                        miner_uid = miner_uid,
+                        executor_id = %executor_info.id,
+                        "[EVAL_FLOW] NAT validation successful"
+                    );
+                    true
+                }
+                _ => {
+                    warn!(
+                        miner_uid = miner_uid,
+                        executor_id = %executor_info.id,
+                        "[EVAL_FLOW] NAT validation failed"
+                    );
+                    false
+                }
+            }
+        };
+
+        let validation_successful = connectivity_successful && nat_validation_successful;
+        if !validation_successful {
+            error!(
+                miner_uid = miner_uid,
+                executor_id = executor_id,
+                connectivity_successful = connectivity_successful,
+                nat_validation_successful = nat_validation_successful,
+                "[EVAL_FLOW] Critical validation failed during lightweight validation"
+            );
+        }
+
         let total_duration = total_start.elapsed();
 
-        let verification_score = if connectivity_successful {
+        let verification_score = if validation_successful {
             previous_score
         } else {
             0.0
@@ -446,16 +490,19 @@ impl ValidationExecutor {
             binary_upload_duration: Duration::from_secs(0),
             binary_execution_duration: Duration::from_secs(0),
             total_validation_duration: total_duration,
-            ssh_score: if connectivity_successful { 1.0 } else { 0.0 },
+            ssh_score: if validation_successful { 1.0 } else { 0.0 },
             binary_score: 0.0,
             combined_score: verification_score,
         };
 
         info!(
+            miner_uid = miner_uid,
             executor_id = %executor_info.id,
             score = verification_score,
             duration_ms = total_duration.as_millis(),
             node_available = connectivity_successful,
+            nat_validation_successful = nat_validation_successful,
+            validation_successful = validation_successful,
             "[EVAL_FLOW] Lightweight validation completed"
         );
 
@@ -466,9 +513,9 @@ impl ValidationExecutor {
                 .record_attestation_verification(
                     &executor_info.id.to_string(),
                     "connectivity_check",
-                    connectivity_successful,
-                    connectivity_successful, // signature_valid - connectivity successful
-                    false,                   // no hardware attestation in lightweight mode
+                    validation_successful,
+                    validation_successful,
+                    false,
                 )
                 .await;
         }
@@ -476,18 +523,16 @@ impl ValidationExecutor {
         Ok(ExecutorVerificationResult {
             executor_id: executor_info.id.clone(),
             grpc_endpoint: executor_info.grpc_endpoint.clone(),
-            verification_score: if connectivity_successful {
-                previous_score
-            } else {
-                0.0
-            },
-            ssh_connection_successful: connectivity_successful,
+            verification_score,
+            ssh_connection_successful: validation_successful,
             binary_validation_successful: false,
             executor_result,
-            error: if connectivity_successful {
+            error: if validation_successful {
                 None
-            } else {
+            } else if !connectivity_successful {
                 Some("Connectivity check failed".to_string())
+            } else {
+                Some("NAT validation failed".to_string())
             },
             execution_time: total_duration,
             validation_details: details,
