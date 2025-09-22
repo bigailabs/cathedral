@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Default mode shows essential information without internal IDs
 - Enhanced interactive selector with improved GPU information display in detailed mode
 
+### Changed
+- Renamed `--gpu-min` to `--gpu-count` in the `up` command for clarity
+- GPU selection now uses exact count matching instead of minimum matching when provisioning instances
+  - `basilica up a100 --gpu-count 2` now gets executors with exactly 2 GPUs, not "at least 2"
+
+### Fixed
+- Compact mode GPU selections (e.g., selecting "1x A100") now correctly filter for executors with exactly that GPU count, not executors with more GPUs
+
 ## [0.3.3]
 
 ### Added
