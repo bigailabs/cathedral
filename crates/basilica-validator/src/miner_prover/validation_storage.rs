@@ -103,7 +103,7 @@ impl StorageCollector {
         info!(
             executor_id = executor_id,
             available_tb = format!("{:.2}", available_tb),
-            "[STORAGE] Storage requirement met: {:.2} TB available",
+            "[STORAGE] Storage: {:.2} TB available",
             available_tb
         );
 
