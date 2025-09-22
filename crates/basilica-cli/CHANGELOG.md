@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4]
+
 ### Added
 - Three-tier display system for `ls`, `up`, and `ps` commands with flexible output control:
   - `--detailed` flag shows internal IDs (executor IDs in `ls`/`up`, rental IDs in `ps`) for debugging
