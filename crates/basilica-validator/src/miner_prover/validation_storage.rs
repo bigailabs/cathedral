@@ -380,9 +380,9 @@ pub fn parse_df_output(
 
 /// Parse bytes format: avail size fstype target
 fn parse_bytes_format(parts: &[&str]) -> Result<(u64, u64, String, String)> {
-    if parts.len() != 4 {
+    if parts.len() < 4 {
         return Err(anyhow::anyhow!(
-            "Invalid bytes format: expected 4 fields, got {}",
+            "Invalid bytes format: expected at least 4 fields, got {}",
             parts.len()
         ));
     }
@@ -394,7 +394,7 @@ fn parse_bytes_format(parts: &[&str]) -> Result<(u64, u64, String, String)> {
         .parse::<u64>()
         .with_context(|| format!("Failed to parse total bytes: {}", parts[1]))?;
     let fstype = parts[2].to_string();
-    let mount = parts[3].to_string();
+    let mount = parts[3..].join(" ");
 
     Ok((avail, total, fstype, mount))
 }
@@ -670,6 +670,20 @@ mod tests {
 
         let filesystems = result.unwrap();
         assert_eq!(filesystems.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_df_output_primary_format_mount_with_spaces() {
+        // Test mount point with spaces in primary format (bytes)
+        let output = "1073741824 2147483648 ext4 /mnt/my backup drive";
+        let result = parse_df_output(output, "test-executor", true);
+        assert!(result.is_ok());
+        let fs = result.unwrap();
+        assert_eq!(fs.len(), 1);
+        assert_eq!(fs[0].mount_point, "/mnt/my backup drive");
+        assert_eq!(fs[0].available_bytes, 1073741824);
+        assert_eq!(fs[0].total_bytes, 2147483648);
+        assert_eq!(fs[0].filesystem_type, "ext4");
     }
 
     #[test]
