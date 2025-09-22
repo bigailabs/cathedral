@@ -639,7 +639,10 @@ impl ValidationExecutor {
             // as we may have valid executors with <1TB storage that we want to allow
             // once we have a better understanding of the ecosystem we can re-enable this
             // quality_validations_successful = docker_result.is_some() && nat_result.is_some() && storage_result.is_some();
-            let nat_successful = nat_result.as_ref().map(|n| n.is_accessible).unwrap_or(false);
+            let nat_successful = nat_result
+                .as_ref()
+                .map(|n| n.is_accessible)
+                .unwrap_or(false);
             quality_validations_successful = docker_result.is_some() && nat_successful;
             if !quality_validations_successful {
                 error!(
