@@ -214,6 +214,7 @@ impl NetworkSpeedCollector {
             Ok(profile) => {
                 if let Err(e) = self.store(miner_uid, executor_id, &profile).await {
                     warn!(
+                        miner_uid = miner_uid,
                         executor_id = executor_id,
                         error = %e,
                         "[SPEEDTEST] Failed to store network speed profile (non-critical)"
@@ -223,6 +224,7 @@ impl NetworkSpeedCollector {
             }
             Err(e) => {
                 warn!(
+                    miner_uid = miner_uid,
                     executor_id = executor_id,
                     error = %e,
                     "[SPEEDTEST] Failed to collect network speed profile (non-critical)"

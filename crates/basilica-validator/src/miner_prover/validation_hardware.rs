@@ -284,6 +284,7 @@ impl HardwareCollector {
                 // Try to store but don't fail if storage fails
                 if let Err(e) = self.store(miner_uid, executor_id, &profile).await {
                     warn!(
+                        miner_uid = miner_uid,
                         executor_id = executor_id,
                         error = %e,
                         "[HARDWARE_PROFILE] Failed to store hardware profile (non-critical)"
@@ -293,6 +294,7 @@ impl HardwareCollector {
             }
             Err(e) => {
                 warn!(
+                    miner_uid = miner_uid,
                     executor_id = executor_id,
                     error = %e,
                     "[HARDWARE_PROFILE] Failed to collect hardware profile (non-critical)"
