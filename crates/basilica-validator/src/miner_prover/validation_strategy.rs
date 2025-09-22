@@ -635,8 +635,11 @@ impl ValidationExecutor {
                 storage_future
             );
 
-            quality_validations_successful =
-                docker_result.is_some() && nat_result.is_some() && storage_result.is_some();
+            // For now, I'm disabling storage validation from affecting the overall quality validation result
+            // as we may have valid executors with <1TB storage that we want to allow
+            // once we have a better understanding of the ecosystem we can re-enable this
+            // quality_validations_successful = docker_result.is_some() && nat_result.is_some() && storage_result.is_some();
+            quality_validations_successful = docker_result.is_some() && nat_result.is_some();
             if !quality_validations_successful {
                 error!(
                     miner_uid = miner_uid,
