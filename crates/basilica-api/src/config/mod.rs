@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Rental health check interval in seconds
+const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+
 /// Bittensor integration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BittensorIntegrationConfig {
@@ -142,6 +145,11 @@ impl Config {
     /// Get validator timeout as Duration
     pub fn validator_timeout(&self) -> Duration {
         Duration::from_secs(30) // Default 30 seconds
+    }
+
+    /// Get rental health check interval as Duration
+    pub fn rental_health_check_interval(&self) -> Duration {
+        Duration::from_secs(RENTAL_HEALTH_CHECK_INTERVAL_SECS)
     }
 
     /// Create BittensorConfig from our configuration
