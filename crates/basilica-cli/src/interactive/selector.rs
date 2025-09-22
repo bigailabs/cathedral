@@ -318,7 +318,8 @@ impl InteractiveSelector {
             };
             Ok(ExecutorSelection::ExecutorId { executor_id })
         } else {
-            Ok(ExecutorSelection::GpuRequirements {
+            // Use ExactGpuConfiguration for compact mode to ensure exact GPU count matching
+            Ok(ExecutorSelection::ExactGpuConfiguration {
                 gpu_requirements: GpuRequirements {
                     gpu_type: Some(selected_config.1.clone()),
                     gpu_count: selected_config.2,

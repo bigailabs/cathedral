@@ -324,6 +324,7 @@ impl From<GpuRequirements> for SdkGpuRequirements {
 pub enum ExecutorSelection {
     ExecutorId { executor_id: String },
     GpuRequirements { gpu_requirements: GpuRequirements },
+    ExactGpuConfiguration { gpu_requirements: GpuRequirements },
 }
 
 impl From<ExecutorSelection> for SdkExecutorSelection {
@@ -334,6 +335,11 @@ impl From<ExecutorSelection> for SdkExecutorSelection {
             }
             ExecutorSelection::GpuRequirements { gpu_requirements } => {
                 SdkExecutorSelection::GpuRequirements {
+                    gpu_requirements: gpu_requirements.into(),
+                }
+            }
+            ExecutorSelection::ExactGpuConfiguration { gpu_requirements } => {
+                SdkExecutorSelection::ExactGpuConfiguration {
                     gpu_requirements: gpu_requirements.into(),
                 }
             }

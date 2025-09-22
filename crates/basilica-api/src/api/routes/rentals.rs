@@ -86,9 +86,21 @@ pub async fn start_rental(
             info!("Starting rental with specified executor: {}", executor_id);
             executor_id.clone()
         }
-        ExecutorSelection::GpuRequirements { gpu_requirements } => {
+        ExecutorSelection::GpuRequirements { gpu_requirements }
+        | ExecutorSelection::ExactGpuConfiguration { gpu_requirements } => {
+            // Determine if we need exact count matching
+            let require_exact_count = matches!(
+                &request.executor_selection,
+                ExecutorSelection::ExactGpuConfiguration { .. }
+            );
+
             info!(
-                "Selecting executor based on GPU requirements: {:?}",
+                "Selecting executor based on GPU requirements ({}): {:?}",
+                if require_exact_count {
+                    "exact"
+                } else {
+                    "minimum"
+                },
                 gpu_requirements
             );
 
@@ -109,22 +121,50 @@ pub async fn start_rental(
                     message: format!("Failed to query available executors: {}", e),
                 })?;
 
-            if executors_response.available_executors.is_empty() {
-                error!("No executors match the specified GPU requirements");
-                return Err(crate::error::ApiError::NotFound {
-                    message: "executor matching GPU requirements".into(),
-                });
-            }
+            // Filter for exact count if needed, otherwise use all results
+            let executors = if require_exact_count {
+                let exact_count = gpu_requirements.gpu_count as usize;
+                let filtered: Vec<_> = executors_response
+                    .available_executors
+                    .into_iter()
+                    .filter(|exec| exec.executor.gpu_specs.len() == exact_count)
+                    .collect();
 
-            // Randomly select an executor from those matching GPU requirements
-            let selected_id = select_best_executor(executors_response.available_executors)
-                .ok_or_else(|| crate::error::ApiError::Internal {
+                if filtered.is_empty() {
+                    error!("No executors with exactly {} GPU(s) available", exact_count);
+                    return Err(crate::error::ApiError::NotFound {
+                        message: format!(
+                            "No executors with exactly {} GPU(s) matching requirements",
+                            exact_count
+                        ),
+                    });
+                }
+                filtered
+            } else {
+                if executors_response.available_executors.is_empty() {
+                    error!("No executors match the specified GPU requirements");
+                    return Err(crate::error::ApiError::NotFound {
+                        message: "executor matching GPU requirements".into(),
+                    });
+                }
+                executors_response.available_executors
+            };
+
+            // Randomly select an executor from the (possibly filtered) list
+            let selected_id = select_best_executor(executors).ok_or_else(|| {
+                crate::error::ApiError::Internal {
                     message: "Failed to select executor".into(),
-                })?;
+                }
+            })?;
 
             info!(
-                "Randomly selected executor {} from available executors matching GPU requirements",
-                selected_id
+                "Selected executor {} from available executors {}",
+                selected_id,
+                if require_exact_count {
+                    format!("with exactly {} GPU(s)", gpu_requirements.gpu_count)
+                } else {
+                    "matching GPU requirements".to_string()
+                }
             );
             selected_id
         }
