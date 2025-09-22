@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5]
+
 ### Fixed
 - Fixed `--gpu-count` flag to properly filter GPU configurations in all selection modes (default, compact, and detailed)
   - Interactive selector now shows only executors/configurations with the exact GPU count specified
