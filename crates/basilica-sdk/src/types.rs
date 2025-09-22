@@ -113,8 +113,8 @@ pub struct LogStreamQuery {
 pub enum ExecutorSelection {
     /// Select a specific executor by ID
     ExecutorId { executor_id: String },
-    /// Select best available executor based on GPU requirements
-    GpuRequirements { gpu_requirements: GpuRequirements },
+    /// Select executor with exact GPU configuration (exact count match)
+    ExactGpuConfiguration { gpu_requirements: GpuRequirements },
 }
 
 /// Start rental request with flexible executor selection

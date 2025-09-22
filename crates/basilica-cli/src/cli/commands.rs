@@ -228,9 +228,9 @@ pub struct ListFilters {
 /// Options for provisioning instances
 #[derive(clap::Args, Debug, Clone)]
 pub struct UpOptions {
-    /// Minimum GPU count
+    /// Exact GPU count required
     #[arg(long)]
-    pub gpu_min: Option<u32>,
+    pub gpu_count: Option<u32>,
 
     /// Docker image to run
     #[arg(long)]

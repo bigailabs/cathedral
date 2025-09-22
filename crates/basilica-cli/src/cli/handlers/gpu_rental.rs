@@ -159,16 +159,16 @@ pub async fn handle_up(
                 ExecutorSelection::ExecutorId { executor_id }
             }
             TargetType::GpuCategory(gpu_category) => {
-                // GPU category specified - use automatic selection
+                // GPU category specified - use automatic selection with exact matching
                 let spinner =
                     create_spinner(&format!("Finding available {} executors...", gpu_category));
                 complete_spinner_and_clear(spinner);
 
-                ExecutorSelection::GpuRequirements {
+                ExecutorSelection::ExactGpuConfiguration {
                     gpu_requirements: GpuRequirements {
                         min_memory_gb: 0, // Default, no minimum memory requirement
                         gpu_type: Some(gpu_category.as_str()),
-                        gpu_count: options.gpu_min.unwrap_or(0),
+                        gpu_count: options.gpu_count.unwrap_or(0),
                     },
                 }
             }
@@ -182,7 +182,7 @@ pub async fn handle_up(
             available: Some(true),
             min_gpu_memory: None,
             gpu_type: None,
-            min_gpu_count: options.gpu_min,
+            min_gpu_count: options.gpu_count,
             location: options.country.as_ref().map(|country| LocationProfile {
                 city: None,
                 region: None,
@@ -257,7 +257,7 @@ pub async fn handle_up(
             cpu_cores: options.cpu_cores.unwrap_or(0.0),
             memory_mb: options.memory_mb.unwrap_or(0),
             storage_mb: options.storage_mb.unwrap_or(0),
-            gpu_count: options.gpu_min.unwrap_or(0),
+            gpu_count: options.gpu_count.unwrap_or(0),
             gpu_types: vec![],
         },
         command,

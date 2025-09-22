@@ -29,7 +29,7 @@ impl Default for GpuRequirements {
         Self {
             min_memory_gb: 0,
             gpu_type: Some("b200".to_string()),
-            gpu_count: 1,
+            gpu_count: 0,
         }
     }
 }

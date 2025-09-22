@@ -231,11 +231,11 @@ fn executor_by_id(executor_id: String) -> types::ExecutorSelection {
     types::ExecutorSelection::ExecutorId { executor_id }
 }
 
-/// Helper function to create executor selection by GPU requirements
+/// Helper function to create executor selection by GPU requirements (exact count)
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn executor_by_gpu(gpu_requirements: types::GpuRequirements) -> types::ExecutorSelection {
-    types::ExecutorSelection::GpuRequirements { gpu_requirements }
+    types::ExecutorSelection::ExactGpuConfiguration { gpu_requirements }
 }
 
 /// Python module for Basilica SDK
