@@ -596,6 +596,10 @@ impl VerificationEngine {
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
         info!(
+            miner_uid = miner_uid,
+            executor_id = %executor_result.executor_id,
+            verification_score = executor_result.verification_score,
+            validation_type = %executor_result.validation_type,
             "Storing executor verification result to database for miner {}, executor {}: score={:.2}",
             miner_uid, executor_result.executor_id, executor_result.verification_score
         );
@@ -690,16 +694,25 @@ impl VerificationEngine {
         let status = match (success, &executor_result.validation_type) {
             (false, _) => "offline".to_string(),
             (true, ValidationType::Full) => "online".to_string(),
-            (true, ValidationType::Lightweight) => sqlx::query_scalar::<_, String>(
-                "SELECT status FROM miner_executors WHERE miner_id = ? AND executor_id = ?",
-            )
-            .bind(&miner_id)
-            .bind(&verification_log.executor_id)
-            .fetch_optional(self.persistence.pool())
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "verified".to_string()),
+            (true, ValidationType::Lightweight) => {
+                match self
+                    .persistence
+                    .has_active_rental(&executor_result.executor_id.to_string(), &miner_id)
+                    .await
+                {
+                    Ok(true) => "online".to_string(),
+                    _ => sqlx::query_scalar::<_, String>(
+                        "SELECT status FROM miner_executors WHERE miner_id = ? AND executor_id = ?",
+                    )
+                    .bind(&miner_id)
+                    .bind(&verification_log.executor_id)
+                    .fetch_optional(self.persistence.pool())
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "verified".to_string()),
+                }
+            }
         };
 
         info!(
@@ -845,6 +858,10 @@ impl VerificationEngine {
         }
 
         info!(
+            miner_uid = miner_uid,
+            executor_id = %executor_result.executor_id,
+            verification_score = executor_result.verification_score,
+            validation_type = %executor_result.validation_type,
             "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
             miner_uid, executor_result.executor_id, executor_result.verification_score
         );
@@ -1401,11 +1418,17 @@ impl VerificationEngine {
             );
         } else {
             debug!(
+                security = true,
+                miner_uid = miner_uid,
+                executor_id = %executor_id,
+                validation_type = "lightweight",
                 "No GPU assignments found to update for {}/{} with {} reported UUIDs",
                 miner_id,
                 executor_id,
                 reported_gpu_uuids.len()
             );
+            self.store_gpu_uuid_assignments(miner_uid, executor_id, gpu_infos)
+                .await?;
         }
 
         Ok(())
