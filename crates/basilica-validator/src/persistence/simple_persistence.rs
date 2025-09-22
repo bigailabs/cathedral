@@ -2697,7 +2697,8 @@ impl SimplePersistence {
         &self,
         miner_uid: u16,
         executor_id: &str,
-    ) -> Result<Option<crate::miner_prover::validation_storage::StorageProfile>, anyhow::Error> {
+    ) -> Result<Option<crate::miner_prover::validation_storage::StorageProfile>, anyhow::Error>
+    {
         let row = sqlx::query(
             r#"
             SELECT total_bytes, available_bytes, required_bytes,
@@ -2720,17 +2721,20 @@ impl SimplePersistence {
             let full_json: String = row.get("full_json");
 
             let filesystem_details = serde_json::from_str(&filesystem_details_json)?;
-            let collection_timestamp = chrono::DateTime::parse_from_rfc3339(&collection_timestamp_str)?
-                .with_timezone(&chrono::Utc);
+            let collection_timestamp =
+                chrono::DateTime::parse_from_rfc3339(&collection_timestamp_str)?
+                    .with_timezone(&chrono::Utc);
 
-            Ok(Some(crate::miner_prover::validation_storage::StorageProfile {
-                total_bytes: total_bytes as u64,
-                available_bytes: available_bytes as u64,
-                required_bytes: required_bytes as u64,
-                filesystem_details,
-                collection_timestamp,
-                full_json,
-            }))
+            Ok(Some(
+                crate::miner_prover::validation_storage::StorageProfile {
+                    total_bytes: total_bytes as u64,
+                    available_bytes: available_bytes as u64,
+                    required_bytes: required_bytes as u64,
+                    filesystem_details,
+                    collection_timestamp,
+                    full_json,
+                },
+            ))
         } else {
             Ok(None)
         }

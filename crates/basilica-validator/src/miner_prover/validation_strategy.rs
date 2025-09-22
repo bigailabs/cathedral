@@ -14,6 +14,7 @@ use super::validation_hardware::HardwareCollector;
 use super::validation_nat::NatCollector;
 use super::validation_network::NetworkProfileCollector;
 use super::validation_speedtest::NetworkSpeedCollector;
+use super::validation_storage::StorageCollector;
 use crate::config::VerificationConfig;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::SimplePersistence;
@@ -56,6 +57,7 @@ pub struct ValidationExecutor {
     speedtest_collector: NetworkSpeedCollector,
     docker_collector: DockerCollector,
     nat_collector: NatCollector,
+    storage_collector: StorageCollector,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
 
@@ -347,7 +349,12 @@ impl ValidationExecutor {
             config.docker_validation.docker_image.clone(),
             config.docker_validation.pull_timeout_secs,
         );
-        let nat_collector = NatCollector::new(ssh_client.clone(), persistence);
+        let nat_collector = NatCollector::new(ssh_client.clone(), persistence.clone());
+        let storage_collector = StorageCollector::new(
+            ssh_client.clone(),
+            persistence,
+            config.storage_validation.min_required_storage_bytes,
+        );
 
         Self {
             ssh_client,
@@ -357,6 +364,7 @@ impl ValidationExecutor {
             speedtest_collector,
             docker_collector,
             nat_collector,
+            storage_collector,
             metrics,
         }
     }
@@ -603,6 +611,7 @@ impl ValidationExecutor {
             let speedtest_collector = self.speedtest_collector.clone();
             let docker_collector = self.docker_collector.clone();
             let nat_collector = self.nat_collector.clone();
+            let storage_collector = self.storage_collector.clone();
 
             let hardware_future =
                 hardware_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
@@ -614,22 +623,30 @@ impl ValidationExecutor {
                 docker_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
             let nat_future =
                 nat_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
+            let storage_future =
+                storage_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
 
-            let (_hardware, _network, _speedtest, docker_result, nat_result) = tokio::join!(
+            let (_hardware, _network, _speedtest, docker_result, nat_result, storage_result) = tokio::join!(
                 hardware_future,
                 network_future,
                 speedtest_future,
                 docker_future,
-                nat_future
+                nat_future,
+                storage_future
             );
 
-            quality_validations_successful = docker_result.is_some() && nat_result.is_some();
+            quality_validations_successful =
+                docker_result.is_some() && nat_result.is_some() && storage_result.is_some();
             if !quality_validations_successful {
                 error!(
                     miner_uid = miner_uid,
                     executor_id = %executor_info.id,
                     docker_successful = docker_result.is_some(),
                     nat_successful = nat_result.is_some(),
+                    storage_successful = storage_result.is_some(),
+                    storage_available_tb = storage_result.as_ref().map(|s|
+                        format!("{:.2}", s.available_bytes as f64 / 1024_f64.powi(4))
+                    ).unwrap_or_else(|| "N/A".to_string()),
                     "[EVAL_FLOW] Critical pre-validations failed"
                 );
             }
