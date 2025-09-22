@@ -1427,8 +1427,23 @@ impl VerificationEngine {
                 executor_id,
                 reported_gpu_uuids.len()
             );
-            self.store_gpu_uuid_assignments(miner_uid, executor_id, gpu_infos)
-                .await?;
+            if self
+                .persistence
+                .has_active_rental(executor_id, &miner_id)
+                .await
+                .unwrap_or(false)
+            {
+                self.store_gpu_uuid_assignments(miner_uid, executor_id, gpu_infos)
+                    .await?;
+            } else {
+                debug!(
+                    security = true,
+                    miner_uid = miner_uid,
+                    executor_id = %executor_id,
+                    validation_type = "lightweight",
+                    "Skipping GPU assignment creation in lightweight (no active rental)"
+                );
+            }
         }
 
         Ok(())
