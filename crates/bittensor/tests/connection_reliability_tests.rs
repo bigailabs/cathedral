@@ -1,10 +1,10 @@
 //! Integration tests for connection reliability improvements
 
-use bittensor::{
-    ConnectionPool, ConnectionPoolBuilder, ConnectionManager, ConnectionState, HealthChecker,
-    BittensorError, RetryConfig,
-};
 use basilica_common::config::BittensorConfig;
+use bittensor::{
+    BittensorError, ConnectionManager, ConnectionPool, ConnectionPoolBuilder, ConnectionState,
+    HealthChecker, RetryConfig,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -74,7 +74,10 @@ async fn test_connection_pool_fallback_behavior() {
 #[tokio::test]
 async fn test_health_checker_monitoring() {
     use bittensor::connect::ConnectionPoolTrait;
-    let pool = Arc::new(ConnectionPool::new(vec!["wss://test.invalid:443".to_string()], 1));
+    let pool = Arc::new(ConnectionPool::new(
+        vec!["wss://test.invalid:443".to_string()],
+        1,
+    ));
 
     let checker = Arc::new(
         HealthChecker::new()
@@ -230,7 +233,10 @@ async fn test_connection_pool_refresh() {
 
 #[tokio::test]
 async fn test_health_checker_failure_threshold() {
-    let pool = Arc::new(ConnectionPool::new(vec!["wss://test.invalid:443".to_string()], 1));
+    let pool = Arc::new(ConnectionPool::new(
+        vec!["wss://test.invalid:443".to_string()],
+        1,
+    ));
 
     let checker = Arc::new(
         HealthChecker::new()
@@ -371,7 +377,7 @@ async fn test_concurrent_connection_attempts() {
     // All should complete without panic
     for result in results {
         assert!(result.is_ok()); // Task completed
-        // The actual connection will fail due to invalid endpoints
+                                 // The actual connection will fail due to invalid endpoints
     }
 }
 

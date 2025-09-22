@@ -2,9 +2,9 @@
 //!
 //! Central service for all Bittensor chain interactions using crabtensor.
 
-use crate::connect::{ConnectionPool, ConnectionPoolBuilder, ConnectionManager};
-use crate::error::BittensorError;
 use crate::connect::{CircuitBreaker, HealthChecker, RetryConfig, RetryExecutor};
+use crate::connect::{ConnectionManager, ConnectionPool, ConnectionPoolBuilder};
+use crate::error::BittensorError;
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 // Import our own utilities
@@ -129,11 +129,11 @@ impl Service {
         retry_executor
             .execute_with_config(
                 || async {
-                    pool.initialize().await.map_err(|e| {
-                        BittensorError::NetworkError {
+                    pool.initialize()
+                        .await
+                        .map_err(|e| BittensorError::NetworkError {
                             message: format!("Pool initialization failed: {}", e),
-                        }
-                    })
+                        })
                 },
                 RetryConfig::network(),
             )
@@ -159,8 +159,7 @@ impl Service {
                 .with_failure_threshold(3),
         );
 
-        let monitor_handle = health_checker.start_monitoring(Arc::clone(&pool))
-;
+        let monitor_handle = health_checker.start_monitoring(Arc::clone(&pool));
 
         // Load wallet signer
         let hotkey_path = home_hotkey_location(&config.wallet_name, &config.hotkey_name)
@@ -247,7 +246,10 @@ impl Service {
 
             async move {
                 // Get a healthy client from the pool
-                let client = self.connection_pool.get_healthy_client().await
+                let client = self
+                    .connection_pool
+                    .get_healthy_client()
+                    .await
                     .map_err(|e| BittensorError::NetworkError {
                         message: format!("Failed to get healthy client: {}", e),
                     })?;
@@ -350,7 +352,10 @@ impl Service {
 
             async move {
                 // Get a healthy client from the pool
-                let client = self.connection_pool.get_healthy_client().await
+                let client = self
+                    .connection_pool
+                    .get_healthy_client()
+                    .await
                     .map_err(|e| BittensorError::NetworkError {
                         message: format!("Failed to get healthy client: {}", e),
                     })?;
@@ -423,7 +428,10 @@ impl Service {
         debug!("Getting neuron info for UID: {} on netuid: {}", uid, netuid);
 
         // Get a healthy client from the pool
-        let client = self.connection_pool.get_healthy_client().await
+        let client = self
+            .connection_pool
+            .get_healthy_client()
+            .await
             .map_err(|e| BittensorError::NetworkError {
                 message: format!("Failed to get healthy client: {}", e),
             })?;
@@ -474,7 +482,10 @@ impl Service {
         let operation = || {
             async move {
                 // Get a healthy client from the pool
-                let client = self.connection_pool.get_healthy_client().await
+                let client = self
+                    .connection_pool
+                    .get_healthy_client()
+                    .await
                     .map_err(|e| BittensorError::NetworkError {
                         message: format!("Failed to get healthy client: {}", e),
                     })?;
@@ -591,7 +602,10 @@ impl Service {
         );
 
         // Get a healthy client from the pool
-        let client = self.connection_pool.get_healthy_client().await
+        let client = self
+            .connection_pool
+            .get_healthy_client()
+            .await
             .map_err(|e| BittensorError::NetworkError {
                 message: format!("Failed to get healthy client: {}", e),
             })?;
@@ -647,7 +661,10 @@ impl Service {
     /// ```
     pub async fn get_block_number(&self) -> Result<u64, BittensorError> {
         // Get a healthy client from the pool
-        let client = self.connection_pool.get_healthy_client().await
+        let client = self
+            .connection_pool
+            .get_healthy_client()
+            .await
             .map_err(|e| BittensorError::NetworkError {
                 message: format!("Failed to get healthy client: {}", e),
             })?;
@@ -699,7 +716,10 @@ impl Service {
         T: subxt::tx::Payload,
     {
         // Get a healthy client from the pool
-        let client = self.connection_pool.get_healthy_client().await
+        let client = self
+            .connection_pool
+            .get_healthy_client()
+            .await
             .map_err(|e| BittensorError::NetworkError {
                 message: format!("Failed to get healthy client: {}", e),
             })?;

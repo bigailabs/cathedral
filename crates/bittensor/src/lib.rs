@@ -29,8 +29,8 @@ pub use registration::{
     ChainRegistration, RegistrationConfig, RegistrationConfigBuilder, RegistrationStateSnapshot,
 };
 pub use retry::{retry_operation, retry_operation_with_timeout, CircuitBreaker, RetryExecutor};
-pub use service::Service;
 pub use service::ConnectionPoolMetrics;
+pub use service::Service;
 pub use utils::{
     account_id_to_hotkey, create_signature, hotkey_to_account_id, normalize_weights, rao_to_tao,
     set_weights_payload, sign_message_hex, sign_with_keypair, tao_to_rao,

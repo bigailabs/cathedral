@@ -86,7 +86,6 @@ where
 
         Self::with_pool(pool, handler).await
     }
-
 }
 
 impl<H, P> BlockchainMonitor<H, P>
@@ -101,7 +100,10 @@ where
     {
         // Initialize connections (best-effort)
         if let Err(e) = pool.reconnect_with_backoff().await {
-            warn!("BlockchainMonitor: initial connection attempt failed: {}", e);
+            warn!(
+                "BlockchainMonitor: initial connection attempt failed: {}",
+                e
+            );
         }
 
         // Start health monitoring in background
@@ -145,7 +147,10 @@ where
                 Ok(s) => s,
                 Err(e) => {
                     attempts = attempts.saturating_add(1);
-                    warn!("Failed to subscribe to finalized blocks (attempt {}): {}", attempts, e);
+                    warn!(
+                        "Failed to subscribe to finalized blocks (attempt {}): {}",
+                        attempts, e
+                    );
                     tokio::time::sleep(self.retry_delay(attempts)).await;
                     continue;
                 }

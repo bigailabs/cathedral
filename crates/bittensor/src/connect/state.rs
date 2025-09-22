@@ -43,11 +43,7 @@ impl ConnectionState {
     pub fn status_message(&self) -> String {
         match self {
             ConnectionState::Connected { since, endpoint } => {
-                format!(
-                    "Connected to {} (uptime: {:?})",
-                    endpoint,
-                    since.elapsed()
-                )
+                format!("Connected to {} (uptime: {:?})", endpoint, since.elapsed())
             }
             ConnectionState::Reconnecting {
                 attempts,
@@ -146,14 +142,11 @@ impl ConnectionManager {
         match state {
             ConnectionState::Connected { .. } => {
                 // Fast path: already connected
-                self.client
-                    .read()
-                    .await
-                    .as_ref()
-                    .cloned()
-                    .ok_or_else(|| BittensorError::ServiceUnavailable {
+                self.client.read().await.as_ref().cloned().ok_or_else(|| {
+                    BittensorError::ServiceUnavailable {
                         message: "Client not initialized despite connected state".to_string(),
-                    })
+                    }
+                })
             }
             ConnectionState::Reconnecting {
                 attempts, since, ..

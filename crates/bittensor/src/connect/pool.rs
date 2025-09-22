@@ -1,7 +1,7 @@
 //! Connection pool for managing multiple blockchain connections with automatic failover
 
-use crate::error::{BittensorError, RetryConfig};
 use crate::connect::health::{ConnectionPoolTrait, HealthChecker};
+use crate::error::{BittensorError, RetryConfig};
 use crate::retry::ExponentialBackoff;
 use futures::future::join_all;
 use std::sync::Arc;

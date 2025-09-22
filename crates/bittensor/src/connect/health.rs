@@ -14,7 +14,9 @@ type ChainClient = OnlineClient<PolkadotConfig>;
 #[async_trait::async_trait]
 pub trait ConnectionPoolTrait: Send + Sync {
     async fn connections(&self) -> Arc<RwLock<Vec<Arc<ChainClient>>>>;
-    async fn reconnect_with_backoff(&self) -> Result<Arc<ChainClient>, crate::error::BittensorError>;
+    async fn reconnect_with_backoff(
+        &self,
+    ) -> Result<Arc<ChainClient>, crate::error::BittensorError>;
     async fn get_healthy_client(&self) -> Result<Arc<ChainClient>, crate::error::BittensorError>;
 }
 
@@ -79,10 +81,7 @@ impl HealthChecker {
     }
 
     /// Start monitoring the connection pool in a background task
-    pub fn start_monitoring<P>(
-        self: Arc<Self>,
-        pool: Arc<P>,
-    ) -> tokio::task::JoinHandle<()>
+    pub fn start_monitoring<P>(self: Arc<Self>, pool: Arc<P>) -> tokio::task::JoinHandle<()>
     where
         P: ConnectionPoolTrait + Send + Sync + 'static,
     {
@@ -283,10 +282,7 @@ mod tests {
         let checker = HealthChecker::new();
 
         // Add some successful checks
-        checker
-            .metrics
-            .total_checks
-            .store(10, Ordering::Relaxed);
+        checker.metrics.total_checks.store(10, Ordering::Relaxed);
         checker
             .metrics
             .successful_checks
@@ -313,18 +309,12 @@ mod tests {
         let checker = HealthChecker::new();
 
         // Set some values
-        checker
-            .metrics
-            .total_checks
-            .store(100, Ordering::Relaxed);
+        checker.metrics.total_checks.store(100, Ordering::Relaxed);
         checker
             .metrics
             .successful_checks
             .store(90, Ordering::Relaxed);
-        checker
-            .metrics
-            .failed_checks
-            .store(10, Ordering::Relaxed);
+        checker.metrics.failed_checks.store(10, Ordering::Relaxed);
 
         // Reset
         checker.reset_metrics();
@@ -337,7 +327,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_monitoring_prevents_duplicate() {
-        let pool = Arc::new(ConnectionPool::new(vec!["wss://test.endpoint:443".to_string()], 1));
+        let pool = Arc::new(ConnectionPool::new(
+            vec!["wss://test.endpoint:443".to_string()],
+            1,
+        ));
         let checker = Arc::new(HealthChecker::new().with_interval(Duration::from_millis(100)));
 
         // Start monitoring
@@ -369,7 +362,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_consecutive_failures_tracking() {
-        let pool = Arc::new(ConnectionPool::new(vec!["wss://invalid.endpoint:443".to_string()], 1));
+        let pool = Arc::new(ConnectionPool::new(
+            vec!["wss://invalid.endpoint:443".to_string()],
+            1,
+        ));
         let checker = Arc::new(
             HealthChecker::new()
                 .with_interval(Duration::from_millis(50))
@@ -409,10 +405,7 @@ mod tests {
 
         // Simulate multiple checks
         for _ in 0..5 {
-            checker
-                .metrics
-                .total_checks
-                .fetch_add(1, Ordering::Relaxed);
+            checker.metrics.total_checks.fetch_add(1, Ordering::Relaxed);
             checker
                 .metrics
                 .successful_checks
@@ -420,10 +413,7 @@ mod tests {
         }
 
         for _ in 0..2 {
-            checker
-                .metrics
-                .total_checks
-                .fetch_add(1, Ordering::Relaxed);
+            checker.metrics.total_checks.fetch_add(1, Ordering::Relaxed);
             checker
                 .metrics
                 .failed_checks

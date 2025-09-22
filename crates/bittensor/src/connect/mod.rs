@@ -3,18 +3,18 @@
 //! This module groups all connection-related primitives behind a cohesive API while
 //! re-exporting items to keep the public surface stable.
 
-pub mod pool;
-pub mod state;
 pub mod health;
 pub mod monitor;
+pub mod pool;
+pub mod state;
 
 // Re-export core types from submodules
+pub use crate::error::RetryConfig;
+pub use crate::retry::{CircuitBreaker, ExponentialBackoff, RetryExecutor};
+pub use health::{ConnectionPoolTrait, HealthCheckMetrics, HealthChecker};
+pub use monitor::{BlockchainEventHandler, BlockchainMonitor};
 pub use pool::{ConnectionPool, ConnectionPoolBuilder};
 pub use state::{ConnectionManager, ConnectionMetricsSnapshot, ConnectionState};
-pub use health::{HealthCheckMetrics, HealthChecker, ConnectionPoolTrait};
-pub use monitor::{BlockchainMonitor, BlockchainEventHandler};
-pub use crate::retry::{CircuitBreaker, ExponentialBackoff, RetryExecutor};
-pub use crate::error::RetryConfig;
 
 /// Common imports for connection-related code
 pub mod prelude {
