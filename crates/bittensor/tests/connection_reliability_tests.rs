@@ -73,7 +73,7 @@ async fn test_connection_pool_fallback_behavior() {
 
 #[tokio::test]
 async fn test_health_checker_monitoring() {
-    use bittensor::connect::ConnectionPoolTrait;
+    
     let pool = Arc::new(ConnectionPool::new(
         vec!["wss://test.invalid:443".to_string()],
         1,
@@ -173,7 +173,7 @@ async fn test_concurrent_health_checks() {
     let handles: Vec<_> = (0..5)
         .map(|_| {
             let pool_clone = pool.clone();
-            let checker_clone = checker.clone();
+            let _checker_clone = checker.clone();
             tokio::spawn(async move { pool_clone.healthy_connection_count().await })
         })
         .collect();
