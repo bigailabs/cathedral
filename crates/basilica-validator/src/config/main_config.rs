@@ -634,6 +634,7 @@ impl Default for ValidatorConfig {
                     netuid: 1,
                     chain_endpoint: Some("wss://entrypoint-finney.opentensor.ai:443".to_string()),
                     weight_interval_secs: 300,
+                    ..Default::default()
                 },
                 axon_port: 9090,
                 external_ip: None,
