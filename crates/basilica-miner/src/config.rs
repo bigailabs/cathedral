@@ -498,6 +498,7 @@ impl Default for MinerBittensorConfig {
                 netuid: 39,                // Basilca subnet ID
                 chain_endpoint: None,      // Will be auto-detected based on network
                 weight_interval_secs: 300, // 5 minutes
+                ..Default::default()
             },
             coldkey_name: "default".to_string(),
             axon_port: 8091,

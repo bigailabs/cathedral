@@ -29,6 +29,9 @@ serde_json = { workspace = true }
 # Internal dependencies
 basilica-common = { path = "../basilica-common" }
 
+# Additional dependencies for connection improvements
+futures = { workspace = true }
+
 # Metadata generation dependencies (only used by binary)
 subxt-codegen = { workspace = true, optional = true }
 subxt-metadata = { workspace = true, optional = true }
@@ -44,4 +47,7 @@ name = "generate-metadata"
 path = "src/bin/generate-metadata.rs"
 required-features = ["generate-metadata"]
 
-[dev-dependencies] 
+[dev-dependencies]
+wiremock = { workspace = true }
+futures = { workspace = true }
+tokio-test = "0.4"
