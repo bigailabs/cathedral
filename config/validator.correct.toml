@@ -95,7 +95,7 @@ rental_session_duration = 3600
 key_cleanup_interval = { secs = 60, nanos = 0 }
 enable_automated_sessions = true
 max_concurrent_sessions = 5
-session_rate_limit = 20
+session_rate_limit = 200
 enable_audit_logging = true
 audit_log_path = "/opt/basilica/data/ssh_audit.log"
 ssh_connection_timeout = { secs = 30, nanos = 0 }
