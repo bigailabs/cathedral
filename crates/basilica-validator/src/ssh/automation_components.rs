@@ -481,6 +481,7 @@ mod tests {
             executor_validation_interval: Duration::from_secs(12 * 3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
             enable_worker_queue: false,
+            storage_validation: crate::config::StorageValidationConfig::default(),
         };
 
         let automatic_verification_config = AutomaticVerificationConfig {

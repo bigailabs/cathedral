@@ -116,6 +116,9 @@ pub struct VerificationConfig {
     /// Docker validation configuration
     #[serde(default)]
     pub docker_validation: DockerValidationConfig,
+    /// Storage validation configuration
+    #[serde(default)]
+    pub storage_validation: StorageValidationConfig,
     /// Collateral event scan interval
     #[serde(default = "default_collateral_event_scan_interval")]
     pub collateral_event_scan_interval: Duration,
@@ -189,6 +192,7 @@ impl VerificationConfig {
             executor_validation_interval: Duration::from_secs(3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(7200)),
             enable_worker_queue: false,
+            storage_validation: StorageValidationConfig::default(),
         }
     }
 }
@@ -281,6 +285,26 @@ impl Default for DockerValidationConfig {
             pull_timeout_secs: default_docker_pull_timeout(),
         }
     }
+}
+
+/// Configuration for storage validation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageValidationConfig {
+    /// Minimum required storage in bytes (default: 1TB)
+    #[serde(default = "default_min_required_storage_bytes")]
+    pub min_required_storage_bytes: u64,
+}
+
+impl Default for StorageValidationConfig {
+    fn default() -> Self {
+        Self {
+            min_required_storage_bytes: default_min_required_storage_bytes(),
+        }
+    }
+}
+
+fn default_min_required_storage_bytes() -> u64 {
+    1_099_511_627_776 // 1TB in bytes
 }
 
 fn default_docker_image() -> String {
@@ -632,6 +656,7 @@ impl Default for ValidatorConfig {
                 grpc_port_offset: None,
                 binary_validation: BinaryValidationConfig::default(),
                 docker_validation: DockerValidationConfig::default(),
+                storage_validation: StorageValidationConfig::default(),
                 collateral_event_scan_interval: default_collateral_event_scan_interval(),
                 executor_validation_interval: default_executor_validation_interval(),
                 gpu_assignment_cleanup_ttl: default_gpu_assignment_cleanup_ttl(),

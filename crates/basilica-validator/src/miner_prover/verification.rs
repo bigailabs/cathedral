@@ -2575,6 +2575,7 @@ impl VerificationEngine {
                     .read()
                     .await
                     .execute_lightweight_validation(
+                        miner_uid,
                         executor_info,
                         &ssh_details,
                         &session_info,

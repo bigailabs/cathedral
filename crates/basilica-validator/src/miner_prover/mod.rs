@@ -13,6 +13,7 @@ pub mod validation_hardware;
 pub mod validation_nat;
 pub mod validation_network;
 pub mod validation_speedtest;
+pub mod validation_storage;
 pub mod validation_strategy;
 pub mod validation_worker;
 pub mod verification;
