@@ -810,62 +810,37 @@ impl WeightSetter {
         Ok(())
     }
 
-    /// Get current block number from chain with retry logic
+    /// Get current block number from chain
     async fn get_current_block(&self) -> Result<u64> {
-        const MAX_RETRIES: u32 = 3;
-        const BASE_DELAY: Duration = Duration::from_secs(1);
+        match self.bittensor_service.get_current_block().await {
+            Ok(block) => {
+                debug!("Successfully got current block {}", block);
+                Ok(block)
+            }
+            Err(e) => {
+                error!("Failed to get current block: {}", e);
 
-        let mut last_error: Option<anyhow::Error> = None;
+                // Record critical RPC failure metric
+                if let Some(ref metrics) = self.metrics {
+                    let error_type = {
+                        let error_msg = e.to_string().to_lowercase();
+                        if error_msg.contains("timeout") {
+                            "timeout"
+                        } else if error_msg.contains("background") {
+                            "background_terminated"
+                        } else {
+                            "connection"
+                        }
+                    };
 
-        for attempt in 1..=MAX_RETRIES {
-            match self.bittensor_service.get_current_block().await {
-                Ok(block) => {
-                    debug!(
-                        "Successfully got current block {} on attempt {}",
-                        block, attempt
-                    );
-                    return Ok(block);
+                    metrics
+                        .prometheus()
+                        .record_rpc_critical_failure("get_current_block", error_type);
                 }
-                Err(e) => {
-                    error!("Failed to get current block (attempt {}): {}", attempt, e);
-                    last_error = Some(e.into());
-                    if attempt < MAX_RETRIES {
-                        let delay = BASE_DELAY * 2_u32.pow(attempt - 1);
-                        warn!(
-                            "Retrying get_current_block in {} seconds...",
-                            delay.as_secs()
-                        );
-                        tokio::time::sleep(delay).await;
-                    }
-                }
+
+                Err(e.into())
             }
         }
-
-        // Record critical RPC failure metric before returning error
-        if let Some(ref metrics) = self.metrics {
-            // Determine error type from the last error
-            let error_type = if let Some(ref e) = last_error {
-                let error_msg = e.to_string().to_lowercase();
-                if error_msg.contains("timeout") {
-                    "timeout"
-                } else if error_msg.contains("background") {
-                    "background_terminated"
-                } else {
-                    "connection"
-                }
-            } else {
-                "unknown"
-            };
-
-            metrics
-                .prometheus()
-                .record_rpc_critical_failure("get_current_block", error_type);
-        }
-
-        Err(anyhow::anyhow!(
-            "Failed to get current block after {} attempts",
-            MAX_RETRIES
-        ))
     }
 
     /// Get the last weight set block from storage or initialize to current block
