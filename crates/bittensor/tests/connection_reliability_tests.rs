@@ -73,7 +73,6 @@ async fn test_connection_pool_fallback_behavior() {
 
 #[tokio::test]
 async fn test_health_checker_monitoring() {
-    
     let pool = Arc::new(ConnectionPool::new(
         vec!["wss://test.invalid:443".to_string()],
         1,
