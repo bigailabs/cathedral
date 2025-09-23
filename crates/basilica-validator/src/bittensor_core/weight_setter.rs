@@ -815,6 +815,8 @@ impl WeightSetter {
         const MAX_RETRIES: u32 = 3;
         const BASE_DELAY: Duration = Duration::from_secs(1);
 
+        let mut last_error: Option<anyhow::Error> = None;
+
         for attempt in 1..=MAX_RETRIES {
             match self.bittensor_service.get_current_block().await {
                 Ok(block) => {
@@ -826,6 +828,7 @@ impl WeightSetter {
                 }
                 Err(e) => {
                     error!("Failed to get current block (attempt {}): {}", attempt, e);
+                    last_error = Some(e.into());
                     if attempt < MAX_RETRIES {
                         let delay = BASE_DELAY * 2_u32.pow(attempt - 1);
                         warn!(
@@ -836,6 +839,27 @@ impl WeightSetter {
                     }
                 }
             }
+        }
+
+        // Record critical RPC failure metric before returning error
+        if let Some(ref metrics) = self.metrics {
+            // Determine error type from the last error
+            let error_type = if let Some(ref e) = last_error {
+                let error_msg = e.to_string().to_lowercase();
+                if error_msg.contains("timeout") {
+                    "timeout"
+                } else if error_msg.contains("background") {
+                    "background_terminated"
+                } else {
+                    "connection"
+                }
+            } else {
+                "unknown"
+            };
+
+            metrics
+                .prometheus()
+                .record_rpc_critical_failure("get_current_block", error_type);
         }
 
         Err(anyhow::anyhow!(
