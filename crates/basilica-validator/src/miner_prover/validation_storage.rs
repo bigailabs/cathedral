@@ -335,8 +335,8 @@ pub fn parse_df_output(
         debug!(
             executor_id = executor_id,
             mount_point = mount_point,
-            available_gb = available_bytes / 1024_u64.pow(3),
-            total_gb = total_bytes / 1024_u64.pow(3),
+            available_gb = format!("{:.2}", available_bytes as f64 / 1024_f64.powi(3)),
+            total_gb = format!("{:.2}", total_bytes as f64 / 1024_f64.powi(3)),
             filesystem_type = filesystem_type,
             "[STORAGE] Valid filesystem found"
         );
