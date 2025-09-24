@@ -11,13 +11,22 @@ impl OutboxRepo for PgRepos {
         amount: &str,
         txid: &str,
     ) -> Result<()> {
+        // Parse amount string to i64 for numeric column
+        let amount_numeric = amount.parse::<i64>()
+            .unwrap_or_else(|_| {
+                // If it fails, try parsing as u64 and convert
+                amount.parse::<u64>()
+                    .map(|v| v as i64)
+                    .unwrap_or(0)
+            });
+
         sqlx::query(
             r#"INSERT INTO billing_outbox (user_id, amount_plancks, transaction_id)
                SELECT user_id, $2, $3 FROM deposit_accounts WHERE account_id_hex = $1
                ON CONFLICT (transaction_id) DO NOTHING"#,
         )
         .bind(to_hex)
-        .bind(amount)
+        .bind(amount_numeric)
         .bind(txid)
         .execute(&mut **tx)
         .await?;

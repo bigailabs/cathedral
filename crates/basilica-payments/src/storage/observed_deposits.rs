@@ -15,6 +15,15 @@ impl ObservedDepositsRepo for PgRepos {
         from_hex: &str,
         amount: &str,
     ) -> Result<()> {
+        // Parse amount string to i64 for numeric column
+        let amount_numeric = amount.parse::<i64>()
+            .unwrap_or_else(|_| {
+                // If it fails, try parsing as u64 and convert
+                amount.parse::<u64>()
+                    .map(|v| v as i64)
+                    .unwrap_or(0)
+            });
+
         sqlx::query(
             r#"INSERT INTO observed_deposits
                (block_number, event_index, to_account_hex, from_account_hex, amount_plancks, status)
@@ -25,7 +34,7 @@ impl ObservedDepositsRepo for PgRepos {
         .bind(idx)
         .bind(to_hex)
         .bind(from_hex)
-        .bind(amount)
+        .bind(amount_numeric)
         .execute(&mut **tx)
         .await?;
         Ok(())
