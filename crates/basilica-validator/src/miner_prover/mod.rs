@@ -56,7 +56,12 @@ impl MinerProver {
         persistence: Arc<SimplePersistence>,
         metrics: Option<Arc<ValidatorMetrics>>,
     ) -> Result<Self> {
-        let discovery = MinerDiscovery::new(bittensor_service.clone(), config.clone());
+        let mut discovery = MinerDiscovery::new(bittensor_service.clone(), config.clone());
+
+        // Add metrics if available
+        if let Some(metrics_ref) = &metrics {
+            discovery = discovery.with_metrics(metrics_ref.clone());
+        }
 
         // Get validator hotkey from bittensor service
         let validator_hotkey = bittensor::account_id_to_hotkey(bittensor_service.get_account_id())

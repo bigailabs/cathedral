@@ -173,6 +173,12 @@ impl ValidatorPrometheusMetrics {
             "Total RPC failures after all retry attempts exhausted"
         );
 
+        // Discovered miners metrics
+        describe_gauge!(
+            "basilica_validator_discovered_miners_total",
+            "Total number of miners currently discovered from metagraph"
+        );
+
         Ok(Self {
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
             persistence,
@@ -526,5 +532,10 @@ impl ValidatorPrometheusMetrics {
             "RPC critical failure recorded: method={}, error_type={}",
             method, error_type
         );
+    }
+
+    /// Set total discovered miners count
+    pub fn set_discovered_miners_total(&self, count: u64) {
+        gauge!("basilica_validator_discovered_miners_total").set(count as f64);
     }
 }
