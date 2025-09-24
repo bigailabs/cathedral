@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tracing::info;
 
 use crate::{
     domain::types::Treasury,
@@ -74,6 +75,15 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
             .await
             .map_err(internal)?;
         tx.commit().await.map_err(internal)?;
+
+        // Log successful account creation for debugging
+        info!(
+            "Successfully created deposit account for user {}: address={} (ss58), account_hex={}...{}",
+            &user_id,
+            &addr,
+            &acct_hex[..8.min(acct_hex.len())],
+            if acct_hex.len() > 4 { &acct_hex[acct_hex.len()-4..] } else { "" }
+        );
 
         // Record success metrics
         if let Some(ref metrics) = self.metrics {
