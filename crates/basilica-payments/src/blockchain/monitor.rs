@@ -28,10 +28,16 @@ async fn process_transfers(
             transfer.from, transfer.to, transfer.amount, transfer.block_number
         );
 
-        info!("DEPOSIT DETECTED! Transfer to known account {}", transfer.to);
+        info!(
+            "DEPOSIT DETECTED! Transfer to known account {}",
+            transfer.to
+        );
 
         // Record deposit
-        let txid = format!("b{}#e{}#{}", transfer.block_number, transfer.event_index, transfer.to);
+        let txid = format!(
+            "b{}#e{}#{}",
+            transfer.block_number, transfer.event_index, transfer.to
+        );
 
         if let Err(e) = async {
             let mut tx = repos.begin().await?;
@@ -45,7 +51,9 @@ async fn process_transfers(
                     &transfer.amount,
                 )
                 .await?;
-            repos.enqueue_tx(&mut tx, &transfer.to, &transfer.amount, &txid).await?;
+            repos
+                .enqueue_tx(&mut tx, &transfer.to, &transfer.amount, &txid)
+                .await?;
             tx.commit().await?;
             Ok::<(), anyhow::Error>(())
         }
@@ -126,17 +134,18 @@ impl ChainMonitor {
                     }
 
                     // Use first endpoint from the list
-                    let endpoint = endpoints.first()
-                        .ok_or_else(|| Box::<dyn StdError>::from("No blockchain endpoints configured"))?
+                    let endpoint = endpoints
+                        .first()
+                        .ok_or_else(|| {
+                            Box::<dyn StdError>::from("No blockchain endpoints configured")
+                        })?
                         .clone();
 
                     info!("Connecting to blockchain at: {}", endpoint);
-                    let monitor = BlockchainMonitor::new(&endpoint)
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to connect to blockchain: {}", e);
-                            Box::<dyn StdError>::from(e.to_string())
-                        })?;
+                    let monitor = BlockchainMonitor::new(&endpoint).await.map_err(|e| {
+                        error!("Failed to connect to blockchain: {}", e);
+                        Box::<dyn StdError>::from(e.to_string())
+                    })?;
 
                     info!("Successfully connected to blockchain");
 
@@ -146,7 +155,9 @@ impl ChainMonitor {
                     }
 
                     // Get initial block number
-                    let mut last_block = monitor.get_current_block().await
+                    let mut last_block = monitor
+                        .get_current_block()
+                        .await
                         .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?;
 
                     info!("Starting from block: {}", last_block);
@@ -165,31 +176,57 @@ impl ChainMonitor {
                                     match monitor.get_latest_transfers().await {
                                         Ok(transfers) => {
                                             if !transfers.is_empty() {
-                                                info!("Found {} transfers in block {}", transfers.len(), current_block);
+                                                info!(
+                                                    "Found {} transfers in block {}",
+                                                    transfers.len(),
+                                                    current_block
+                                                );
 
                                                 // Debug: Log all transfers
                                                 for t in &transfers {
-                                                    info!("  Transfer: {} -> {}", &t.from[0..8], &t.to[0..8]);
+                                                    info!(
+                                                        "  Transfer: {} -> {}",
+                                                        &t.from[0..8],
+                                                        &t.to[0..8]
+                                                    );
                                                 }
 
                                                 // Load known accounts
                                                 match repos.list_account_hexes().await {
                                                     Ok(accounts) => {
-                                                        let known_accounts: HashSet<String> = accounts.into_iter().collect();
-                                                        info!("Checking against {} known accounts", known_accounts.len());
+                                                        let known_accounts: HashSet<String> =
+                                                            accounts.into_iter().collect();
+                                                        info!(
+                                                            "Checking against {} known accounts",
+                                                            known_accounts.len()
+                                                        );
 
                                                         // Process transfers
-                                                        if let Err(e) = process_transfers(&repos, transfers, &known_accounts, metrics.as_ref()).await {
-                                                            error!("Failed to process transfers: {}", e);
+                                                        if let Err(e) = process_transfers(
+                                                            &repos,
+                                                            transfers,
+                                                            &known_accounts,
+                                                            metrics.as_ref(),
+                                                        )
+                                                        .await
+                                                        {
+                                                            error!(
+                                                                "Failed to process transfers: {}",
+                                                                e
+                                                            );
                                                         }
                                                     }
-                                                    Err(e) => error!("Failed to load accounts: {}", e),
+                                                    Err(e) => {
+                                                        error!("Failed to load accounts: {}", e)
+                                                    }
                                                 }
                                             }
 
                                             // Update metrics
                                             if let Some(ref m) = metrics {
-                                                m.business_metrics().set_block_height(current_block as u64).await;
+                                                m.business_metrics()
+                                                    .set_block_height(current_block as u64)
+                                                    .await;
                                             }
 
                                             last_block = current_block;

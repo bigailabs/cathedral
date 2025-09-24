@@ -16,13 +16,10 @@ impl ObservedDepositsRepo for PgRepos {
         amount: &str,
     ) -> Result<()> {
         // Parse amount string to i64 for numeric column
-        let amount_numeric = amount.parse::<i64>()
-            .unwrap_or_else(|_| {
-                // If it fails, try parsing as u64 and convert
-                amount.parse::<u64>()
-                    .map(|v| v as i64)
-                    .unwrap_or(0)
-            });
+        let amount_numeric = amount.parse::<i64>().unwrap_or_else(|_| {
+            // If it fails, try parsing as u64 and convert
+            amount.parse::<u64>().map(|v| v as i64).unwrap_or(0)
+        });
 
         sqlx::query(
             r#"INSERT INTO observed_deposits

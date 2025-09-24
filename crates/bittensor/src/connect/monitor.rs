@@ -125,8 +125,11 @@ impl BlockchainMonitor {
                 let transfers = self.get_latest_transfers().await?;
 
                 if !transfers.is_empty() {
-                    info!("Found {} transfers in block {}",
-                          transfers.len(), current_block);
+                    info!(
+                        "Found {} transfers in block {}",
+                        transfers.len(),
+                        current_block
+                    );
                     callback(transfers)?;
                 }
 

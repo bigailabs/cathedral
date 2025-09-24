@@ -236,7 +236,8 @@ impl BasilicaClient {
 
     /// Create a deposit account for the authenticated user
     pub async fn create_deposit_account(&self) -> Result<CreateDepositAccountResponse> {
-        self.post("/payments/deposit-account", &serde_json::json!({})).await
+        self.post("/payments/deposit-account", &serde_json::json!({}))
+            .await
     }
 
     /// List deposits for the authenticated user
