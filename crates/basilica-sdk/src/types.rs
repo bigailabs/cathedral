@@ -235,3 +235,51 @@ pub struct ApiKeyInfo {
     /// Last usage timestamp
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+// Payment Management Types
+
+/// Deposit account response from API
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepositAccountResponse {
+    pub user_id: String,
+    pub address: String,
+    pub exists: bool,
+}
+
+/// Response after creating a deposit account
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateDepositAccountResponse {
+    pub user_id: String,
+    pub address: String,
+}
+
+/// Individual deposit record
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepositRecord {
+    pub tx_hash: String,
+    pub block_number: u64,
+    pub event_index: u32,
+    pub from_address: String,
+    pub to_address: String,
+    pub amount_tao: String,
+    pub status: String,
+    pub observed_at: String,
+    pub finalized_at: Option<String>,
+    pub credited_at: Option<String>,
+}
+
+/// List deposits response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListDepositsResponse {
+    pub deposits: Vec<DepositRecord>,
+    pub total_count: usize,
+}
+
+/// Query parameters for listing deposits
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ListDepositsQuery {
+    #[serde(default)]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}

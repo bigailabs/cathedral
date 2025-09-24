@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod external;
+pub mod fund;
 pub mod gpu_rental;
 pub mod gpu_rental_helpers;
 #[cfg(debug_assertions)]

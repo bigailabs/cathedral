@@ -138,6 +138,31 @@ pub enum Commands {
         #[command(subcommand)]
         action: TokenAction,
     },
+
+    /// Fund your account with Bittensor TAO
+    Fund {
+        #[command(subcommand)]
+        action: Option<FundAction>,
+
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
+}
+
+/// Fund management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum FundAction {
+    /// List deposit history
+    List {
+        /// Limit number of results (default: 50)
+        #[arg(long, default_value = "50")]
+        limit: u32,
+
+        /// Offset for pagination (default: 0)
+        #[arg(long, default_value = "0")]
+        offset: u32,
+    },
 }
 
 /// Token management actions
@@ -177,7 +202,8 @@ impl Commands {
             | Commands::Exec { .. }
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
-            | Commands::Tokens { .. } => true,
+            | Commands::Tokens { .. }
+            | Commands::Fund { .. } => true,
 
             // Authentication and delegation commands don't require auth
             Commands::Login { .. }
