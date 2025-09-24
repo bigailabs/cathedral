@@ -442,6 +442,17 @@ impl ValidationExecutor {
                     error = %e,
                     "[EVAL_FLOW] Lightweight connectivity check failed"
                 );
+
+                // Record connectivity check failure
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().record_validation_failure_stage(
+                        &executor_info.id.to_string(),
+                        miner_uid,
+                        "lightweight",
+                        "connectivity_check",
+                        1.0,
+                    );
+                }
                 false
             }
         };
@@ -469,6 +480,17 @@ impl ValidationExecutor {
                         executor_id = %executor_info.id,
                         "[EVAL_FLOW] NAT validation failed"
                     );
+
+                    // Record NAT validation failure
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().record_validation_failure_stage(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            "lightweight",
+                            "nat_validation",
+                            1.0,
+                        );
+                    }
                     false
                 }
             }
@@ -516,6 +538,19 @@ impl ValidationExecutor {
 
         // Record lightweight validation metrics
         if let Some(ref metrics) = self.metrics {
+            // Record overall lightweight validation status
+            metrics.prometheus().record_validation_failure_stage(
+                &executor_info.id.to_string(),
+                miner_uid,
+                "lightweight",
+                if validation_successful {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                if validation_successful { 0.0 } else { 1.0 },
+            );
+
             metrics
                 .business()
                 .record_attestation_verification(
@@ -595,6 +630,17 @@ impl ValidationExecutor {
                         error = %e,
                         "[EVAL_FLOW] SSH connection test failed"
                     );
+
+                    // Record SSH connection failure
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().record_validation_failure_stage(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            "full",
+                            "ssh_connection",
+                            1.0,
+                        );
+                    }
                     false
                 }
             };
@@ -656,6 +702,28 @@ impl ValidationExecutor {
                     ).unwrap_or_else(|| "N/A".to_string()),
                     "[EVAL_FLOW] Critical pre-validations failed"
                 );
+
+                // Record specific validation failure
+                if let Some(ref metrics) = self.metrics {
+                    if docker_result.is_none() {
+                        metrics.prometheus().record_validation_failure_stage(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            "full",
+                            "docker_validation",
+                            1.0,
+                        );
+                    }
+                    if !nat_successful {
+                        metrics.prometheus().record_validation_failure_stage(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            "full",
+                            "nat_validation",
+                            1.0,
+                        );
+                    }
+                }
             }
         }
 
@@ -708,7 +776,16 @@ impl ValidationExecutor {
                         "[EVAL_FLOW] Binary validation failed"
                     );
 
+                    // Record binary validation failure
                     if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().record_validation_failure_stage(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            "full",
+                            "binary_validation",
+                            1.0,
+                        );
+
                         metrics
                             .business()
                             .record_attestation_verification(
@@ -738,6 +815,18 @@ impl ValidationExecutor {
         validation_details.combined_score = combined_score;
         validation_details.binary_score = binary_score;
         validation_details.total_validation_duration = total_start.elapsed();
+
+        // Record overall validation status
+        let overall_success = pre_validations_successful && binary_validation_successful;
+        if let Some(ref metrics) = self.metrics {
+            metrics.prometheus().record_validation_failure_stage(
+                &executor_info.id.to_string(),
+                miner_uid,
+                "full",
+                if overall_success { "passed" } else { "failed" },
+                if overall_success { 0.0 } else { 1.0 },
+            );
+        }
 
         Ok(ExecutorVerificationResult {
             executor_id: executor_info.id.clone(),

@@ -179,6 +179,12 @@ impl ValidatorPrometheusMetrics {
             "Total number of miners currently discovered from metagraph"
         );
 
+        // Validation failure tracking metrics
+        describe_gauge!(
+            "basilica_validator_executor_validation_status",
+            "Current validation status of executors by stage (1=failing, 0=passing)"
+        );
+
         Ok(Self {
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
             persistence,
@@ -537,5 +543,23 @@ impl ValidatorPrometheusMetrics {
     /// Set total discovered miners count
     pub fn set_discovered_miners_total(&self, count: u64) {
         gauge!("basilica_validator_discovered_miners_total").set(count as f64);
+    }
+
+    /// Record validation failure stage for an executor
+    pub fn record_validation_failure_stage(
+        &self,
+        executor_id: &str,
+        miner_uid: u16,
+        validation_type: &str,
+        failure_stage: &str,
+        value: f64,
+    ) {
+        gauge!("basilica_validator_executor_validation_status",
+            "executor_id" => executor_id.to_string(),
+            "miner_uid" => miner_uid.to_string(),
+            "validation_type" => validation_type.to_string(),
+            "failure_stage" => failure_stage.to_string()
+        )
+        .set(value);
     }
 }

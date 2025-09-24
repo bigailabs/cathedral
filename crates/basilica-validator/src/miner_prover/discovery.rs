@@ -59,7 +59,9 @@ impl MinerDiscovery {
 
         // Update discovered miners metrics
         if let Some(metrics) = &self.metrics {
-            metrics.prometheus().set_discovered_miners_total(miners.len() as u64);
+            metrics
+                .prometheus()
+                .set_discovered_miners_total(miners.len() as u64);
         }
 
         info!(
