@@ -7,8 +7,8 @@ use crate::{
     error::{ApiError, Result},
 };
 use axum::Router;
-use basilica_validator::{api::types::RentalStatus, ValidatorClient};
 use basilica_payments::client::PaymentsClient;
+use basilica_validator::{api::types::RentalStatus, ValidatorClient};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
 use tokio::signal;
