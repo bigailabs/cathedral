@@ -3,173 +3,71 @@ use crate::{
     storage::{DepositAccountsRepo, ObservedDepositsRepo, OutboxRepo, PgRepos},
 };
 use anyhow::Result;
-use async_trait::async_trait;
 use basilica_common::distributed::postgres_lock::{LeaderElection, LockKey};
-use bittensor::connect::{BlockchainEventHandler, BlockchainMonitor};
+use bittensor::connect::{BlockchainMonitor, TransferInfo};
 use std::collections::HashSet;
 use std::error::Error as StdError;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{error, info};
 
-/// Payments-specific event handler for blockchain monitoring
-struct PaymentsEventHandler {
-    repos: PgRepos,
-    known_accounts: Arc<RwLock<HashSet<String>>>,
-    metrics: Option<Arc<PaymentsMetricsSystem>>,
-}
-
-impl PaymentsEventHandler {
-    async fn new(repos: PgRepos, metrics: Option<Arc<PaymentsMetricsSystem>>) -> Result<Self> {
-        let accounts = repos.list_account_hexes().await?;
-        let known_accounts = Arc::new(RwLock::new(accounts.into_iter().collect()));
-        Ok(Self {
-            repos,
-            known_accounts,
-            metrics,
-        })
-    }
-
-    async fn refresh_known_accounts(&self) -> Result<()> {
-        let accounts = self.repos.list_account_hexes().await?;
-        let mut known = self.known_accounts.write().await;
-        let count = accounts.len();
-        *known = accounts.into_iter().collect();
-
-        // Record metrics
-        if let Some(ref metrics) = self.metrics {
-            metrics
-                .business_metrics()
-                .record_treasury_operation("refresh_accounts")
-                .await;
+/// Process transfers and update database
+async fn process_transfers(
+    repos: &PgRepos,
+    transfers: Vec<TransferInfo>,
+    known_accounts: &HashSet<String>,
+    metrics: Option<&Arc<PaymentsMetricsSystem>>,
+) -> Result<()> {
+    for transfer in transfers {
+        // Check if recipient is a known deposit account
+        if !known_accounts.contains(&transfer.to) {
+            continue;
         }
 
-        info!("Refreshed known accounts: {} accounts", count);
-        Ok(())
-    }
-}
+        info!(
+            "Processing deposit: {} -> {} amount: {} (block: {})",
+            transfer.from, transfer.to, transfer.amount, transfer.block_number
+        );
 
-#[async_trait]
-impl BlockchainEventHandler for PaymentsEventHandler {
-    async fn handle_transfer(
-        &self,
-        from: &str,
-        to: &str,
-        amount: &str,
-        block_number: u32,
-        event_index: usize,
-    ) -> Result<()> {
-        let timer = self
-            .metrics
-            .as_ref()
-            .map(|m| m.payment_metrics().start_payment_timer());
+        info!("DEPOSIT DETECTED! Transfer to known account {}", transfer.to);
 
-        let known = self.known_accounts.read().await;
-        if !known.contains(to) {
-            // Record filtered deposit
-            if let Some(ref metrics) = self.metrics {
-                metrics
-                    .business_metrics()
-                    .record_monitor_event("deposit_filtered")
-                    .await;
-            }
-            return Ok(());
-        }
-
-        // Record deposit detected
-        if let Some(ref metrics) = self.metrics {
-            metrics
-                .business_metrics()
-                .record_monitor_event("deposit_detected")
-                .await;
-        }
-
-        let txid = format!("b{}#e{}#{}", block_number, event_index, to);
+        // Record deposit
+        let txid = format!("b{}#e{}#{}", transfer.block_number, transfer.event_index, transfer.to);
 
         if let Err(e) = async {
-            let mut tx = self.repos.begin().await?;
-            self.repos
+            let mut tx = repos.begin().await?;
+            repos
                 .insert_finalized_tx(
                     &mut tx,
-                    block_number as i64,
-                    event_index as i32,
-                    to,
-                    from,
-                    amount,
+                    transfer.block_number as i64,
+                    transfer.event_index as i32,
+                    &transfer.to,
+                    &transfer.from,
+                    &transfer.amount,
                 )
                 .await?;
-            self.repos.enqueue_tx(&mut tx, to, amount, &txid).await?;
+            repos.enqueue_tx(&mut tx, &transfer.to, &transfer.amount, &txid).await?;
             tx.commit().await?;
             Ok::<(), anyhow::Error>(())
         }
         .await
         {
-            // Don't tear down the monitor on a single failed write; log and move on.
-            error!(%txid, %to, %from, %amount, block_number, event_index, err=%e, "failed to persist observed deposit");
-
-            // Record failure
-            if let Some(ref metrics) = self.metrics {
-                metrics
-                    .business_metrics()
-                    .record_payment_failed(&[("reason", "deposit_persistence")])
-                    .await;
-                if let Some(timer) = timer {
-                    metrics
-                        .payment_metrics()
-                        .record_payment_complete(timer, false, 0.0)
-                        .await;
-                }
-            }
-
-            return Ok(());
+            error!("Failed to persist deposit: {}", e);
+            continue;
         }
 
-        info!(
-            "Recorded deposit: {} -> {} amount: {} (txid: {})",
-            from, to, amount, txid
-        );
+        info!("Recorded deposit: {}", txid);
 
-        // Record successful deposit
-        if let Some(ref metrics) = self.metrics {
-            // Convert plancks to TAO (assuming 1 TAO = 1e9 plancks)
-            let amount_tao = amount.parse::<f64>().unwrap_or(0.0) / 1e9;
-
+        // Update metrics
+        if let Some(metrics) = metrics {
+            let amount_tao = transfer.amount.parse::<f64>().unwrap_or(0.0) / 1e9;
             metrics
                 .business_metrics()
                 .record_payment_processed(amount_tao, &[("type", "deposit")])
                 .await;
-            metrics
-                .business_metrics()
-                .record_blockchain_transaction("deposit")
-                .await;
-
-            if let Some(timer) = timer {
-                metrics
-                    .payment_metrics()
-                    .record_payment_complete(timer, true, amount_tao)
-                    .await;
-            }
         }
-
-        Ok(())
     }
 
-    async fn on_block_end(&self, block_number: u32) -> Result<()> {
-        // Record block processing
-        if let Some(ref metrics) = self.metrics {
-            metrics
-                .business_metrics()
-                .set_block_height(block_number as u64)
-                .await;
-            metrics
-                .business_metrics()
-                .record_monitor_event("block_processed")
-                .await;
-        }
-
-        self.refresh_known_accounts().await?;
-        Ok(())
-    }
+    Ok(())
 }
 
 /// Monitors blockchain for deposits to payment accounts
@@ -198,12 +96,17 @@ impl ChainMonitor {
     /// This uses the common distributed locking to ensure only one monitor
     /// instance is active at a time in a distributed deployment.
     pub async fn run(self) -> Result<()> {
+        info!("===== BLOCKCHAIN MONITOR STARTING =====");
+        info!("Starting blockchain monitor with leader election");
+
         let election = LeaderElection::new(self.repos.pool.clone(), LockKey::PAYMENTS_MONITOR)
             .with_retry_interval(3);
 
         let repos = self.repos;
         let endpoints = self.endpoints.clone();
         let metrics = self.metrics.clone();
+
+        info!("Attempting to acquire leader lock for blockchain monitoring...");
 
         election
             .run_as_leader(move || {
@@ -212,6 +115,8 @@ impl ChainMonitor {
                 let metrics = metrics.clone();
 
                 async move {
+                    info!("Blockchain monitor acquired leadership, initializing...");
+
                     // Record connection status
                     if let Some(ref metrics) = metrics {
                         metrics
@@ -220,27 +125,86 @@ impl ChainMonitor {
                             .await;
                     }
 
-                    let handler = PaymentsEventHandler::new(repos, metrics.clone())
-                        .await
-                        .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?;
-                    let monitor = BlockchainMonitor::new(endpoints, handler)
-                        .await
-                        .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?;
+                    // Use first endpoint from the list
+                    let endpoint = endpoints.first()
+                        .ok_or_else(|| Box::<dyn StdError>::from("No blockchain endpoints configured"))?
+                        .clone();
 
-                    let result = monitor
-                        .run()
+                    info!("Connecting to blockchain at: {}", endpoint);
+                    let monitor = BlockchainMonitor::new(&endpoint)
                         .await
-                        .map_err(|e| Box::<dyn StdError>::from(e.to_string()));
+                        .map_err(|e| {
+                            error!("Failed to connect to blockchain: {}", e);
+                            Box::<dyn StdError>::from(e.to_string())
+                        })?;
 
-                    // Record disconnection
-                    if let Some(ref metrics) = metrics {
-                        metrics
-                            .business_metrics()
-                            .set_blockchain_connected(false)
-                            .await;
+                    info!("Successfully connected to blockchain");
+
+                    // Record connection
+                    if let Some(ref m) = metrics {
+                        m.business_metrics().set_blockchain_connected(true).await;
                     }
 
-                    result
+                    // Get initial block number
+                    let mut last_block = monitor.get_current_block().await
+                        .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?;
+
+                    info!("Starting from block: {}", last_block);
+
+                    // Main monitoring loop
+                    let scan_interval = tokio::time::Duration::from_secs(12);
+                    let mut ticker = tokio::time::interval(scan_interval);
+
+                    loop {
+                        ticker.tick().await;
+
+                        match monitor.get_current_block().await {
+                            Ok(current_block) => {
+                                if current_block > last_block {
+                                    // Get transfers from latest block
+                                    match monitor.get_latest_transfers().await {
+                                        Ok(transfers) => {
+                                            if !transfers.is_empty() {
+                                                info!("Found {} transfers in block {}", transfers.len(), current_block);
+
+                                                // Debug: Log all transfers
+                                                for t in &transfers {
+                                                    info!("  Transfer: {} -> {}", &t.from[0..8], &t.to[0..8]);
+                                                }
+
+                                                // Load known accounts
+                                                match repos.list_account_hexes().await {
+                                                    Ok(accounts) => {
+                                                        let known_accounts: HashSet<String> = accounts.into_iter().collect();
+                                                        info!("Checking against {} known accounts", known_accounts.len());
+
+                                                        // Process transfers
+                                                        if let Err(e) = process_transfers(&repos, transfers, &known_accounts, metrics.as_ref()).await {
+                                                            error!("Failed to process transfers: {}", e);
+                                                        }
+                                                    }
+                                                    Err(e) => error!("Failed to load accounts: {}", e),
+                                                }
+                                            }
+
+                                            // Update metrics
+                                            if let Some(ref m) = metrics {
+                                                m.business_metrics().set_block_height(current_block as u64).await;
+                                            }
+
+                                            last_block = current_block;
+                                        }
+                                        Err(e) => error!("Failed to get transfers: {}", e),
+                                    }
+                                }
+                            }
+                            Err(e) => error!("Failed to get current block: {}", e),
+                        }
+                    }
+
+                    // Loop never returns, but if it somehow does:
+                    #[allow(unreachable_code)]
+                    Ok(())
                 }
             })
             .await

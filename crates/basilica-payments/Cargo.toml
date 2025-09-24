@@ -45,3 +45,9 @@ features = ["postgres"]
 
 [dependencies.bittensor]
 path = "../bittensor"
+
+[dependencies.sp-core]
+workspace = true
+
+[dependencies.hex]
+workspace = true
