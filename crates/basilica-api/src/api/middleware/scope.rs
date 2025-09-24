@@ -103,6 +103,12 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/api-keys") => Some("keys:list".to_string()),
         (&Method::DELETE, p) if p.starts_with("/api-keys/") => Some("keys:revoke".to_string()),
 
+        // Payment endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own payment accounts
+        (&Method::GET, "/payments/deposit-account") => Some(String::new()),
+        (&Method::POST, "/payments/deposit-account") => Some(String::new()),
+        (&Method::GET, "/payments/deposits") => Some(String::new()),
+
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"
         (&Method::GET, "/health") => Some(String::new()),
@@ -167,6 +173,28 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test payment endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/payments/deposit-account")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/payments/deposit-account")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/payments/deposits")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));
