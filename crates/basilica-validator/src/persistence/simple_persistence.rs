@@ -4,7 +4,9 @@ use sqlx::{QueryBuilder, Row, SqlitePool};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::persistence::entities::{Rental, RentalStatus, VerificationLog};
+use crate::persistence::entities::{
+    MisbehaviourLog, MisbehaviourType, Rental, RentalStatus, VerificationLog,
+};
 use crate::persistence::ValidatorPersistence;
 use crate::rental::{RentalInfo, RentalState};
 
@@ -589,6 +591,39 @@ impl SimplePersistence {
                 .await?;
             info!("Dropped location column from miner_executors table");
         }
+
+        // Create executor_misbehaviour_log table for ban system
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS executor_misbehaviour_log (
+                miner_uid INTEGER NOT NULL,
+                executor_id TEXT NOT NULL,
+                gpu_uuid TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                endpoint_executor TEXT NOT NULL,
+                type_of_misbehaviour TEXT NOT NULL,
+                details TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (gpu_uuid, recorded_at)
+            );
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create indexes for executor_misbehaviour_log
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_misbehaviour_miner_uid ON executor_misbehaviour_log(miner_uid);
+            CREATE INDEX IF NOT EXISTS idx_misbehaviour_executor_id ON executor_misbehaviour_log(executor_id);
+            CREATE INDEX IF NOT EXISTS idx_misbehaviour_gpu_uuid ON executor_misbehaviour_log(gpu_uuid);
+            CREATE INDEX IF NOT EXISTS idx_misbehaviour_recorded_at ON executor_misbehaviour_log(recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_misbehaviour_type ON executor_misbehaviour_log(type_of_misbehaviour);
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }
@@ -2795,6 +2830,131 @@ impl SimplePersistence {
         } else {
             Ok(None)
         }
+    }
+
+    /// Insert a misbehaviour log entry for an executor
+    pub async fn insert_misbehaviour_log(
+        &self,
+        log: &MisbehaviourLog,
+    ) -> Result<(), anyhow::Error> {
+        let query = r#"
+            INSERT INTO executor_misbehaviour_log (
+                miner_uid, executor_id, gpu_uuid, recorded_at,
+                endpoint_executor, type_of_misbehaviour, details,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        sqlx::query(query)
+            .bind(log.miner_uid as i32)
+            .bind(&log.executor_id)
+            .bind(&log.gpu_uuid)
+            .bind(log.recorded_at.to_rfc3339())
+            .bind(&log.endpoint_executor)
+            .bind(log.type_of_misbehaviour.as_str())
+            .bind(&log.details)
+            .bind(log.created_at.to_rfc3339())
+            .bind(log.updated_at.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+
+        tracing::info!(
+            miner_uid = log.miner_uid,
+            executor_id = %log.executor_id,
+            misbehaviour_type = %log.type_of_misbehaviour,
+            "Misbehaviour log recorded"
+        );
+
+        Ok(())
+    }
+
+    /// Get misbehaviour logs for an executor since a given time
+    pub async fn get_misbehaviour_logs(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<MisbehaviourLog>, anyhow::Error> {
+        let query = r#"
+            SELECT
+                miner_uid, executor_id, gpu_uuid, recorded_at,
+                endpoint_executor, type_of_misbehaviour, details,
+                created_at, updated_at
+            FROM executor_misbehaviour_log
+            WHERE miner_uid = ? AND executor_id = ? AND recorded_at >= ?
+            ORDER BY recorded_at DESC
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(miner_uid as i32)
+            .bind(executor_id)
+            .bind(since.to_rfc3339())
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut logs = Vec::new();
+        for row in rows {
+            let miner_uid: i32 = row.get("miner_uid");
+            let type_str: String = row.get("type_of_misbehaviour");
+            let type_of_misbehaviour = type_str
+                .parse::<MisbehaviourType>()
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            logs.push(MisbehaviourLog {
+                miner_uid: miner_uid as u16,
+                executor_id: row.get("executor_id"),
+                gpu_uuid: row.get("gpu_uuid"),
+                recorded_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("recorded_at"))?
+                    .with_timezone(&Utc),
+                endpoint_executor: row.get("endpoint_executor"),
+                type_of_misbehaviour,
+                details: row.get("details"),
+                created_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))?
+                    .with_timezone(&Utc),
+                updated_at: DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))?
+                    .with_timezone(&Utc),
+            });
+        }
+
+        Ok(logs)
+    }
+
+    /// Get the GPU UUID for an executor at index 0
+    pub async fn get_gpu_uuid_for_executor(
+        &self,
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let gpu_uuid: Option<String> = sqlx::query_scalar(
+            "SELECT gpu_uuid FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND executor_id = ? AND gpu_index = 0
+             LIMIT 1",
+        )
+        .bind(miner_id)
+        .bind(executor_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(gpu_uuid)
+    }
+
+    /// Get the executor endpoint from miner_executors table
+    pub async fn get_executor_endpoint(
+        &self,
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let endpoint: Option<String> = sqlx::query_scalar(
+            "SELECT grpc_address FROM miner_executors
+             WHERE miner_id = ? AND executor_id = ?
+             LIMIT 1",
+        )
+        .bind(miner_id)
+        .bind(executor_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(endpoint)
     }
 }
 
