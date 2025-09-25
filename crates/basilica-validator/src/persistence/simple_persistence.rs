@@ -106,7 +106,7 @@ impl SimplePersistence {
         Ok(instance)
     }
 
-    async fn run_migrations(&self) -> Result<(), anyhow::Error> {
+    pub async fn run_migrations(&self) -> Result<(), anyhow::Error> {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS miners (

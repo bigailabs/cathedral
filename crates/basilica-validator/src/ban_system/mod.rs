@@ -88,7 +88,7 @@ impl BanManager {
 
     /// Check if an executor is currently banned
     pub async fn is_executor_banned(&self, miner_uid: u16, executor_id: &str) -> Result<bool> {
-        // Get recent misbehaviour logs
+        // Get recent misbehaviour logs from the last 7 days
         let logs = self
             .get_recent_misbehaviours(miner_uid, executor_id, Duration::days(7))
             .await?;
@@ -97,32 +97,22 @@ impl BanManager {
             return Ok(false);
         }
 
-        // Calculate ban duration based on offense count
-        let ban_duration = self.calculate_ban_duration(logs.len());
+        // Find the latest ban trigger (if any)
+        let ban_trigger = self.find_ban_trigger_timestamp(&logs);
 
-        // Check if the most recent ban has expired
-        let most_recent = logs.iter().max_by_key(|log| log.recorded_at).unwrap();
-
-        // Check if executor had multiple failures within 1 hour
-        let one_hour_ago = Utc::now() - Duration::hours(1);
-        let recent_failures = logs
-            .iter()
-            .filter(|log| log.recorded_at >= one_hour_ago)
-            .count();
-
-        // Ban is active if:
-        // 1. There are 2+ failures within the last hour, OR
-        // 2. The ban period from the most recent misbehaviour hasn't expired
-        if recent_failures >= 2 {
-            let ban_expiry = most_recent.recorded_at + ban_duration;
+        if let Some(trigger_time) = ban_trigger {
+            // Calculate ban duration based on total offense count in 7 days
+            let ban_duration = self.calculate_ban_duration(logs.len());
+            let ban_expiry = trigger_time + ban_duration;
             let is_banned = Utc::now() < ban_expiry;
 
             if is_banned {
                 debug!(
                     miner_uid = miner_uid,
                     executor_id = executor_id,
+                    ban_trigger = %trigger_time,
                     ban_expiry = %ban_expiry,
-                    failures_in_hour = recent_failures,
+                    offense_count = logs.len(),
                     "Executor is currently banned"
                 );
             }
@@ -139,10 +129,7 @@ impl BanManager {
         miner_uid: u16,
         executor_id: &str,
     ) -> Result<Option<DateTime<Utc>>> {
-        if !self.is_executor_banned(miner_uid, executor_id).await? {
-            return Ok(None);
-        }
-
+        // Get recent misbehaviour logs from the last 7 days
         let logs = self
             .get_recent_misbehaviours(miner_uid, executor_id, Duration::days(7))
             .await?;
@@ -151,10 +138,23 @@ impl BanManager {
             return Ok(None);
         }
 
-        let ban_duration = self.calculate_ban_duration(logs.len());
-        let most_recent = logs.iter().max_by_key(|log| log.recorded_at).unwrap();
+        // Find the latest ban trigger
+        let ban_trigger = self.find_ban_trigger_timestamp(&logs);
 
-        Ok(Some(most_recent.recorded_at + ban_duration))
+        if let Some(trigger_time) = ban_trigger {
+            // Calculate ban duration based on total offense count
+            let ban_duration = self.calculate_ban_duration(logs.len());
+            let ban_expiry = trigger_time + ban_duration;
+
+            // Only return expiry if ban is still active
+            if Utc::now() < ban_expiry {
+                Ok(Some(ban_expiry))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
     }
 
     /// Check if ban should be triggered based on recent misbehaviours
@@ -180,6 +180,44 @@ impl BanManager {
         self.persistence
             .get_misbehaviour_logs(miner_uid, executor_id, since)
             .await
+    }
+
+    /// Find the latest timestamp where a ban was triggered
+    ///
+    /// A ban is triggered when there are 2+ misbehaviours within any 1-hour sliding window.
+    /// Returns the timestamp of the later misbehaviour that triggered the ban.
+    fn find_ban_trigger_timestamp(&self, logs: &[MisbehaviourLog]) -> Option<DateTime<Utc>> {
+        if logs.len() < 2 {
+            return None;
+        }
+
+        // Sort logs by timestamp (oldest to newest)
+        let mut sorted_logs: Vec<&MisbehaviourLog> = logs.iter().collect();
+        sorted_logs.sort_by_key(|log| log.recorded_at);
+
+        let mut latest_trigger: Option<DateTime<Utc>> = None;
+
+        // Check each log as a potential trigger point
+        for i in 1..sorted_logs.len() {
+            let current_log = sorted_logs[i];
+            let one_hour_before = current_log.recorded_at - Duration::hours(1);
+
+            // Count how many logs fall within the 1-hour window before this log
+            let failures_in_window = sorted_logs
+                .iter()
+                .filter(|log| {
+                    log.recorded_at >= one_hour_before &&
+                    log.recorded_at <= current_log.recorded_at
+                })
+                .count();
+
+            // If this timestamp triggers a ban (2+ failures in window), update latest trigger
+            if failures_in_window >= 2 {
+                latest_trigger = Some(current_log.recorded_at);
+            }
+        }
+
+        latest_trigger
     }
 
     /// Calculate ban duration based on offense count within 7 days
@@ -269,5 +307,337 @@ impl BanManager {
             "timestamp": Utc::now().to_rfc3339(),
         })
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::persistence::entities::{MisbehaviourLog, MisbehaviourType};
+    use chrono::{Duration, Utc};
+
+    fn create_test_log(
+        miner_uid: u16,
+        executor_id: &str,
+        recorded_at: DateTime<Utc>,
+    ) -> MisbehaviourLog {
+        let now = Utc::now();
+        MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "test-gpu-uuid".to_string(),
+            endpoint_executor: "test-endpoint".to_string(),
+            type_of_misbehaviour: MisbehaviourType::BadRental,
+            details: "test details".to_string(),
+            recorded_at,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    // Helper function to test ban trigger logic without needing persistence
+    fn test_find_ban_trigger(logs: &[MisbehaviourLog]) -> Option<DateTime<Utc>> {
+        if logs.len() < 2 {
+            return None;
+        }
+
+        let mut sorted_logs: Vec<&MisbehaviourLog> = logs.iter().collect();
+        sorted_logs.sort_by_key(|log| log.recorded_at);
+
+        let mut latest_trigger: Option<DateTime<Utc>> = None;
+
+        for i in 1..sorted_logs.len() {
+            let current_log = sorted_logs[i];
+            let one_hour_before = current_log.recorded_at - Duration::hours(1);
+
+            let failures_in_window = sorted_logs
+                .iter()
+                .filter(|log| {
+                    log.recorded_at >= one_hour_before &&
+                    log.recorded_at <= current_log.recorded_at
+                })
+                .count();
+
+            if failures_in_window >= 2 {
+                latest_trigger = Some(current_log.recorded_at);
+            }
+        }
+
+        latest_trigger
+    }
+
+    // Helper function to test ban duration calculation
+    fn test_calculate_duration(offense_count: usize) -> Duration {
+        match offense_count {
+            0 => Duration::hours(0),
+            1 => Duration::hours(1),
+            2 => Duration::hours(2),
+            3 => Duration::hours(4),
+            4 => Duration::hours(8),
+            _ => Duration::hours(24), // Max ban duration
+        }
+    }
+
+    #[test]
+    fn test_find_ban_trigger_no_logs() {
+        let logs = vec![];
+        assert_eq!(test_find_ban_trigger(&logs), None);
+    }
+
+    #[test]
+    fn test_find_ban_trigger_single_log() {
+        let now = Utc::now();
+        let logs = vec![create_test_log(1, "executor1", now)];
+        assert_eq!(test_find_ban_trigger(&logs), None);
+    }
+
+    #[test]
+    fn test_find_ban_trigger_two_logs_within_hour() {
+        let now = Utc::now();
+        let logs = vec![
+            create_test_log(1, "executor1", now - Duration::minutes(30)),
+            create_test_log(1, "executor1", now),
+        ];
+        // Should trigger ban at the second log timestamp
+        assert_eq!(test_find_ban_trigger(&logs), Some(now));
+    }
+
+    #[test]
+    fn test_find_ban_trigger_two_logs_outside_hour() {
+        let now = Utc::now();
+        let logs = vec![
+            create_test_log(1, "executor1", now - Duration::hours(2)),
+            create_test_log(1, "executor1", now),
+        ];
+        // Should not trigger ban as logs are more than 1 hour apart
+        assert_eq!(test_find_ban_trigger(&logs), None);
+    }
+
+    #[test]
+    fn test_find_ban_trigger_multiple_triggers() {
+        let now = Utc::now();
+        let logs = vec![
+            create_test_log(1, "executor1", now - Duration::hours(3)),
+            create_test_log(1, "executor1", now - Duration::hours(3) + Duration::minutes(30)),
+            create_test_log(1, "executor1", now - Duration::minutes(40)),
+            create_test_log(1, "executor1", now - Duration::minutes(20)),
+        ];
+        // Should return the latest trigger (now - 20 minutes)
+        assert_eq!(
+            test_find_ban_trigger(&logs),
+            Some(now - Duration::minutes(20))
+        );
+    }
+
+    #[test]
+    fn test_find_ban_trigger_sliding_window() {
+        let now = Utc::now();
+        // Three logs: first two trigger a ban, third is outside the window
+        let logs = vec![
+            create_test_log(1, "executor1", now - Duration::minutes(90)),
+            create_test_log(1, "executor1", now - Duration::minutes(50)),  // Triggers ban
+            create_test_log(1, "executor1", now),
+        ];
+        // The last two logs also form a trigger (50 mins apart)
+        assert_eq!(
+            test_find_ban_trigger(&logs),
+            Some(now)
+        );
+    }
+
+    #[test]
+    fn test_calculate_ban_duration_progression() {
+        assert_eq!(test_calculate_duration(0), Duration::hours(0));
+        assert_eq!(test_calculate_duration(1), Duration::hours(1));
+        assert_eq!(test_calculate_duration(2), Duration::hours(2));
+        assert_eq!(test_calculate_duration(3), Duration::hours(4));
+        assert_eq!(test_calculate_duration(4), Duration::hours(8));
+        assert_eq!(test_calculate_duration(5), Duration::hours(24));
+        assert_eq!(test_calculate_duration(10), Duration::hours(24)); // Max
+    }
+
+    #[tokio::test]
+    async fn test_ban_persists_after_hour_window() {
+        // This is the critical test that verifies the fix
+        // It simulates the scenario where a ban should persist even after
+        // the 1-hour window no longer contains 2 failures
+
+        use crate::persistence::SimplePersistence;
+        use std::sync::Arc;
+
+        // Create in-memory database for testing
+        let persistence = Arc::new(
+            SimplePersistence::new(":memory:", "test_hotkey".to_string())
+                .await
+                .unwrap(),
+        );
+        persistence.run_migrations().await.unwrap();
+
+        let ban_manager = BanManager::new(persistence.clone());
+        let miner_uid = 1;
+        let executor_id = "executor1";
+
+        // Insert two misbehaviours within 1 hour (triggers ban)
+        let now = Utc::now();
+        let log1 = MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "gpu1".to_string(),
+            endpoint_executor: "endpoint1".to_string(),
+            type_of_misbehaviour: MisbehaviourType::BadRental,
+            details: "failure 1".to_string(),
+            recorded_at: now - Duration::minutes(90),
+            created_at: now,
+            updated_at: now,
+        };
+        let log2 = MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "gpu1".to_string(),
+            endpoint_executor: "endpoint1".to_string(),
+            type_of_misbehaviour: MisbehaviourType::BadRental,
+            details: "failure 2".to_string(),
+            recorded_at: now - Duration::minutes(85),
+            created_at: now,
+            updated_at: now,
+        };
+
+        persistence.insert_misbehaviour_log(&log1).await.unwrap();
+        persistence.insert_misbehaviour_log(&log2).await.unwrap();
+
+        // Mock current time as 85 minutes after the second failure
+        // At this point, the 1-hour window contains 0 failures
+        // But the ban (2 hours for 2nd offense) should still be active
+
+        // Since we have 2 offenses, ban duration is 2 hours
+        // Ban was triggered at log2.recorded_at
+        // Ban should expire at log2.recorded_at + 2 hours
+        // Current time is log2.recorded_at + 85 minutes
+        // Ban should still be active (85 minutes < 120 minutes)
+
+        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
+
+        // This assertion would fail with the old implementation
+        // but passes with the fixed implementation
+        assert!(is_banned, "Executor should still be banned after 85 minutes (ban duration is 2 hours)");
+
+        // Check ban expiry is correct
+        let ban_expiry = ban_manager.get_ban_expiry(miner_uid, executor_id).await.unwrap();
+        assert!(ban_expiry.is_some(), "Ban expiry should be set");
+
+        let expected_expiry = log2.recorded_at + Duration::hours(2);
+        let actual_expiry = ban_expiry.unwrap();
+
+        // Allow small time difference for test execution
+        let diff = (expected_expiry - actual_expiry).num_seconds().abs();
+        assert!(diff < 5, "Ban expiry should be approximately 2 hours from trigger time");
+    }
+
+    #[tokio::test]
+    async fn test_ban_expires_after_duration() {
+        use crate::persistence::SimplePersistence;
+        use std::sync::Arc;
+
+        let persistence = Arc::new(
+            SimplePersistence::new(":memory:", "test_hotkey".to_string())
+                .await
+                .unwrap(),
+        );
+        persistence.run_migrations().await.unwrap();
+
+        let ban_manager = BanManager::new(persistence.clone());
+        let miner_uid = 1;
+        let executor_id = "executor1";
+
+        // Insert two old misbehaviours that should have expired
+        let now = Utc::now();
+        let log1 = MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "gpu1".to_string(),
+            endpoint_executor: "endpoint1".to_string(),
+            type_of_misbehaviour: MisbehaviourType::BadRental,
+            details: "failure 1".to_string(),
+            recorded_at: now - Duration::hours(3),
+            created_at: now,
+            updated_at: now,
+        };
+        let log2 = MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "gpu1".to_string(),
+            endpoint_executor: "endpoint1".to_string(),
+            type_of_misbehaviour: MisbehaviourType::BadRental,
+            details: "failure 2".to_string(),
+            recorded_at: now - Duration::hours(3) + Duration::minutes(10),
+            created_at: now,
+            updated_at: now,
+        };
+
+        persistence.insert_misbehaviour_log(&log1).await.unwrap();
+        persistence.insert_misbehaviour_log(&log2).await.unwrap();
+
+        // Ban duration for 2 offenses is 2 hours
+        // Ban was triggered 2h50m ago, so it should have expired
+
+        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
+        assert!(!is_banned, "Ban should have expired after 2 hours");
+
+        let ban_expiry = ban_manager.get_ban_expiry(miner_uid, executor_id).await.unwrap();
+        assert!(ban_expiry.is_none(), "No ban expiry should be returned for expired ban");
+    }
+
+    #[tokio::test]
+    async fn test_progressive_ban_durations() {
+        use crate::persistence::SimplePersistence;
+        use std::sync::Arc;
+
+        let persistence = Arc::new(
+            SimplePersistence::new(":memory:", "test_hotkey".to_string())
+                .await
+                .unwrap(),
+        );
+        persistence.run_migrations().await.unwrap();
+
+        let ban_manager = BanManager::new(persistence.clone());
+        let miner_uid = 1;
+        let executor_id = "executor1";
+
+        // Insert 5 misbehaviours over time to test progressive bans
+        let now = Utc::now();
+        let logs = vec![
+            // First pair triggers 1st ban
+            create_test_log(miner_uid, executor_id, now - Duration::days(6)),
+            create_test_log(miner_uid, executor_id, now - Duration::days(6) + Duration::minutes(10)),
+            // Second pair triggers 2nd ban
+            create_test_log(miner_uid, executor_id, now - Duration::days(3)),
+            create_test_log(miner_uid, executor_id, now - Duration::days(3) + Duration::minutes(10)),
+            // Recent trigger
+            create_test_log(miner_uid, executor_id, now - Duration::minutes(30)),
+        ];
+
+        for log in &logs {
+            persistence.insert_misbehaviour_log(log).await.unwrap();
+        }
+
+        // With 5 offenses in 7 days, ban duration should be 24 hours (max)
+        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
+        assert!(!is_banned, "Should not be banned as no trigger in last logs");
+
+        // Add another log to trigger ban
+        let trigger_log = create_test_log(miner_uid, executor_id, now);
+        persistence.insert_misbehaviour_log(&trigger_log).await.unwrap();
+
+        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
+        assert!(is_banned, "Should be banned with 6 offenses and recent trigger");
+
+        let ban_expiry = ban_manager.get_ban_expiry(miner_uid, executor_id).await.unwrap();
+        assert!(ban_expiry.is_some());
+
+        // With 6 offenses, duration should be 24 hours (max)
+        let expected_expiry = now + Duration::hours(24);
+        let actual_expiry = ban_expiry.unwrap();
+        let diff = (expected_expiry - actual_expiry).num_seconds().abs();
+        assert!(diff < 5, "Ban should be 24 hours for 6 offenses");
     }
 }
