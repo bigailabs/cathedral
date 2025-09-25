@@ -118,19 +118,6 @@ impl VerificationEngine {
             self.convert_db_data_to_executor_info(known_executor_data, task.miner_uid)?;
         let executor_list = self.combine_executor_lists(discovered_executors, known_executors);
 
-        // Track discovery state for all discovered executors
-        for executor in &executor_list {
-            if let Some(ref metrics) = self.validation_executor.read().await.metrics() {
-                metrics.prometheus().set_executor_validation_state(
-                    &executor.id.to_string(),
-                    task.miner_uid,
-                    task.intended_validation_strategy,
-                    ValidationState::Discovered,
-                    StateResult::Current,
-                );
-            }
-        }
-
         verification_steps.push(VerificationStep {
             step_name: "executor_discovery".to_string(),
             status: StepStatus::Completed,
@@ -204,6 +191,18 @@ impl VerificationEngine {
                         intended_strategy = ?intended_strategy,
                         "[EVAL_FLOW] Starting verification for executor"
                     );
+
+                    // Set discovered state for this specific executor being validated
+                    if let Some(ref metrics) = self_clone.validation_executor.read().await.metrics()
+                    {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            intended_strategy,
+                            ValidationState::Discovered,
+                            StateResult::Current,
+                        );
+                    }
 
                     let result = self_clone
                         .verify_executor(
@@ -386,8 +385,20 @@ impl VerificationEngine {
         let mut failed_count = 0;
 
         for executor in executors {
-            match worker_queue.publish(executor, task.clone()).await {
-                Ok(_) => published_count += 1,
+            match worker_queue.publish(executor.clone(), task.clone()).await {
+                Ok(_) => {
+                    // Set discovered state only for executors successfully published to queue
+                    if let Some(ref metrics) = self.validation_executor.read().await.metrics() {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor.id.to_string(),
+                            task.miner_uid,
+                            task.intended_validation_strategy,
+                            ValidationState::Discovered,
+                            StateResult::Current,
+                        );
+                    }
+                    published_count += 1;
+                }
                 Err(e) => {
                     warn!("Failed to publish executor to queue: {}", e);
                     failed_count += 1;
@@ -2053,6 +2064,11 @@ impl VerificationEngine {
             self.bittensor_service().is_some(),
             self.worker_queue.is_some()
         )
+    }
+
+    /// Get access to validation metrics
+    pub async fn get_metrics(&self) -> Option<Arc<ValidatorMetrics>> {
+        self.validation_executor.read().await.metrics().clone()
     }
 
     /// Set worker queue for decoupled execution
