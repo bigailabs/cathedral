@@ -11,6 +11,7 @@ use super::types::{
 use super::validation_binary::BinaryValidator;
 use super::validation_docker::DockerCollector;
 use super::validation_hardware::HardwareCollector;
+use super::validation_misbehaviour::Misbehaviour;
 use super::validation_nat::NatCollector;
 use super::validation_network::NetworkProfileCollector;
 use super::validation_speedtest::NetworkSpeedCollector;
@@ -58,6 +59,7 @@ pub struct ValidationExecutor {
     docker_collector: DockerCollector,
     nat_collector: NatCollector,
     storage_collector: StorageCollector,
+    misbehaviour_collector: Misbehaviour,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
 
@@ -352,9 +354,10 @@ impl ValidationExecutor {
         let nat_collector = NatCollector::new(ssh_client.clone(), persistence.clone());
         let storage_collector = StorageCollector::new(
             ssh_client.clone(),
-            persistence,
+            persistence.clone(),
             config.storage_validation.min_required_storage_bytes,
         );
+        let misbehaviour_collector = Misbehaviour::new(persistence);
 
         Self {
             ssh_client,
@@ -365,6 +368,7 @@ impl ValidationExecutor {
             docker_collector,
             nat_collector,
             storage_collector,
+            misbehaviour_collector,
             metrics,
         }
     }
@@ -446,7 +450,40 @@ impl ValidationExecutor {
             }
         };
 
-        let nat_validation_successful = if !connectivity_successful {
+        // Check if executor is banned
+        let misbehaviour_check_passed = match self
+            .misbehaviour_collector
+            .collect_with_fallback(&executor_id, miner_uid)
+            .await
+        {
+            Some(profile) if !profile.is_banned => {
+                debug!(
+                    miner_uid = miner_uid,
+                    executor_id = %executor_info.id,
+                    "[EVAL_FLOW] Misbehaviour: executor is legit"
+                );
+                true
+            }
+            Some(profile) if profile.is_banned => {
+                warn!(
+                    miner_uid = miner_uid,
+                    executor_id = %executor_info.id,
+                    ban_expiry = ?profile.ban_expiry,
+                    "[EVAL_FLOW] Misbehaviour: executor is banned"
+                );
+                false
+            }
+            _ => {
+                debug!(
+                    miner_uid = miner_uid,
+                    executor_id = %executor_info.id,
+                    "[EVAL_FLOW] Misbehaviour check defaulted to pass"
+                );
+                true
+            }
+        };
+
+        let nat_validation_successful = if !connectivity_successful || !misbehaviour_check_passed {
             false
         } else {
             let nat_collector = self.nat_collector.clone();
@@ -474,7 +511,8 @@ impl ValidationExecutor {
             }
         };
 
-        let validation_successful = connectivity_successful && nat_validation_successful;
+        let validation_successful =
+            connectivity_successful && misbehaviour_check_passed && nat_validation_successful;
         if !validation_successful {
             error!(
                 miner_uid = miner_uid,
@@ -612,6 +650,7 @@ impl ValidationExecutor {
             let docker_collector = self.docker_collector.clone();
             let nat_collector = self.nat_collector.clone();
             let storage_collector = self.storage_collector.clone();
+            let misbehaviour_collector = self.misbehaviour_collector.clone();
 
             let hardware_future =
                 hardware_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
@@ -625,14 +664,25 @@ impl ValidationExecutor {
                 nat_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
             let storage_future =
                 storage_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
+            let misbehaviour_future =
+                misbehaviour_collector.collect_with_fallback(&executor_id, miner_uid);
 
-            let (_hardware, _network, _speedtest, docker_result, nat_result, storage_result) = tokio::join!(
+            let (
+                _hardware,
+                _network,
+                _speedtest,
+                docker_result,
+                nat_result,
+                storage_result,
+                misbehaviour_result,
+            ) = tokio::join!(
                 hardware_future,
                 network_future,
                 speedtest_future,
                 docker_future,
                 nat_future,
-                storage_future
+                storage_future,
+                misbehaviour_future
             );
 
             // For now, I'm disabling storage validation from affecting the overall quality validation result
@@ -643,7 +693,12 @@ impl ValidationExecutor {
                 .as_ref()
                 .map(|n| n.is_accessible)
                 .unwrap_or(false);
-            quality_validations_successful = docker_result.is_some() && nat_successful;
+            let not_banned = misbehaviour_result
+                .as_ref()
+                .map(|m| !m.is_banned)
+                .unwrap_or(true);
+            quality_validations_successful =
+                docker_result.is_some() && nat_successful && not_banned;
             if !quality_validations_successful {
                 error!(
                     miner_uid = miner_uid,
