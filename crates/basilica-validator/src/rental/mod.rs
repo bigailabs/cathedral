@@ -17,8 +17,10 @@ pub use deployment::DeploymentManager;
 pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
+use crate::ban_system::BanManager;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::miner_prover::miner_client::{AuthenticatedMinerConnection, MinerClient};
+use crate::persistence::entities::MisbehaviourType;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 use basilica_protocol::basilca::miner::v1::CloseSshSessionRequest;
@@ -39,6 +41,8 @@ pub struct RentalManager {
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
     /// Metrics for tracking rental status (required)
     metrics: Arc<ValidatorPrometheusMetrics>,
+    /// Ban manager for logging misbehaviours
+    ban_manager: Arc<BanManager>,
 }
 
 /// Parse SSH host from credentials string format "user@host:port"
@@ -101,11 +105,15 @@ impl RentalManager {
         let deployment_manager = Arc::new(DeploymentManager::new());
         let log_streamer = Arc::new(LogStreamer::new());
 
-        // Create health monitor with SSH key manager and metrics
+        // Create ban manager
+        let ban_manager = Arc::new(BanManager::new(persistence.clone()));
+
+        // Create health monitor with SSH key manager, metrics, and ban manager
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
             persistence.clone(),
             ssh_key_manager.clone(),
             metrics.clone(),
+            ban_manager.clone(),
         ));
 
         Self {
@@ -116,6 +124,7 @@ impl RentalManager {
             miner_client,
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
+            ban_manager,
         }
     }
 
@@ -169,6 +178,26 @@ impl RentalManager {
         request: RentalRequest,
         miner_connection: &mut AuthenticatedMinerConnection,
     ) -> Result<RentalResponse> {
+        // Check if executor is banned before attempting rental
+        let miner_uid = extract_miner_uid(&request.miner_id);
+        if let Some(miner_uid) = miner_uid {
+            if self
+                .ban_manager
+                .is_executor_banned(miner_uid, &request.executor_id)
+                .await?
+            {
+                let ban_expiry = self
+                    .ban_manager
+                    .get_ban_expiry(miner_uid, &request.executor_id)
+                    .await?;
+                return Err(anyhow::anyhow!(
+                    "Executor {} is currently banned. Ban expires at: {:?}",
+                    request.executor_id,
+                    ban_expiry
+                ));
+            }
+        }
+
         // Generate rental ID
         let rental_id = format!("rental-{}", Uuid::new_v4());
 
@@ -209,6 +238,34 @@ impl RentalManager {
         {
             Ok(info) => info,
             Err(e) => {
+                // Log misbehaviour for deployment failure
+                let miner_uid = extract_miner_uid(&request.miner_id);
+                if let Some(miner_uid) = miner_uid {
+                    let details = BanManager::create_rental_failure_details(
+                        &rental_id,
+                        &request.executor_id,
+                        &e.to_string(),
+                        Some(&ssh_session.access_credentials),
+                    );
+
+                    if let Err(log_err) = self
+                        .ban_manager
+                        .log_misbehaviour(
+                            miner_uid,
+                            &request.executor_id,
+                            MisbehaviourType::BadRental,
+                            &details,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to log misbehaviour for executor {}: {}",
+                            request.executor_id,
+                            log_err
+                        );
+                    }
+                }
+
                 let close_request = CloseSshSessionRequest {
                     session_id: ssh_session.session_id.clone(),
                     validator_hotkey: request.validator_hotkey.clone(),
@@ -468,9 +525,39 @@ impl RentalManager {
     }
 
     pub async fn list_rentals(&self, validator_hotkey: &str) -> Result<Vec<RentalInfo>> {
-        self.persistence
+        let all_rentals = self
+            .persistence
             .list_validator_rentals(validator_hotkey)
-            .await
+            .await?;
+
+        // Filter out rentals from banned executors
+        let mut available_rentals = Vec::new();
+        for rental in all_rentals {
+            // Extract miner_uid from miner_id
+            let miner_uid = extract_miner_uid(&rental.miner_id);
+
+            if let Some(miner_uid) = miner_uid {
+                // Check if executor is banned
+                if self
+                    .ban_manager
+                    .is_executor_banned(miner_uid, &rental.executor_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    tracing::debug!(
+                        "Filtering out rental {} from banned executor {} (miner_uid: {})",
+                        rental.rental_id,
+                        rental.executor_id,
+                        miner_uid
+                    );
+                    continue;
+                }
+            }
+
+            available_rentals.push(rental);
+        }
+
+        Ok(available_rentals)
     }
 }
 
