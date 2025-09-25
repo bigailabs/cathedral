@@ -6,6 +6,7 @@
 use super::miner_client::{MinerClient, MinerClientConfig};
 use super::types::MinerInfo;
 use super::types::{ExecutorInfoDetailed, ExecutorVerificationResult, GpuInfo, ValidationType};
+use super::validation_states::{StateResult, ValidationState};
 use super::validation_strategy::{
     ValidationExecutor, ValidationStrategy, ValidationStrategySelector,
 };
@@ -116,6 +117,19 @@ impl VerificationEngine {
         let known_executors =
             self.convert_db_data_to_executor_info(known_executor_data, task.miner_uid)?;
         let executor_list = self.combine_executor_lists(discovered_executors, known_executors);
+
+        // Track discovery state for all discovered executors
+        for executor in &executor_list {
+            if let Some(ref metrics) = self.validation_executor.read().await.metrics() {
+                metrics.prometheus().set_executor_validation_state(
+                    &executor.id.to_string(),
+                    task.miner_uid,
+                    task.intended_validation_strategy,
+                    ValidationState::Discovered,
+                    StateResult::Current,
+                );
+            }
+        }
 
         verification_steps.push(VerificationStep {
             step_name: "executor_discovery".to_string(),

@@ -14,6 +14,7 @@ use super::validation_hardware::HardwareCollector;
 use super::validation_nat::NatCollector;
 use super::validation_network::NetworkProfileCollector;
 use super::validation_speedtest::NetworkSpeedCollector;
+use super::validation_states::{StateResult, ValidationState};
 use super::validation_storage::StorageCollector;
 use crate::config::VerificationConfig;
 use crate::metrics::ValidatorMetrics;
@@ -384,6 +385,11 @@ impl ValidationExecutor {
         self.binary_validator.shutdown().await
     }
 
+    /// Get access to metrics for state tracking
+    pub fn metrics(&self) -> &Option<Arc<ValidatorMetrics>> {
+        &self.metrics
+    }
+
     /// Execute lightweight validation (connectivity check only)
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_lightweight_validation(
@@ -409,6 +415,17 @@ impl ValidationExecutor {
         let total_start = Instant::now();
         let executor_id = executor_info.id.to_string();
 
+        // Track state: Connecting
+        if let Some(ref metrics) = self.metrics {
+            metrics.prometheus().set_executor_validation_state(
+                &executor_id,
+                miner_uid,
+                ValidationType::Lightweight,
+                ValidationState::Connecting,
+                StateResult::Current,
+            );
+        }
+
         let connectivity_successful = match self
             .ssh_client
             .execute_command(
@@ -419,6 +436,28 @@ impl ValidationExecutor {
             .await
         {
             Ok(output) => {
+                // Move to Connected state
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().set_executor_validation_state(
+                        &executor_id,
+                        miner_uid,
+                        ValidationType::Lightweight,
+                        ValidationState::Connected,
+                        StateResult::Current,
+                    );
+                }
+
+                // Move to ConnectivityChecking state
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().set_executor_validation_state(
+                        &executor_id,
+                        miner_uid,
+                        ValidationType::Lightweight,
+                        ValidationState::ConnectivityChecking,
+                        StateResult::Current,
+                    );
+                }
+
                 let lines: Vec<&str> = output
                     .lines()
                     .map(|l| l.trim())
@@ -433,6 +472,19 @@ impl ValidationExecutor {
                     gpus_detected = gpus_detected,
                     "[EVAL_FLOW] GPU availability check completed"
                 );
+
+                if !gpu_present {
+                    // Failed at connectivity check
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_id,
+                            miner_uid,
+                            ValidationType::Lightweight,
+                            ValidationState::ConnectivityChecking,
+                            StateResult::Failed,
+                        );
+                    }
+                }
                 gpu_present
             }
             Err(e) => {
@@ -443,16 +495,17 @@ impl ValidationExecutor {
                     "[EVAL_FLOW] Lightweight connectivity check failed"
                 );
 
-                // Record connectivity check failure
+                // Failed at Connecting stage
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().record_validation_failure_stage(
-                        &executor_info.id.to_string(),
+                    metrics.prometheus().set_executor_validation_state(
+                        &executor_id,
                         miner_uid,
-                        "lightweight",
-                        "connectivity_check",
-                        1.0,
+                        ValidationType::Lightweight,
+                        ValidationState::Connecting,
+                        StateResult::Failed,
                     );
                 }
+
                 false
             }
         };
@@ -460,6 +513,17 @@ impl ValidationExecutor {
         let nat_validation_successful = if !connectivity_successful {
             false
         } else {
+            // Move to NatValidating state
+            if let Some(ref metrics) = self.metrics {
+                metrics.prometheus().set_executor_validation_state(
+                    &executor_id,
+                    miner_uid,
+                    ValidationType::Lightweight,
+                    ValidationState::NatValidating,
+                    StateResult::Current,
+                );
+            }
+
             let nat_collector = self.nat_collector.clone();
 
             match nat_collector
@@ -481,16 +545,17 @@ impl ValidationExecutor {
                         "[EVAL_FLOW] NAT validation failed"
                     );
 
-                    // Record NAT validation failure
+                    // Failed at NAT stage
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().record_validation_failure_stage(
-                            &executor_info.id.to_string(),
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_id,
                             miner_uid,
-                            "lightweight",
-                            "nat_validation",
-                            1.0,
+                            ValidationType::Lightweight,
+                            ValidationState::NatValidating,
+                            StateResult::Failed,
                         );
                     }
+
                     false
                 }
             }
@@ -538,19 +603,6 @@ impl ValidationExecutor {
 
         // Record lightweight validation metrics
         if let Some(ref metrics) = self.metrics {
-            // Record overall lightweight validation status
-            metrics.prometheus().record_validation_failure_stage(
-                &executor_info.id.to_string(),
-                miner_uid,
-                "lightweight",
-                if validation_successful {
-                    "passed"
-                } else {
-                    "failed"
-                },
-                if validation_successful { 0.0 } else { 1.0 },
-            );
-
             metrics
                 .business()
                 .record_attestation_verification(
@@ -562,6 +614,20 @@ impl ValidationExecutor {
                 )
                 .await;
         }
+
+        // Final state - only set if validation was successful
+        if validation_successful {
+            if let Some(ref metrics) = self.metrics {
+                metrics.prometheus().set_executor_validation_state(
+                    &executor_id,
+                    miner_uid,
+                    ValidationType::Lightweight,
+                    ValidationState::Completed,
+                    StateResult::Current,
+                );
+            }
+        }
+        // Note: If failed, we keep the state where it failed (don't move to Completed)
 
         Ok(ExecutorVerificationResult {
             executor_id: executor_info.id.clone(),
@@ -601,6 +667,7 @@ impl ValidationExecutor {
         );
 
         let total_start = Instant::now();
+        let executor_id = executor_info.id.to_string();
         let mut validation_details = ValidationDetails {
             ssh_test_duration: Duration::from_secs(0),
             binary_upload_duration: Duration::from_secs(0),
@@ -611,11 +678,33 @@ impl ValidationExecutor {
             combined_score: 0.0,
         };
 
+        // Track state: Connecting
+        if let Some(ref metrics) = self.metrics {
+            metrics.prometheus().set_executor_validation_state(
+                &executor_id,
+                miner_uid,
+                ValidationType::Full,
+                ValidationState::Connecting,
+                StateResult::Current,
+            );
+        }
+
         // Phase 1: SSH Connection Test
         let ssh_test_start = Instant::now();
         let ssh_connection_successful: bool =
             match self.ssh_client.test_connection(ssh_details).await {
                 Ok(_) => {
+                    // Move to Connected state
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_id,
+                            miner_uid,
+                            ValidationType::Full,
+                            ValidationState::Connected,
+                            StateResult::Current,
+                        );
+                    }
+
                     info!(
                         miner_uid = miner_uid,
                         executor_id = %executor_info.id,
@@ -624,6 +713,17 @@ impl ValidationExecutor {
                     true
                 }
                 Err(e) => {
+                    // Failed at Connecting stage
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_id,
+                            miner_uid,
+                            ValidationType::Full,
+                            ValidationState::Connecting,
+                            StateResult::Failed,
+                        );
+                    }
+
                     error!(
                         miner_uid = miner_uid,
                         executor_id = %executor_info.id,
@@ -631,16 +731,6 @@ impl ValidationExecutor {
                         "[EVAL_FLOW] SSH connection test failed"
                     );
 
-                    // Record SSH connection failure
-                    if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().record_validation_failure_stage(
-                            &executor_info.id.to_string(),
-                            miner_uid,
-                            "full",
-                            "ssh_connection",
-                            1.0,
-                        );
-                    }
                     false
                 }
             };
@@ -652,6 +742,17 @@ impl ValidationExecutor {
         let mut quality_validations_successful = false;
         if ssh_connection_successful {
             let executor_id = executor_info.id.to_string();
+
+            // Move to DockerValidating state
+            if let Some(ref metrics) = self.metrics {
+                metrics.prometheus().set_executor_validation_state(
+                    &executor_id,
+                    miner_uid,
+                    ValidationType::Full,
+                    ValidationState::DockerValidating,
+                    StateResult::Current,
+                );
+            }
             let hardware_collector = self.hardware_collector.clone();
             let network_collector = self.network_collector.clone();
             let speedtest_collector = self.speedtest_collector.clone();
@@ -690,6 +791,43 @@ impl ValidationExecutor {
                 .map(|n| n.is_accessible)
                 .unwrap_or(false);
             quality_validations_successful = docker_result.is_some() && nat_successful;
+
+            // Track state transitions based on validation results
+            if docker_result.is_none() {
+                // Failed at DockerValidating stage
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().set_executor_validation_state(
+                        &executor_id,
+                        miner_uid,
+                        ValidationType::Full,
+                        ValidationState::DockerValidating,
+                        StateResult::Failed,
+                    );
+                }
+            } else if !nat_successful {
+                // Docker passed, move to NatValidating and mark as failed
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().set_executor_validation_state(
+                        &executor_id,
+                        miner_uid,
+                        ValidationType::Full,
+                        ValidationState::NatValidating,
+                        StateResult::Failed,
+                    );
+                }
+            } else {
+                // Both Docker and NAT passed, move to NatValidating as current
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().set_executor_validation_state(
+                        &executor_id,
+                        miner_uid,
+                        ValidationType::Full,
+                        ValidationState::NatValidating,
+                        StateResult::Current,
+                    );
+                }
+            }
+
             if !quality_validations_successful {
                 error!(
                     miner_uid = miner_uid,
@@ -702,28 +840,6 @@ impl ValidationExecutor {
                     ).unwrap_or_else(|| "N/A".to_string()),
                     "[EVAL_FLOW] Critical pre-validations failed"
                 );
-
-                // Record specific validation failure
-                if let Some(ref metrics) = self.metrics {
-                    if docker_result.is_none() {
-                        metrics.prometheus().record_validation_failure_stage(
-                            &executor_info.id.to_string(),
-                            miner_uid,
-                            "full",
-                            "docker_validation",
-                            1.0,
-                        );
-                    }
-                    if !nat_successful {
-                        metrics.prometheus().record_validation_failure_stage(
-                            &executor_info.id.to_string(),
-                            miner_uid,
-                            "full",
-                            "nat_validation",
-                            1.0,
-                        );
-                    }
-                }
             }
         }
 
@@ -736,6 +852,17 @@ impl ValidationExecutor {
             ssh_connection_successful && quality_validations_successful;
 
         if pre_validations_successful && binary_config.enabled {
+            // Move to BinaryValidating state
+            if let Some(ref metrics) = self.metrics {
+                metrics.prometheus().set_executor_validation_state(
+                    &executor_id,
+                    miner_uid,
+                    ValidationType::Full,
+                    ValidationState::BinaryValidating,
+                    StateResult::Current,
+                );
+            }
+
             match self
                 .binary_validator
                 .execute_binary_validation(
@@ -769,6 +896,17 @@ impl ValidationExecutor {
                     }
                 }
                 Err(e) => {
+                    // Failed at BinaryValidating stage
+                    if let Some(ref metrics) = self.metrics {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_id,
+                            miner_uid,
+                            ValidationType::Full,
+                            ValidationState::BinaryValidating,
+                            StateResult::Failed,
+                        );
+                    }
+
                     error!(
                         miner_uid = miner_uid,
                         executor_id = %executor_info.id,
@@ -776,16 +914,7 @@ impl ValidationExecutor {
                         "[EVAL_FLOW] Binary validation failed"
                     );
 
-                    // Record binary validation failure
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().record_validation_failure_stage(
-                            &executor_info.id.to_string(),
-                            miner_uid,
-                            "full",
-                            "binary_validation",
-                            1.0,
-                        );
-
                         metrics
                             .business()
                             .record_attestation_verification(
@@ -818,15 +947,20 @@ impl ValidationExecutor {
 
         // Record overall validation status
         let overall_success = pre_validations_successful && binary_validation_successful;
-        if let Some(ref metrics) = self.metrics {
-            metrics.prometheus().record_validation_failure_stage(
-                &executor_info.id.to_string(),
-                miner_uid,
-                "full",
-                if overall_success { "passed" } else { "failed" },
-                if overall_success { 0.0 } else { 1.0 },
-            );
+
+        // Final state - only set if validation was successful
+        if overall_success {
+            if let Some(ref metrics) = self.metrics {
+                metrics.prometheus().set_executor_validation_state(
+                    &executor_id,
+                    miner_uid,
+                    ValidationType::Full,
+                    ValidationState::Completed,
+                    StateResult::Current,
+                );
+            }
         }
+        // Note: If failed, we keep the state where it failed (don't move to Completed)
 
         Ok(ExecutorVerificationResult {
             executor_id: executor_info.id.clone(),
