@@ -192,14 +192,14 @@ impl VerificationEngine {
                         "[EVAL_FLOW] Starting verification for executor"
                     );
 
-                    // Set discovered state for this specific executor being validated
+                    // Set in-queue state for this specific executor being validated
                     if let Some(ref metrics) = self_clone.validation_executor.read().await.metrics()
                     {
                         metrics.prometheus().set_executor_validation_state(
                             &executor_info.id.to_string(),
                             miner_uid,
                             intended_strategy,
-                            ValidationState::Discovered,
+                            ValidationState::InQueue,
                             StateResult::Current,
                         );
                     }
@@ -387,13 +387,13 @@ impl VerificationEngine {
         for executor in executors {
             match worker_queue.publish(executor.clone(), task.clone()).await {
                 Ok(_) => {
-                    // Set discovered state only for executors successfully published to queue
+                    // Set in-queue state only for executors successfully published to queue
                     if let Some(ref metrics) = self.validation_executor.read().await.metrics() {
                         metrics.prometheus().set_executor_validation_state(
                             &executor.id.to_string(),
                             task.miner_uid,
                             task.intended_validation_strategy,
-                            ValidationState::Discovered,
+                            ValidationState::InQueue,
                             StateResult::Current,
                         );
                     }

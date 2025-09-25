@@ -571,7 +571,7 @@ impl ValidationWorkerQueue {
                 state.mark_processing(executor_key.clone(), item.clone());
             }
 
-            // Clear discovered state now that processing has started
+            // Clear in-queue state now that processing has started
             // The validation strategy will set appropriate states during verification
             if let Some(ref metrics) = verification_engine.get_metrics().await {
                 metrics.prometheus().clear_executor_validation_states(
@@ -787,7 +787,7 @@ impl ValidationWorkerQueue {
                 state.mark_processing(executor_key.clone(), item.clone());
             }
 
-            // Clear discovered state now that processing has started
+            // Clear in-queue state now that processing has started
             // The validation strategy will set appropriate states during verification
             if let Some(ref metrics) = verification_engine.get_metrics().await {
                 metrics.prometheus().clear_executor_validation_states(

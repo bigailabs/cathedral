@@ -9,12 +9,12 @@
 //! - `2.0`: Failed at this state
 //!
 //! **State Flow:**
-//! - **Lightweight**: Discovered → Connecting → Connected → ConnectivityChecking → NatValidating → Completed
-//! - **Full**: Discovered → Connecting → Connected → DockerValidating → NatValidating → BinaryValidating → Completed
+//! - **Lightweight**: InQueue → Connecting → Connected → ConnectivityChecking → NatValidating → Completed
+//! - **Full**: InQueue → Connecting → Connected → DockerValidating → NatValidating → BinaryValidating → Completed
 //!
 //! **Example** (executor failed at NAT validation):
 //! ```
-//! executor_validation_state{executor_id="e1",state="discovered"} 0.0
+//! executor_validation_state{executor_id="e1",state="in_queue"} 0.0
 //! executor_validation_state{executor_id="e1",state="connecting"} 0.0
 //! executor_validation_state{executor_id="e1",state="connected"} 0.0
 //! executor_validation_state{executor_id="e1",state="nat_validating"} 2.0
@@ -27,7 +27,7 @@ use super::types::ValidationType;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationState {
     // Common states
-    Discovered,
+    InQueue,
     Connecting,
     Connected,
 
@@ -52,7 +52,7 @@ impl ValidationState {
 
         match validation_type {
             ValidationType::Lightweight => &[
-                Discovered,
+                InQueue,
                 Connecting,
                 Connected,
                 ConnectivityChecking,
@@ -60,7 +60,7 @@ impl ValidationState {
                 Completed,
             ],
             ValidationType::Full => &[
-                Discovered,
+                InQueue,
                 Connecting,
                 Connected,
                 DockerValidating,
@@ -74,7 +74,7 @@ impl ValidationState {
     /// Returns metric label string for this state
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Discovered => "discovered",
+            Self::InQueue => "in_queue",
             Self::Connecting => "connecting",
             Self::Connected => "connected",
             Self::ConnectivityChecking => "connectivity_checking",
