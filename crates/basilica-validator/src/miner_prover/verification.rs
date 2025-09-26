@@ -6,6 +6,7 @@
 use super::miner_client::{MinerClient, MinerClientConfig};
 use super::types::MinerInfo;
 use super::types::{GpuInfo, NodeInfoDetailed, NodeVerificationResult, ValidationType};
+use super::validation_states::{StateResult, ValidationState};
 use super::validation_strategy::{ValidationNode, ValidationStrategy, ValidationStrategySelector};
 use super::validation_worker::{ValidationWorkerQueue, WorkerQueueConfig};
 use crate::config::VerificationConfig;
@@ -191,6 +192,17 @@ impl VerificationEngine {
                         "[EVAL_FLOW] Starting verification for node"
                     );
 
+                    // Set in-queue state for this specific node being validated
+                    if let Some(ref metrics) = self_clone.validation_node.read().await.metrics() {
+                        metrics.prometheus().set_executor_validation_state(
+                            &node_info.id.to_string(),
+                            miner_uid,
+                            intended_strategy,
+                            ValidationState::InQueue,
+                            StateResult::Current,
+                        );
+                    }
+
                     let result = self_clone
                         .verify_node(
                             &miner_endpoint,
@@ -372,8 +384,20 @@ impl VerificationEngine {
         let mut failed_count = 0;
 
         for node in nodes {
-            match worker_queue.publish(node, task.clone()).await {
-                Ok(_) => published_count += 1,
+            match worker_queue.publish(node.clone(), task.clone()).await {
+                Ok(_) => {
+                    published_count += 1;
+                    // Set in-queue state only for nodes successfully published to queue
+                    if let Some(ref metrics) = self.validation_node.read().await.metrics() {
+                        metrics.prometheus().set_executor_validation_state(
+                            &node.id.to_string(),
+                            task.miner_uid,
+                            task.intended_validation_strategy,
+                            ValidationState::InQueue,
+                            StateResult::Current,
+                        );
+                    }
+                }
                 Err(e) => {
                     warn!("Failed to publish node to queue: {}", e);
                     failed_count += 1;
@@ -2027,6 +2051,11 @@ impl VerificationEngine {
             self.bittensor_service().is_some(),
             self.worker_queue.is_some()
         )
+    }
+
+    /// Get access to validation metrics
+    pub async fn get_metrics(&self) -> Option<Arc<ValidatorMetrics>> {
+        self.validation_node.read().await.metrics().clone()
     }
 
     /// Set worker queue for decoupled execution
