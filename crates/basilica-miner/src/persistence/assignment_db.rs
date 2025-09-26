@@ -3,20 +3,10 @@
 //! Database operations for manual node assignments
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use sqlx::types::chrono;
 use sqlx::SqlitePool;
 use tracing::info;
-
-/// Validator stake information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidatorStake {
-    pub validator_hotkey: String,
-    pub stake_amount: f64,
-    pub percentage_of_total: f64,
-    pub last_updated: DateTime<Utc>,
-}
 
 /// Assignment database operations
 pub struct AssignmentDb {

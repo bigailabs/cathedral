@@ -426,11 +426,3 @@ pub struct AuthorizationStats {
     pub expired_authorizations: usize,
     pub validators_by_node: HashMap<String, usize>,
 }
-
-// Keep SessionStats for backward compatibility
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionStats {
-    pub total_sessions: usize,
-    pub active_sessions: usize,
-    pub expired_sessions: usize,
-}
