@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
+use crate::miner_prover::types::ValidationType;
+use crate::miner_prover::validation_states::{StateResult, ValidationState};
 use crate::persistence::SimplePersistence;
 
 /// Core Prometheus metrics collector for Validator
@@ -171,6 +173,18 @@ impl ValidatorPrometheusMetrics {
         describe_counter!(
             "basilica_validator_rpc_critical_failures_total",
             "Total RPC failures after all retry attempts exhausted"
+        );
+
+        // Discovered miners metrics
+        describe_gauge!(
+            "basilica_validator_discovered_miners_total",
+            "Total number of miners currently discovered from metagraph"
+        );
+
+        // Validation state tracking metrics
+        describe_gauge!(
+            "basilica_validator_executor_validation_state",
+            "Current validation state of executors (0=not in state, 1=current, 2=failed)"
         );
 
         Ok(Self {
@@ -526,5 +540,70 @@ impl ValidatorPrometheusMetrics {
             "RPC critical failure recorded: method={}, error_type={}",
             method, error_type
         );
+    }
+
+    /// Set total discovered miners count
+    pub fn set_discovered_miners_total(&self, count: u64) {
+        gauge!("basilica_validator_discovered_miners_total").set(count as f64);
+    }
+
+    /// Sets executor validation state atomically, clearing all other states for the validation type
+    pub fn set_executor_validation_state(
+        &self,
+        executor_id: &str,
+        miner_uid: u16,
+        validation_type: ValidationType,
+        current_state: ValidationState,
+        result: StateResult,
+    ) {
+        let validation_type_str = match validation_type {
+            ValidationType::Full => "full",
+            ValidationType::Lightweight => "lightweight",
+        };
+
+        // Get all possible states for this validation type
+        let all_states = ValidationState::states_for_type(validation_type);
+
+        // Set metrics for all states
+        for state in all_states {
+            let value = if *state == current_state {
+                result.to_metric_value()
+            } else {
+                0.0
+            };
+
+            gauge!("basilica_validator_executor_validation_state",
+                "executor_id" => executor_id.to_string(),
+                "miner_uid" => miner_uid.to_string(),
+                "validation_type" => validation_type_str.to_string(),
+                "state" => state.as_str().to_string()
+            )
+            .set(value);
+        }
+    }
+
+    /// Clears all validation states for an executor (sets all to 0.0)
+    pub fn clear_executor_validation_states(
+        &self,
+        executor_id: &str,
+        miner_uid: u16,
+        validation_type: ValidationType,
+    ) {
+        let validation_type_str = match validation_type {
+            ValidationType::Full => "full",
+            ValidationType::Lightweight => "lightweight",
+        };
+
+        let all_states = ValidationState::states_for_type(validation_type);
+
+        for state in all_states {
+            gauge!("basilica_validator_executor_validation_state",
+                "executor_id" => executor_id.to_string(),
+                "miner_uid" => miner_uid.to_string(),
+                "validation_type" => validation_type_str.to_string(),
+                "state" => state.as_str().to_string()
+            )
+            .set(0.0);
+        }
     }
 }

@@ -6,6 +6,7 @@
 use super::miner_client::{MinerClient, MinerClientConfig};
 use super::types::MinerInfo;
 use super::types::{ExecutorInfoDetailed, ExecutorVerificationResult, GpuInfo, ValidationType};
+use super::validation_states::{StateResult, ValidationState};
 use super::validation_strategy::{
     ValidationExecutor, ValidationStrategy, ValidationStrategySelector,
 };
@@ -191,6 +192,18 @@ impl VerificationEngine {
                         "[EVAL_FLOW] Starting verification for executor"
                     );
 
+                    // Set in-queue state for this specific executor being validated
+                    if let Some(ref metrics) = self_clone.validation_executor.read().await.metrics()
+                    {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor_info.id.to_string(),
+                            miner_uid,
+                            intended_strategy,
+                            ValidationState::InQueue,
+                            StateResult::Current,
+                        );
+                    }
+
                     let result = self_clone
                         .verify_executor(
                             &miner_endpoint,
@@ -372,8 +385,20 @@ impl VerificationEngine {
         let mut failed_count = 0;
 
         for executor in executors {
-            match worker_queue.publish(executor, task.clone()).await {
-                Ok(_) => published_count += 1,
+            match worker_queue.publish(executor.clone(), task.clone()).await {
+                Ok(_) => {
+                    // Set in-queue state only for executors successfully published to queue
+                    if let Some(ref metrics) = self.validation_executor.read().await.metrics() {
+                        metrics.prometheus().set_executor_validation_state(
+                            &executor.id.to_string(),
+                            task.miner_uid,
+                            task.intended_validation_strategy,
+                            ValidationState::InQueue,
+                            StateResult::Current,
+                        );
+                    }
+                    published_count += 1;
+                }
                 Err(e) => {
                     warn!("Failed to publish executor to queue: {}", e);
                     failed_count += 1;
@@ -2030,6 +2055,11 @@ impl VerificationEngine {
             self.bittensor_service().is_some(),
             self.worker_queue.is_some()
         )
+    }
+
+    /// Get access to validation metrics
+    pub async fn get_metrics(&self) -> Option<Arc<ValidatorMetrics>> {
+        self.validation_executor.read().await.metrics().clone()
     }
 
     /// Set worker queue for decoupled execution

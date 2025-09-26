@@ -571,6 +571,16 @@ impl ValidationWorkerQueue {
                 state.mark_processing(executor_key.clone(), item.clone());
             }
 
+            // Clear in-queue state now that processing has started
+            // The validation strategy will set appropriate states during verification
+            if let Some(ref metrics) = verification_engine.get_metrics().await {
+                metrics.prometheus().clear_executor_validation_states(
+                    &executor_key.executor_id.to_string(),
+                    executor_key.miner_uid,
+                    ValidationType::Full,
+                );
+            }
+
             let start_time = Instant::now();
             let result = timeout(
                 max_processing_time,
@@ -775,6 +785,16 @@ impl ValidationWorkerQueue {
             {
                 let mut state = queue.write().await;
                 state.mark_processing(executor_key.clone(), item.clone());
+            }
+
+            // Clear in-queue state now that processing has started
+            // The validation strategy will set appropriate states during verification
+            if let Some(ref metrics) = verification_engine.get_metrics().await {
+                metrics.prometheus().clear_executor_validation_states(
+                    &executor_key.executor_id.to_string(),
+                    executor_key.miner_uid,
+                    ValidationType::Lightweight,
+                );
             }
 
             let start_time = Instant::now();
