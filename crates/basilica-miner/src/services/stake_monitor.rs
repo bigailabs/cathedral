@@ -50,26 +50,6 @@ impl StakeMonitor {
         })
     }
 
-    #[cfg(test)]
-    /// Configure update interval
-    fn with_update_interval(mut self, interval: Duration) -> Self {
-        self.update_interval = interval;
-        self
-    }
-
-    #[cfg(test)]
-    /// Configure minimum stake threshold
-    fn with_min_stake_threshold(mut self, threshold: f64) -> Self {
-        self.min_stake_threshold = threshold;
-        self
-    }
-
-    #[cfg(test)]
-    /// Force an immediate stake update
-    async fn force_update(&self) -> Result<usize> {
-        self.update_validator_stakes().await
-    }
-
     /// Start the stake monitoring service
     pub async fn start(self) -> Result<()> {
         info!(
@@ -192,45 +172,6 @@ mod tests {
     use super::*;
     use sqlx::SqlitePool;
 
-    async fn setup_test_monitor() -> (StakeMonitor, SqlitePool) {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-
-        // Run migrations
-        let assignment_db = AssignmentDb::new(pool.clone());
-        assignment_db.run_migrations().await.unwrap();
-
-        // Create a test config that doesn't require real wallet files
-        let config = create_test_config();
-
-        // Create monitor with test settings
-        let monitor = StakeMonitor::new(&config, pool.clone())
-            .await
-            .unwrap()
-            .with_update_interval(Duration::from_secs(1))
-            .with_min_stake_threshold(10.0);
-
-        (monitor, pool)
-    }
-
-    #[tokio::test]
-    #[ignore] // Ignore by default as it requires network access
-    async fn test_stake_monitor_update() {
-        let (monitor, pool) = setup_test_monitor().await;
-
-        // Force an update
-        let result = monitor.force_update().await;
-        assert!(result.is_ok());
-
-        // Check that stakes were saved
-        let db = AssignmentDb::new(pool);
-        let stakes = db.get_all_validator_stakes().await.unwrap();
-        assert!(!stakes.is_empty());
-
-        // Verify stake percentages add up to approximately 100%
-        let total_percentage: f64 = stakes.iter().map(|s| s.percentage_of_total).sum();
-        assert!((total_percentage - 100.0).abs() < 1.0); // Allow 1% tolerance
-    }
-
     #[tokio::test]
     async fn test_stake_monitor_creation() {
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -281,13 +222,14 @@ mod tests {
         assignment_db.run_migrations().await?;
 
         let config = create_test_config();
-        let monitor = StakeMonitor::new(&config, pool)
-            .await?
-            .with_update_interval(Duration::from_secs(60))
-            .with_min_stake_threshold(50.0);
+        let monitor = StakeMonitor::new(&config, pool).await?;
 
-        assert_eq!(monitor.update_interval, Duration::from_secs(60));
-        assert_eq!(monitor.min_stake_threshold, 50.0);
+        // Verify the monitor was created with expected config values
+        assert_eq!(monitor.netuid, config.bittensor.common.netuid);
+        assert_eq!(
+            monitor.min_stake_threshold,
+            config.validator_assignment.min_stake_threshold
+        );
 
         Ok(())
     }

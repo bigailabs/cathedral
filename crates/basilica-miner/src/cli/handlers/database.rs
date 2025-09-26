@@ -211,7 +211,7 @@ async fn show_database_stats(config: &MinerConfig) -> Result<()> {
     }
 
     // Show health status
-    let health_records = db.get_all_executor_health().await.unwrap_or_default();
+    let health_records = db.get_all_node_health().await.unwrap_or_default();
     let interaction_count = db
         .get_recent_validator_interactions(100)
         .await
@@ -219,16 +219,16 @@ async fn show_database_stats(config: &MinerConfig) -> Result<()> {
         .len();
 
     println!("\n=== Content Summary ===");
-    println!("Executor Health Records: {}", health_records.len());
+    println!("Node Health Records: {}", health_records.len());
     println!("Recent Validator Interactions: {interaction_count}");
 
-    let healthy_executors = health_records.iter().filter(|h| h.is_healthy).count();
+    let healthy_nodes = health_records.iter().filter(|h| h.is_healthy).count();
     if !health_records.is_empty() {
         println!(
-            "Healthy Executors: {}/{} ({:.1}%)",
-            healthy_executors,
+            "Healthy Nodes: {}/{} ({:.1}%)",
+            healthy_nodes,
             health_records.len(),
-            (healthy_executors as f64 / health_records.len() as f64) * 100.0
+            (healthy_nodes as f64 / health_records.len() as f64) * 100.0
         );
     }
 
@@ -261,10 +261,10 @@ async fn cleanup_database(config: &MinerConfig, days: u32) -> Result<()> {
         println!("Cleaned {grants_cleaned} old SSH grants");
     }
 
-    // Clean up stale executor health records
-    let health_cleaned = clean_stale_executor_health(&db, cutoff_date).await?;
+    // Clean up stale node health records
+    let health_cleaned = clean_stale_node_health(&db, cutoff_date).await?;
     if health_cleaned > 0 {
-        println!("Cleaned {health_cleaned} stale executor health records");
+        println!("Cleaned {health_cleaned} stale node health records");
     }
 
     if interactions_cleaned == 0 && grants_cleaned == 0 && health_cleaned == 0 {
@@ -443,10 +443,7 @@ async fn clean_old_ssh_grants(db: &RegistrationDb, cutoff_date: DateTime<Utc>) -
     db.cleanup_old_ssh_grants(cutoff_date).await
 }
 
-/// Clean stale executor health records
-async fn clean_stale_executor_health(
-    db: &RegistrationDb,
-    cutoff_date: DateTime<Utc>,
-) -> Result<u64> {
-    db.cleanup_stale_executor_health(cutoff_date).await
+/// Clean stale node health records
+async fn clean_stale_node_health(db: &RegistrationDb, cutoff_date: DateTime<Utc>) -> Result<u64> {
+    db.cleanup_stale_node_health(cutoff_date).await
 }

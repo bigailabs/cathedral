@@ -15,12 +15,12 @@ async fn test_registration_db_new() {
 }
 
 #[tokio::test]
-async fn test_executor_registration() {
+async fn test_node_registration() {
     let db = create_test_db().await;
 
-    // Register executor
+    // Register node
     let result = db
-        .register_executor(
+        .register_node(
             "exec1",
             "127.0.0.1:50051",
             serde_json::json!({"gpu": "RTX 4090"}),
@@ -29,54 +29,54 @@ async fn test_executor_registration() {
 
     assert!(result.is_ok());
 
-    // Get executor
-    let executor = db.get_executor("exec1").await.unwrap();
-    assert!(executor.is_some());
+    // Get node
+    let node = db.get_node("exec1").await.unwrap();
+    assert!(node.is_some());
 
-    let executor = executor.unwrap();
-    assert_eq!(executor.id, "exec1");
-    assert_eq!(executor.grpc_address, "127.0.0.1:50051");
-    assert!(executor.is_active);
+    let node = node.unwrap();
+    assert_eq!(node.id, "exec1");
+    assert_eq!(node.grpc_address, "127.0.0.1:50051");
+    assert!(node.is_active);
 }
 
 #[tokio::test]
-async fn test_executor_health_update() {
+async fn test_node_health_update() {
     let db = create_test_db().await;
 
-    // Register executor
-    db.register_executor("exec1", "127.0.0.1:50051", serde_json::json!({}))
+    // Register node
+    db.register_node("exec1", "127.0.0.1:50051", serde_json::json!({}))
         .await
         .unwrap();
 
     // Update health status
-    let result = db.update_executor_health("exec1", false).await;
+    let result = db.update_node_health("exec1", false).await;
     assert!(result.is_ok());
 
     // Verify update
-    let executor = db.get_executor("exec1").await.unwrap().unwrap();
-    assert!(!executor.is_healthy);
+    let node = db.get_node("exec1").await.unwrap().unwrap();
+    assert!(!node.is_healthy);
 }
 
 #[tokio::test]
-async fn test_list_active_executors() {
+async fn test_list_active_nodes() {
     let db = create_test_db().await;
 
-    // Register multiple executors
-    db.register_executor("exec1", "127.0.0.1:50051", serde_json::json!({}))
+    // Register multiple nodes
+    db.register_node("exec1", "127.0.0.1:50051", serde_json::json!({}))
         .await
         .unwrap();
-    db.register_executor("exec2", "127.0.0.1:50052", serde_json::json!({}))
+    db.register_node("exec2", "127.0.0.1:50052", serde_json::json!({}))
         .await
         .unwrap();
-    db.register_executor("exec3", "127.0.0.1:50053", serde_json::json!({}))
+    db.register_node("exec3", "127.0.0.1:50053", serde_json::json!({}))
         .await
         .unwrap();
 
     // Deactivate one
-    db.update_executor_active("exec2", false).await.unwrap();
+    db.update_node_active("exec2", false).await.unwrap();
 
-    // List active executors
-    let active = db.list_active_executors().await.unwrap();
+    // List active nodes
+    let active = db.list_active_nodes().await.unwrap();
     assert_eq!(active.len(), 2);
     assert!(active.iter().any(|e| e.id == "exec1"));
     assert!(active.iter().any(|e| e.id == "exec3"));
@@ -171,7 +171,7 @@ async fn test_get_ssh_access_by_validator() {
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].executor_id, "exec1");
+    assert_eq!(records[0].node_id, "exec1");
     assert!(records[0].is_active);
 }
 

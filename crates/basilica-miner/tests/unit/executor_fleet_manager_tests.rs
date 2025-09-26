@@ -1,8 +1,8 @@
-//! Unit tests for ExecutorFleetManager
+//! Unit tests for NodeFleetManager
 
 use basilica_common::config::DatabaseConfig;
-use basilica_miner::config::{ExecutorConfig, ExecutorManagementConfig};
-use basilica_miner::executor_fleet_manager::{ExecutorFleetManager, FleetStatistics};
+use basilica_miner::config::{NodeConfig, NodeManagementConfig};
+use basilica_miner::node_fleet_manager::{NodeFleetManager, FleetStatistics};
 use basilica_miner::persistence::RegistrationDb;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -12,23 +12,23 @@ async fn test_fleet_manager_new() {
     let config = create_test_config();
     let db = create_test_db().await;
 
-    let manager = ExecutorFleetManager::new(config.clone(), db).await.unwrap();
+    let manager = NodeFleetManager::new(config.clone(), db).await.unwrap();
     let stats = manager.get_fleet_stats().await;
 
-    assert_eq!(stats.total_executors, 2);
-    assert_eq!(stats.healthy_executors, 0);
-    assert_eq!(stats.unhealthy_executors, 2);
+    assert_eq!(stats.total_nodes, 2);
+    assert_eq!(stats.healthy_nodes, 0);
+    assert_eq!(stats.unhealthy_nodes, 2);
 }
 
 #[tokio::test]
-async fn test_list_available_executors_empty_when_unhealthy() {
+async fn test_list_available_nodes_empty_when_unhealthy() {
     let config = create_test_config();
     let db = create_test_db().await;
 
-    let manager = ExecutorFleetManager::new(config, db).await.unwrap();
-    let executors = manager.list_available_executors().await.unwrap();
+    let manager = NodeFleetManager::new(config, db).await.unwrap();
+    let nodes = manager.list_available_nodes().await.unwrap();
 
-    assert_eq!(executors.len(), 0);
+    assert_eq!(nodes.len(), 0);
 }
 
 #[tokio::test]
@@ -36,12 +36,12 @@ async fn test_fleet_stats_calculation() {
     let config = create_test_config();
     let db = create_test_db().await;
 
-    let manager = ExecutorFleetManager::new(config, db).await.unwrap();
+    let manager = NodeFleetManager::new(config, db).await.unwrap();
     let stats = manager.get_fleet_stats().await;
 
-    assert_eq!(stats.total_executors, 2);
-    assert_eq!(stats.healthy_executors, 0);
-    assert_eq!(stats.unhealthy_executors, 2);
+    assert_eq!(stats.total_nodes, 2);
+    assert_eq!(stats.healthy_nodes, 0);
+    assert_eq!(stats.unhealthy_nodes, 2);
     assert_eq!(stats.avg_response_time, 0.0);
 }
 
@@ -50,7 +50,7 @@ async fn test_parse_resource_stats() {
     let config = create_test_config();
     let db = create_test_db().await;
 
-    let manager = ExecutorFleetManager::new(config, db).await.unwrap();
+    let manager = NodeFleetManager::new(config, db).await.unwrap();
 
     let mut resource_status = std::collections::HashMap::new();
     resource_status.insert("cpu_usage".to_string(), "50.5".to_string());
@@ -83,7 +83,7 @@ async fn test_health_monitoring_timeout() {
     config.health_check_interval = Duration::from_millis(100);
     let db = create_test_db().await;
 
-    let manager = ExecutorFleetManager::new(config, db).await.unwrap();
+    let manager = NodeFleetManager::new(config, db).await.unwrap();
 
     // Start monitoring should not block indefinitely
     let result = timeout(Duration::from_secs(1), manager.start_monitoring()).await;
@@ -94,19 +94,19 @@ async fn test_health_monitoring_timeout() {
 
 // Helper functions
 
-fn create_test_config() -> ExecutorManagementConfig {
-    ExecutorManagementConfig {
-        executors: vec![
-            ExecutorConfig {
-                id: "test-executor-1".to_string(),
+fn create_test_config() -> NodeManagementConfig {
+    NodeManagementConfig {
+        nodes: vec![
+            NodeConfig {
+                id: "test-node-1".to_string(),
                 grpc_address: "127.0.0.1:50051".to_string(),
-                name: Some("Test Executor 1".to_string()),
+                name: Some("Test Node 1".to_string()),
                 metadata: None,
             },
-            ExecutorConfig {
-                id: "test-executor-2".to_string(),
+            NodeConfig {
+                id: "test-node-2".to_string(),
                 grpc_address: "127.0.0.1:50052".to_string(),
-                name: Some("Test Executor 2".to_string()),
+                name: Some("Test Node 2".to_string()),
                 metadata: None,
             },
         ],

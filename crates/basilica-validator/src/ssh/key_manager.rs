@@ -1,6 +1,6 @@
 //! SSH Key Management for Validator Sessions
 //!
-//! Handles generation, storage, and cleanup of ephemeral SSH keys for validator-executor sessions.
+//! Handles generation, storage, and cleanup of ephemeral SSH keys for validator-node sessions.
 
 use anyhow::{Context, Result};
 use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey};

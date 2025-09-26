@@ -28,7 +28,7 @@ sol!(
 #[derive(Debug, Clone)]
 pub struct Reclaim {
     pub hotkey: [u8; 32],
-    pub executor_id: [u8; 16],
+    pub node_id: [u8; 16],
     pub miner: Address,
     pub amount: U256,
     pub deny_timeout: u64,
@@ -42,7 +42,7 @@ impl From<(FixedBytes<32>, FixedBytes<16>, Address, U256, u64)> for Reclaim {
                 hk.copy_from_slice(tuple.0.as_slice());
                 hk
             },
-            executor_id: {
+            node_id: {
                 let mut b = [0u8; 16];
                 b.copy_from_slice(tuple.1.as_slice());
                 b
@@ -184,7 +184,7 @@ pub async fn scan_events_with_scope(
 pub async fn deposit(
     private_key: &str,
     hotkey: [u8; 32],
-    executor_id: [u8; 16],
+    node_id: [u8; 16],
     amount: U256,
     network_config: &CollateralNetworkConfig,
 ) -> Result<(), anyhow::Error> {
@@ -193,7 +193,7 @@ pub async fn deposit(
     let tx = contract
         .deposit(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id),
+            FixedBytes::from_slice(&node_id),
         )
         .value(amount);
     let tx = tx.send().await?;
@@ -205,7 +205,7 @@ pub async fn deposit(
 pub async fn deposit_with_config(
     private_key: &str,
     hotkey: [u8; 32],
-    executor_id: [u8; 16],
+    node_id: [u8; 16],
     amount: U256,
     network_config: &CollateralNetworkConfig,
 ) -> Result<(), anyhow::Error> {
@@ -214,7 +214,7 @@ pub async fn deposit_with_config(
     let tx = contract
         .deposit(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id),
+            FixedBytes::from_slice(&node_id),
         )
         .value(amount);
     let tx = tx.send().await?;
@@ -226,7 +226,7 @@ pub async fn deposit_with_config(
 pub async fn reclaim_collateral(
     private_key: &str,
     hotkey: [u8; 32],
-    executor_id: [u8; 16],
+    node_id: [u8; 16],
     url: &str,
     url_content_md5_checksum: u128,
     network_config: &CollateralNetworkConfig,
@@ -235,7 +235,7 @@ pub async fn reclaim_collateral(
 
     let tx = contract.reclaimCollateral(
         FixedBytes::from_slice(&hotkey),
-        FixedBytes::from_slice(&executor_id),
+        FixedBytes::from_slice(&node_id),
         url.to_string(),
         FixedBytes::from_slice(&url_content_md5_checksum.to_be_bytes()),
     );
@@ -279,7 +279,7 @@ pub async fn deny_reclaim(
 pub async fn slash_collateral(
     private_key: &str,
     hotkey: [u8; 32],
-    executor_id: [u8; 16],
+    node_id: [u8; 16],
     url: &str,
     url_content_md5_checksum: u128,
     network_config: &CollateralNetworkConfig,
@@ -288,7 +288,7 @@ pub async fn slash_collateral(
 
     let tx = contract.slashCollateral(
         FixedBytes::from_slice(&hotkey),
-        FixedBytes::from_slice(&executor_id),
+        FixedBytes::from_slice(&node_id),
         url.to_string(),
         FixedBytes::from_slice(&url_content_md5_checksum.to_be_bytes()),
     );
@@ -339,29 +339,29 @@ pub async fn min_collateral_increase(
     Ok(min_collateral_increase)
 }
 
-pub async fn executor_to_miner(
+pub async fn node_to_miner(
     hotkey: [u8; 32],
-    executor_id: [u8; 16],
+    node_id: [u8; 16],
     network_config: &CollateralNetworkConfig,
 ) -> Result<Address, anyhow::Error> {
     let provider = ProviderBuilder::new()
         .connect(&network_config.rpc_url)
         .await?;
     let contract = CollateralUpgradeable::new(network_config.contract_address, provider);
-    // let executor_bytes = executor_id.to_be_bytes();
-    let executor_to_miner = contract
-        .executorToMiner(
+    // let node_bytes = node_id.to_be_bytes();
+    let node_to_miner = contract
+        .nodeToMiner(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id),
+            FixedBytes::from_slice(&node_id),
         )
         .call()
         .await?;
-    Ok(executor_to_miner)
+    Ok(node_to_miner)
 }
 
 pub async fn collaterals(
     hotkey: [u8; 32],
-    executor_id: [u8; 16],
+    node_id: [u8; 16],
     network_config: &CollateralNetworkConfig,
 ) -> Result<U256, anyhow::Error> {
     let provider = ProviderBuilder::new()
@@ -371,7 +371,7 @@ pub async fn collaterals(
     let collaterals = contract
         .collaterals(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id),
+            FixedBytes::from_slice(&node_id),
         )
         .call()
         .await?;
@@ -389,7 +389,7 @@ pub async fn reclaims(
     let result = contract.reclaims(reclaim_request_id).call().await?;
     let reclaim = Reclaim::from((
         result.hotkey,
-        result.executorId,
+        result.nodeId,
         result.miner,
         result.amount,
         result.denyTimeout,

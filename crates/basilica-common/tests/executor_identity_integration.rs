@@ -1,13 +1,13 @@
-//! End-to-end integration tests for the executor identity module
+//! End-to-end integration tests for the node identity module
 //!
 //! These tests verify the complete functionality of the UUID+HUID system
 //! across all components in realistic usage scenarios.
 
 #![cfg(feature = "sqlite")]
 
-use basilica_common::executor_identity::{
-    is_valid_huid, validate_identifier, ExecutorId, ExecutorIdentity, IdentityDisplay,
-    IdentityPersistence, SqliteIdentityStore, StaticWordProvider, WordProvider,
+use basilica_common::node_identity::{
+    is_valid_huid, validate_identifier, IdentityDisplay, IdentityPersistence, NodeId, NodeIdentity,
+    SqliteIdentityStore, StaticWordProvider, WordProvider,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -32,127 +32,124 @@ async fn create_test_database() -> (SqliteIdentityStore, TempDir) {
 }
 
 #[tokio::test]
-async fn test_e2e_executor_lifecycle() {
+async fn test_e2e_node_lifecycle() {
     let (store, _temp_dir) = create_test_database().await;
 
-    // Step 1: Create a new executor identity
-    let executor = store
-        .get_or_create()
-        .await
-        .expect("Should create new executor");
+    // Step 1: Create a new node identity
+    let node = store.get_or_create().await.expect("Should create new node");
 
-    println!("Created executor: {}", executor.full_display());
+    println!("Created node: {}", node.full_display());
 
     // Verify the identity format
-    assert!(is_valid_huid(executor.huid()), "HUID should be valid");
-    assert_eq!(executor.uuid().get_version(), Some(uuid::Version::Random));
+    assert!(is_valid_huid(node.huid()), "HUID should be valid");
+    assert_eq!(node.uuid().get_version(), Some(uuid::Version::Random));
 
     // Step 2: Look up by UUID
     let found_by_uuid = store
-        .find_by_identifier(&executor.uuid().to_string())
+        .find_by_identifier(&node.uuid().to_string())
         .await
         .expect("Lookup should succeed")
-        .expect("Should find executor");
+        .expect("Should find node");
 
-    assert_eq!(found_by_uuid.uuid(), executor.uuid());
-    assert_eq!(found_by_uuid.huid(), executor.huid());
+    assert_eq!(found_by_uuid.uuid(), node.uuid());
+    assert_eq!(found_by_uuid.huid(), node.huid());
 
     // Step 3: Look up by HUID prefix (minimum 3 chars)
-    let huid_prefix = &executor.huid()[..5];
+    let huid_prefix = &node.huid()[..5];
     let found_by_prefix = store
         .find_by_identifier(huid_prefix)
         .await
         .expect("Prefix lookup should succeed")
-        .expect("Should find executor");
+        .expect("Should find node");
 
-    assert_eq!(found_by_prefix.uuid(), executor.uuid());
+    assert_eq!(found_by_prefix.uuid(), node.uuid());
 
     // Step 4: Test display formatting
-    use basilica_common::executor_identity::ExecutorIdentityDisplay;
-    let display = ExecutorIdentityDisplay::new(&*executor);
+    use basilica_common::node_identity::NodeIdentityDisplay;
+    let display = NodeIdentityDisplay::new(&*node);
 
     let compact = display.format_compact();
-    assert_eq!(compact, executor.huid());
+    assert_eq!(compact, node.huid());
 
     let verbose = display.format_verbose();
-    assert!(verbose.contains(&executor.uuid().to_string()));
-    assert!(verbose.contains(executor.huid()));
+    assert!(verbose.contains(&node.uuid().to_string()));
+    assert!(verbose.contains(node.huid()));
 
     let json = display.format_json().expect("JSON formatting should work");
     let parsed: serde_json::Value =
         serde_json::from_str(&json).expect("Should parse as valid JSON");
-    assert_eq!(parsed["uuid"], executor.uuid().to_string());
-    assert_eq!(parsed["huid"], executor.huid());
+    assert_eq!(parsed["uuid"], node.uuid().to_string());
+    assert_eq!(parsed["huid"], node.huid());
 }
 
 #[tokio::test]
 async fn test_e2e_collision_handling() {
-    // Test HUID collision handling by creating many executors directly
-    // Note: get_or_create returns the same executor for a given store
+    // Test HUID collision handling by creating many nodes directly
+    // Note: get_or_create returns the same node for a given store
 
-    let mut executors = Vec::new();
+    let mut nodes = Vec::new();
     let mut huids = HashSet::new();
 
-    // Create many executor IDs directly to test HUID uniqueness
+    // Create many node IDs directly to test HUID uniqueness
     let provider = StaticWordProvider::new();
     for i in 0..100 {
-        let executor = ExecutorId::new_with_seed_and_provider(&format!("test-seed-{i}"), &provider)
-            .expect("Should create executor");
+        let node = NodeId::new_with_seed_and_provider(&format!("test-seed-{i}"), &provider)
+            .expect("Should create node");
 
         // Verify HUID uniqueness
         assert!(
-            huids.insert(executor.huid().to_string()),
+            huids.insert(node.huid().to_string()),
             "HUID collision detected at iteration {}: {}",
             i,
-            executor.huid()
+            node.huid()
         );
 
-        executors.push(executor);
+        nodes.push(node);
     }
 
     println!(
-        "Created {} unique executors with no HUID collisions",
-        executors.len()
+        "Created {} unique nodes with no HUID collisions",
+        nodes.len()
     );
 
     // Test that the store handles collisions properly when saving
     let (store, _temp_dir) = create_test_database().await;
 
-    // Get the single executor identity for this store
-    let store_executor = store.get_or_create().await.expect("Should create executor");
+    // Get the single node identity for this store
+    let store_node = store.get_or_create().await.expect("Should create node");
 
     // Verify it's retrievable
     let found = store
-        .find_by_identifier(&store_executor.uuid().to_string())
+        .find_by_identifier(&store_node.uuid().to_string())
         .await
         .expect("Lookup should succeed")
-        .expect("Should find executor");
+        .expect("Should find node");
 
-    assert_eq!(found.huid(), store_executor.huid());
+    assert_eq!(found.huid(), store_node.huid());
 }
 
 #[tokio::test]
 async fn test_e2e_prefix_matching_disambiguation() {
     let (store, _temp_dir) = create_test_database().await;
 
-    // Get the store's executor
-    let executor = store.get_or_create().await.expect("Should create executor");
+    // Get the store's node
+    let node = store.get_or_create().await.expect("Should create node");
 
-    let huid = executor.huid();
+    let huid = node.huid();
 
     // Test various prefix lengths
     for len in 3..8.min(huid.len()) {
         let prefix = &huid[..len];
 
-        // Try to find by prefix - should always find the same executor
+        // Try to find by prefix - should always find the same node
         let found = store
             .find_by_identifier(prefix)
             .await
             .expect("Query should succeed")
-            .expect("Should find executor");
+            .expect("Should find node");
 
-        assert_eq!(found.uuid(), executor.uuid());
-        assert_eq!(found.huid(), executor.huid());
+        assert_eq!(found.uuid(), node.uuid());
+        assert_eq!(found.huid(), node.huid());
     }
 
     // Test non-matching prefix
@@ -180,11 +177,11 @@ async fn test_e2e_prefix_matching_disambiguation() {
 async fn test_e2e_persistence_and_caching() {
     let (store, _temp_dir) = create_test_database().await;
 
-    // Create an executor
-    let executor = store.get_or_create().await.expect("Should create executor");
+    // Create an node
+    let node = store.get_or_create().await.expect("Should create node");
 
-    let uuid = executor.uuid().to_string();
-    let huid = executor.huid().to_string();
+    let uuid = node.uuid().to_string();
+    let huid = node.huid().to_string();
 
     // Multiple rapid lookups should use cache
     let start = std::time::Instant::now();
@@ -193,7 +190,7 @@ async fn test_e2e_persistence_and_caching() {
             .find_by_identifier(&uuid)
             .await
             .expect("Lookup should succeed")
-            .expect("Should find executor");
+            .expect("Should find node");
 
         assert_eq!(found.huid(), &huid);
     }
@@ -211,12 +208,12 @@ async fn test_e2e_persistence_and_caching() {
         .await
         .expect("Should create new store");
 
-    // Should find the same executor
+    // Should find the same node
     let found = new_store
         .find_by_identifier(&uuid)
         .await
         .expect("Lookup should succeed")
-        .expect("Should find executor");
+        .expect("Should find node");
 
     assert_eq!(found.uuid().to_string(), uuid);
     assert_eq!(found.huid(), huid);
@@ -230,36 +227,36 @@ async fn test_e2e_legacy_migration() {
     let legacy_ids = vec![
         "gpu-node-1",
         "worker-abc123",
-        "executor-west-2",
+        "node-west-2",
         "miner-node-xyz",
     ];
 
     // Migrate all legacy IDs
     let mut migrated_ids = Vec::new();
     for legacy_id in &legacy_ids {
-        let executor = store
+        let node = store
             .migrate_legacy_id(legacy_id)
             .await
             .expect("Migration should succeed");
 
-        println!("Migrated '{}' -> {}", legacy_id, executor.full_display());
-        migrated_ids.push((legacy_id.to_string(), executor));
+        println!("Migrated '{}' -> {}", legacy_id, node.full_display());
+        migrated_ids.push((legacy_id.to_string(), node));
     }
 
     // Verify idempotency - migrating again returns same identity
     for (legacy_id, original) in &migrated_ids {
-        let executor_again = store
+        let node_again = store
             .migrate_legacy_id(legacy_id)
             .await
             .expect("Repeated migration should succeed");
 
         assert_eq!(
-            executor_again.uuid(),
+            node_again.uuid(),
             original.uuid(),
             "Repeated migration should return same UUID"
         );
         assert_eq!(
-            executor_again.huid(),
+            node_again.huid(),
             original.huid(),
             "Repeated migration should return same HUID"
         );
@@ -282,8 +279,8 @@ async fn test_e2e_concurrent_operations() {
     let (store, _temp_dir) = create_test_database().await;
     let store = Arc::new(store);
 
-    // Create initial executor
-    let initial = store.get_or_create().await.expect("Should create executor");
+    // Create initial node
+    let initial = store.get_or_create().await.expect("Should create node");
 
     let uuid = initial.uuid().to_string();
     let huid = initial.huid().to_string();
@@ -332,14 +329,14 @@ async fn test_e2e_concurrent_operations() {
         let expected_uuid = *initial.uuid();
         handles.push(tokio::spawn(async move {
             for j in 0..10 {
-                let executor = store
+                let node = store
                     .get_or_create()
                     .await
                     .expect("Get or create should succeed");
                 assert_eq!(
-                    executor.uuid(),
+                    node.uuid(),
                     &expected_uuid,
-                    "Task {i} iteration {j} got wrong executor"
+                    "Task {i} iteration {j} got wrong node"
                 );
 
                 sleep(Duration::from_micros(200)).await;
@@ -357,7 +354,7 @@ async fn test_e2e_concurrent_operations() {
         .find_by_identifier(&uuid)
         .await
         .expect("Final lookup should succeed")
-        .expect("Should find executor");
+        .expect("Should find node");
 
     assert_eq!(final_check.uuid().to_string(), uuid);
     assert_eq!(final_check.huid(), huid);
@@ -427,16 +424,16 @@ async fn test_e2e_performance_characteristics() {
     );
 
     // Create a known set for lookup tests
-    let mut test_executors = Vec::new();
+    let mut test_nodes = Vec::new();
     for _ in 0..50 {
-        let executor = store.get_or_create().await.expect("Should create");
-        test_executors.push(executor);
+        let node = store.get_or_create().await.expect("Should create");
+        test_nodes.push(node);
     }
 
     // Measure lookup times
     let mut lookup_times = Vec::new();
-    for executor in &test_executors {
-        let uuid = executor.uuid().to_string();
+    for node in &test_nodes {
+        let uuid = node.uuid().to_string();
 
         let start = std::time::Instant::now();
         let _ = store
@@ -452,8 +449,8 @@ async fn test_e2e_performance_characteristics() {
 
     // Test prefix matching performance
     let mut prefix_times = Vec::new();
-    for executor in test_executors.iter().take(20) {
-        let prefix = &executor.huid()[..4];
+    for node in test_nodes.iter().take(20) {
+        let prefix = &node.huid()[..4];
 
         let start = std::time::Instant::now();
         let _ = store
@@ -487,10 +484,10 @@ fn test_e2e_word_lists_and_combinations() {
     // Generate many HUIDs and check for early collisions
     let mut generated_huids = HashSet::new();
     for i in 0..10000 {
-        let executor = ExecutorId::new_with_seed_and_provider(&format!("test-seed-{i}"), &provider)
-            .expect("Should create executor");
+        let node = NodeId::new_with_seed_and_provider(&format!("test-seed-{i}"), &provider)
+            .expect("Should create node");
 
-        let huid = executor.huid().to_string();
+        let huid = node.huid().to_string();
         assert!(
             generated_huids.insert(huid.clone()),
             "HUID collision at iteration {i}: {huid}"

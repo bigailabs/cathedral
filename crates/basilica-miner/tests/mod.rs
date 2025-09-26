@@ -52,13 +52,13 @@ mod tests {
             contract.MIN_COLLATERAL_INCREASE().call().await.unwrap()
         );
 
-        let executor_id: u128 = rand::thread_rng().gen_range(0..10000000000);
+        let node_id: u128 = rand::thread_rng().gen_range(0..10000000000);
         let hotkey: [u8; 32] = [1u8; 32];
         let amount = U256::from(10);
         let deposit_tx = contract
             .deposit(
                 FixedBytes::from_slice(&hotkey),
-                FixedBytes::from_slice(&executor_id.to_be_bytes()),
+                FixedBytes::from_slice(&node_id.to_be_bytes()),
             )
             .value(amount);
         let deposit_tx_receipt = deposit_tx.send().await?.get_receipt().await?;
@@ -66,7 +66,7 @@ mod tests {
         let mut deposit_found = false;
         deposit_tx_receipt.logs().iter().for_each(|log| {
             if let Ok(event) = CollateralUpgradeable::Deposit::decode_log(&log.inner) {
-                assert!(FixedBytes::from(executor_id) == event.executorId);
+                assert!(FixedBytes::from(node_id) == event.nodeId);
                 deposit_found = true;
             }
         });
@@ -75,7 +75,7 @@ mod tests {
         let collaterals = contract
             .collaterals(
                 FixedBytes::from_slice(&hotkey),
-                FixedBytes::from_slice(&executor_id.to_be_bytes()),
+                FixedBytes::from_slice(&node_id.to_be_bytes()),
             )
             .call()
             .await
@@ -93,13 +93,13 @@ mod tests {
         let contract = get_contract().await?;
 
         // Deposit first
-        let executor_id: u128 = rand::thread_rng().gen_range(0..10000000000);
+        let node_id: u128 = rand::thread_rng().gen_range(0..10000000000);
         let hotkey: [u8; 32] = [1u8; 32];
         let amount = U256::from(10);
         let deposit_tx = contract
             .deposit(
                 FixedBytes::from_slice(&hotkey),
-                FixedBytes::from_slice(&executor_id.to_be_bytes()),
+                FixedBytes::from_slice(&node_id.to_be_bytes()),
             )
             .value(amount);
         let _deposit_tx_receipt = deposit_tx.send().await?.get_receipt().await?;
@@ -109,7 +109,7 @@ mod tests {
         let url_checksum = 123_u128;
         let reclaim_tx = contract.reclaimCollateral(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id.to_be_bytes()),
+            FixedBytes::from_slice(&node_id.to_be_bytes()),
             url.to_owned(),
             FixedBytes::from_slice(&url_checksum.to_be_bytes()),
         );
@@ -147,13 +147,13 @@ mod tests {
     async fn test_reclaim_deny() -> anyhow::Result<()> {
         let contract = get_contract().await?;
 
-        let executor_id: u128 = rand::thread_rng().gen_range(0..10000000000);
+        let node_id: u128 = rand::thread_rng().gen_range(0..10000000000);
         let hotkey: [u8; 32] = [1u8; 32];
         let amount = U256::from(10);
         let deposit_tx = contract
             .deposit(
                 FixedBytes::from_slice(&hotkey),
-                FixedBytes::from_slice(&executor_id.to_be_bytes()),
+                FixedBytes::from_slice(&node_id.to_be_bytes()),
             )
             .value(amount);
         let _deposit_tx_receipt = deposit_tx.send().await?.get_receipt().await?;
@@ -163,7 +163,7 @@ mod tests {
         let url_checksum = 123_u128;
         let reclaim_tx = contract.reclaimCollateral(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id.to_be_bytes()),
+            FixedBytes::from_slice(&node_id.to_be_bytes()),
             url.to_owned(),
             FixedBytes::from_slice(&url_checksum.to_be_bytes()),
         );
@@ -203,13 +203,13 @@ mod tests {
     async fn test_slash() -> anyhow::Result<()> {
         let contract = get_contract().await?;
 
-        let executor_id: u128 = rand::thread_rng().gen_range(0..10000000000);
+        let node_id: u128 = rand::thread_rng().gen_range(0..10000000000);
         let hotkey: [u8; 32] = [1u8; 32];
         let amount = U256::from(10);
         let deposit_tx = contract
             .deposit(
                 FixedBytes::from_slice(&hotkey),
-                FixedBytes::from_slice(&executor_id.to_be_bytes()),
+                FixedBytes::from_slice(&node_id.to_be_bytes()),
             )
             .value(amount);
         let _deposit_tx_receipt = deposit_tx.send().await?.get_receipt().await?;
@@ -219,7 +219,7 @@ mod tests {
         let url_checksum = 123_u128;
         let slash_tx = contract.slashCollateral(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id.to_be_bytes()),
+            FixedBytes::from_slice(&node_id.to_be_bytes()),
             url.to_owned(),
             FixedBytes::from_slice(&url_checksum.to_be_bytes()),
         );
@@ -227,7 +227,7 @@ mod tests {
 
         slash_receipt.logs().iter().for_each(|log| {
             if let Ok(event) = CollateralUpgradeable::Slashed::decode_log(&log.inner) {
-                assert_eq!(event.executorId, FixedBytes::from(executor_id));
+                assert_eq!(event.nodeId, FixedBytes::from(node_id));
             }
         });
         Ok(())

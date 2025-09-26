@@ -1,7 +1,7 @@
 //! # Miner Client
 //!
 //! gRPC client for communicating with miners' MinerDiscovery service.
-//! Handles authentication, executor discovery, and SSH session initialization.
+//! Handles authentication, node discovery, and SSH session initialization.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -11,8 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use basilica_common::identity::Hotkey;
 use basilica_protocol::miner_discovery::{
-    miner_discovery_client::MinerDiscoveryClient, CloseSshSessionRequest, CloseSshSessionResponse,
-    ExecutorConnectionDetails, InitiateSshSessionRequest, InitiateSshSessionResponse, LeaseRequest,
+    miner_discovery_client::MinerDiscoveryClient, DiscoverNodesRequest, NodeConnectionDetails,
     ValidatorAuthRequest,
 };
 
@@ -356,156 +355,48 @@ pub struct AuthenticatedMinerConnection {
 }
 
 impl AuthenticatedMinerConnection {
-    /// Request available executors from the miner
-    pub async fn request_executors(
+    /// Request available nodes from the miner
+    pub async fn request_nodes(
         &mut self,
-        requirements: Option<basilica_protocol::common::ResourceLimits>,
-        lease_duration: Duration,
-    ) -> Result<Vec<ExecutorConnectionDetails>> {
-        info!("Requesting available executors from miner");
+        _requirements: Option<basilica_protocol::common::ResourceLimits>,
+        _lease_duration: Duration,
+    ) -> Result<Vec<NodeConnectionDetails>> {
+        info!("Requesting available nodes from miner");
 
-        let request = LeaseRequest {
-            validator_hotkey: String::new(), // Will be extracted from token by miner
-            session_token: self.session_token.clone(),
-            requirements,
-            lease_duration_seconds: lease_duration.as_secs(),
+        // Create request with authentication fields
+        let now = chrono::Utc::now();
+        let timestamp = basilica_protocol::common::Timestamp {
+            value: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+        };
+
+        let request = DiscoverNodesRequest {
+            validator_hotkey: self.session_token.clone(), // Using session token as hotkey
+            signature: String::new(),                     // Signature would be added by signer
+            nonce: uuid::Uuid::new_v4().to_string(),
+            validator_public_key: String::new(), // Public key would be added by signer
+            timestamp: Some(timestamp),
+            target_miner_hotkey: String::new(), // Target is implicit from connection
         };
 
         let response = self
             .client
-            .request_executor_lease(request)
+            .discover_nodes(request)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to request executors: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to discover nodes: {}", e))?;
 
         let response = response.into_inner();
 
-        if let Some(error) = response.error {
-            return Err(anyhow::anyhow!(
-                "Executor request failed: {}",
-                error.message
-            ));
-        }
+        // Response no longer has error field, errors come via gRPC status
 
         info!(
-            "Received {} available executors from miner",
-            response.available_executors.len()
+            "Received {} available nodes from miner",
+            response.nodes.len()
         );
 
-        Ok(response.available_executors)
-    }
-
-    /// Initiate SSH session with public key
-    pub async fn initiate_ssh_session(
-        &mut self,
-        request: InitiateSshSessionRequest,
-    ) -> Result<InitiateSshSessionResponse> {
-        info!(
-            "Initiating SSH session for executor {} with public key",
-            request.executor_id
-        );
-
-        // DEBUG: Log the SSH public key being sent through the gRPC pipeline
-        debug!(
-            "SSH public key being sent to miner: '{}' (length: {} chars)",
-            request.validator_public_key,
-            request.validator_public_key.len()
-        );
-
-        let response = self
-            .client
-            .initiate_ssh_session(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initiate SSH session: {}", e))?;
-
-        let response = response.into_inner();
-
-        info!(
-            "SSH session response: session_id={}, status={:?}",
-            response.session_id, response.status
-        );
-
-        Ok(response)
-    }
-
-    /// Initiate SSH session for rental with public key
-    pub async fn initiate_rental_ssh_session(
-        &mut self,
-        executor_id: &str,
-        validator_hotkey: &str,
-        validator_public_key: &str,
-        rental_id: &str,
-        session_duration: u64,
-    ) -> Result<InitiateSshSessionResponse> {
-        info!(
-            "Initiating rental SSH session for executor {} (rental: {})",
-            executor_id, rental_id
-        );
-
-        let request = InitiateSshSessionRequest {
-            validator_hotkey: validator_hotkey.to_string(),
-            executor_id: executor_id.to_string(),
-            purpose: "rental".to_string(),
-            validator_public_key: validator_public_key.to_string(),
-            session_duration_secs: session_duration as i64,
-            session_metadata: serde_json::json!({
-                "rental_id": rental_id,
-                "type": "container_deployment"
-            })
-            .to_string(),
-            rental_mode: true,
-            rental_id: rental_id.to_string(),
-        };
-
-        self.initiate_ssh_session(request).await
-    }
-
-    /// Close SSH session
-    pub async fn close_ssh_session(
-        &mut self,
-        request: CloseSshSessionRequest,
-    ) -> Result<CloseSshSessionResponse> {
-        info!("Closing SSH session {}", request.session_id);
-
-        let response = self
-            .client
-            .close_ssh_session(request)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to close SSH session: {}", e))?;
-
-        let response = response.into_inner();
-
-        if response.success {
-            info!("Successfully closed SSH session");
-        } else {
-            warn!("Failed to close SSH session: {}", response.message);
-        }
-
-        Ok(response)
-    }
-
-    /// Close SSH session by ID
-    pub async fn close_ssh_session_by_id(
-        &mut self,
-        session_id: &str,
-        validator_hotkey: &str,
-        reason: &str,
-    ) -> Result<()> {
-        let request = CloseSshSessionRequest {
-            session_id: session_id.to_string(),
-            validator_hotkey: validator_hotkey.to_string(),
-            reason: reason.to_string(),
-        };
-
-        let response = self.close_ssh_session(request).await?;
-
-        if !response.success {
-            return Err(anyhow::anyhow!(
-                "Failed to close SSH session: {}",
-                response.message
-            ));
-        }
-
-        Ok(())
+        Ok(response.nodes)
     }
 }
 

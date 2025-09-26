@@ -31,7 +31,7 @@ pub use metrics::{
 // Journal functionality temporarily disabled for testing
 pub use miner_prover::types::ValidationError;
 pub use miner_prover::{
-    types::{ExecutorInfo, MinerInfo},
+    types::{MinerInfo, NodeInfo},
     MinerProver,
 };
 pub use persistence::entities::{
@@ -40,7 +40,7 @@ pub use persistence::entities::{
 };
 pub use persistence::SimplePersistence;
 pub use rental::{RentalInfo, RentalManager, RentalRequest, RentalResponse};
-pub use ssh::{ExecutorSshDetails, ValidatorSshClient};
+pub use ssh::{NodeSshDetails, ValidatorSshClient};
 
 /// Validator library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -21,7 +21,7 @@ pub enum Commands {
     /// Provision and start GPU instances
     #[command(alias = "start")]
     Up {
-        /// Target executor ID (UUID) or GPU category (e.g., 'h100', 'h200', 'b200') (optional)
+        /// Target node ID (UUID) or GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         target: Option<TargetType>,
 
         #[command(flatten)]
@@ -107,10 +107,10 @@ pub enum Commands {
         args: Vec<String>,
     },
 
-    /// Run executor (delegates to basilica-executor)
+    /// Run node (delegates to basilica-node)
     #[command(disable_help_flag = true)]
-    Executor {
-        /// Arguments to pass to basilica-executor
+    Node {
+        /// Arguments to pass to basilica-node
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -184,7 +184,7 @@ impl Commands {
             | Commands::Logout
             | Commands::Validator { .. }
             | Commands::Miner { .. }
-            | Commands::Executor { .. } => false,
+            | Commands::Node { .. } => false,
 
             // Test auth command requires authentication
             #[cfg(debug_assertions)]
@@ -220,7 +220,7 @@ pub struct ListFilters {
     #[arg(long)]
     pub compact: bool,
 
-    /// Use detailed view (shows executor IDs)
+    /// Use detailed view (shows node IDs)
     #[arg(long)]
     pub detailed: bool,
 }
@@ -280,11 +280,11 @@ pub struct UpOptions {
     #[arg(short = 'd', long)]
     pub detach: bool,
 
-    /// Use compact view (group executors by GPU type)
+    /// Use compact view (group nodes by GPU type)
     #[arg(long)]
     pub compact: bool,
 
-    /// Use detailed view (shows executor IDs during selection)
+    /// Use detailed view (shows node IDs during selection)
     #[arg(long)]
     pub detailed: bool,
 }
@@ -308,7 +308,7 @@ pub struct PsFilters {
     #[arg(long)]
     pub compact: bool,
 
-    /// Use detailed view (shows rental and executor IDs)
+    /// Use detailed view (shows rental and node IDs)
     #[arg(long)]
     pub detailed: bool,
 }

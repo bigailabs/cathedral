@@ -1,7 +1,7 @@
 //! # Registration Database
 //!
 //! Simplified SQLite database for the miner according to SPEC v1.6:
-//! - Track executor health status (no dynamic registration)
+//! - Track node health status (no dynamic registration)
 //! - Log validator interactions and SSH access grants
 //! - Simple audit trail for compliance
 
@@ -15,7 +15,7 @@ use tracing::{debug, info};
 
 use basilica_common::{
     config::DatabaseConfig,
-    executor_identity::{ExecutorId, ExecutorIdentity},
+    node_identity::{NodeId, NodeIdentity},
 };
 
 /// Registration database client
@@ -24,12 +24,12 @@ pub struct RegistrationDb {
     pool: SqlitePool,
 }
 
-/// Executor health status
+/// Node health status
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct ExecutorHealth {
-    /// Executor ID (from config)
-    pub executor_id: String,
-    /// Is the executor healthy?
+pub struct NodeHealth {
+    /// Node ID (from config)
+    pub node_id: String,
+    /// Is the node healthy?
     pub is_healthy: bool,
     /// Last successful health check
     pub last_health_check: Option<DateTime<Utc>>,
@@ -48,7 +48,7 @@ pub struct ValidatorInteraction {
     pub id: i64,
     /// Validator hotkey
     pub validator_hotkey: String,
-    /// Type of interaction (auth, list_executors, ssh_access)
+    /// Type of interaction (auth, list_nodes, ssh_access)
     pub interaction_type: String,
     /// Was the interaction successful?
     pub success: bool,
@@ -65,8 +65,8 @@ pub struct SshAccessGrant {
     pub id: i64,
     /// Validator who was granted access
     pub validator_hotkey: String,
-    /// Executor IDs that were granted access to
-    pub executor_ids: String, // JSON array
+    /// Node IDs that were granted access to
+    pub node_ids: String, // JSON array
     /// When access was granted
     pub granted_at: DateTime<Utc>,
     /// When access expires (if applicable)
@@ -82,8 +82,8 @@ pub struct SshSessionRecord {
     pub session_id: String,
     /// Validator hotkey
     pub validator_hotkey: String,
-    /// Target executor ID
-    pub executor_id: String,
+    /// Target node ID
+    pub node_id: String,
     /// SSH username created for this session
     pub ssh_username: String,
     /// When the session was created
@@ -133,11 +133,11 @@ impl RegistrationDb {
     async fn run_migrations(&self) -> Result<()> {
         info!("Running database migrations...");
 
-        // Create executor health table
+        // Create node health table
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS executor_health (
-                executor_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS node_health (
+                node_id TEXT PRIMARY KEY,
                 is_healthy BOOLEAN NOT NULL DEFAULT FALSE,
                 last_health_check TIMESTAMP,
                 consecutive_failures INTEGER NOT NULL DEFAULT 0,
@@ -148,7 +148,7 @@ impl RegistrationDb {
         )
         .execute(&self.pool)
         .await
-        .context("Failed to create executor_health table")?;
+        .context("Failed to create node_health table")?;
 
         // Create validator interactions table
         sqlx::query(
@@ -173,7 +173,7 @@ impl RegistrationDb {
             CREATE TABLE IF NOT EXISTS ssh_access_grants (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 validator_hotkey TEXT NOT NULL,
-                executor_ids TEXT NOT NULL,
+                node_ids TEXT NOT NULL,
                 granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE
@@ -190,7 +190,7 @@ impl RegistrationDb {
             CREATE TABLE IF NOT EXISTS ssh_sessions (
                 session_id TEXT PRIMARY KEY,
                 validator_hotkey TEXT NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 ssh_username TEXT NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP NOT NULL,
@@ -217,11 +217,9 @@ impl RegistrationDb {
             .execute(&self.pool)
             .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_ssh_sessions_executor ON ssh_sessions(executor_id)",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_sessions_node ON ssh_sessions(node_id)")
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_sessions_status ON ssh_sessions(status)")
             .execute(&self.pool)
@@ -229,8 +227,8 @@ impl RegistrationDb {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS executor_uuids (
-                executor_address TEXT NOT NULL UNIQUE,
+            CREATE TABLE IF NOT EXISTS node_uuids (
+                node_address TEXT NOT NULL UNIQUE,
                 uuid TEXT NOT NULL UNIQUE,
                 huid TEXT NOT NULL UNIQUE,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -245,36 +243,35 @@ impl RegistrationDb {
         Ok(())
     }
 
-    /// Update executor health status
-    pub async fn update_executor_health(&self, executor_id: &str, is_healthy: bool) -> Result<()> {
+    /// Update node health status
+    pub async fn update_node_health(&self, node_id: &str, is_healthy: bool) -> Result<()> {
         let now = Utc::now();
 
         let consecutive_failures = if is_healthy {
             0
         } else {
             // Get current failures and increment
-            let current: Option<(i32,)> = sqlx::query_as(
-                "SELECT consecutive_failures FROM executor_health WHERE executor_id = ?",
-            )
-            .bind(executor_id)
-            .fetch_optional(&self.pool)
-            .await?;
+            let current: Option<(i32,)> =
+                sqlx::query_as("SELECT consecutive_failures FROM node_health WHERE node_id = ?")
+                    .bind(node_id)
+                    .fetch_optional(&self.pool)
+                    .await?;
 
             current.map(|(f,)| f + 1).unwrap_or(1)
         };
 
         sqlx::query(
             r#"
-            INSERT INTO executor_health (executor_id, is_healthy, last_health_check, consecutive_failures, updated_at)
+            INSERT INTO node_health (node_id, is_healthy, last_health_check, consecutive_failures, updated_at)
             VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(executor_id) DO UPDATE SET
+            ON CONFLICT(node_id) DO UPDATE SET
                 is_healthy = excluded.is_healthy,
-                last_health_check = CASE WHEN excluded.is_healthy THEN excluded.last_health_check ELSE executor_health.last_health_check END,
+                last_health_check = CASE WHEN excluded.is_healthy THEN excluded.last_health_check ELSE node_health.last_health_check END,
                 consecutive_failures = excluded.consecutive_failures,
                 updated_at = excluded.updated_at
             "#,
         )
-        .bind(executor_id)
+        .bind(node_id)
         .bind(is_healthy)
         .bind(if is_healthy { Some(now) } else { None })
         .bind(consecutive_failures)
@@ -283,31 +280,29 @@ impl RegistrationDb {
         .await?;
 
         debug!(
-            "Updated health status for executor {}: healthy={}",
-            executor_id, is_healthy
+            "Updated health status for node {}: healthy={}",
+            node_id, is_healthy
         );
         Ok(())
     }
 
-    /// Get health status of all executors
-    pub async fn get_all_executor_health(&self) -> Result<Vec<ExecutorHealth>> {
-        let health_records = sqlx::query_as::<_, ExecutorHealth>(
-            "SELECT * FROM executor_health ORDER BY executor_id",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+    /// Get health status of all nodes
+    pub async fn get_all_node_health(&self) -> Result<Vec<NodeHealth>> {
+        let health_records =
+            sqlx::query_as::<_, NodeHealth>("SELECT * FROM node_health ORDER BY node_id")
+                .fetch_all(&self.pool)
+                .await?;
 
         Ok(health_records)
     }
 
-    /// Check if a specific executor is healthy
-    pub async fn is_executor_healthy(&self, executor_id: &str) -> Result<bool> {
-        let result = sqlx::query_scalar::<_, bool>(
-            "SELECT is_healthy FROM executor_health WHERE executor_id = ?",
-        )
-        .bind(executor_id)
-        .fetch_optional(&self.pool)
-        .await?;
+    /// Check if a specific node is healthy
+    pub async fn is_node_healthy(&self, node_id: &str) -> Result<bool> {
+        let result =
+            sqlx::query_scalar::<_, bool>("SELECT is_healthy FROM node_health WHERE node_id = ?")
+                .bind(node_id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         Ok(result.unwrap_or(false))
     }
@@ -354,25 +349,25 @@ impl RegistrationDb {
     pub async fn record_ssh_access_grant(
         &self,
         validator_hotkey: &str,
-        executor_ids: &[String],
+        node_ids: &[String],
     ) -> Result<()> {
-        let executor_ids_json = serde_json::to_string(executor_ids)?;
+        let node_ids_json = serde_json::to_string(node_ids)?;
 
         sqlx::query(
             r#"
-            INSERT INTO ssh_access_grants (validator_hotkey, executor_ids)
+            INSERT INTO ssh_access_grants (validator_hotkey, node_ids)
             VALUES (?, ?)
             "#,
         )
         .bind(validator_hotkey)
-        .bind(executor_ids_json)
+        .bind(node_ids_json)
         .execute(&self.pool)
         .await?;
 
         info!(
-            "Recorded SSH access grant for validator {} to {} executors",
+            "Recorded SSH access grant for validator {} to {} nodes",
             validator_hotkey,
-            executor_ids.len()
+            node_ids.len()
         );
         Ok(())
     }
@@ -416,26 +411,26 @@ impl RegistrationDb {
         &self,
         session_id: &str,
         validator_hotkey: &str,
-        executor_id: &str,
+        node_id: &str,
         expires_at: &DateTime<Utc>,
     ) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO ssh_sessions (session_id, validator_hotkey, executor_id, ssh_username, expires_at)
+            INSERT INTO ssh_sessions (session_id, validator_hotkey, node_id, ssh_username, expires_at)
             VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(session_id)
         .bind(validator_hotkey)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(format!("validator_{}", &session_id[..8]))
         .bind(expires_at)
         .execute(&self.pool)
         .await?;
 
         debug!(
-            "Recorded SSH session {} for validator {} -> executor {}",
-            session_id, validator_hotkey, executor_id
+            "Recorded SSH session {} for validator {} -> node {}",
+            session_id, validator_hotkey, node_id
         );
         Ok(())
     }
@@ -619,6 +614,92 @@ impl RegistrationDb {
         Ok(result.rows_affected())
     }
 
+    /// Record SSH key authorization in access grants table
+    pub async fn record_ssh_key_authorization(
+        &self,
+        validator_hotkey: &str,
+        public_key: &str,
+        node_ids: &str,
+        expires_at: Option<&DateTime<Utc>>,
+    ) -> Result<()> {
+        // Insert into ssh_access_grants table
+        let query = if let Some(exp) = expires_at {
+            sqlx::query(
+                r#"
+                INSERT INTO ssh_access_grants (validator_hotkey, node_ids, expires_at)
+                VALUES (?, ?, ?)
+                "#,
+            )
+            .bind(validator_hotkey)
+            .bind(node_ids)
+            .bind(exp)
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO ssh_access_grants (validator_hotkey, node_ids)
+                VALUES (?, ?)
+                "#,
+            )
+            .bind(validator_hotkey)
+            .bind(node_ids)
+        };
+
+        query.execute(&self.pool).await?;
+
+        // Also log this as a validator interaction
+        self.record_validator_interaction(
+            validator_hotkey,
+            "ssh_key_authorized",
+            true,
+            Some(format!(
+                "SSH key authorized for nodes: {}. Key: {}...",
+                node_ids,
+                &public_key[..20.min(public_key.len())]
+            )),
+        )
+        .await?;
+
+        debug!(
+            "Recorded SSH key authorization for validator {} on nodes {}",
+            validator_hotkey, node_ids
+        );
+        Ok(())
+    }
+
+    /// Record SSH key revocation
+    pub async fn record_ssh_key_revocation(
+        &self,
+        validator_hotkey: &str,
+        reason: &str,
+    ) -> Result<()> {
+        // Update ssh_access_grants to mark as inactive
+        sqlx::query(
+            r#"
+            UPDATE ssh_access_grants
+            SET is_active = FALSE
+            WHERE validator_hotkey = ? AND is_active = TRUE
+            "#,
+        )
+        .bind(validator_hotkey)
+        .execute(&self.pool)
+        .await?;
+
+        // Log this as a validator interaction
+        self.record_validator_interaction(
+            validator_hotkey,
+            "ssh_key_revoked",
+            true,
+            Some(format!("SSH key revoked. Reason: {}", reason)),
+        )
+        .await?;
+
+        debug!(
+            "Recorded SSH key revocation for validator {}: {}",
+            validator_hotkey, reason
+        );
+        Ok(())
+    }
+
     /// Clean up old SSH grants
     pub async fn cleanup_old_ssh_grants(&self, cutoff_date: DateTime<Utc>) -> Result<u64> {
         let result =
@@ -630,11 +711,11 @@ impl RegistrationDb {
         Ok(result.rows_affected())
     }
 
-    /// Clean up stale executor health records
-    pub async fn cleanup_stale_executor_health(&self, cutoff_date: DateTime<Utc>) -> Result<u64> {
+    /// Clean up stale node health records
+    pub async fn cleanup_stale_node_health(&self, cutoff_date: DateTime<Utc>) -> Result<u64> {
         // Only clean up records that haven't been updated recently and are not healthy
         let result = sqlx::query(
-            "DELETE FROM executor_health WHERE updated_at < ? AND is_healthy = 0 AND consecutive_failures > 10"
+            "DELETE FROM node_health WHERE updated_at < ? AND is_healthy = 0 AND consecutive_failures > 10"
         )
         .bind(cutoff_date)
         .execute(&self.pool)
@@ -659,35 +740,35 @@ impl RegistrationDb {
         Ok(())
     }
 
-    pub async fn get_or_create_executor_id(&self, executor_address: &str) -> Result<ExecutorId> {
+    pub async fn get_or_create_node_id(&self, node_address: &str) -> Result<NodeId> {
         // First try to get existing identity
         let existing = sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
-            "SELECT uuid, huid, created_at FROM executor_uuids WHERE executor_address = ?",
+            "SELECT uuid, huid, created_at FROM node_uuids WHERE node_address = ?",
         )
-        .bind(executor_address)
+        .bind(node_address)
         .fetch_optional(&self.pool)
         .await?;
 
         if let Some((uid_str, huid, created_at)) = existing {
             let uuid = uuid::Uuid::parse_str(&uid_str)?;
-            let executor_id = ExecutorId::from_parts(uuid, huid, created_at.into())?;
-            return Ok(executor_id);
+            let node_id = NodeId::from_parts(uuid, huid, created_at.into())?;
+            return Ok(node_id);
         }
 
-        let executor_id = ExecutorId::new(executor_address)?;
+        let node_id = NodeId::new(node_address)?;
 
         // Try to insert with conflict handling
         match sqlx::query(
-            "INSERT INTO executor_uuids (executor_address, uuid, huid, created_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO node_uuids (node_address, uuid, huid, created_at) VALUES (?, ?, ?, ?)",
         )
-        .bind(executor_address)
-        .bind(executor_id.uuid.to_string())
-        .bind(executor_id.huid.clone())
-        .bind(DateTime::<Utc>::from(executor_id.created_at()))
+        .bind(node_address)
+        .bind(node_id.uuid.to_string())
+        .bind(node_id.huid.clone())
+        .bind(DateTime::<Utc>::from(node_id.created_at()))
         .execute(&self.pool)
         .await
         {
-            Ok(_) => Ok(executor_id),
+            Ok(_) => Ok(node_id),
             Err(e) => Err(e.into()),
         }
     }
@@ -713,42 +794,7 @@ pub struct TableStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basilica_common::executor_identity::{constants::is_valid_huid, ExecutorIdentity};
-
-    #[tokio::test]
-    async fn test_executor_health_tracking() {
-        let config = DatabaseConfig {
-            url: "sqlite::memory:".to_string(),
-            run_migrations: true,
-            ..Default::default()
-        };
-
-        let db = RegistrationDb::new(&config).await.unwrap();
-
-        // Update health status
-        db.update_executor_health("executor-1", true).await.unwrap();
-        db.update_executor_health("executor-2", false)
-            .await
-            .unwrap();
-
-        // Get all health records
-        let health_records = db.get_all_executor_health().await.unwrap();
-        assert_eq!(health_records.len(), 2);
-
-        let executor1 = health_records
-            .iter()
-            .find(|h| h.executor_id == "executor-1")
-            .unwrap();
-        assert!(executor1.is_healthy);
-        assert_eq!(executor1.consecutive_failures, 0);
-
-        let executor2 = health_records
-            .iter()
-            .find(|h| h.executor_id == "executor-2")
-            .unwrap();
-        assert!(!executor2.is_healthy);
-        assert_eq!(executor2.consecutive_failures, 1);
-    }
+    use basilica_common::node_identity::{constants::is_valid_huid, NodeIdentity};
 
     #[tokio::test]
     async fn test_validator_interaction_logging() {
@@ -770,7 +816,7 @@ mod tests {
 
         db.record_validator_interaction(
             "validator-1",
-            "list_executors",
+            "list_nodes",
             true,
             Some(r#"{"count": 5}"#.to_string()),
         )
@@ -787,13 +833,13 @@ mod tests {
             .map(|i| i.interaction_type.as_str())
             .collect();
         assert!(interaction_types.contains(&"authentication"));
-        assert!(interaction_types.contains(&"list_executors"));
+        assert!(interaction_types.contains(&"list_nodes"));
     }
 
     // ===== AUTOMATIC IDENTITY GENERATION TESTS =====
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_first_time() {
+    async fn test_get_or_create_node_id_first_time() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -803,28 +849,22 @@ mod tests {
         let db = RegistrationDb::new(&config).await.unwrap();
 
         // First call should create a new identity
-        let executor_id = db
-            .get_or_create_executor_id("127.0.0.1:50051")
-            .await
-            .unwrap();
+        let node_id = db.get_or_create_node_id("127.0.0.1:50051").await.unwrap();
 
         // Verify the identity was generated correctly
-        assert!(is_valid_huid(&executor_id.huid));
-        assert_eq!(executor_id.uuid.get_version(), Some(uuid::Version::Random));
-        assert!(!executor_id.uuid.to_string().is_empty());
-        assert!(!executor_id.huid.is_empty());
+        assert!(is_valid_huid(&node_id.huid));
+        assert_eq!(node_id.uuid.get_version(), Some(uuid::Version::Random));
+        assert!(!node_id.uuid.to_string().is_empty());
+        assert!(!node_id.huid.is_empty());
 
         // Verify the identity was stored in the database
-        let stored_id = db
-            .get_or_create_executor_id("127.0.0.1:50051")
-            .await
-            .unwrap();
-        assert_eq!(stored_id.uuid, executor_id.uuid);
-        assert_eq!(stored_id.huid, executor_id.huid);
+        let stored_id = db.get_or_create_node_id("127.0.0.1:50051").await.unwrap();
+        assert_eq!(stored_id.uuid, node_id.uuid);
+        assert_eq!(stored_id.huid, node_id.huid);
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_retrieval_consistency() {
+    async fn test_get_or_create_node_id_retrieval_consistency() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -836,18 +876,18 @@ mod tests {
         let address = "192.168.1.100:8080";
 
         // Create identity
-        let id1 = db.get_or_create_executor_id(address).await.unwrap();
+        let id1 = db.get_or_create_node_id(address).await.unwrap();
 
         // Retrieve multiple times - should always return the same identity
         for _ in 0..5 {
-            let id2 = db.get_or_create_executor_id(address).await.unwrap();
+            let id2 = db.get_or_create_node_id(address).await.unwrap();
             assert_eq!(id2.uuid, id1.uuid);
             assert_eq!(id2.huid, id1.huid);
         }
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_multiple_executors() {
+    async fn test_get_or_create_node_id_multiple_nodes() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -865,9 +905,9 @@ mod tests {
 
         let mut identities = Vec::new();
 
-        // Create identities for multiple executors
+        // Create identities for multiple nodes
         for address in &addresses {
-            let id = db.get_or_create_executor_id(address).await.unwrap();
+            let id = db.get_or_create_node_id(address).await.unwrap();
             identities.push((address.to_string(), id));
         }
 
@@ -882,14 +922,14 @@ mod tests {
 
         // Verify each address maps to the correct identity
         for (address, expected_id) in &identities {
-            let retrieved_id = db.get_or_create_executor_id(address).await.unwrap();
+            let retrieved_id = db.get_or_create_node_id(address).await.unwrap();
             assert_eq!(retrieved_id.uuid, expected_id.uuid);
             assert_eq!(retrieved_id.huid, expected_id.huid);
         }
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_database_persistence() {
+    async fn test_get_or_create_node_id_database_persistence() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -901,11 +941,11 @@ mod tests {
         let address = "127.0.0.1:50051";
 
         // Create identity
-        let original_id = db.get_or_create_executor_id(address).await.unwrap();
+        let original_id = db.get_or_create_node_id(address).await.unwrap();
 
         // Verify it's stored in the database by querying directly
         let stored = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT executor_address, uuid, huid FROM executor_uuids WHERE executor_address = ?",
+            "SELECT node_address, uuid, huid FROM node_uuids WHERE node_address = ?",
         )
         .bind(address)
         .fetch_one(&db.pool)
@@ -918,7 +958,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_format_validation() {
+    async fn test_get_or_create_node_id_format_validation() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -930,7 +970,7 @@ mod tests {
         // Generate multiple identities to test format consistency
         for i in 0..10 {
             let address = format!("127.0.0.1:{}", 50051 + i);
-            let id = db.get_or_create_executor_id(&address).await.unwrap();
+            let id = db.get_or_create_node_id(&address).await.unwrap();
 
             // Verify HUID format
             assert!(is_valid_huid(&id.huid), "HUID should be valid: {}", id.huid);
@@ -942,7 +982,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_edge_cases() {
+    async fn test_get_or_create_node_id_edge_cases() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -962,14 +1002,14 @@ mod tests {
         ];
 
         for address in test_addresses {
-            let id = db.get_or_create_executor_id(address).await.unwrap();
+            let id = db.get_or_create_node_id(address).await.unwrap();
             assert!(is_valid_huid(&id.huid));
             assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
         }
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_uniqueness_across_generations() {
+    async fn test_get_or_create_node_id_uniqueness_across_generations() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -984,7 +1024,7 @@ mod tests {
         // Generate many identities to test uniqueness
         for i in 0..50 {
             let address = format!("127.0.0.1:{}", 50051 + i);
-            let id = db.get_or_create_executor_id(&address).await.unwrap();
+            let id = db.get_or_create_node_id(&address).await.unwrap();
 
             // Verify UUID uniqueness
             assert!(
@@ -1008,7 +1048,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_database_integrity() {
+    async fn test_get_or_create_node_id_database_integrity() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -1021,7 +1061,7 @@ mod tests {
         let addresses = vec!["127.0.0.1:50051", "127.0.0.1:50052", "192.168.1.100:8080"];
 
         for address in &addresses {
-            db.get_or_create_executor_id(address).await.unwrap();
+            db.get_or_create_node_id(address).await.unwrap();
         }
 
         // Verify database integrity
@@ -1030,16 +1070,16 @@ mod tests {
 
         // Verify table statistics
         let stats = db.get_database_stats().await.unwrap();
-        let executor_uuids_stats = stats
+        let node_uuids_stats = stats
             .table_stats
             .iter()
-            .find(|s| s.table_name == "executor_uuids")
+            .find(|s| s.table_name == "node_uuids")
             .unwrap();
-        assert_eq!(executor_uuids_stats.row_count, 3);
+        assert_eq!(node_uuids_stats.row_count, 3);
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_error_handling() {
+    async fn test_get_or_create_node_id_error_handling() {
         // Test with invalid database URL format (should fail gracefully)
         let config = DatabaseConfig {
             url: "invalid://database/url".to_string(),
@@ -1055,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_empty_address() {
+    async fn test_get_or_create_node_id_empty_address() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -1065,13 +1105,13 @@ mod tests {
         let db = RegistrationDb::new(&config).await.unwrap();
 
         // Test with empty address (edge case)
-        let id = db.get_or_create_executor_id("").await.unwrap();
+        let id = db.get_or_create_node_id("").await.unwrap();
         assert!(is_valid_huid(&id.huid));
         assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
     }
 
     #[tokio::test]
-    async fn test_get_or_create_executor_id_special_characters() {
+    async fn test_get_or_create_node_id_special_characters() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -1083,20 +1123,20 @@ mod tests {
         // Test with addresses containing special characters
         let test_addresses = vec![
             "test-host:50051",
-            "my-executor.local:8080",
-            "executor-01.example.com:9090",
+            "my-node.local:8080",
+            "node-01.example.com:9090",
             "192.168.1.100:12345",
         ];
 
         for address in test_addresses {
-            let id = db.get_or_create_executor_id(address).await.unwrap();
+            let id = db.get_or_create_node_id(address).await.unwrap();
             assert!(is_valid_huid(&id.huid));
             assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
         }
     }
 
     #[tokio::test]
-    async fn test_executor_id_timestamp_parsing() {
+    async fn test_node_id_timestamp_parsing() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -1105,28 +1145,22 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        // Create a new executor ID
-        let original_executor_id = db
-            .get_or_create_executor_id("test-executor:50051")
-            .await
-            .unwrap();
+        // Create a new node ID
+        let original_node_id = db.get_or_create_node_id("test-node:50051").await.unwrap();
 
         // Verify the identity was created correctly
-        assert!(is_valid_huid(&original_executor_id.huid));
-        assert_eq!(original_executor_id.uuid().to_string().len(), 36);
+        assert!(is_valid_huid(&original_node_id.huid));
+        assert_eq!(original_node_id.uuid().to_string().len(), 36);
 
-        // Get the same executor ID back from the database
-        let retrieved_executor_id = db
-            .get_or_create_executor_id("test-executor:50051")
-            .await
-            .unwrap();
+        // Get the same node ID back from the database
+        let retrieved_node_id = db.get_or_create_node_id("test-node:50051").await.unwrap();
 
         // Verify all fields match exactly
-        assert_eq!(original_executor_id.uuid(), retrieved_executor_id.uuid());
-        assert_eq!(original_executor_id.huid(), retrieved_executor_id.huid());
+        assert_eq!(original_node_id.uuid(), retrieved_node_id.uuid());
+        assert_eq!(original_node_id.huid(), retrieved_node_id.huid());
         assert_eq!(
-            original_executor_id.created_at(),
-            retrieved_executor_id.created_at()
+            original_node_id.created_at(),
+            retrieved_node_id.created_at()
         );
     }
 }

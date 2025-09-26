@@ -46,7 +46,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum TxCommands {
-    /// Deposit collateral for an executor
+    /// Deposit collateral for an node
     Deposit {
         /// Private key for signing the transaction (hex string)
         #[arg(long, env = "PRIVATE_KEY")]
@@ -54,14 +54,14 @@ enum TxCommands {
         /// Hotkey as hex string (32 bytes)
         #[arg(long)]
         hotkey: String,
-        /// Executor ID as string
+        /// Node ID as string
         #[arg(long)]
-        executor_id: String,
+        node_id: String,
         /// Amount to deposit in wei
         #[arg(long)]
         amount: String,
     },
-    /// Reclaim collateral for an executor
+    /// Reclaim collateral for an node
     ReclaimCollateral {
         /// Private key for signing the transaction (hex string)
         #[arg(long, env = "PRIVATE_KEY")]
@@ -69,9 +69,9 @@ enum TxCommands {
         /// Hotkey as hex string (32 bytes)
         #[arg(long)]
         hotkey: String,
-        /// Executor ID as string
+        /// Node ID as string
         #[arg(long)]
-        executor_id: String,
+        node_id: String,
         /// URL for proof of reclaim
         #[arg(long)]
         url: String,
@@ -103,7 +103,7 @@ enum TxCommands {
         #[arg(long)]
         url_content_md5_checksum: String,
     },
-    /// Slash collateral for an executor
+    /// Slash collateral for an node
     SlashCollateral {
         /// Private key for signing the transaction (hex string)
         #[arg(long, env = "PRIVATE_KEY")]
@@ -111,9 +111,9 @@ enum TxCommands {
         /// Hotkey as hex string (32 bytes)
         #[arg(long)]
         hotkey: String,
-        /// Executor ID as string
+        /// Node ID as string
         #[arg(long)]
-        executor_id: String,
+        node_id: String,
         /// URL for proof of slashing
         #[arg(long)]
         url: String,
@@ -133,23 +133,23 @@ enum QueryCommands {
     DecisionTimeout,
     /// Get the minimum collateral increase
     MinCollateralIncrease,
-    /// Get the miner address for an executor
-    ExecutorToMiner {
+    /// Get the miner address for an node
+    NodeToMiner {
         /// Hotkey as hex string (32 bytes)
         #[arg(long)]
         hotkey: String,
-        /// Executor ID as string
+        /// Node ID as string
         #[arg(long)]
-        executor_id: String,
+        node_id: String,
     },
-    /// Get the collateral amount for an executor
+    /// Get the collateral amount for an node
     Collaterals {
         /// Hotkey as hex string (32 bytes)
         #[arg(long)]
         hotkey: String,
-        /// Executor ID as string
+        /// Node ID as string
         #[arg(long)]
-        executor_id: String,
+        node_id: String,
     },
     /// Get reclaim details by request ID
     Reclaims {
@@ -205,21 +205,21 @@ async fn handle_tx_command(
         TxCommands::Deposit {
             private_key,
             hotkey,
-            executor_id,
+            node_id,
             amount,
         } => {
             let hotkey_bytes = parse_hotkey(&hotkey)?;
             let amount_u256 = parse_u256(&amount)?;
-            let executor_uuid = Uuid::parse_str(&executor_id)?;
+            let node_uuid = Uuid::parse_str(&node_id)?;
 
             println!(
-                "Depositing {} wei for executor {} with hotkey {}",
-                amount, executor_id, hotkey
+                "Depositing {} wei for node {} with hotkey {}",
+                amount, node_id, hotkey
             );
             collateral_contract::deposit(
                 &private_key,
                 hotkey_bytes,
-                executor_uuid.into_bytes(),
+                node_uuid.into_bytes(),
                 amount_u256,
                 network_config,
             )
@@ -229,22 +229,22 @@ async fn handle_tx_command(
         TxCommands::ReclaimCollateral {
             private_key,
             hotkey,
-            executor_id,
+            node_id,
             url,
             url_content_md5_checksum,
         } => {
             let hotkey_bytes = parse_hotkey(&hotkey)?;
             let checksum = parse_md5_checksum(&url_content_md5_checksum)?;
-            let executor_uuid = Uuid::parse_str(&executor_id)?;
+            let node_uuid = Uuid::parse_str(&node_id)?;
 
             println!(
-                "Reclaiming collateral for executor {} with hotkey {}",
-                executor_id, hotkey
+                "Reclaiming collateral for node {} with hotkey {}",
+                node_id, hotkey
             );
             collateral_contract::reclaim_collateral(
                 &private_key,
                 hotkey_bytes,
-                executor_uuid.into_bytes(),
+                node_uuid.into_bytes(),
                 &url,
                 checksum,
                 network_config,
@@ -285,22 +285,22 @@ async fn handle_tx_command(
         TxCommands::SlashCollateral {
             private_key,
             hotkey,
-            executor_id,
+            node_id,
             url,
             url_content_md5_checksum,
         } => {
             let hotkey_bytes = parse_hotkey(&hotkey)?;
             let checksum = parse_md5_checksum(&url_content_md5_checksum)?;
-            let executor_uuid = Uuid::parse_str(&executor_id)?;
+            let node_uuid = Uuid::parse_str(&node_id)?;
 
             println!(
-                "Slashing collateral for executor {} with hotkey {}",
-                executor_id, hotkey
+                "Slashing collateral for node {} with hotkey {}",
+                node_id, hotkey
             );
             collateral_contract::slash_collateral(
                 &private_key,
                 hotkey_bytes,
-                executor_uuid.into_bytes(),
+                node_uuid.into_bytes(),
                 &url,
                 checksum,
                 network_config,
@@ -333,48 +333,36 @@ async fn handle_query_command(
             let result = collateral_contract::min_collateral_increase(network_config).await?;
             println!("Minimum collateral increase: {} wei", result);
         }
-        QueryCommands::ExecutorToMiner {
-            hotkey,
-            executor_id,
-        } => {
+        QueryCommands::NodeToMiner { hotkey, node_id } => {
             let hotkey_bytes = parse_hotkey(&hotkey)?;
-            let executor_id_clone = executor_id.clone();
-            let executor_uuid = Uuid::parse_str(&executor_id)?;
-            let result = collateral_contract::executor_to_miner(
+            let node_id_clone = node_id.clone();
+            let node_uuid = Uuid::parse_str(&node_id)?;
+            let result = collateral_contract::node_to_miner(
                 hotkey_bytes,
-                executor_uuid.into_bytes(),
+                node_uuid.into_bytes(),
                 network_config,
             )
             .await?;
-            println!(
-                "Miner address for executor {}: {}",
-                executor_id_clone, result
-            );
+            println!("Miner address for node {}: {}", node_id_clone, result);
         }
-        QueryCommands::Collaterals {
-            hotkey,
-            executor_id,
-        } => {
+        QueryCommands::Collaterals { hotkey, node_id } => {
             let hotkey_bytes = parse_hotkey(&hotkey)?;
-            let executor_id_clone = executor_id.clone();
-            let executor_uuid = Uuid::parse_str(&executor_id)?;
+            let node_id_clone = node_id.clone();
+            let node_uuid = Uuid::parse_str(&node_id)?;
             let result = collateral_contract::collaterals(
                 hotkey_bytes,
-                executor_uuid.into_bytes(),
+                node_uuid.into_bytes(),
                 network_config,
             )
             .await?;
-            println!(
-                "Collateral for executor {}: {} wei",
-                executor_id_clone, result
-            );
+            println!("Collateral for node {}: {} wei", node_id_clone, result);
         }
         QueryCommands::Reclaims { reclaim_request_id } => {
             let request_id = parse_u256(&reclaim_request_id)?;
             let result = collateral_contract::reclaims(request_id, network_config).await?;
             println!("Reclaim details for request {}:", reclaim_request_id);
             println!("  Hotkey: {}", hex::encode(result.hotkey));
-            println!("  Executor ID: {}", Uuid::from_bytes(result.executor_id));
+            println!("  Node ID: {}", Uuid::from_bytes(result.node_id));
             println!("  Miner: {}", result.miner);
             println!("  Amount: {} wei", result.amount);
             println!("  Deny timeout: {}", result.deny_timeout);
@@ -456,10 +444,7 @@ fn print_events_pretty(events: &HashMap<u64, Vec<CollateralEvent>>) {
                 CollateralEvent::Deposit(deposit) => {
                     println!("    Type: Deposit");
                     println!("    Hotkey: {}", hex::encode(deposit.hotkey.as_slice()));
-                    println!(
-                        "    Executor ID: {}",
-                        hex::encode(deposit.executorId.as_slice())
-                    );
+                    println!("    Node ID: {}", hex::encode(deposit.nodeId.as_slice()));
                     println!("    Miner: {}", deposit.miner);
                     println!("    Amount: {} wei", deposit.amount);
                 }
@@ -467,20 +452,14 @@ fn print_events_pretty(events: &HashMap<u64, Vec<CollateralEvent>>) {
                     println!("    Type: Reclaimed");
                     println!("    Request ID: {}", reclaimed.reclaimRequestId);
                     println!("    Hotkey: {}", hex::encode(reclaimed.hotkey.as_slice()));
-                    println!(
-                        "    Executor ID: {}",
-                        hex::encode(reclaimed.executorId.as_slice())
-                    );
+                    println!("    Node ID: {}", hex::encode(reclaimed.nodeId.as_slice()));
                     println!("    Miner: {}", reclaimed.miner);
                     println!("    Amount: {} wei", reclaimed.amount);
                 }
                 CollateralEvent::Slashed(slashed) => {
                     println!("    Type: Slashed");
                     println!("    Hotkey: {}", hex::encode(slashed.hotkey.as_slice()));
-                    println!(
-                        "    Executor ID: {}",
-                        hex::encode(slashed.executorId.as_slice())
-                    );
+                    println!("    Node ID: {}", hex::encode(slashed.nodeId.as_slice()));
                     println!("    Miner: {}", slashed.miner);
                     println!("    Amount: {} wei", slashed.amount);
                     println!("    URL: {}", slashed.url);
@@ -506,7 +485,7 @@ fn print_events_json(events: &HashMap<u64, Vec<CollateralEvent>>) -> Result<()> 
                     serde_json::json!({
                         "type": "Deposit",
                         "hotkey": hex::encode(deposit.hotkey.as_slice()),
-                        "executorId": hex::encode(deposit.executorId.as_slice()),
+                        "nodeId": hex::encode(deposit.nodeId.as_slice()),
                         "miner": deposit.miner.to_string(),
                         "amount": deposit.amount.to_string()
                     })
@@ -516,7 +495,7 @@ fn print_events_json(events: &HashMap<u64, Vec<CollateralEvent>>) -> Result<()> 
                         "type": "Reclaimed",
                         "reclaimRequestId": reclaimed.reclaimRequestId.to_string(),
                         "hotkey": hex::encode(reclaimed.hotkey.as_slice()),
-                        "executorId": hex::encode(reclaimed.executorId.as_slice()),
+                        "nodeId": hex::encode(reclaimed.nodeId.as_slice()),
                         "miner": reclaimed.miner.to_string(),
                         "amount": reclaimed.amount.to_string()
                     })
@@ -525,7 +504,7 @@ fn print_events_json(events: &HashMap<u64, Vec<CollateralEvent>>) -> Result<()> 
                     serde_json::json!({
                         "type": "Slashed",
                         "hotkey": hex::encode(slashed.hotkey.as_slice()),
-                        "executorId": hex::encode(slashed.executorId.as_slice()),
+                        "nodeId": hex::encode(slashed.nodeId.as_slice()),
                         "miner": slashed.miner.to_string(),
                         "amount": slashed.amount.to_string(),
                         "url": slashed.url,

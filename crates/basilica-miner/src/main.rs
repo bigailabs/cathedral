@@ -1,6 +1,6 @@
 //! # Basilca Miner
 //!
-//! Bittensor neuron that manages a fleet of executors and serves
+//! Bittensor neuron that manages a fleet of nodes and serves
 //! validator requests for GPU rental and computational challenges.
 
 use anyhow::{Context, Result};
@@ -8,34 +8,26 @@ use basilica_common::identity::MinerUid;
 use clap::Parser;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::signal;
 use tracing::{error, info, warn};
 
-mod auth;
 mod bittensor_core;
 mod cli;
 mod config;
-mod executor_auth;
-mod executor_manager;
-mod executors;
 mod metrics;
+mod node_manager;
 mod persistence;
 mod request_verification;
 mod services;
-mod session_cleanup;
 mod ssh;
 mod validator_comms;
 mod validator_discovery;
 
-use auth::JwtAuthService;
-use basilica_common::ssh::manager::DefaultSshService;
 use bittensor_core::ChainRegistration;
 use config::MinerConfig;
-use executor_manager::ExecutorManager;
+use node_manager::NodeManager;
 use persistence::RegistrationDb;
-use session_cleanup::run_cleanup_service;
-use ssh::{MinerSshConfig, SshCleanupService, ValidatorAccessService};
+use ssh::ValidatorAccessService;
 use validator_comms::ValidatorCommsServer;
 
 use crate::cli::{Args, Commands};
@@ -46,10 +38,10 @@ pub struct MinerState {
     pub miner_uid: MinerUid,
     pub chain_registration: ChainRegistration,
     pub validator_comms: ValidatorCommsServer,
-    pub executor_manager: Arc<ExecutorManager>,
+    pub node_manager: Arc<NodeManager>,
     pub registration_db: RegistrationDb,
     pub ssh_access_service: ValidatorAccessService,
-    pub jwt_service: std::sync::Arc<JwtAuthService>,
+    pub ssh_session_manager: ssh::session_manager::SshSessionManager,
     pub metrics: Option<metrics::MinerMetrics>,
     pub validator_discovery: Option<std::sync::Arc<validator_discovery::ValidatorDiscovery>>,
 }
@@ -75,24 +67,16 @@ impl MinerState {
         let assignment_db = persistence::AssignmentDb::new(assignment_pool.clone());
         assignment_db.run_migrations().await?;
 
-        // Initialize executor manager
-        let executor_manager =
-            Arc::new(ExecutorManager::new(&config, registration_db.clone()).await?);
+        // Initialize node manager with SSH config
+        let node_manager = Arc::new(NodeManager::new(config.ssh_session.clone()));
 
         // Initialize SSH services
-        let ssh_config = MinerSshConfig::default();
-        let ssh_service = std::sync::Arc::new(DefaultSshService::new(ssh_config.clone())?);
-        let ssh_access_service = ValidatorAccessService::new(
-            ssh_config.clone(),
-            ssh_service,
-            executor_manager.clone(),
+        let ssh_session_manager = ssh::session_manager::SshSessionManager::new(
+            config.ssh_session.clone(),
             registration_db.clone(),
         )
         .await?;
-
-        // Start SSH cleanup background task
-        let cleanup_service = SshCleanupService::new(ssh_access_service.clone(), &ssh_config);
-        cleanup_service.start_cleanup_task().await?;
+        let ssh_access_service = ValidatorAccessService::new(node_manager.clone())?;
 
         // Initialize Bittensor chain registration
         let chain_registration = ChainRegistration::new(config.bittensor.clone()).await?;
@@ -111,9 +95,11 @@ impl MinerState {
             {
                 "round_robin" => Box::new(validator_discovery::RoundRobinAssignment),
                 "highest_stake" => {
+                    let min_stake_rao =
+                        (config.validator_assignment.min_stake_threshold * 1_000_000_000.0) as u128;
                     let strategy = validator_discovery::HighestStakeAssignment::new(
                         assignment_pool.clone(),
-                        config.validator_assignment.min_stake_threshold,
+                        min_stake_rao,
                         config.validator_assignment.validator_hotkey.clone(),
                     );
                     Box::new(strategy)
@@ -128,86 +114,22 @@ impl MinerState {
 
             let discovery = validator_discovery::ValidatorDiscovery::new(
                 chain_registration.get_bittensor_service(),
-                executor_manager.clone(),
+                node_manager.clone(),
                 strategy,
                 config.bittensor.common.netuid,
             );
             Some(std::sync::Arc::new(discovery))
         };
 
-        // Initialize SSH session orchestrator
-        let executor_connection_config = executors::ExecutorConnectionConfig {
-            miner_executor_key_path: config.ssh_session.miner_executor_key_path.clone(),
-            default_executor_username: config.ssh_session.default_executor_username.clone(),
-            connection_timeout: config.ssh_session.ssh_connection_timeout,
-            max_idle_time: Duration::from_secs(300),
-            health_check_interval: Duration::from_secs(60),
-        };
-        let executor_connection_manager = Arc::new(executors::ExecutorConnectionManager::new(
-            executor_connection_config,
-        ));
-
-        // Register all executors with the connection manager
-        for executor_config in &config.executor_management.executors {
-            let executor_id = registration_db
-                .get_or_create_executor_id(&executor_config.grpc_address)
-                .await?;
-            if !executor_config.enabled {
-                info!("Skipping disabled executor: {}", executor_id.uuid);
-                continue;
-            }
-
-            use std::str::FromStr;
-            let executor_info = executors::ExecutorInfo {
-                id: basilica_common::identity::ExecutorId::from_str(&executor_id.uuid.to_string())
-                    .map_err(|e| {
-                        anyhow::anyhow!("Invalid executor ID '{}': {}", executor_id.uuid, e)
-                    })?,
-                host: executor_config.host.clone(),
-                ssh_port: executor_config.ssh_port,
-                ssh_username: executor_config.ssh_username.clone(),
-                grpc_endpoint: Some(executor_config.grpc_address.clone()),
-                last_health_check: None,
-                is_healthy: true,
-            };
-            executor_connection_manager
-                .register_executor(executor_info)
-                .await
-                .with_context(|| format!("Failed to register executor {}", executor_id.uuid))?;
-        }
-
-        // Create executor auth service for signing requests
-        let executor_auth_service = Arc::new(executor_auth::ExecutorAuthService::new(
-            chain_registration.get_bittensor_service(),
-        ));
-
-        let ssh_session_config = ssh::SshSessionConfig {
-            max_sessions_per_validator: config.ssh_session.max_sessions_per_validator,
-            session_rate_limit: config.ssh_session.session_rate_limit,
-            cleanup_interval: config.ssh_session.session_cleanup_interval,
-            max_session_duration: Duration::from_secs(config.ssh_session.max_session_duration),
-            enable_audit_log: config.ssh_session.enable_audit_log,
-        };
-        let ssh_session_orchestrator = Arc::new(ssh::SshSessionOrchestrator::new_with_auth(
-            executor_connection_manager,
-            ssh_session_config,
-            executor_auth_service,
-        ));
-
         // Initialize validator communications server
         let validator_comms = ValidatorCommsServer::new(
             config.validator_comms.clone(),
             config.security.clone(),
-            executor_manager.clone(),
-            registration_db.clone(),
-            ssh_access_service.clone(),
+            node_manager.clone(),
             validator_discovery.clone(),
+            Some(chain_registration.get_bittensor_service()),
         )
-        .await?
-        .with_ssh_session_orchestrator(ssh_session_orchestrator)
-        .with_bittensor_service(chain_registration.get_bittensor_service());
-
-        let jwt_service = validator_comms.jwt_service.clone();
+        .await?;
 
         // Use a placeholder UID that will be updated after chain registration
         let miner_uid = MinerUid::from(0);
@@ -217,10 +139,10 @@ impl MinerState {
             miner_uid,
             chain_registration,
             validator_comms,
-            executor_manager,
+            node_manager,
             registration_db,
             ssh_access_service,
-            jwt_service,
+            ssh_session_manager,
             metrics,
             validator_discovery,
         })
@@ -258,39 +180,11 @@ impl MinerState {
         }
 
         // Start validator communications server
-        let validator_addr = format!("{}:{}", self.config.server.host, self.config.server.port)
-            .parse()
-            .expect("Invalid server address configuration");
         let validator_handle = {
             let validator_comms = self.validator_comms.clone();
             tokio::spawn(async move {
-                if let Err(e) = validator_comms.serve(validator_addr).await {
+                if let Err(e) = validator_comms.start().await {
                     error!("Validator comms server error: {}", e);
-                }
-            })
-        };
-
-        // Start executor health monitoring
-        let executor_handle = {
-            let executor_manager = self.executor_manager.clone();
-            tokio::spawn(async move {
-                if let Err(e) = executor_manager.start_monitoring().await {
-                    error!("Executor monitoring error: {}", e);
-                }
-                // Keep the task alive
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-                }
-            })
-        };
-
-        // Start JWT session cleanup service
-        let cleanup_handle = {
-            let jwt_service = self.jwt_service.clone();
-            let cleanup_interval = tokio::time::Duration::from_secs(300); // 5 minutes
-            tokio::spawn(async move {
-                if let Err(e) = run_cleanup_service(jwt_service, cleanup_interval).await {
-                    error!("Session cleanup service error: {}", e);
                 }
             })
         };
@@ -323,7 +217,7 @@ impl MinerState {
             Some(tokio::spawn(async move {
                 info!("Starting validator discovery service");
                 loop {
-                    if let Err(e) = discovery.discover_and_assign().await {
+                    if let Err(e) = discovery.run_discovery().await {
                         error!("Validator discovery error: {}", e);
                     }
                     tokio::time::sleep(discovery_interval).await;
@@ -345,12 +239,6 @@ impl MinerState {
                 _ = validator_handle => {
                     warn!("Validator comms server stopped unexpectedly");
                 }
-                _ = executor_handle => {
-                    warn!("Executor monitoring stopped unexpectedly");
-                }
-                _ = cleanup_handle => {
-                    warn!("Session cleanup service stopped unexpectedly");
-                }
                 _ = stake_monitor_handle => {
                     warn!("Stake monitor service stopped unexpectedly");
                 }
@@ -365,12 +253,6 @@ impl MinerState {
                 }
                 _ = validator_handle => {
                     warn!("Validator comms server stopped unexpectedly");
-                }
-                _ = executor_handle => {
-                    warn!("Executor monitoring stopped unexpectedly");
-                }
-                _ = cleanup_handle => {
-                    warn!("Session cleanup service stopped unexpectedly");
                 }
                 _ = stake_monitor_handle => {
                     warn!("Stake monitor service stopped unexpectedly");
@@ -430,16 +312,9 @@ async fn main() -> Result<()> {
 /// Handle CLI commands
 async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<()> {
     match command {
-        Commands::Executor { executor_cmd } => {
-            let db = RegistrationDb::new(&config.database).await?;
-            cli::handle_executor_command(executor_cmd, config, db).await
-        }
         Commands::Validator { validator_cmd } => {
             let db = RegistrationDb::new(&config.database).await?;
             cli::handle_validator_command(validator_cmd, db).await
-        }
-        Commands::Assignment { assignment_cmd } => {
-            cli::handle_assignment_command(&assignment_cmd, config).await
         }
         Commands::Service { service_cmd } => cli::handle_service_command(service_cmd, config).await,
         Commands::Database { database_cmd } => {
@@ -461,93 +336,15 @@ async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<(
             println!("Database migrations completed successfully");
             Ok(())
         }
-        Commands::DeployExecutors {
-            dry_run,
-            only_machines,
-            status_only,
-        } => handle_deploy_executors(config, dry_run, only_machines, status_only).await,
-    }
-}
-
-/// Handle deploy executors command
-async fn handle_deploy_executors(
-    config: &MinerConfig,
-    dry_run: bool,
-    _only_machines: Option<String>,
-    status_only: bool,
-) -> Result<()> {
-    // Check if deployment is configured
-    let deployment_config = config
-        .remote_executor_deployment
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No executor deployment configuration found"))?;
-
-    // Initialize persistence
-    let db = RegistrationDb::new(&config.database).await?;
-
-    // Create executor manager
-    let manager = ExecutorManager::new(config, db).await?;
-
-    // Status check only
-    if status_only {
-        let available = manager.list_available().await?;
-        info!("Checking status of executors...");
-
-        if available.is_empty() {
-            warn!("No healthy executors found");
-        } else {
-            for executor in available {
-                info!("✓ {} ({}) - Available", executor.name, executor.id);
-                info!(
-                    "  GPUs: {}, Address: {}",
-                    executor.gpu_count, executor.grpc_address
-                );
-            }
-        }
-        return Ok(());
-    }
-
-    // Dry run
-    if dry_run {
-        info!("DRY RUN: Would deploy executors to the following machines:");
-        for machine in &deployment_config.remote_machines {
-            info!(
-                "  - {} ({}) at {}:{}",
-                machine.name, machine.id, machine.ssh.host, machine.ssh.port
-            );
-            info!("    SSH user: {}", machine.ssh.username);
-            info!("    GPU count: {}", machine.gpu_count.unwrap_or(0));
-            info!("    Executor port: {}", machine.executor_port);
-        }
-        return Ok(());
-    }
-
-    // Actual deployment
-    info!("Deploying executors...");
-    let results = manager.deploy_all().await?;
-
-    // Report results
-    let successful = results.iter().filter(|r| r.success).count();
-    let failed = results.len() - successful;
-
-    info!("\nDeployment Summary:");
-    info!("  Successful: {}", successful);
-    info!("  Failed: {}", failed);
-
-    // Show details
-    for result in &results {
-        if result.success {
-            info!("✓ {} - Deployed successfully", result.machine_name);
-        } else {
-            error!(
-                "✗ {} - Failed: {}",
-                result.machine_name,
-                result.error.as_ref().unwrap()
-            );
+        Commands::DeployNodes {
+            dry_run: _,
+            only_machines: _,
+            status_only: _,
+        } => {
+            error!("Deploy nodes command is no longer supported - nodes are managed directly");
+            Err(anyhow::anyhow!("This command has been deprecated"))
         }
     }
-
-    Ok(())
 }
 
 /// Load configuration from file and environment
@@ -575,15 +372,3 @@ fn load_config(config_path: &Path) -> Result<MinerConfig> {
 
     Ok(config)
 }
-
-// TODO: Implement the following for production readiness:
-// 1. Graceful shutdown with proper cleanup of all services
-// 2. Configuration hot-reloading for dynamic updates
-// 3. Service discovery and health monitoring
-// 4. Backup and disaster recovery procedures
-// 5. Performance monitoring and alerting
-// 6. Load balancing across multiple validators
-// 7. Fault tolerance and circuit breaker patterns
-// 8. Distributed tracing and correlation IDs
-// 9. Security hardening and rate limiting
-// 10. Integration testing and end-to-end validation

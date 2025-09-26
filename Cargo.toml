@@ -2,7 +2,6 @@
 members = [
   "crates/basilica-common",
   "crates/basilica-protocol",
-  "crates/basilica-executor",
   "crates/basilica-miner",
   "crates/basilica-validator",
   "crates/basilica-billing",
@@ -107,7 +106,7 @@ tempfile = "3.8"
 # Build dependencies
 dotenvy = "0.15"
 
-# Executor-specific dependencies
+# Node-specific dependencies
 tokio-stream = { version = "0.1", features = ["net"] }
 nvml-wrapper = "0.9"
 num_cpus = "1.16"

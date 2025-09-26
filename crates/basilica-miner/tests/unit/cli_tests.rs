@@ -2,11 +2,11 @@
 
 use basilica_common::config::DatabaseConfig;
 use basilica_miner::cli::{
-    display_executor_details, display_executors_table, handle_command, AddExecutorArgs, Command,
-    GenerateConfigArgs, ListExecutorsArgs, MinerArgs, RemoveExecutorArgs, StatusArgs,
-    UpdateExecutorArgs, ValidatorCommand,
+    display_node_details, display_nodes_table, handle_command, AddNodeArgs, Command,
+    GenerateConfigArgs, ListNodesArgs, MinerArgs, RemoveNodeArgs, StatusArgs,
+    UpdateNodeArgs, ValidatorCommand,
 };
-use basilica_miner::config::{AppConfig, ExecutorConfig};
+use basilica_miner::config::{AppConfig, NodeConfig};
 use basilica_miner::persistence::RegistrationDb;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,115 +25,115 @@ fn test_miner_args_default() {
 
 #[test]
 fn test_command_variants() {
-    // Test ListExecutors command
-    let cmd = Command::ListExecutors(ListExecutorsArgs {
+    // Test ListNodes command
+    let cmd = Command::ListNodes(ListNodesArgs {
         active_only: true,
         format: Some("json".to_string()),
     });
 
     match cmd {
-        Command::ListExecutors(args) => {
+        Command::ListNodes(args) => {
             assert!(args.active_only);
             assert_eq!(args.format, Some("json".to_string()));
         }
         _ => panic!("Wrong command type"),
     }
 
-    // Test AddExecutor command
-    let cmd = Command::AddExecutor(AddExecutorArgs {
+    // Test AddNode command
+    let cmd = Command::AddNode(AddNodeArgs {
         id: "exec1".to_string(),
         grpc_address: "127.0.0.1:50051".to_string(),
-        name: Some("Test Executor".to_string()),
+        name: Some("Test Node".to_string()),
         metadata: None,
     });
 
     match cmd {
-        Command::AddExecutor(args) => {
+        Command::AddNode(args) => {
             assert_eq!(args.id, "exec1");
             assert_eq!(args.grpc_address, "127.0.0.1:50051");
-            assert_eq!(args.name, Some("Test Executor".to_string()));
+            assert_eq!(args.name, Some("Test Node".to_string()));
         }
         _ => panic!("Wrong command type"),
     }
 }
 
 #[tokio::test]
-async fn test_handle_list_executors_empty() {
+async fn test_handle_list_nodes_empty() {
     let db = create_test_db().await;
     let config = create_test_config();
 
-    let args = ListExecutorsArgs {
+    let args = ListNodesArgs {
         active_only: false,
         format: None,
     };
 
-    // Should not panic even with empty executor list
-    let result = handle_command(Command::ListExecutors(args), &config, &db).await;
+    // Should not panic even with empty node list
+    let result = handle_command(Command::ListNodes(args), &config, &db).await;
     assert!(result.is_ok());
 }
 
 #[tokio::test]
-async fn test_handle_add_executor() {
+async fn test_handle_add_node() {
     let db = create_test_db().await;
     let config = create_test_config();
 
-    let args = AddExecutorArgs {
+    let args = AddNodeArgs {
         id: "exec1".to_string(),
         grpc_address: "127.0.0.1:50051".to_string(),
-        name: Some("Test Executor".to_string()),
+        name: Some("Test Node".to_string()),
         metadata: Some("{\"gpu\": \"RTX 4090\"}".to_string()),
     };
 
-    let result = handle_command(Command::AddExecutor(args), &config, &db).await;
+    let result = handle_command(Command::AddNode(args), &config, &db).await;
     assert!(result.is_ok());
 
-    // Verify executor was added
-    let executor = db.get_executor("exec1").await.unwrap();
-    assert!(executor.is_some());
+    // Verify node was added
+    let node = db.get_node("exec1").await.unwrap();
+    assert!(node.is_some());
 }
 
 #[tokio::test]
-async fn test_handle_remove_executor() {
+async fn test_handle_remove_node() {
     let db = create_test_db().await;
     let config = create_test_config();
 
-    // First add an executor
-    db.register_executor("exec1", "127.0.0.1:50051", serde_json::json!({}))
+    // First add an node
+    db.register_node("exec1", "127.0.0.1:50051", serde_json::json!({}))
         .await
         .unwrap();
 
-    let args = RemoveExecutorArgs {
+    let args = RemoveNodeArgs {
         id: "exec1".to_string(),
         force: false,
     };
 
-    let result = handle_command(Command::RemoveExecutor(args), &config, &db).await;
+    let result = handle_command(Command::RemoveNode(args), &config, &db).await;
     assert!(result.is_ok());
 
-    // Verify executor is inactive
-    let executor = db.get_executor("exec1").await.unwrap();
-    assert!(executor.is_some());
-    assert!(!executor.unwrap().is_active);
+    // Verify node is inactive
+    let node = db.get_node("exec1").await.unwrap();
+    assert!(node.is_some());
+    assert!(!node.unwrap().is_active);
 }
 
 #[tokio::test]
-async fn test_handle_update_executor() {
+async fn test_handle_update_node() {
     let db = create_test_db().await;
     let config = create_test_config();
 
-    // First add an executor
-    db.register_executor("exec1", "127.0.0.1:50051", serde_json::json!({}))
+    // First add an node
+    db.register_node("exec1", "127.0.0.1:50051", serde_json::json!({}))
         .await
         .unwrap();
 
-    let args = UpdateExecutorArgs {
+    let args = UpdateNodeArgs {
         id: "exec1".to_string(),
         grpc_address: Some("127.0.0.1:50052".to_string()),
-        name: Some("Updated Executor".to_string()),
+        name: Some("Updated Node".to_string()),
         metadata: None,
     };
 
-    let result = handle_command(Command::UpdateExecutor(args), &config, &db).await;
+    let result = handle_command(Command::UpdateNode(args), &config, &db).await;
     assert!(result.is_ok());
 }
 
@@ -183,47 +183,47 @@ async fn test_handle_validator_list() {
 }
 
 #[test]
-fn test_display_executors_table() {
-    let executors = vec![
-        basilica_miner::persistence::ExecutorRecord {
+fn test_display_nodes_table() {
+    let nodes = vec![
+        basilica_miner::persistence::NodeRecord {
             id: "exec1".to_string(),
             grpc_address: "127.0.0.1:50051".to_string(),
             is_active: true,
             is_healthy: true,
             last_seen: chrono::Utc::now(),
-            metadata: serde_json::json!({"name": "Executor 1"}),
+            metadata: serde_json::json!({"name": "Node 1"}),
         },
-        basilica_miner::persistence::ExecutorRecord {
+        basilica_miner::persistence::NodeRecord {
             id: "exec2".to_string(),
             grpc_address: "127.0.0.1:50052".to_string(),
             is_active: true,
             is_healthy: false,
             last_seen: chrono::Utc::now() - chrono::Duration::minutes(5),
-            metadata: serde_json::json!({"name": "Executor 2"}),
+            metadata: serde_json::json!({"name": "Node 2"}),
         },
     ];
 
     // Should not panic
-    display_executors_table(&executors);
+    display_nodes_table(&nodes);
 }
 
 #[test]
-fn test_display_executor_details() {
-    let executor = basilica_miner::persistence::ExecutorRecord {
+fn test_display_node_details() {
+    let node = basilica_miner::persistence::NodeRecord {
         id: "exec1".to_string(),
         grpc_address: "127.0.0.1:50051".to_string(),
         is_active: true,
         is_healthy: true,
         last_seen: chrono::Utc::now(),
         metadata: serde_json::json!({
-            "name": "Test Executor",
+            "name": "Test Node",
             "gpu": "RTX 4090",
             "location": "US-East"
         }),
     };
 
     // Should not panic
-    display_executor_details(&executor);
+    display_node_details(&node);
 }
 
 // Helper functions

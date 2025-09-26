@@ -116,13 +116,13 @@ impl SimplePersistence {
                 last_seen TEXT NOT NULL,
                 registered_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                executor_info TEXT NOT NULL DEFAULT '{}'
+                node_info TEXT NOT NULL DEFAULT '{}'
             );
 
-            CREATE TABLE IF NOT EXISTS miner_executors (
+            CREATE TABLE IF NOT EXISTS miner_nodes (
                 id TEXT PRIMARY KEY,
                 miner_id TEXT NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 grpc_address TEXT NOT NULL,
                 gpu_count INTEGER NOT NULL,
                 status TEXT DEFAULT 'unknown',
@@ -136,7 +136,7 @@ impl SimplePersistence {
                 id TEXT PRIMARY KEY,
                 miner_id TEXT NOT NULL,
                 verification_type TEXT NOT NULL,
-                executor_id TEXT,
+                node_id TEXT,
                 status TEXT DEFAULT 'scheduled',
                 scheduled_at TEXT NOT NULL,
                 completed_at TEXT,
@@ -151,7 +151,7 @@ impl SimplePersistence {
             r#"
             CREATE TABLE IF NOT EXISTS verification_logs (
                 id TEXT PRIMARY KEY,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 validator_hotkey TEXT NOT NULL,
                 verification_type TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
@@ -167,7 +167,7 @@ impl SimplePersistence {
             CREATE TABLE IF NOT EXISTS rentals (
                 id TEXT PRIMARY KEY,
                 validator_hotkey TEXT NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 container_id TEXT NOT NULL,
                 ssh_session_id TEXT NOT NULL,
                 ssh_credentials TEXT NOT NULL,
@@ -219,7 +219,7 @@ impl SimplePersistence {
             CREATE TABLE IF NOT EXISTS miner_prover_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 gpu_model TEXT NOT NULL,
                 gpu_count INTEGER NOT NULL,
                 gpu_memory_gb REAL NOT NULL,
@@ -231,9 +231,9 @@ impl SimplePersistence {
                 CONSTRAINT valid_gpu_memory CHECK (gpu_memory_gb >= 0)
             );
 
-            CREATE TABLE IF NOT EXISTS executor_hardware_profile (
+            CREATE TABLE IF NOT EXISTS node_hardware_profile (
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 cpu_model TEXT,
                 cpu_cores INTEGER,
                 ram_gb INTEGER,
@@ -241,12 +241,12 @@ impl SimplePersistence {
                 full_hardware_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, executor_id)
+                PRIMARY KEY (miner_uid, node_id)
             );
 
-            CREATE TABLE IF NOT EXISTS executor_speedtest_profile (
+            CREATE TABLE IF NOT EXISTS node_speedtest_profile (
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 download_mbps REAL,
                 upload_mbps REAL,
                 test_timestamp TEXT NOT NULL,
@@ -254,12 +254,12 @@ impl SimplePersistence {
                 full_result_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, executor_id)
+                PRIMARY KEY (miner_uid, node_id)
             );
 
-            CREATE TABLE IF NOT EXISTS executor_network_profile (
+            CREATE TABLE IF NOT EXISTS node_network_profile (
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 ip_address TEXT,
                 hostname TEXT,
                 city TEXT,
@@ -273,12 +273,12 @@ impl SimplePersistence {
                 full_result_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, executor_id)
+                PRIMARY KEY (miner_uid, node_id)
             );
 
-            CREATE TABLE IF NOT EXISTS executor_docker_profile (
+            CREATE TABLE IF NOT EXISTS node_docker_profile (
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 service_active BOOLEAN NOT NULL,
                 docker_version TEXT,
                 images_pulled TEXT,
@@ -287,12 +287,12 @@ impl SimplePersistence {
                 full_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, executor_id)
+                PRIMARY KEY (miner_uid, node_id)
             );
 
-            CREATE TABLE IF NOT EXISTS executor_nat_profile (
+            CREATE TABLE IF NOT EXISTS node_nat_profile (
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 is_accessible BOOLEAN NOT NULL,
                 test_port INTEGER NOT NULL,
                 test_path TEXT NOT NULL,
@@ -303,12 +303,12 @@ impl SimplePersistence {
                 error_message TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, executor_id)
+                PRIMARY KEY (miner_uid, node_id)
             );
 
-            CREATE TABLE IF NOT EXISTS executor_storage_profile (
+            CREATE TABLE IF NOT EXISTS node_storage_profile (
                 miner_uid INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 total_bytes INTEGER NOT NULL,
                 available_bytes INTEGER NOT NULL,
                 required_bytes INTEGER NOT NULL,
@@ -317,7 +317,7 @@ impl SimplePersistence {
                 full_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, executor_id)
+                PRIMARY KEY (miner_uid, node_id)
             );
 
             CREATE TABLE IF NOT EXISTS weight_allocation_history (
@@ -352,15 +352,15 @@ impl SimplePersistence {
             CREATE INDEX IF NOT EXISTS idx_weight_history_miner ON weight_allocation_history(miner_uid);
             CREATE INDEX IF NOT EXISTS idx_weight_history_category ON weight_allocation_history(gpu_category);
             CREATE INDEX IF NOT EXISTS idx_weight_history_block ON weight_allocation_history(weight_set_block);
-            CREATE INDEX IF NOT EXISTS idx_executor_hardware_miner ON executor_hardware_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_executor_hardware_updated ON executor_hardware_profile(updated_at);
-            CREATE INDEX IF NOT EXISTS idx_executor_speedtest_miner ON executor_speedtest_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_executor_speedtest_timestamp ON executor_speedtest_profile(test_timestamp);
-            CREATE INDEX IF NOT EXISTS idx_executor_network_miner ON executor_network_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_executor_network_timestamp ON executor_network_profile(test_timestamp);
-            CREATE INDEX IF NOT EXISTS idx_executor_network_country ON executor_network_profile(country);
-            CREATE INDEX IF NOT EXISTS idx_executor_docker_miner ON executor_docker_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_executor_docker_updated ON executor_docker_profile(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_node_hardware_miner ON node_hardware_profile(miner_uid);
+            CREATE INDEX IF NOT EXISTS idx_node_hardware_updated ON node_hardware_profile(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_node_speedtest_miner ON node_speedtest_profile(miner_uid);
+            CREATE INDEX IF NOT EXISTS idx_node_speedtest_timestamp ON node_speedtest_profile(test_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_node_network_miner ON node_network_profile(miner_uid);
+            CREATE INDEX IF NOT EXISTS idx_node_network_timestamp ON node_network_profile(test_timestamp);
+            CREATE INDEX IF NOT EXISTS idx_node_network_country ON node_network_profile(country);
+            CREATE INDEX IF NOT EXISTS idx_node_docker_miner ON node_docker_profile(miner_uid);
+            CREATE INDEX IF NOT EXISTS idx_node_docker_updated ON node_docker_profile(updated_at);
             "#,
         )
         .execute(&self.pool)
@@ -418,11 +418,11 @@ impl SimplePersistence {
             info!("Added gpu_uuid column to miner_prover_results table");
         }
 
-        // Check if gpu_uuids column exists in miner_executors
+        // Check if gpu_uuids column exists in miner_nodes
         let gpu_uuids_exists: bool = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_executors')
+            FROM pragma_table_info('miner_nodes')
             WHERE name = 'gpu_uuids'
             "#,
         )
@@ -431,17 +431,17 @@ impl SimplePersistence {
         .unwrap_or(false);
 
         if !gpu_uuids_exists {
-            // Migration to add gpu_uuids column to miner_executors
+            // Migration to add gpu_uuids column to miner_nodes
             sqlx::query(
                 r#"
-                ALTER TABLE miner_executors
+                ALTER TABLE miner_nodes
                 ADD COLUMN gpu_uuids TEXT;
                 "#,
             )
             .execute(&self.pool)
             .await?;
 
-            info!("Added gpu_uuids column to miner_executors table");
+            info!("Added gpu_uuids column to miner_nodes table");
         }
 
         // Create GPU UUID assignments table
@@ -450,7 +450,7 @@ impl SimplePersistence {
             CREATE TABLE IF NOT EXISTS gpu_uuid_assignments (
                 gpu_uuid TEXT PRIMARY KEY,
                 gpu_index INTEGER NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 miner_id TEXT NOT NULL,
                 gpu_name TEXT,
                 gpu_memory_gb REAL,
@@ -493,12 +493,12 @@ impl SimplePersistence {
         sqlx::query(
             r#"
             CREATE INDEX IF NOT EXISTS idx_prover_results_gpu_uuid ON miner_prover_results(gpu_uuid);
-            CREATE INDEX IF NOT EXISTS idx_executors_gpu_uuids ON miner_executors(gpu_uuids);
-            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_executor ON gpu_uuid_assignments(executor_id);
+            CREATE INDEX IF NOT EXISTS idx_nodes_gpu_uuids ON miner_nodes(gpu_uuids);
+            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_node ON gpu_uuid_assignments(node_id);
             CREATE INDEX IF NOT EXISTS idx_gpu_assignments_miner ON gpu_uuid_assignments(miner_id);
-            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_miner_executor ON gpu_uuid_assignments(miner_id, executor_id);
-            CREATE INDEX IF NOT EXISTS idx_miner_executors_status ON miner_executors(status);
-            CREATE INDEX IF NOT EXISTS idx_miner_executors_health_check ON miner_executors(last_health_check);
+            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_miner_node ON gpu_uuid_assignments(miner_id, node_id);
+            CREATE INDEX IF NOT EXISTS idx_miner_nodes_status ON miner_nodes(status);
+            CREATE INDEX IF NOT EXISTS idx_miner_nodes_health_check ON miner_nodes(last_health_check);
             "#,
         )
         .execute(&self.pool)
@@ -532,12 +532,12 @@ impl SimplePersistence {
         self.create_collateral_scanned_blocks_table().await?;
         self.add_binary_validation_columns().await?;
 
-        // Migration to remove deprecated columns from miner_executors table
+        // Migration to remove deprecated columns from miner_nodes table
         // Check if gpu_specs column exists
         let gpu_specs_exists: bool = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_executors')
+            FROM pragma_table_info('miner_nodes')
             WHERE name = 'gpu_specs'
             "#,
         )
@@ -546,17 +546,17 @@ impl SimplePersistence {
         .unwrap_or(false);
 
         if gpu_specs_exists {
-            sqlx::query("ALTER TABLE miner_executors DROP COLUMN gpu_specs")
+            sqlx::query("ALTER TABLE miner_nodes DROP COLUMN gpu_specs")
                 .execute(&self.pool)
                 .await?;
-            info!("Dropped gpu_specs column from miner_executors table");
+            info!("Dropped gpu_specs column from miner_nodes table");
         }
 
         // Check if cpu_specs column exists
         let cpu_specs_exists: bool = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_executors')
+            FROM pragma_table_info('miner_nodes')
             WHERE name = 'cpu_specs'
             "#,
         )
@@ -565,17 +565,17 @@ impl SimplePersistence {
         .unwrap_or(false);
 
         if cpu_specs_exists {
-            sqlx::query("ALTER TABLE miner_executors DROP COLUMN cpu_specs")
+            sqlx::query("ALTER TABLE miner_nodes DROP COLUMN cpu_specs")
                 .execute(&self.pool)
                 .await?;
-            info!("Dropped cpu_specs column from miner_executors table");
+            info!("Dropped cpu_specs column from miner_nodes table");
         }
 
         // Check if location column exists
         let location_exists: bool = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_executors')
+            FROM pragma_table_info('miner_nodes')
             WHERE name = 'location'
             "#,
         )
@@ -584,10 +584,10 @@ impl SimplePersistence {
         .unwrap_or(false);
 
         if location_exists {
-            sqlx::query("ALTER TABLE miner_executors DROP COLUMN location")
+            sqlx::query("ALTER TABLE miner_nodes DROP COLUMN location")
                 .execute(&self.pool)
                 .await?;
-            info!("Dropped location column from miner_executors table");
+            info!("Dropped location column from miner_nodes table");
         }
 
         Ok(())
@@ -599,14 +599,14 @@ impl SimplePersistence {
     ) -> Result<(), anyhow::Error> {
         let query = r#"
             INSERT INTO verification_logs (
-                id, executor_id, validator_hotkey, verification_type, timestamp,
+                id, node_id, validator_hotkey, verification_type, timestamp,
                 score, success, details, duration_ms, error_message, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#;
 
         sqlx::query(query)
             .bind(log.id.to_string())
-            .bind(&log.executor_id)
+            .bind(&log.node_id)
             .bind(&log.validator_hotkey)
             .bind(&log.verification_type)
             .bind(log.timestamp.to_rfc3339())
@@ -622,7 +622,7 @@ impl SimplePersistence {
 
         tracing::info!(
             verification_id = %log.id,
-            executor_id = %log.executor_id,
+            node_id = %log.node_id,
             success = %log.success,
             score = %log.score,
             "Verification log created"
@@ -634,21 +634,21 @@ impl SimplePersistence {
     /// Query verification logs with filtering and pagination
     pub async fn query_verification_logs(
         &self,
-        executor_id: Option<&str>,
+        node_id: Option<&str>,
         success_only: Option<bool>,
         limit: u32,
         offset: u32,
     ) -> Result<Vec<VerificationLog>, anyhow::Error> {
         let mut query = String::from(
-            "SELECT id, executor_id, validator_hotkey, verification_type, timestamp,
+            "SELECT id, node_id, validator_hotkey, verification_type, timestamp,
              score, success, details, duration_ms, error_message, created_at, updated_at
              FROM verification_logs WHERE 1=1",
         );
 
         let mut conditions = Vec::new();
 
-        if let Some(exec_id) = executor_id {
-            conditions.push(format!("executor_id = '{exec_id}'"));
+        if let Some(exec_id) = node_id {
+            conditions.push(format!("node_id = '{exec_id}'"));
         }
 
         if let Some(success) = success_only {
@@ -676,11 +676,8 @@ impl SimplePersistence {
         Ok(logs)
     }
 
-    /// Get executor statistics from verification logs
-    pub async fn get_executor_stats(
-        &self,
-        executor_id: &str,
-    ) -> Result<Option<ExecutorStats>, anyhow::Error> {
+    /// Get node statistics from verification logs
+    pub async fn get_node_stats(&self, node_id: &str) -> Result<Option<NodeStats>, anyhow::Error> {
         let row = sqlx::query(
             "SELECT
                 COUNT(*) as total_verifications,
@@ -690,9 +687,9 @@ impl SimplePersistence {
                 MIN(timestamp) as first_verification,
                 MAX(timestamp) as last_verification
              FROM verification_logs
-             WHERE executor_id = ?",
+             WHERE node_id = ?",
         )
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -702,8 +699,8 @@ impl SimplePersistence {
                 return Ok(None);
             }
 
-            let stats = ExecutorStats {
-                executor_id: executor_id.to_string(),
+            let stats = NodeStats {
+                node_id: node_id.to_string(),
                 total_verifications: total as u64,
                 successful_verifications: row.get::<i64, _>("successful_verifications") as u64,
                 average_score: row.get("avg_score"),
@@ -739,14 +736,14 @@ impl SimplePersistence {
 
         let rows = sqlx::query(
             "SELECT
-                executor_id,
+                node_id,
                 COUNT(*) as total_verifications,
                 SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful_verifications,
                 AVG(score) as avg_score,
                 MAX(timestamp) as last_verification,
                 MAX(details) as latest_details
              FROM verification_logs
-             GROUP BY executor_id
+             GROUP BY node_id
              HAVING avg_score >= ?
                 AND (CAST(successful_verifications AS REAL) / CAST(total_verifications AS REAL)) >= ?
              ORDER BY avg_score DESC, last_verification DESC
@@ -761,7 +758,7 @@ impl SimplePersistence {
 
         let mut entries = Vec::new();
         for row in rows {
-            let executor_id: String = row.get("executor_id");
+            let node_id: String = row.get("node_id");
             let total_verifications: i64 = row.get("total_verifications");
             let successful_verifications: i64 = row.get("successful_verifications");
             let avg_score: f64 = row.get("avg_score");
@@ -777,7 +774,7 @@ impl SimplePersistence {
             let details: Value = serde_json::from_str(&latest_details).unwrap_or(Value::Null);
 
             entries.push(CapacityEntry {
-                executor_id,
+                node_id,
                 verification_score: avg_score,
                 success_rate,
                 last_verification: DateTime::parse_from_rfc3339(&last_verification)
@@ -791,22 +788,22 @@ impl SimplePersistence {
         Ok(entries)
     }
 
-    /// Get available executors for rental (not currently rented)
-    pub async fn get_available_executors(
+    /// Get available nodes for rental (not currently rented)
+    pub async fn get_available_nodes(
         &self,
         min_gpu_memory: Option<u32>,
         gpu_type: Option<String>,
         min_gpu_count: Option<u32>,
         location: Option<basilica_common::LocationProfile>,
-    ) -> Result<Vec<AvailableExecutorData>, anyhow::Error> {
-        // Build the base query with LEFT JOIN to find executors without active rentals
+    ) -> Result<Vec<AvailableNodeData>, anyhow::Error> {
+        // Build the base query with LEFT JOIN to find nodes without active rentals
         // Also join with gpu_uuid_assignments to get actual GPU data
         // And join with hardware profile to get CPU/RAM information
         // And join with network profile to get location information
         // And join with speedtest profile to get network speed information
         let mut query_str = String::from(
             "SELECT
-                me.executor_id,
+                me.node_id,
                 me.miner_id,
                 me.status,
                 me.gpu_count,
@@ -822,15 +819,15 @@ impl SimplePersistence {
                 esp.download_mbps,
                 esp.upload_mbps,
                 esp.test_timestamp
-            FROM miner_executors me
+            FROM miner_nodes me
             JOIN miners m ON me.miner_id = m.id
-            LEFT JOIN rentals r ON me.executor_id = r.executor_id
+            LEFT JOIN rentals r ON me.node_id = r.node_id
                 AND r.miner_id = me.miner_id
                 AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
-            LEFT JOIN gpu_uuid_assignments gua ON me.executor_id = gua.executor_id AND gua.miner_id = me.miner_id
-            LEFT JOIN executor_hardware_profile ehp ON me.executor_id = ehp.executor_id AND me.miner_id = 'miner_' || ehp.miner_uid
-            LEFT JOIN executor_network_profile enp ON me.executor_id = enp.executor_id AND me.miner_id = 'miner_' || enp.miner_uid
-            LEFT JOIN executor_speedtest_profile esp ON me.executor_id = esp.executor_id AND me.miner_id = 'miner_' || esp.miner_uid
+            LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+            LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
+            LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
+            LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
             WHERE r.id IS NULL
                 AND (me.status IS NULL OR me.status != 'offline')",
         );
@@ -848,7 +845,7 @@ impl SimplePersistence {
             }
         }
 
-        query_str.push_str(" GROUP BY me.executor_id");
+        query_str.push_str(" GROUP BY me.node_id");
 
         // Add GPU count filter if specified (use HAVING since we're grouping)
         if let Some(min_count) = min_gpu_count {
@@ -857,7 +854,7 @@ impl SimplePersistence {
 
         let rows = sqlx::query(&query_str).fetch_all(&self.pool).await?;
 
-        let mut executors = Vec::new();
+        let mut nodes = Vec::new();
         for row in rows {
             // Get GPU data from gpu_uuid_assignments join
             let gpu_names: Option<String> = row.get("gpu_names");
@@ -932,8 +929,8 @@ impl SimplePersistence {
                     .map(|dt| dt.with_timezone(&chrono::Utc))
             });
 
-            executors.push(AvailableExecutorData {
-                executor_id: row.get("executor_id"),
+            nodes.push(AvailableNodeData {
+                node_id: row.get("node_id"),
                 miner_id: row.get("miner_id"),
                 gpu_specs,
                 cpu_specs,
@@ -947,7 +944,7 @@ impl SimplePersistence {
             });
         }
 
-        Ok(executors)
+        Ok(nodes)
     }
 
     /// Helper function to convert database row to VerificationLog
@@ -963,7 +960,7 @@ impl SimplePersistence {
 
         Ok(VerificationLog {
             id: Uuid::parse_str(&id_str)?,
-            executor_id: row.get("executor_id"),
+            node_id: row.get("node_id"),
             validator_hotkey: row.get("validator_hotkey"),
             verification_type: row.get("verification_type"),
             timestamp: DateTime::parse_from_rfc3339(&timestamp_str)?.with_timezone(&Utc),
@@ -981,7 +978,7 @@ impl SimplePersistence {
     pub async fn create_rental(&self, rental: &Rental) -> Result<(), anyhow::Error> {
         let query = r#"
             INSERT INTO rentals (
-                id, executor_id, customer_public_key, docker_image, env_vars,
+                id, node_id, customer_public_key, docker_image, env_vars,
                 gpu_requirements, ssh_access_info, max_duration_hours, cost_per_hour,
                 status, created_at, updated_at, started_at, terminated_at,
                 termination_reason, total_cost
@@ -997,7 +994,7 @@ impl SimplePersistence {
 
         sqlx::query(query)
             .bind(rental.id.to_string())
-            .bind(&rental.executor_id)
+            .bind(&rental.node_id)
             .bind(&rental.customer_public_key)
             .bind(&rental.docker_image)
             .bind(
@@ -1022,7 +1019,7 @@ impl SimplePersistence {
 
         tracing::info!(
             rental_id = %rental.id,
-            executor_id = %rental.executor_id,
+            node_id = %rental.node_id,
             status = ?rental.status,
             "Rental created"
         );
@@ -1080,22 +1077,22 @@ impl SimplePersistence {
         Ok(())
     }
 
-    /// Check if an executor has an active rental
+    /// Check if an node has an active rental
     pub async fn has_active_rental(
         &self,
-        executor_id: &str,
+        node_id: &str,
         miner_id: &str,
     ) -> Result<bool, anyhow::Error> {
         let query = r#"
             SELECT COUNT(*) as count
             FROM rentals
-            WHERE executor_id = ?
+            WHERE node_id = ?
                 AND miner_id = ?
                 AND state = 'active'
         "#;
 
         let row = sqlx::query(query)
-            .bind(executor_id)
+            .bind(node_id)
             .bind(miner_id)
             .fetch_one(&self.pool)
             .await?;
@@ -1126,13 +1123,13 @@ impl SimplePersistence {
     fn parse_rental_row(
         &self,
         row: sqlx::sqlite::SqliteRow,
-        executor_details: crate::api::types::ExecutorDetails,
+        node_details: crate::api::types::NodeDetails,
     ) -> Result<RentalInfo, anyhow::Error> {
         let state_str: String = row.get("state");
         let created_at_str: String = row.get("created_at");
         let container_spec_str: String = row.get("container_spec");
         let rental_id: String = row.get("id");
-        let executor_id: String = row.get("executor_id");
+        let node_id: String = row.get("node_id");
 
         // Use existing parse_rental_state for consistency
         let state = Self::parse_rental_state(&state_str, &rental_id);
@@ -1140,7 +1137,7 @@ impl SimplePersistence {
         Ok(RentalInfo {
             rental_id,
             validator_hotkey: row.get("validator_hotkey"),
-            executor_id,
+            node_id,
             container_id: row.get("container_id"),
             ssh_session_id: row.get("ssh_session_id"),
             ssh_credentials: row.get("ssh_credentials"),
@@ -1148,7 +1145,7 @@ impl SimplePersistence {
             created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),
             container_spec: serde_json::from_str(&container_spec_str)?,
             miner_id: row.get::<String, _>("miner_id"),
-            executor_details,
+            node_details,
         })
     }
 
@@ -1199,20 +1196,20 @@ impl SimplePersistence {
         let query = builder.build();
         let rows = query.fetch_all(&self.pool).await?;
 
-        // Parse all rows and fetch executor details for each
+        // Parse all rows and fetch node details for each
         let mut rentals = Vec::new();
         for row in rows {
-            // Extract executor_id and miner_id from the row first
-            let executor_id: String = row.get("executor_id");
+            // Extract node_id and miner_id from the row first
+            let node_id: String = row.get("node_id");
             let miner_id: String = row.get("miner_id");
 
-            // Fetch executor details or use defaults if not found
-            let executor_details = match self.get_executor_details(&executor_id, &miner_id).await {
+            // Fetch node details or use defaults if not found
+            let node_details = match self.get_node_details(&node_id, &miner_id).await {
                 Ok(Some(details)) => details,
                 _ => {
-                    // Default executor details if not found
-                    crate::api::types::ExecutorDetails {
-                        id: executor_id.clone(),
+                    // Default node details if not found
+                    crate::api::types::NodeDetails {
+                        id: node_id.clone(),
                         gpu_specs: vec![],
                         cpu_specs: crate::api::types::CpuSpec {
                             cores: 0,
@@ -1225,7 +1222,7 @@ impl SimplePersistence {
                 }
             };
 
-            rentals.push(self.parse_rental_row(row, executor_details)?);
+            rentals.push(self.parse_rental_row(row, node_details)?);
         }
 
         Ok(rentals)
@@ -1253,7 +1250,7 @@ impl SimplePersistence {
 
         Ok(Rental {
             id: Uuid::parse_str(&id_str)?,
-            executor_id: row.get("executor_id"),
+            node_id: row.get("node_id"),
             customer_public_key: row.get("customer_public_key"),
             docker_image: row.get("docker_image"),
             env_vars: env_vars_str.map(|s| serde_json::from_str(&s)).transpose()?,
@@ -1293,8 +1290,8 @@ impl SimplePersistence {
         let rows = sqlx::query(
             "SELECT
                 id, hotkey, endpoint, verification_score, uptime_percentage,
-                last_seen, registered_at, executor_info,
-                (SELECT COUNT(*) FROM miner_executors WHERE miner_id = miners.id) as executor_count
+                last_seen, registered_at, node_info,
+                (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
              FROM miners
              ORDER BY registered_at DESC
              LIMIT ? OFFSET ?",
@@ -1306,8 +1303,8 @@ impl SimplePersistence {
 
         let mut miners = Vec::new();
         for row in rows {
-            let executor_info_str: String = row.get("executor_info");
-            let executor_count: i64 = row.get("executor_count");
+            let node_info_str: String = row.get("node_info");
+            let node_count: i64 = row.get("node_count");
             let last_seen_str: String = row.get("last_seen");
             let registered_at_str: String = row.get("registered_at");
 
@@ -1315,7 +1312,7 @@ impl SimplePersistence {
                 miner_id: row.get("id"),
                 hotkey: row.get("hotkey"),
                 endpoint: row.get("endpoint"),
-                executor_count: executor_count as u32,
+                node_count: node_count as u32,
                 verification_score: row.get("verification_score"),
                 uptime_percentage: row.get("uptime_percentage"),
                 last_seen: chrono::NaiveDateTime::parse_from_str(
@@ -1335,7 +1332,7 @@ impl SimplePersistence {
                     DateTime::parse_from_rfc3339(&registered_at_str)
                         .map(|dt| dt.with_timezone(&Utc))
                 })?,
-                executor_info: serde_json::from_str(&executor_info_str)
+                node_info: serde_json::from_str(&node_info_str)
                     .unwrap_or(Value::Object(serde_json::Map::new())),
             });
         }
@@ -1349,32 +1346,32 @@ impl SimplePersistence {
         miner_id: &str,
         hotkey: &str,
         endpoint: &str,
-        executors: &[crate::api::types::ExecutorRegistration],
+        nodes: &[crate::api::types::NodeRegistration],
     ) -> Result<(), anyhow::Error> {
         let now = Utc::now().to_rfc3339();
-        let executor_info = serde_json::to_string(&executors)?;
+        let node_info = serde_json::to_string(&nodes)?;
 
         let mut tx = self.pool.begin().await?;
 
         // Validate that grpc_addresses are not already registered
-        for executor in executors {
+        for node in nodes {
             let existing =
-                sqlx::query("SELECT COUNT(*) as count FROM miner_executors WHERE grpc_address = ?")
-                    .bind(&executor.grpc_address)
+                sqlx::query("SELECT COUNT(*) as count FROM miner_nodes WHERE grpc_address = ?")
+                    .bind(&node.grpc_address)
                     .fetch_one(&mut *tx)
                     .await?;
 
             let count: i64 = existing.get("count");
             if count > 0 {
                 return Err(anyhow::anyhow!(
-                    "Executor with grpc_address {} is already registered",
-                    executor.grpc_address
+                    "Node with grpc_address {} is already registered",
+                    node.grpc_address
                 ));
             }
         }
 
         sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, executor_info)
+            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
              VALUES (?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(miner_id)
@@ -1383,22 +1380,22 @@ impl SimplePersistence {
         .bind(&now)
         .bind(&now)
         .bind(&now)
-        .bind(&executor_info)
+        .bind(&node_info)
         .execute(&mut *tx)
         .await?;
 
-        for executor in executors {
-            let executor_id = Uuid::new_v4().to_string();
+        for node in nodes {
+            let node_id = Uuid::new_v4().to_string();
 
             sqlx::query(
-                "INSERT INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, created_at, updated_at)
+                "INSERT INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
-            .bind(&executor_id)
+            .bind(&node_id)
             .bind(miner_id)
-            .bind(&executor.executor_id)
-            .bind(&executor.grpc_address)
-            .bind(executor.gpu_count as i64)
+            .bind(&node.node_id)
+            .bind(&node.grpc_address)
+            .bind(node.gpu_count as i64)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
@@ -1417,8 +1414,8 @@ impl SimplePersistence {
         let row = sqlx::query(
             "SELECT
                 id, hotkey, endpoint, verification_score, uptime_percentage,
-                last_seen, registered_at, executor_info,
-                (SELECT COUNT(*) FROM miner_executors WHERE miner_id = miners.id) as executor_count
+                last_seen, registered_at, node_info,
+                (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
              FROM miners
              WHERE id = ?",
         )
@@ -1427,8 +1424,8 @@ impl SimplePersistence {
         .await?;
 
         if let Some(row) = row {
-            let executor_info_str: String = row.get("executor_info");
-            let executor_count: i64 = row.get("executor_count");
+            let node_info_str: String = row.get("node_info");
+            let node_count: i64 = row.get("node_count");
             let last_seen_str: String = row.get("last_seen");
             let registered_at_str: String = row.get("registered_at");
 
@@ -1436,7 +1433,7 @@ impl SimplePersistence {
                 miner_id: row.get("id"),
                 hotkey: row.get("hotkey"),
                 endpoint: row.get("endpoint"),
-                executor_count: executor_count as u32,
+                node_count: node_count as u32,
                 verification_score: row.get("verification_score"),
                 uptime_percentage: row.get("uptime_percentage"),
                 last_seen: chrono::NaiveDateTime::parse_from_str(
@@ -1456,7 +1453,7 @@ impl SimplePersistence {
                     DateTime::parse_from_rfc3339(&registered_at_str)
                         .map(|dt| dt.with_timezone(&Utc))
                 })?,
-                executor_info: serde_json::from_str(&executor_info_str)
+                node_info: serde_json::from_str(&node_info_str)
                     .unwrap_or(Value::Object(serde_json::Map::new())),
             }))
         } else {
@@ -1485,17 +1482,17 @@ impl SimplePersistence {
             }
         }
 
-        if let Some(executors) = &request.executors {
-            // When updating executors, we need to handle the miner_executors table
+        if let Some(nodes) = &request.nodes {
+            // When updating nodes, we need to handle the miner_nodes table
             let mut tx = self.pool.begin().await?;
 
             // First, validate that new grpc_addresses aren't already registered by other miners
-            for executor in executors {
+            for node in nodes {
                 let existing = sqlx::query(
-                    "SELECT COUNT(*) as count FROM miner_executors
+                    "SELECT COUNT(*) as count FROM miner_nodes
                      WHERE grpc_address = ? AND miner_id != ?",
                 )
-                .bind(&executor.grpc_address)
+                .bind(&node.grpc_address)
                 .bind(miner_id)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -1503,42 +1500,42 @@ impl SimplePersistence {
                 let count: i64 = existing.get("count");
                 if count > 0 {
                     return Err(anyhow::anyhow!(
-                        "Executor with grpc_address {} is already registered by another miner",
-                        executor.grpc_address
+                        "Node with grpc_address {} is already registered by another miner",
+                        node.grpc_address
                     ));
                 }
             }
 
-            // Delete existing executors for this miner
-            sqlx::query("DELETE FROM miner_executors WHERE miner_id = ?")
+            // Delete existing nodes for this miner
+            sqlx::query("DELETE FROM miner_nodes WHERE miner_id = ?")
                 .bind(miner_id)
                 .execute(&mut *tx)
                 .await?;
 
-            // Insert new executors
-            for executor in executors {
-                let executor_id = Uuid::new_v4().to_string();
+            // Insert new nodes
+            for node in nodes {
+                let node_id = Uuid::new_v4().to_string();
 
                 sqlx::query(
-                    "INSERT INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, created_at, updated_at)
+                    "INSERT INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, created_at, updated_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
-                .bind(&executor_id)
+                .bind(&node_id)
                 .bind(miner_id)
-                .bind(&executor.executor_id)
-                .bind(&executor.grpc_address)
-                .bind(executor.gpu_count as i64)
+                .bind(&node.node_id)
+                .bind(&node.grpc_address)
+                .bind(node.gpu_count as i64)
                 .bind(&now)
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
             }
 
-            // Also update the executor_info JSON in the miners table
-            let executor_info = serde_json::to_string(executors)?;
+            // Also update the node_info JSON in the miners table
+            let node_info = serde_json::to_string(nodes)?;
             let result =
-                sqlx::query("UPDATE miners SET executor_info = ?, updated_at = ? WHERE id = ?")
-                    .bind(&executor_info)
+                sqlx::query("UPDATE miners SET node_info = ?, updated_at = ? WHERE id = ?")
+                    .bind(&node_info)
                     .bind(&now)
                     .bind(miner_id)
                     .execute(&mut *tx)
@@ -1575,8 +1572,8 @@ impl SimplePersistence {
         miner_id: &str,
     ) -> Result<Option<MinerHealthData>, anyhow::Error> {
         let rows = sqlx::query(
-            "SELECT executor_id, status, last_health_check, created_at
-             FROM miner_executors
+            "SELECT node_id, status, last_health_check, created_at
+             FROM miner_nodes
              WHERE miner_id = ?",
         )
         .bind(miner_id)
@@ -1587,7 +1584,7 @@ impl SimplePersistence {
             return Ok(None);
         }
 
-        let mut executor_health = Vec::new();
+        let mut node_health = Vec::new();
         let mut latest_check = Utc::now() - chrono::Duration::hours(24);
 
         for row in rows {
@@ -1604,8 +1601,8 @@ impl SimplePersistence {
                 latest_check = last_seen;
             }
 
-            executor_health.push(ExecutorHealthData {
-                executor_id: row.get("executor_id"),
+            node_health.push(NodeHealthData {
+                node_id: row.get("node_id"),
                 status: row
                     .get::<Option<String>, _>("status")
                     .unwrap_or_else(|| "unknown".to_string()),
@@ -1615,7 +1612,7 @@ impl SimplePersistence {
 
         Ok(Some(MinerHealthData {
             last_health_check: latest_check,
-            executor_health,
+            node_health,
         }))
     }
 
@@ -1625,18 +1622,18 @@ impl SimplePersistence {
         miner_id: &str,
         verification_id: &str,
         verification_type: &str,
-        executor_id: Option<&str>,
+        node_id: Option<&str>,
     ) -> Result<(), anyhow::Error> {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO verification_requests (id, miner_id, verification_type, executor_id, scheduled_at, created_at)
+            "INSERT INTO verification_requests (id, miner_id, verification_type, node_id, scheduled_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?)"
         )
         .bind(verification_id)
         .bind(miner_id)
         .bind(verification_type)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -1645,14 +1642,11 @@ impl SimplePersistence {
         Ok(())
     }
 
-    /// Get miner executors
-    pub async fn get_miner_executors(
-        &self,
-        miner_id: &str,
-    ) -> Result<Vec<ExecutorData>, anyhow::Error> {
+    /// Get miner nodes
+    pub async fn get_miner_nodes(&self, miner_id: &str) -> Result<Vec<NodeData>, anyhow::Error> {
         let rows = sqlx::query(
             "SELECT
-                me.executor_id,
+                me.node_id,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
@@ -1660,12 +1654,12 @@ impl SimplePersistence {
                 enp.city,
                 enp.region,
                 enp.country
-             FROM miner_executors me
-             LEFT JOIN gpu_uuid_assignments gua ON me.executor_id = gua.executor_id AND gua.miner_id = me.miner_id
-             LEFT JOIN executor_hardware_profile ehp ON me.executor_id = ehp.executor_id AND me.miner_id = 'miner_' || ehp.miner_uid
-             LEFT JOIN executor_network_profile enp ON me.executor_id = enp.executor_id AND me.miner_id = 'miner_' || enp.miner_uid
+             FROM miner_nodes me
+             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
+             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
              WHERE me.miner_id = ?
-             GROUP BY me.executor_id,
+             GROUP BY me.node_id,
                       ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
                       enp.city, enp.region, enp.country",
         )
@@ -1673,7 +1667,7 @@ impl SimplePersistence {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut executors = Vec::new();
+        let mut nodes = Vec::new();
         for row in rows {
             // Get GPU data from gpu_uuid_assignments join
             let gpu_names: Option<String> = row.get("gpu_names");
@@ -1697,7 +1691,7 @@ impl SimplePersistence {
                 }
             }
 
-            // Get hardware profile data from executor_hardware_profile table
+            // Get hardware profile data from node_hardware_profile table
             let cpu_model: Option<String> = row.get("cpu_model");
             let cpu_cores: Option<i32> = row.get("cpu_cores");
             let ram_gb: Option<i32> = row.get("ram_gb");
@@ -1717,28 +1711,25 @@ impl SimplePersistence {
             let location_profile = basilica_common::LocationProfile::new(city, region, country);
             let location = Some(location_profile.to_string());
 
-            executors.push(ExecutorData {
-                executor_id: row.get("executor_id"),
+            nodes.push(NodeData {
+                node_id: row.get("node_id"),
                 gpu_specs,
                 cpu_specs,
                 location,
             });
         }
 
-        Ok(executors)
+        Ok(nodes)
     }
 
-    /// Get miner ID by executor ID
-    pub async fn get_miner_id_by_executor(
-        &self,
-        executor_id: &str,
-    ) -> Result<String, anyhow::Error> {
+    /// Get miner ID by node ID
+    pub async fn get_miner_id_by_node(&self, node_id: &str) -> Result<String, anyhow::Error> {
         let miner_id: String = sqlx::query(
-            "SELECT miner_id FROM miner_executors \
-                 WHERE executor_id = ? \
+            "SELECT miner_id FROM miner_nodes \
+                 WHERE node_id = ? \
                  LIMIT 1",
         )
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_one(&self.pool)
         .await?
         .get("miner_id");
@@ -1746,16 +1737,16 @@ impl SimplePersistence {
         Ok(miner_id)
     }
 
-    /// Get detailed executor information including GPU and CPU specs
-    pub async fn get_executor_details(
+    /// Get detailed node information including GPU and CPU specs
+    pub async fn get_node_details(
         &self,
-        executor_id: &str,
+        node_id: &str,
         miner_id: &str,
-    ) -> Result<Option<crate::api::types::ExecutorDetails>, anyhow::Error> {
-        // Get executor info with GPU data, hardware profile, network profile, and speed test data
+    ) -> Result<Option<crate::api::types::NodeDetails>, anyhow::Error> {
+        // Get node info with GPU data, hardware profile, network profile, and speed test data
         let row = sqlx::query(
             "SELECT
-                me.executor_id,
+                me.node_id,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
@@ -1766,25 +1757,25 @@ impl SimplePersistence {
                 esp.download_mbps,
                 esp.upload_mbps,
                 esp.test_timestamp
-             FROM miner_executors me
-             LEFT JOIN gpu_uuid_assignments gua ON me.executor_id = gua.executor_id AND gua.miner_id = me.miner_id
-             LEFT JOIN executor_hardware_profile ehp ON me.executor_id = ehp.executor_id AND me.miner_id = 'miner_' || ehp.miner_uid
-             LEFT JOIN executor_network_profile enp ON me.executor_id = enp.executor_id AND me.miner_id = 'miner_' || enp.miner_uid
-             LEFT JOIN executor_speedtest_profile esp ON me.executor_id = esp.executor_id AND me.miner_id = 'miner_' || esp.miner_uid
-             WHERE me.executor_id = ? AND me.miner_id = ?
-             GROUP BY me.executor_id,
+             FROM miner_nodes me
+             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
+             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
+             LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
+             WHERE me.node_id = ? AND me.miner_id = ?
+             GROUP BY me.node_id,
                       ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
                       enp.city, enp.region, enp.country,
                       esp.download_mbps, esp.upload_mbps, esp.test_timestamp
              LIMIT 1",
         )
-        .bind(executor_id)
+        .bind(node_id)
         .bind(miner_id)
         .fetch_optional(&self.pool)
         .await?;
 
         if let Some(row) = row {
-            let executor_id: String = row.get("executor_id");
+            let node_id: String = row.get("node_id");
 
             // Get GPU data from gpu_uuid_assignments join
             let gpu_names: Option<String> = row.get("gpu_names");
@@ -1858,8 +1849,8 @@ impl SimplePersistence {
                 None
             };
 
-            Ok(Some(crate::api::types::ExecutorDetails {
-                id: executor_id,
+            Ok(Some(crate::api::types::NodeDetails {
+                id: node_id,
                 gpu_specs,
                 cpu_specs,
                 location: final_location,
@@ -1870,37 +1861,37 @@ impl SimplePersistence {
         }
     }
 
-    /// Get the actual gpu_count for an executor from gpu_uuid_assignments
-    pub async fn get_executor_gpu_count_from_assignments(
+    /// Get the actual gpu_count for an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_count_from_assignments(
         &self,
         miner_id: &str,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<u32, anyhow::Error> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT gpu_uuid) FROM gpu_uuid_assignments
-             WHERE miner_id = ? AND executor_id = ?",
+             WHERE miner_id = ? AND node_id = ?",
         )
         .bind(miner_id)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(count as u32)
     }
 
-    /// Get the actual gpu_memory_gb for a specific GPU index of an executor from gpu_uuid_assignments
-    pub async fn get_executor_gpu_memory_gb_by_index(
+    /// Get the actual gpu_memory_gb for a specific GPU index of an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_memory_gb_by_index(
         &self,
         miner_id: &str,
-        executor_id: &str,
+        node_id: &str,
         index: u32,
     ) -> Result<f64, anyhow::Error> {
         let memory: f64 = sqlx::query_scalar(
             "SELECT COALESCE(gpu_memory_gb, 0.0) FROM gpu_uuid_assignments
-             WHERE miner_id = ? AND executor_id = ? AND gpu_index = ?",
+             WHERE miner_id = ? AND node_id = ? AND gpu_index = ?",
         )
         .bind(miner_id)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(index)
         .fetch_one(&self.pool)
         .await?;
@@ -1908,19 +1899,19 @@ impl SimplePersistence {
         Ok(memory)
     }
 
-    /// Get the actual gpu_memory_gb for a specific GPU index of an executor from gpu_uuid_assignments
-    pub async fn get_executor_gpu_memory_gb_by_gpu_uuid(
+    /// Get the actual gpu_memory_gb for a specific GPU index of an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_memory_gb_by_gpu_uuid(
         &self,
         miner_id: &str,
-        executor_id: &str,
+        node_id: &str,
         gpu_uuid: &str,
     ) -> Result<f64, anyhow::Error> {
         let memory: f64 = sqlx::query_scalar(
             "SELECT COALESCE(gpu_memory_gb, 0.0) FROM gpu_uuid_assignments
-             WHERE miner_id = ? AND executor_id = ? AND gpu_uuid = ?",
+             WHERE miner_id = ? AND node_id = ? AND gpu_uuid = ?",
         )
         .bind(miner_id)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(gpu_uuid)
         .fetch_one(&self.pool)
         .await?;
@@ -1928,59 +1919,59 @@ impl SimplePersistence {
         Ok(memory)
     }
 
-    /// Get the actual gpu_memory_gb for the first GPU (index 0) of an executor from gpu_uuid_assignments
-    pub async fn get_executor_first_gpu_memory_gb(
+    /// Get the actual gpu_memory_gb for the first GPU (index 0) of an node from gpu_uuid_assignments
+    pub async fn get_node_first_gpu_memory_gb(
         &self,
         miner_id: &str,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<f64, anyhow::Error> {
         let memory: f64 = sqlx::query_scalar(
             "SELECT COALESCE(gpu_memory_gb, 0.0) FROM gpu_uuid_assignments
-             WHERE miner_id = ? AND executor_id = ? AND gpu_index = 0",
+             WHERE miner_id = ? AND node_id = ? AND gpu_index = 0",
         )
         .bind(miner_id)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_one(&self.pool)
         .await?;
 
         Ok(memory)
     }
 
-    /// Get the GPU name/model for an executor from gpu_uuid_assignments
-    pub async fn get_executor_gpu_name_from_assignments(
+    /// Get the GPU name/model for an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_name_from_assignments(
         &self,
         miner_id: &str,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<Option<String>, anyhow::Error> {
         let gpu_name: Option<String> = sqlx::query_scalar(
             "SELECT gpu_name FROM gpu_uuid_assignments
-             WHERE miner_id = ? AND executor_id = ?
+             WHERE miner_id = ? AND node_id = ?
              LIMIT 1",
         )
         .bind(miner_id)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(gpu_name)
     }
 
-    /// Get the actual gpu_count for all ONLINE executors of a miner from gpu_uuid_assignments
+    /// Get the actual gpu_count for all ONLINE nodes of a miner from gpu_uuid_assignments
     pub async fn get_miner_gpu_uuid_assignments(
         &self,
         miner_id: &str,
     ) -> Result<Vec<(String, u32, String, f64)>, anyhow::Error> {
         let rows = sqlx::query(
             "SELECT
-                ga.executor_id,
+                ga.node_id,
                 COUNT(DISTINCT ga.gpu_uuid) as gpu_count,
                 ga.gpu_name,
                 MAX(ga.gpu_memory_gb) as gpu_memory_gb
              FROM gpu_uuid_assignments ga
-             JOIN miner_executors me ON ga.executor_id = me.executor_id AND ga.miner_id = me.miner_id
+             JOIN miner_nodes me ON ga.node_id = me.node_id AND ga.miner_id = me.miner_id
              WHERE ga.miner_id = ?
                 AND me.status IN ('online', 'verified')
-             GROUP BY ga.executor_id, ga.gpu_name
+             GROUP BY ga.node_id, ga.gpu_name
              HAVING COUNT(DISTINCT ga.gpu_uuid) > 0",
         )
         .bind(miner_id)
@@ -1989,12 +1980,12 @@ impl SimplePersistence {
 
         let mut results = Vec::new();
         for row in rows {
-            let executor_id: String = row.get("executor_id");
+            let node_id: String = row.get("node_id");
             let gpu_count: i64 = row.get("gpu_count");
             let gpu_name: String = row.get("gpu_name");
             let gpu_memory_gb: f64 = row.get("gpu_memory_gb");
 
-            results.push((executor_id, gpu_count as u32, gpu_name, gpu_memory_gb));
+            results.push((node_id, gpu_count as u32, gpu_name, gpu_memory_gb));
         }
 
         Ok(results)
@@ -2008,7 +1999,7 @@ impl SimplePersistence {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT ga.gpu_uuid)
              FROM gpu_uuid_assignments ga
-             INNER JOIN miner_executors me ON ga.executor_id = me.executor_id AND ga.miner_id = me.miner_id
+             INNER JOIN miner_nodes me ON ga.node_id = me.node_id AND ga.miner_id = me.miner_id
              WHERE ga.miner_id = ?
                 AND me.status IN ('online', 'verified')",
         )
@@ -2075,32 +2066,28 @@ impl SimplePersistence {
     /// Get last successful full validation data for lightweight validation
     pub async fn get_last_full_validation_data(
         &self,
-        executor_id: &str,
+        node_id: &str,
         miner_id: &str,
     ) -> Result<
         Option<(
             f64,
-            Option<super::super::miner_prover::types::ExecutorResult>,
+            Option<super::super::miner_prover::types::NodeResult>,
             u64,
             bool,
         )>,
         anyhow::Error,
     > {
         // duality due to schema migration issues
-        let composite_executor_id = if miner_id.starts_with("miner_") {
-            format!(
-                "{}__{}",
-                miner_id.replacen("miner_", "miner", 1),
-                executor_id
-            )
+        let composite_node_id = if miner_id.starts_with("miner_") {
+            format!("{}__{}", miner_id.replacen("miner_", "miner", 1), node_id)
         } else {
-            format!("miner{}__{}", miner_id, executor_id)
+            format!("miner{}__{}", miner_id, node_id)
         };
 
         let query = r#"
             SELECT score, details
             FROM verification_logs
-            WHERE (executor_id = ? OR executor_id GLOB ('*__' || ?) OR executor_id = ? )
+            WHERE (node_id = ? OR node_id GLOB ('*__' || ?) OR node_id = ? )
               AND success = 1
               AND verification_type = 'ssh_automation'
               AND (
@@ -2112,9 +2099,9 @@ impl SimplePersistence {
         "#;
 
         let row = sqlx::query(query)
-            .bind(executor_id)
-            .bind(executor_id)
-            .bind(&composite_executor_id)
+            .bind(node_id)
+            .bind(node_id)
+            .bind(&composite_node_id)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -2125,11 +2112,11 @@ impl SimplePersistence {
             let details: serde_json::Value = serde_json::from_str(&details_str)
                 .map_err(|e| anyhow::anyhow!("Failed to parse details JSON: {}", e))?;
 
-            let executor_result = details.get("executor_result").and_then(|v| {
+            let node_result = details.get("node_result").and_then(|v| {
                 if v.is_null() {
                     None
                 } else {
-                    serde_json::from_value::<super::super::miner_prover::types::ExecutorResult>(
+                    serde_json::from_value::<super::super::miner_prover::types::NodeResult>(
                         v.clone(),
                     )
                     .ok()
@@ -2148,7 +2135,7 @@ impl SimplePersistence {
 
             Ok(Some((
                 score,
-                executor_result,
+                node_result,
                 gpu_count,
                 binary_validation_successful,
             )))
@@ -2166,7 +2153,7 @@ impl SimplePersistence {
         let count_query = r#"
             SELECT COUNT(*) as count
             FROM verification_logs vl
-            INNER JOIN miner_executors me ON vl.executor_id = me.executor_id
+            INNER JOIN miner_nodes me ON vl.node_id = me.node_id
             WHERE me.miner_id = ?
             AND vl.success = 1
             AND vl.timestamp > datetime('now', ? || ' hours')
@@ -2182,16 +2169,16 @@ impl SimplePersistence {
         Ok(count as u32)
     }
 
-    /// Get known executors from database for a miner
-    pub async fn get_known_executors_for_miner(
+    /// Get known nodes from database for a miner
+    pub async fn get_known_nodes_for_miner(
         &self,
         miner_uid: u16,
     ) -> Result<Vec<(String, String, i32, String)>, anyhow::Error> {
         let miner_id = format!("miner_{}", miner_uid);
 
         let query = r#"
-            SELECT executor_id, grpc_address, gpu_count, status
-            FROM miner_executors
+            SELECT node_id, grpc_address, gpu_count, status
+            FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
             AND (last_health_check IS NULL OR last_health_check > datetime('now', '-1 hour'))
@@ -2202,25 +2189,25 @@ impl SimplePersistence {
             .fetch_all(&self.pool)
             .await?;
 
-        let mut known_executors = Vec::new();
+        let mut known_nodes = Vec::new();
         for row in rows {
-            let executor_id: String = row.get("executor_id");
+            let node_id: String = row.get("node_id");
             let grpc_address: String = row.get("grpc_address");
             let gpu_count: i32 = row.get("gpu_count");
             let status: String = row.get("status");
-            known_executors.push((executor_id, grpc_address, gpu_count, status));
+            known_nodes.push((node_id, grpc_address, gpu_count, status));
         }
 
-        Ok(known_executors)
+        Ok(known_nodes)
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Store executor hardware profile information
+    /// Store node hardware profile information
     #[allow(clippy::too_many_arguments)]
-    pub async fn store_executor_hardware_profile(
+    pub async fn store_node_hardware_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         cpu_model: Option<String>,
         cpu_cores: Option<i32>,
         ram_gb: Option<i32>,
@@ -2229,10 +2216,10 @@ impl SimplePersistence {
     ) -> Result<(), anyhow::Error> {
         sqlx::query(
             r#"
-            INSERT INTO executor_hardware_profile
-            (miner_uid, executor_id, cpu_model, cpu_cores, ram_gb, disk_gb, full_hardware_json, updated_at)
+            INSERT INTO node_hardware_profile
+            (miner_uid, node_id, cpu_model, cpu_cores, ram_gb, disk_gb, full_hardware_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+            ON CONFLICT(miner_uid, node_id) DO UPDATE SET
                 cpu_model = excluded.cpu_model,
                 cpu_cores = excluded.cpu_cores,
                 ram_gb = excluded.ram_gb,
@@ -2242,7 +2229,7 @@ impl SimplePersistence {
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(cpu_model)
         .bind(cpu_cores)
         .bind(ram_gb)
@@ -2253,18 +2240,18 @@ impl SimplePersistence {
 
         info!(
             miner_uid = miner_uid,
-            executor_id = executor_id,
-            "Stored hardware profile for executor"
+            node_id = node_id,
+            "Stored hardware profile for node"
         );
 
         Ok(())
     }
 
-    /// Retrieve executor hardware profile from database
-    pub async fn get_executor_hardware_profile(
+    /// Retrieve node hardware profile from database
+    pub async fn get_node_hardware_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<
         Option<(
             String,
@@ -2278,12 +2265,12 @@ impl SimplePersistence {
         let row = sqlx::query(
             r#"
             SELECT cpu_model, cpu_cores, ram_gb, disk_gb, full_hardware_json
-            FROM executor_hardware_profile
-            WHERE miner_uid = ? AND executor_id = ?
+            FROM node_hardware_profile
+            WHERE miner_uid = ? AND node_id = ?
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2306,12 +2293,12 @@ impl SimplePersistence {
         }
     }
 
-    /// Store executor network speedtest profile information
+    /// Store node network speedtest profile information
     #[allow(clippy::too_many_arguments)]
-    pub async fn store_executor_speedtest_profile(
+    pub async fn store_node_speedtest_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         download_mbps: Option<f64>,
         upload_mbps: Option<f64>,
         test_timestamp: &str,
@@ -2320,10 +2307,10 @@ impl SimplePersistence {
     ) -> Result<(), anyhow::Error> {
         sqlx::query(
             r#"
-            INSERT INTO executor_speedtest_profile
-            (miner_uid, executor_id, download_mbps, upload_mbps, test_timestamp, test_server, full_result_json, updated_at)
+            INSERT INTO node_speedtest_profile
+            (miner_uid, node_id, download_mbps, upload_mbps, test_timestamp, test_server, full_result_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+            ON CONFLICT(miner_uid, node_id) DO UPDATE SET
                 download_mbps = excluded.download_mbps,
                 upload_mbps = excluded.upload_mbps,
                 test_timestamp = excluded.test_timestamp,
@@ -2333,7 +2320,7 @@ impl SimplePersistence {
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(download_mbps)
         .bind(upload_mbps)
         .bind(test_timestamp)
@@ -2344,31 +2331,31 @@ impl SimplePersistence {
 
         info!(
             miner_uid = miner_uid,
-            executor_id = executor_id,
+            node_id = node_id,
             download_mbps = download_mbps.unwrap_or(0.0),
             upload_mbps = upload_mbps.unwrap_or(0.0),
-            "Stored speedtest profile for executor"
+            "Stored speedtest profile for node"
         );
 
         Ok(())
     }
 
-    /// Retrieve executor speedtest profile from database
-    pub async fn get_executor_speedtest_profile(
+    /// Retrieve node speedtest profile from database
+    pub async fn get_node_speedtest_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<Option<(String, Option<f64>, Option<f64>, String, Option<String>)>, anyhow::Error>
     {
         let row = sqlx::query(
             r#"
             SELECT download_mbps, upload_mbps, test_timestamp, test_server, full_result_json
-            FROM executor_speedtest_profile
-            WHERE miner_uid = ? AND executor_id = ?
+            FROM node_speedtest_profile
+            WHERE miner_uid = ? AND node_id = ?
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2391,12 +2378,12 @@ impl SimplePersistence {
         }
     }
 
-    /// Store executor network geolocation profile information
+    /// Store node network geolocation profile information
     #[allow(clippy::too_many_arguments)]
-    pub async fn store_executor_network_profile(
+    pub async fn store_node_network_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         ip_address: Option<String>,
         hostname: Option<String>,
         city: Option<String>,
@@ -2411,11 +2398,11 @@ impl SimplePersistence {
     ) -> Result<(), anyhow::Error> {
         sqlx::query(
             r#"
-            INSERT INTO executor_network_profile
-            (miner_uid, executor_id, ip_address, hostname, city, region, country, location,
+            INSERT INTO node_network_profile
+            (miner_uid, node_id, ip_address, hostname, city, region, country, location,
              organization, postal_code, timezone, test_timestamp, full_result_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+            ON CONFLICT(miner_uid, node_id) DO UPDATE SET
                 ip_address = excluded.ip_address,
                 hostname = excluded.hostname,
                 city = excluded.city,
@@ -2431,7 +2418,7 @@ impl SimplePersistence {
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(ip_address.clone())
         .bind(hostname)
         .bind(city.clone())
@@ -2448,25 +2435,25 @@ impl SimplePersistence {
 
         info!(
             miner_uid = miner_uid,
-            executor_id = executor_id,
+            node_id = node_id,
             ip = ip_address.unwrap_or_else(|| "Unknown".to_string()),
             country = country.unwrap_or_else(|| "Unknown".to_string()),
             city = city.unwrap_or_else(|| "Unknown".to_string()),
             region = region.unwrap_or_else(|| "Unknown".to_string()),
             organization = organization.unwrap_or_else(|| "Unknown".to_string()),
             location = location.unwrap_or_else(|| "Unknown".to_string()),
-            "Stored network profile for executor"
+            "Stored network profile for node"
         );
 
         Ok(())
     }
 
-    /// Retrieve executor network profile from database
+    /// Retrieve node network profile from database
     #[allow(clippy::type_complexity)]
-    pub async fn get_executor_network_profile(
+    pub async fn get_node_network_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<
         Option<(
             String,
@@ -2487,12 +2474,12 @@ impl SimplePersistence {
             r#"
             SELECT ip_address, hostname, city, region, country, location, organization,
                    postal_code, timezone, test_timestamp, full_result_json
-            FROM executor_network_profile
-            WHERE miner_uid = ? AND executor_id = ?
+            FROM node_network_profile
+            WHERE miner_uid = ? AND node_id = ?
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2527,12 +2514,12 @@ impl SimplePersistence {
         }
     }
 
-    /// Store executor Docker validation profile information
+    /// Store node Docker validation profile information
     #[allow(clippy::too_many_arguments)]
-    pub async fn store_executor_docker_profile(
+    pub async fn store_node_docker_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         service_active: bool,
         docker_version: Option<String>,
         images_pulled: Vec<String>,
@@ -2544,11 +2531,11 @@ impl SimplePersistence {
 
         sqlx::query(
             r#"
-            INSERT INTO executor_docker_profile
-            (miner_uid, executor_id, service_active, docker_version, images_pulled,
+            INSERT INTO node_docker_profile
+            (miner_uid, node_id, service_active, docker_version, images_pulled,
              dind_supported, validation_error, full_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+            ON CONFLICT(miner_uid, node_id) DO UPDATE SET
                 service_active = excluded.service_active,
                 docker_version = excluded.docker_version,
                 images_pulled = excluded.images_pulled,
@@ -2559,7 +2546,7 @@ impl SimplePersistence {
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(service_active)
         .bind(docker_version)
         .bind(&images_json)
@@ -2572,11 +2559,11 @@ impl SimplePersistence {
         Ok(())
     }
 
-    /// Get executor Docker validation profile
-    pub async fn get_executor_docker_profile(
+    /// Get node Docker validation profile
+    pub async fn get_node_docker_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<
         Option<(
             String,
@@ -2591,12 +2578,12 @@ impl SimplePersistence {
         let row = sqlx::query(
             r#"
             SELECT service_active, docker_version, images_pulled, dind_supported, validation_error, full_json
-            FROM executor_docker_profile
-            WHERE miner_uid = ? AND executor_id = ?
+            FROM node_docker_profile
+            WHERE miner_uid = ? AND node_id = ?
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2622,20 +2609,20 @@ impl SimplePersistence {
         }
     }
 
-    /// Store executor NAT validation profile information
-    pub async fn store_executor_nat_profile(
+    /// Store node NAT validation profile information
+    pub async fn store_node_nat_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         profile: &crate::miner_prover::validation_nat::NatProfile,
     ) -> Result<(), anyhow::Error> {
         sqlx::query(
             r#"
-            INSERT INTO executor_nat_profile
-            (miner_uid, executor_id, is_accessible, test_port, test_path, container_id,
+            INSERT INTO node_nat_profile
+            (miner_uid, node_id, is_accessible, test_port, test_path, container_id,
              response_content, test_timestamp, full_json, error_message, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+            ON CONFLICT(miner_uid, node_id) DO UPDATE SET
                 is_accessible = excluded.is_accessible,
                 test_port = excluded.test_port,
                 test_path = excluded.test_path,
@@ -2648,7 +2635,7 @@ impl SimplePersistence {
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(profile.is_accessible)
         .bind(profile.test_port as i32)
         .bind(&profile.test_path)
@@ -2663,22 +2650,22 @@ impl SimplePersistence {
         Ok(())
     }
 
-    /// Get executor NAT validation profile
-    pub async fn get_executor_nat_profile(
+    /// Get node NAT validation profile
+    pub async fn get_node_nat_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<Option<crate::miner_prover::validation_nat::NatProfile>, anyhow::Error> {
         let row = sqlx::query(
             r#"
             SELECT is_accessible, test_port, test_path, container_id, response_content,
                    test_timestamp, full_json, error_message
-            FROM executor_nat_profile
-            WHERE miner_uid = ? AND executor_id = ?
+            FROM node_nat_profile
+            WHERE miner_uid = ? AND node_id = ?
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2710,22 +2697,22 @@ impl SimplePersistence {
         }
     }
 
-    /// Store executor storage validation profile information
-    pub async fn store_executor_storage_profile(
+    /// Store node storage validation profile information
+    pub async fn store_node_storage_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         profile: &crate::miner_prover::validation_storage::StorageProfile,
     ) -> Result<(), anyhow::Error> {
         let filesystem_details_json = serde_json::to_string(&profile.filesystem_details)?;
 
         sqlx::query(
             r#"
-            INSERT INTO executor_storage_profile
-            (miner_uid, executor_id, total_bytes, available_bytes,
+            INSERT INTO node_storage_profile
+            (miner_uid, node_id, total_bytes, available_bytes,
              required_bytes, filesystem_details, collection_timestamp, full_json, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+            ON CONFLICT(miner_uid, node_id) DO UPDATE SET
                 total_bytes = excluded.total_bytes,
                 available_bytes = excluded.available_bytes,
                 required_bytes = excluded.required_bytes,
@@ -2736,7 +2723,7 @@ impl SimplePersistence {
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .bind(profile.total_bytes as i64)
         .bind(profile.available_bytes as i64)
         .bind(profile.required_bytes as i64)
@@ -2749,23 +2736,23 @@ impl SimplePersistence {
         Ok(())
     }
 
-    /// Get executor storage validation profile
-    pub async fn get_executor_storage_profile(
+    /// Get node storage validation profile
+    pub async fn get_node_storage_profile(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<Option<crate::miner_prover::validation_storage::StorageProfile>, anyhow::Error>
     {
         let row = sqlx::query(
             r#"
             SELECT total_bytes, available_bytes, required_bytes,
                    filesystem_details, collection_timestamp, full_json
-            FROM executor_storage_profile
-            WHERE miner_uid = ? AND executor_id = ?
+            FROM node_storage_profile
+            WHERE miner_uid = ? AND node_id = ?
             "#,
         )
         .bind(miner_uid as i32)
-        .bind(executor_id)
+        .bind(node_id)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -2803,7 +2790,7 @@ impl ValidatorPersistence for SimplePersistence {
     async fn save_rental(&self, rental: &RentalInfo) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO rentals (
-                id, validator_hotkey, executor_id, container_id, ssh_session_id,
+                id, validator_hotkey, node_id, container_id, ssh_session_id,
                 ssh_credentials, state, created_at, container_spec, miner_id
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
@@ -2815,7 +2802,7 @@ impl ValidatorPersistence for SimplePersistence {
         )
         .bind(&rental.rental_id)
         .bind(&rental.validator_hotkey)
-        .bind(&rental.executor_id)
+        .bind(&rental.node_id)
         .bind(&rental.container_id)
         .bind(&rental.ssh_session_id)
         .bind(&rental.ssh_credentials)
@@ -2876,10 +2863,10 @@ impl ValidatorPersistence for SimplePersistence {
     }
 }
 
-/// Executor statistics derived from verification logs
+/// Nodestatistics derived from verification logs
 #[derive(Debug, Clone)]
-pub struct ExecutorStats {
-    pub executor_id: String,
+pub struct NodeStats {
+    pub node_id: String,
     pub total_verifications: u64,
     pub successful_verifications: u64,
     pub average_score: Option<f64>,
@@ -2888,7 +2875,7 @@ pub struct ExecutorStats {
     pub last_verification: Option<DateTime<Utc>>,
 }
 
-impl ExecutorStats {
+impl NodeStats {
     pub fn success_rate(&self) -> f64 {
         if self.total_verifications == 0 {
             0.0
@@ -2901,7 +2888,7 @@ impl ExecutorStats {
 /// Available capacity entry
 #[derive(Debug, Clone)]
 pub struct CapacityEntry {
-    pub executor_id: String,
+    pub node_id: String,
     pub verification_score: f64,
     pub success_rate: f64,
     pub last_verification: DateTime<Utc>,
@@ -2915,41 +2902,41 @@ pub struct MinerData {
     pub miner_id: String,
     pub hotkey: String,
     pub endpoint: String,
-    pub executor_count: u32,
+    pub node_count: u32,
     pub verification_score: f64,
     pub uptime_percentage: f64,
     pub last_seen: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
-    pub executor_info: Value,
+    pub node_info: Value,
 }
 
 /// Miner health data
 #[derive(Debug, Clone)]
 pub struct MinerHealthData {
     pub last_health_check: DateTime<Utc>,
-    pub executor_health: Vec<ExecutorHealthData>,
+    pub node_health: Vec<NodeHealthData>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ExecutorHealthData {
-    pub executor_id: String,
+pub struct NodeHealthData {
+    pub node_id: String,
     pub status: String,
     pub last_seen: DateTime<Utc>,
 }
 
-/// Executor details for miner listings
+/// Nodedetails for miner listings
 #[derive(Debug, Clone)]
-pub struct ExecutorData {
-    pub executor_id: String,
+pub struct NodeData {
+    pub node_id: String,
     pub gpu_specs: Vec<crate::api::types::GpuSpec>,
     pub cpu_specs: crate::api::types::CpuSpec,
     pub location: Option<String>,
 }
 
-/// Available executor data for rental listings
+/// Available node data for rental listings
 #[derive(Debug, Clone)]
-pub struct AvailableExecutorData {
-    pub executor_id: String,
+pub struct AvailableNodeData {
+    pub node_id: String,
     pub miner_id: String,
     pub gpu_specs: Vec<crate::api::types::GpuSpec>,
     pub cpu_specs: crate::api::types::CpuSpec,
@@ -2965,7 +2952,7 @@ pub struct AvailableExecutorData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{CpuSpec, ExecutorRegistration, GpuSpec, UpdateMinerRequest};
+    use crate::api::types::{CpuSpec, GpuSpec, NodeRegistration, UpdateMinerRequest};
 
     #[tokio::test]
     async fn test_prevent_duplicate_grpc_address_registration() {
@@ -2975,8 +2962,8 @@ mod tests {
             .expect("Failed to create persistence");
 
         // First miner registration
-        let executors1 = vec![ExecutorRegistration {
-            executor_id: "exec1".to_string(),
+        let nodes1 = vec![NodeRegistration {
+            node_id: "exec1".to_string(),
             grpc_address: "http://192.168.1.1:8080".to_string(),
             gpu_count: 2,
             gpu_specs: vec![GpuSpec {
@@ -2993,13 +2980,13 @@ mod tests {
 
         // Register first miner successfully
         let result = persistence
-            .register_miner("miner1", "hotkey1", "http://miner1.com", &executors1)
+            .register_miner("miner1", "hotkey1", "http://miner1.com", &nodes1)
             .await;
         assert!(result.is_ok());
 
         // Second miner trying to register with same grpc_address
-        let executors2 = vec![ExecutorRegistration {
-            executor_id: "exec2".to_string(),
+        let nodes2 = vec![NodeRegistration {
+            node_id: "exec2".to_string(),
             grpc_address: "http://192.168.1.1:8080".to_string(), // Same address!
             gpu_count: 1,
             gpu_specs: vec![GpuSpec {
@@ -3016,7 +3003,7 @@ mod tests {
 
         // Should fail due to duplicate grpc_address
         let result = persistence
-            .register_miner("miner2", "hotkey2", "http://miner2.com", &executors2)
+            .register_miner("miner2", "hotkey2", "http://miner2.com", &nodes2)
             .await;
         assert!(result.is_err());
         assert!(result
@@ -3033,8 +3020,8 @@ mod tests {
             .expect("Failed to create persistence");
 
         // Register first miner
-        let executors1 = vec![ExecutorRegistration {
-            executor_id: "exec1".to_string(),
+        let nodes1 = vec![NodeRegistration {
+            node_id: "exec1".to_string(),
             grpc_address: "http://192.168.1.1:8080".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
@@ -3046,13 +3033,13 @@ mod tests {
         }];
 
         persistence
-            .register_miner("miner1", "hotkey1", "http://miner1.com", &executors1)
+            .register_miner("miner1", "hotkey1", "http://miner1.com", &nodes1)
             .await
             .expect("Failed to register miner1");
 
         // Register second miner with different address
-        let executors2 = vec![ExecutorRegistration {
-            executor_id: "exec2".to_string(),
+        let nodes2 = vec![NodeRegistration {
+            node_id: "exec2".to_string(),
             grpc_address: "http://192.168.1.2:8080".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
@@ -3064,15 +3051,15 @@ mod tests {
         }];
 
         persistence
-            .register_miner("miner2", "hotkey2", "http://miner2.com", &executors2)
+            .register_miner("miner2", "hotkey2", "http://miner2.com", &nodes2)
             .await
             .expect("Failed to register miner2");
 
         // Try to update miner2 with miner1's grpc_address
         let update_request = UpdateMinerRequest {
             endpoint: None,
-            executors: Some(vec![ExecutorRegistration {
-                executor_id: "exec2_updated".to_string(),
+            nodes: Some(vec![NodeRegistration {
+                node_id: "exec2_updated".to_string(),
                 grpc_address: "http://192.168.1.1:8080".to_string(), // Trying to use miner1's address
                 gpu_count: 1,
                 gpu_specs: vec![],
@@ -3101,8 +3088,8 @@ mod tests {
             .expect("Failed to create persistence");
 
         // Register miner
-        let executors = vec![ExecutorRegistration {
-            executor_id: "exec1".to_string(),
+        let nodes = vec![NodeRegistration {
+            node_id: "exec1".to_string(),
             grpc_address: "http://192.168.1.1:8080".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
@@ -3114,15 +3101,15 @@ mod tests {
         }];
 
         persistence
-            .register_miner("miner1", "hotkey1", "http://miner1.com", &executors)
+            .register_miner("miner1", "hotkey1", "http://miner1.com", &nodes)
             .await
             .expect("Failed to register miner");
 
         // Update same miner with same grpc_address (should succeed)
         let update_request = UpdateMinerRequest {
             endpoint: Some("http://miner1-updated.com".to_string()),
-            executors: Some(vec![ExecutorRegistration {
-                executor_id: "exec1_updated".to_string(),
+            nodes: Some(vec![NodeRegistration {
+                node_id: "exec1_updated".to_string(),
                 grpc_address: "http://192.168.1.1:8080".to_string(), // Same address is OK for same miner
                 gpu_count: 3,                                        // Updated GPU count
                 gpu_specs: vec![],
@@ -3146,9 +3133,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Register initial miner with executor
-        let executor1 = ExecutorRegistration {
-            executor_id: "exec1".to_string(),
+        // Register initial miner with node
+        let node1 = NodeRegistration {
+            node_id: "exec1".to_string(),
             grpc_address: "http://192.168.1.100:50051".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
@@ -3160,25 +3147,23 @@ mod tests {
         };
 
         persistence
-            .register_miner("miner1", "hotkey1", "http://miner1.com", &[executor1])
+            .register_miner("miner1", "hotkey1", "http://miner1.com", &[node1])
             .await
             .unwrap();
 
         // Manually insert GPU UUID for testing
         let gpu_uuid = "GPU-550e8400-e29b-41d4-a716-446655440000";
-        sqlx::query(
-            "UPDATE miner_executors SET gpu_uuids = ? WHERE miner_id = ? AND executor_id = ?",
-        )
-        .bind(gpu_uuid)
-        .bind("miner1")
-        .bind("exec1")
-        .execute(&persistence.pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE miner_nodes SET gpu_uuids = ? WHERE miner_id = ? AND node_id = ?")
+            .bind(gpu_uuid)
+            .bind("miner1")
+            .bind("exec1")
+            .execute(&persistence.pool)
+            .await
+            .unwrap();
 
-        // Register another miner with different executor
-        let executor2 = ExecutorRegistration {
-            executor_id: "exec2".to_string(),
+        // Register another miner with different node
+        let node2 = NodeRegistration {
+            node_id: "exec2".to_string(),
             grpc_address: "http://192.168.1.101:50051".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
@@ -3190,12 +3175,12 @@ mod tests {
         };
 
         persistence
-            .register_miner("miner2", "hotkey2", "http://miner2.com", &[executor2])
+            .register_miner("miner2", "hotkey2", "http://miner2.com", &[node2])
             .await
             .unwrap();
 
-        // Verify both executors exist
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miner_executors")
+        // Verify both nodes exist
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miner_nodes")
             .fetch_one(&persistence.pool)
             .await
             .unwrap();
@@ -3203,7 +3188,7 @@ mod tests {
 
         // Verify only one has the GPU UUID
         let gpu_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM miner_executors WHERE gpu_uuids = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM miner_nodes WHERE gpu_uuids = ?")
                 .bind(gpu_uuid)
                 .fetch_one(&persistence.pool)
                 .await
@@ -3218,9 +3203,9 @@ mod tests {
             .await
             .expect("Failed to create persistence");
 
-        // Register a miner with an executor
-        let executor = ExecutorRegistration {
-            executor_id: "exec1".to_string(),
+        // Register a miner with an node
+        let node = NodeRegistration {
+            node_id: "exec1".to_string(),
             grpc_address: "http://192.168.1.100:50051".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
@@ -3232,13 +3217,13 @@ mod tests {
         };
 
         persistence
-            .register_miner("miner_1", "hotkey1", "http://miner1.com", &[executor])
+            .register_miner("miner_1", "hotkey1", "http://miner1.com", &[node])
             .await
             .unwrap();
 
-        // Store hardware profile for the executor
+        // Store hardware profile for the node
         persistence
-            .store_executor_hardware_profile(
+            .store_node_hardware_profile(
                 1, // miner_uid
                 "exec1",
                 Some("AMD EPYC 7763".to_string()),
@@ -3250,9 +3235,9 @@ mod tests {
             .await
             .unwrap();
 
-        // Store network profile for the executor
+        // Store network profile for the node
         persistence
-            .store_executor_network_profile(
+            .store_node_network_profile(
                 1, // miner_uid
                 "exec1",
                 Some("192.168.1.100".to_string()),
@@ -3270,23 +3255,23 @@ mod tests {
             .await
             .unwrap();
 
-        // Get miner executors and verify hardware profile is used
-        let executors = persistence.get_miner_executors("miner_1").await.unwrap();
-        assert_eq!(executors.len(), 1);
+        // Get miner nodes and verify hardware profile is used
+        let nodes = persistence.get_miner_nodes("miner_1").await.unwrap();
+        assert_eq!(nodes.len(), 1);
 
-        let executor = &executors[0];
-        assert_eq!(executor.executor_id, "exec1");
-        assert_eq!(executor.cpu_specs.model, "AMD EPYC 7763");
-        assert_eq!(executor.cpu_specs.cores, 64);
-        assert_eq!(executor.cpu_specs.memory_gb, 256);
+        let node = &nodes[0];
+        assert_eq!(node.node_id, "exec1");
+        assert_eq!(node.cpu_specs.model, "AMD EPYC 7763");
+        assert_eq!(node.cpu_specs.cores, 64);
+        assert_eq!(node.cpu_specs.memory_gb, 256);
         assert_eq!(
-            executor.location,
+            node.location,
             Some("San Francisco/California/US".to_string())
         );
 
-        // Test get_available_executors with hardware profile
+        // Test get_available_nodes with hardware profile
         let available = persistence
-            .get_available_executors(None, None, None, None)
+            .get_available_nodes(None, None, None, None)
             .await
             .unwrap();
 

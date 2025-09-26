@@ -14,13 +14,13 @@ impl SimplePersistence {
             CREATE TABLE IF NOT EXISTS collateral_status (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 hotkey TEXT NOT NULL,
-                executor_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
                 miner TEXT NOT NULL,
                 collateral TEXT NOT NULL,
                 url TEXT,
                 url_content_md5_checksum TEXT,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(hotkey, executor_id)
+                UNIQUE(hotkey, node_id)
             );
 
             CREATE TABLE IF NOT EXISTS collateral_scan_status (
@@ -79,14 +79,13 @@ impl SimplePersistence {
     pub async fn get_collateral_status_id(
         &self,
         hotkey: &str,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<Option<(i64, U256)>, anyhow::Error> {
-        let query =
-            "SELECT id, collateral FROM collateral_status WHERE hotkey = ? AND executor_id = ?";
+        let query = "SELECT id, collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?";
 
         let row = sqlx::query(query)
             .bind(hotkey)
-            .bind(executor_id)
+            .bind(node_id)
             .fetch_optional(self.pool())
             .await?;
 
@@ -105,7 +104,7 @@ impl SimplePersistence {
         match self
             .get_collateral_status_id(
                 deposit.hotkey.encode_hex::<String>().as_str(),
-                deposit.executorId.encode_hex::<String>().as_str(),
+                deposit.nodeId.encode_hex::<String>().as_str(),
             )
             .await?
         {
@@ -122,10 +121,10 @@ impl SimplePersistence {
                     .await?;
             }
             None => {
-                let query = "INSERT INTO collateral_status (hotkey, executor_id, miner, collateral, updated_at) VALUES (?, ?, ?, ?, ?)";
+                let query = "INSERT INTO collateral_status (hotkey, node_id, miner, collateral, updated_at) VALUES (?, ?, ?, ?, ?)";
                 sqlx::query(query)
                     .bind(deposit.hotkey.encode_hex::<String>())
-                    .bind(deposit.executorId.encode_hex::<String>())
+                    .bind(deposit.nodeId.encode_hex::<String>())
                     .bind(format!(
                         "0x{}",
                         deposit.miner.as_slice().encode_hex::<String>()
@@ -144,7 +143,7 @@ impl SimplePersistence {
         match self
             .get_collateral_status_id(
                 reclaimed.hotkey.encode_hex::<String>().as_str(),
-                reclaimed.executorId.encode_hex::<String>().as_str(),
+                reclaimed.nodeId.encode_hex::<String>().as_str(),
             )
             .await?
         {
@@ -169,7 +168,7 @@ impl SimplePersistence {
         match self
             .get_collateral_status_id(
                 slashed.hotkey.encode_hex::<String>().as_str(),
-                slashed.executorId.encode_hex::<String>().as_str(),
+                slashed.nodeId.encode_hex::<String>().as_str(),
             )
             .await?
         {
@@ -210,14 +209,14 @@ mod tests {
     fn make_hotkey(byte: u8) -> [u8; 32] {
         [byte; 32]
     }
-    fn make_executor_id(byte: u8) -> [u8; 16] {
+    fn make_node_id(byte: u8) -> [u8; 16] {
         [byte; 16]
     }
 
     fn ev_deposit(hk: [u8; 32], ex: [u8; 16], amount: u64) -> Deposit {
         Deposit {
             hotkey: FixedBytes::from_slice(&hk),
-            executorId: FixedBytes::from_slice(&ex),
+            nodeId: FixedBytes::from_slice(&ex),
             miner: Address::from_slice(&[0u8; 20]),
             amount: U256::from(amount),
         }
@@ -226,7 +225,7 @@ mod tests {
         Reclaimed {
             reclaimRequestId: U256::from(1u64),
             hotkey: FixedBytes::from_slice(&hk),
-            executorId: FixedBytes::from_slice(&ex),
+            nodeId: FixedBytes::from_slice(&ex),
             miner: Address::from_slice(&[0u8; 20]),
             amount: U256::from(amount),
         }
@@ -234,7 +233,7 @@ mod tests {
     fn ev_slashed(hk: [u8; 32], ex: [u8; 16], amount: u64) -> Slashed {
         Slashed {
             hotkey: FixedBytes::from_slice(&hk),
-            executorId: FixedBytes::from_slice(&ex),
+            nodeId: FixedBytes::from_slice(&ex),
             miner: Address::from_slice(&[0u8; 20]),
             amount: U256::from(amount),
             url: String::new(),
@@ -287,17 +286,17 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(1);
-        let ex = make_executor_id(2);
+        let ex = make_node_id(2);
 
         // first deposit inserts
         let d1 = ev_deposit(hk, ex, 100);
         persistence.handle_deposit(&d1).await.unwrap();
 
         let coll1: String = sqlx::query_scalar(
-            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(d1.hotkey.encode_hex::<String>())
-        .bind(d1.executorId.encode_hex::<String>())
+        .bind(d1.nodeId.encode_hex::<String>())
         .fetch_one(persistence.pool())
         .await
         .unwrap();
@@ -307,10 +306,10 @@ mod tests {
         let d2 = ev_deposit(hk, ex, 50);
         persistence.handle_deposit(&d2).await.unwrap();
         let coll2: String = sqlx::query_scalar(
-            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(d1.hotkey.encode_hex::<String>())
-        .bind(d1.executorId.encode_hex::<String>())
+        .bind(d1.nodeId.encode_hex::<String>())
         .fetch_one(persistence.pool())
         .await
         .unwrap();
@@ -325,7 +324,7 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(9);
-        let ex = make_executor_id(7);
+        let ex = make_node_id(7);
 
         // seed with deposit 200
         let d = ev_deposit(hk, ex, 200);
@@ -335,10 +334,10 @@ mod tests {
         let r = ev_reclaimed(hk, ex, 80);
         persistence.handle_reclaimed(&r).await.unwrap();
         let coll_after_reclaim: String = sqlx::query_scalar(
-            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(d.hotkey.encode_hex::<String>())
-        .bind(d.executorId.encode_hex::<String>())
+        .bind(d.nodeId.encode_hex::<String>())
         .fetch_one(persistence.pool())
         .await
         .unwrap();
@@ -348,10 +347,10 @@ mod tests {
         let s = ev_slashed(hk, ex, 20);
         persistence.handle_slashed(&s).await.unwrap();
         let coll_after_slash: String = sqlx::query_scalar(
-            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(d.hotkey.encode_hex::<String>())
-        .bind(d.executorId.encode_hex::<String>())
+        .bind(d.nodeId.encode_hex::<String>())
         .fetch_one(persistence.pool())
         .await
         .unwrap();
@@ -366,14 +365,14 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(5);
-        let ex = make_executor_id(6);
+        let ex = make_node_id(6);
         let d = ev_deposit(hk, ex, 999);
         persistence.handle_deposit(&d).await.unwrap();
 
         let result = persistence
             .get_collateral_status_id(
                 &d.hotkey.encode_hex::<String>(),
-                &d.executorId.encode_hex::<String>(),
+                &d.nodeId.encode_hex::<String>(),
             )
             .await
             .unwrap();
@@ -392,7 +391,7 @@ mod tests {
             .unwrap();
 
         let result = persistence
-            .get_collateral_status_id("nonexistent_hotkey", "nonexistent_executor")
+            .get_collateral_status_id("nonexistent_hotkey", "nonexistent_node")
             .await
             .unwrap();
 
@@ -407,7 +406,7 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(10);
-        let ex = make_executor_id(11);
+        let ex = make_node_id(11);
         let r = ev_reclaimed(hk, ex, 50);
 
         let result = persistence.handle_reclaimed(&r).await;
@@ -426,7 +425,7 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(12);
-        let ex = make_executor_id(13);
+        let ex = make_node_id(13);
         let s = ev_slashed(hk, ex, 100);
 
         let result = persistence.handle_slashed(&s).await;
@@ -445,7 +444,7 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(14);
-        let ex = make_executor_id(15);
+        let ex = make_node_id(15);
 
         // Setup initial deposit
         let d = ev_deposit(hk, ex, 500);
@@ -463,10 +462,10 @@ mod tests {
 
         // Verify URL and checksum were stored
         let (url, checksum): (String, String) = sqlx::query_as(
-            "SELECT url, url_content_md5_checksum FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT url, url_content_md5_checksum FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(d.hotkey.encode_hex::<String>())
-        .bind(d.executorId.encode_hex::<String>())
+        .bind(d.nodeId.encode_hex::<String>())
         .fetch_one(persistence.pool())
         .await
         .unwrap();
@@ -493,17 +492,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_deposit_multiple_miners_same_executor() {
+    async fn test_handle_deposit_multiple_miners_same_node() {
         let db_path = ":memory:";
         let persistence = SimplePersistence::new(db_path, "validator".to_string())
             .await
             .unwrap();
 
-        let ex = make_executor_id(20);
+        let ex = make_node_id(20);
         let hk1 = make_hotkey(21);
         let hk2 = make_hotkey(22);
 
-        // Same executor ID, different hotkeys
+        // Same node ID, different hotkeys
         let d1 = ev_deposit(hk1, ex, 100);
         let d2 = ev_deposit(hk2, ex, 200);
 
@@ -512,7 +511,7 @@ mod tests {
 
         // Verify both entries exist separately
         let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM collateral_status WHERE executor_id = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM collateral_status WHERE node_id = ?")
                 .bind(ex.encode_hex::<String>())
                 .fetch_one(persistence.pool())
                 .await
@@ -529,7 +528,7 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(25);
-        let ex = make_executor_id(26);
+        let ex = make_node_id(26);
 
         // Create a deposit with a very large amount
         let mut d1 = ev_deposit(hk, ex, 0);
@@ -545,7 +544,7 @@ mod tests {
         let result = persistence
             .get_collateral_status_id(
                 &d1.hotkey.encode_hex::<String>(),
-                &d1.executorId.encode_hex::<String>(),
+                &d1.nodeId.encode_hex::<String>(),
             )
             .await
             .unwrap();
@@ -563,7 +562,7 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(27);
-        let ex = make_executor_id(28);
+        let ex = make_node_id(28);
 
         // Setup with small deposit
         let d = ev_deposit(hk, ex, 100);
@@ -577,7 +576,7 @@ mod tests {
         let result = persistence
             .get_collateral_status_id(
                 &d.hotkey.encode_hex::<String>(),
-                &d.executorId.encode_hex::<String>(),
+                &d.nodeId.encode_hex::<String>(),
             )
             .await
             .unwrap();
@@ -595,19 +594,19 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(30);
-        let ex = make_executor_id(31);
+        let ex = make_node_id(31);
 
         // First deposit should succeed
         let d1 = ev_deposit(hk, ex, 100);
         persistence.handle_deposit(&d1).await.unwrap();
 
-        // Second deposit with same hotkey and executor should update, not duplicate
+        // Second deposit with same hotkey and node should update, not duplicate
         let d2 = ev_deposit(hk, ex, 50);
         persistence.handle_deposit(&d2).await.unwrap();
 
         // Verify only one row exists
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT COUNT(*) FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(hk.encode_hex::<String>())
         .bind(ex.encode_hex::<String>())
@@ -619,7 +618,7 @@ mod tests {
 
         // Verify the collateral was updated to 150
         let collateral: String = sqlx::query_scalar(
-            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(hk.encode_hex::<String>())
         .bind(ex.encode_hex::<String>())
@@ -664,14 +663,14 @@ mod tests {
             .unwrap();
 
         let hk = make_hotkey(35);
-        let ex = make_executor_id(36);
+        let ex = make_node_id(36);
 
         // Create deposit and verify updated_at is set
         let d = ev_deposit(hk, ex, 100);
         persistence.handle_deposit(&d).await.unwrap();
 
         let updated_at: String = sqlx::query_scalar(
-            "SELECT updated_at FROM collateral_status WHERE hotkey = ? AND executor_id = ?",
+            "SELECT updated_at FROM collateral_status WHERE hotkey = ? AND node_id = ?",
         )
         .bind(hk.encode_hex::<String>())
         .bind(ex.encode_hex::<String>())

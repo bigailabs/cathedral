@@ -126,13 +126,10 @@ async fn show_config(config: &MinerConfig, show_sensitive: bool) -> Result<()> {
         config.server.host, config.server.port
     );
     println!("Metrics Enabled: {}", config.metrics.enabled);
-    println!(
-        "Executor Count: {}",
-        config.executor_management.executors.len()
-    );
+    println!("Node Count: {}", config.node_management.nodes.len());
     println!(
         "Remote Deployment: {}",
-        config.remote_executor_deployment.is_some()
+        config.remote_node_deployment.is_some()
     );
 
     // Show validation status
@@ -294,9 +291,9 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
         &mut suggestions,
     );
 
-    // Executor management validation
-    validate_executor_config(
-        &config.executor_management,
+    // Node management validation
+    validate_node_config(
+        &config.node_management,
         &mut errors,
         &mut warnings,
         &mut suggestions,
@@ -311,7 +308,7 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
     );
 
     // Remote deployment validation (if configured)
-    if let Some(ref deployment) = config.remote_executor_deployment {
+    if let Some(ref deployment) = config.remote_node_deployment {
         validate_remote_deployment_config(deployment, &mut errors, &mut warnings);
     }
 
@@ -387,16 +384,16 @@ fn validate_bittensor_config(
     }
 }
 
-/// Validate executor management configuration
-fn validate_executor_config(
-    config: &crate::config::ExecutorManagementConfig,
+/// Validate node management configuration
+fn validate_node_config(
+    config: &crate::config::NodeManagementConfig,
     _errors: &mut [String],
     warnings: &mut Vec<String>,
     suggestions: &mut Vec<String>,
 ) {
-    if config.executors.is_empty() {
-        warnings.push("No executors configured".to_string());
-        suggestions.push("Add executor configurations or enable remote deployment".to_string());
+    if config.nodes.is_empty() {
+        warnings.push("No nodes configured".to_string());
+        suggestions.push("Add node configurations or enable remote deployment".to_string());
     }
 
     if config.health_check_interval.as_secs() < 30 {
@@ -418,14 +415,6 @@ fn validate_security_config(
     if !config.verify_signatures {
         warnings.push("Signature verification is disabled".to_string());
         suggestions.push("Enable signature verification for production".to_string());
-    }
-
-    if config.jwt_secret == "change-me-in-production" {
-        errors.push("Default JWT secret must be changed for production".to_string());
-    }
-
-    if config.jwt_secret.len() < 32 {
-        warnings.push("JWT secret should be at least 32 characters long".to_string());
     }
 
     if config.token_expiration.as_secs() > 86400 {
@@ -468,7 +457,7 @@ fn validate_private_key_config(
 
 /// Validate remote deployment configuration
 fn validate_remote_deployment_config(
-    config: &crate::config::RemoteExecutorDeploymentConfig,
+    config: &crate::config::RemoteNodeDeploymentConfig,
     errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
@@ -526,13 +515,8 @@ fn display_validation_results(result: &ValidationResult) {
 
 /// Mask sensitive configuration fields
 fn mask_sensitive_fields(config: &mut MinerConfig) {
-    // Mask JWT secret
-    if !config.security.jwt_secret.is_empty() {
-        config.security.jwt_secret = "****MASKED****".to_string();
-    }
-
     // Mask SSH private key paths
-    if let Some(ref mut deployment) = config.remote_executor_deployment {
+    if let Some(ref mut deployment) = config.remote_node_deployment {
         for machine in &mut deployment.remote_machines {
             if !machine.ssh.private_key_path.to_string_lossy().is_empty() {
                 machine.ssh.private_key_path = PathBuf::from("****MASKED****");

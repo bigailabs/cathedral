@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,7 +40,7 @@ jobs:
     needs: create-release
     strategy:
       matrix:
-        service: [executor, miner, validator, basilica-api]
+        service: [miner, validator, basilica-api]
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -85,7 +85,6 @@ jobs:
       - name: Copy veritas binaries
         if: matrix.service == 'validator'
         run: |
-          cp bin/executor-binary/executor-binary ./executor-binary
           cp bin/validator-binary/validator-binary ./validator-binary
 
       # Build release binary
@@ -134,7 +133,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        service: [executor, miner, validator]
+        service: [miner, validator]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -157,7 +156,6 @@ jobs:
       - name: Copy veritas binaries
         if: matrix.service == 'validator'
         run: |
-          cp bin/executor-binary/executor-binary ./executor-binary
           cp bin/validator-binary/validator-binary ./validator-binary
 
       - name: Build Docker image

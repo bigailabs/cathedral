@@ -194,7 +194,7 @@ async fn show_database_status() -> Result<()> {
 
     let tables = vec![
         "miners",
-        "miner_executors",
+        "miner_nodes",
         "verification_requests",
         "verification_logs",
         "rentals",
@@ -362,7 +362,7 @@ async fn cleanup_old_records(days: u32) -> Result<()> {
         total_deleted += old_miners_deleted;
     }
 
-    // Note: miner_executors will be automatically deleted due to CASCADE foreign key
+    // Note: miner_nodes will be automatically deleted due to CASCADE foreign key
 
     // Commit transaction
     tx.commit().await?;
@@ -411,13 +411,13 @@ async fn create_schema(pool: &Pool<Sqlite>) -> Result<()> {
             last_seen TEXT NOT NULL,
             registered_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            executor_info TEXT NOT NULL DEFAULT '{}'
+            node_info TEXT NOT NULL DEFAULT '{}'
         );
 
-        CREATE TABLE IF NOT EXISTS miner_executors (
+        CREATE TABLE IF NOT EXISTS miner_nodes (
             id TEXT PRIMARY KEY,
             miner_id TEXT NOT NULL,
-            executor_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
             grpc_address TEXT NOT NULL,
             gpu_count INTEGER NOT NULL,
             status TEXT DEFAULT 'unknown',
@@ -431,7 +431,7 @@ async fn create_schema(pool: &Pool<Sqlite>) -> Result<()> {
             id TEXT PRIMARY KEY,
             miner_id TEXT NOT NULL,
             verification_type TEXT NOT NULL,
-            executor_id TEXT,
+            node_id TEXT,
             status TEXT DEFAULT 'scheduled',
             scheduled_at TEXT NOT NULL,
             completed_at TEXT,
@@ -448,7 +448,7 @@ async fn create_schema(pool: &Pool<Sqlite>) -> Result<()> {
         r#"
         CREATE TABLE IF NOT EXISTS verification_logs (
             id TEXT PRIMARY KEY,
-            executor_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
             validator_hotkey TEXT NOT NULL,
             verification_type TEXT NOT NULL,
             timestamp TEXT NOT NULL,
@@ -463,7 +463,7 @@ async fn create_schema(pool: &Pool<Sqlite>) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS rentals (
             id TEXT PRIMARY KEY,
-            executor_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
             customer_public_key TEXT NOT NULL,
             docker_image TEXT NOT NULL,
             env_vars TEXT,
@@ -489,9 +489,11 @@ async fn create_schema(pool: &Pool<Sqlite>) -> Result<()> {
         .execute(pool)
         .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_verification_logs_executor_id ON verification_logs(executor_id)")
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_verification_logs_node_id ON verification_logs(node_id)",
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_miners_hotkey ON miners(hotkey)")
         .execute(pool)

@@ -1,7 +1,7 @@
 //! SSH-based Docker container client
 //!
 //! This module provides a client for executing Docker commands over SSH
-//! to manage containers on remote executor machines.
+//! to manage containers on remote node machines.
 
 use anyhow::{Context, Result};
 use serde_json::Value;

@@ -22,15 +22,15 @@ mod tests {
             gpu_repo.upsert_gpu_profile(profile).await?;
 
             let miner_id = format!("miner_{}", profile.miner_uid.as_u16());
-            let executor_id = format!(
-                "miner{}__test-executor-{}",
+            let node_id = format!(
+                "miner{}__test-node-{}",
                 profile.miner_uid.as_u16(),
                 profile.miner_uid.as_u16()
             );
 
             // Seed miners table first (required for foreign key constraint)
             sqlx::query(
-                "INSERT OR REPLACE INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, executor_info)
+                "INSERT OR REPLACE INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
                  VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&miner_id)
@@ -43,15 +43,15 @@ mod tests {
             .execute(persistence.pool())
             .await?;
 
-            // Seed miner_executors table with online status
-            let executor_key = format!("{}:{}", &miner_id, &executor_id);
+            // Seed miner_nodes table with online status
+            let node_key = format!("{}:{}", &miner_id, &node_id);
             sqlx::query(
-                "INSERT OR REPLACE INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, status, gpu_uuids, created_at, updated_at)
+                "INSERT OR REPLACE INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, status, gpu_uuids, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             )
-            .bind(&executor_key)
+            .bind(&node_key)
             .bind(&miner_id)
-            .bind(&executor_id)
+            .bind(&node_id)
             .bind("http://127.0.0.1:50051")
             .bind(profile.gpu_counts.values().sum::<u32>() as i64)
             .bind("online")
@@ -67,12 +67,12 @@ mod tests {
                     let gpu_uuid =
                         format!("gpu-{}-{}-{}", profile.miner_uid.as_u16(), gpu_model, i);
                     sqlx::query(
-                        "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, executor_id, miner_id, gpu_name, last_verified)
+                        "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
                          VALUES (?, ?, ?, ?, ?, ?)"
                     )
                     .bind(&gpu_uuid)
                     .bind(i as i32)
-                    .bind(&executor_id)
+                    .bind(&node_id)
                     .bind(&miner_id)
                     .bind(gpu_model)
                     .bind(now.to_rfc3339())
@@ -85,11 +85,11 @@ mod tests {
             if let Some(last_successful) = profile.last_successful_validation {
                 let log_id = uuid::Uuid::new_v4().to_string();
                 sqlx::query(
-                    "INSERT INTO verification_logs (id, executor_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, error_message, created_at, updated_at)
+                    "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, error_message, created_at, updated_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&log_id)
-                .bind(&executor_id)
+                .bind(&node_id)
                 .bind("test_validator_hotkey")
                 .bind("gpu_validation")
                 .bind(last_successful.to_rfc3339())

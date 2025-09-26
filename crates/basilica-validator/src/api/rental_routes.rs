@@ -27,7 +27,7 @@ use crate::{
 /// Start rental request
 #[derive(Debug, Deserialize, serde::Serialize)]
 pub struct StartRentalRequest {
-    pub executor_id: String,
+    pub node_id: String,
     pub container_image: String,
     pub ssh_public_key: String,
     #[serde(default)]
@@ -51,7 +51,7 @@ fn default_command() -> Vec<String> {
 impl Default for StartRentalRequest {
     fn default() -> Self {
         Self {
-            executor_id: String::new(),
+            node_id: String::new(),
             container_image: "nvidia/cuda:12.2.0-base-ubuntu22.04".to_string(),
             ssh_public_key: String::new(),
             environment: std::collections::HashMap::new(),
@@ -215,13 +215,10 @@ pub async fn start_rental(
 ) -> Result<Json<RentalResponse>, StatusCode> {
     let miner_id = state
         .persistence
-        .get_miner_id_by_executor(&request.executor_id)
+        .get_miner_id_by_node(&request.node_id)
         .await
         .map_err(|e| {
-            error!(
-                "Failed to get miner ID for executor {}: {}",
-                request.executor_id, e
-            );
+            error!("Failed to get miner ID for node {}: {}", request.node_id, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -239,8 +236,8 @@ pub async fn start_rental(
         })?;
 
     info!(
-        "Starting rental for executor {} on miner {}",
-        request.executor_id, miner_id
+        "Starting rental for node {} on miner {}",
+        request.node_id, miner_id
     );
 
     if !is_valid_ssh_public_key(&request.ssh_public_key) {
@@ -295,7 +292,7 @@ pub async fn start_rental(
     let rental_request = RentalRequest {
         validator_hotkey: state.validator_hotkey.to_string(),
         miner_id: miner_id.clone(),
-        executor_id: request.executor_id,
+        node_id: request.node_id,
         container_spec: crate::rental::ContainerSpec {
             image: request.container_image,
             environment: request.environment,
@@ -345,7 +342,7 @@ pub async fn get_rental_status(
         .as_ref()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Get rental info first to get executor details
+    // Get rental info first to get node details
     let rental_info = state
         .persistence
         .load_rental(&rental_id)
@@ -370,8 +367,8 @@ pub async fn get_rental_status(
     // Convert RentalStatus to RentalStatusResponse
     use crate::api::types::{RentalStatus as ApiRentalStatus, RentalStatusResponse};
 
-    // Use executor details from rental info directly
-    let executor = rental_info.executor_details.clone();
+    // Use node details from rental info directly
+    let node = rental_info.node_details.clone();
 
     let response = RentalStatusResponse {
         rental_id: status.rental_id,
@@ -381,7 +378,7 @@ pub async fn get_rental_status(
             RentalState::Stopping | RentalState::Stopped => ApiRentalStatus::Terminated,
             RentalState::Failed => ApiRentalStatus::Failed,
         },
-        executor,
+        node,
         created_at: status.created_at,
         updated_at: status.created_at, // Use created_at for now
     };
@@ -489,20 +486,20 @@ pub async fn list_rentals(
         .iter()
         .map(|r| RentalListItem {
             rental_id: r.rental_id.clone(),
-            executor_id: r.executor_id.clone(),
+            node_id: r.node_id.clone(),
             container_id: r.container_id.clone(),
             state: r.state.clone(),
             created_at: r.created_at.to_rfc3339(),
             miner_id: r.miner_id.clone(),
             container_image: r.container_spec.image.clone(),
-            gpu_specs: if r.executor_details.gpu_specs.is_empty() {
+            gpu_specs: if r.node_details.gpu_specs.is_empty() {
                 None
             } else {
-                Some(r.executor_details.gpu_specs.clone())
+                Some(r.node_details.gpu_specs.clone())
             },
-            cpu_specs: Some(r.executor_details.cpu_specs.clone()),
-            location: r.executor_details.location.clone(),
-            network_speed: r.executor_details.network_speed.clone(),
+            cpu_specs: Some(r.node_details.cpu_specs.clone()),
+            location: r.node_details.location.clone(),
+            network_speed: r.node_details.network_speed.clone(),
         })
         .collect();
 

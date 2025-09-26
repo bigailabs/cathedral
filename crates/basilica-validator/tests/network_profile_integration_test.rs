@@ -10,14 +10,14 @@ async fn test_network_profile_database_integration() -> Result<(), anyhow::Error
 
     // Test data
     let miner_uid = 1u16;
-    let executor_id = "test_executor";
+    let node_id = "test_node";
     let test_timestamp = chrono::Utc::now();
 
     // Store a network profile
     persistence
-        .store_executor_network_profile(
+        .store_node_network_profile(
             miner_uid,
-            executor_id,
+            node_id,
             Some("192.168.1.1".to_string()),
             Some("test.example.com".to_string()),
             Some("San Francisco".to_string()),
@@ -34,7 +34,7 @@ async fn test_network_profile_database_integration() -> Result<(), anyhow::Error
 
     // Retrieve the profile
     let result = persistence
-        .get_executor_network_profile(miner_uid, executor_id)
+        .get_node_network_profile(miner_uid, node_id)
         .await?;
 
     assert!(result.is_some());

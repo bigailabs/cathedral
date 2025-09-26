@@ -39,7 +39,7 @@ pub async fn list_miners(
                     }
                 }
 
-                let total_gpu_count = calculate_total_gpu_count(&miner_data.executor_info);
+                let total_gpu_count = calculate_total_gpu_count(&miner_data.node_info);
 
                 if let Some(min_gpu_count) = query.min_gpu_count {
                     if total_gpu_count < min_gpu_count {
@@ -58,7 +58,7 @@ pub async fn list_miners(
                     hotkey: miner_data.hotkey,
                     endpoint: miner_data.endpoint,
                     status,
-                    executor_count: miner_data.executor_count,
+                    node_count: miner_data.node_count,
                     total_gpu_count,
                     verification_score: miner_data.verification_score,
                     uptime_percentage: miner_data.uptime_percentage,
@@ -98,9 +98,9 @@ pub async fn register_miner(
         ));
     }
 
-    if request.executors.is_empty() {
+    if request.nodes.is_empty() {
         return Err(ApiError::BadRequest(
-            "At least one executor must be registered".to_string(),
+            "At least one node must be registered".to_string(),
         ));
     }
 
@@ -127,7 +127,7 @@ pub async fn register_miner(
             &request.miner_id,
             &request.hotkey,
             &request.endpoint,
-            &request.executors,
+            &request.nodes,
         )
         .await;
 
@@ -161,14 +161,14 @@ pub async fn get_miner(
     match state.persistence.get_miner_by_id(&miner_id).await {
         Ok(Some(miner_data)) => {
             let status = determine_miner_status(&miner_data);
-            let total_gpu_count = calculate_total_gpu_count(&miner_data.executor_info);
+            let total_gpu_count = calculate_total_gpu_count(&miner_data.node_info);
 
             Ok(Json(MinerDetails {
                 miner_id: miner_data.miner_id,
                 hotkey: miner_data.hotkey,
                 endpoint: miner_data.endpoint,
                 status,
-                executor_count: miner_data.executor_count,
+                node_count: miner_data.node_count,
                 total_gpu_count,
                 verification_score: miner_data.verification_score,
                 uptime_percentage: miner_data.uptime_percentage,
@@ -269,11 +269,11 @@ pub async fn get_miner_health(
             let response_time_ms = start_time.elapsed().as_millis() as u64;
             let status = determine_miner_status_from_health(&health_data);
 
-            let executor_health = health_data
-                .executor_health
+            let node_health = health_data
+                .node_health
                 .into_iter()
-                .map(|eh| ExecutorHealthStatus {
-                    executor_id: eh.executor_id,
+                .map(|eh| NodeHealthStatus {
+                    node_id: eh.node_id,
                     status: eh.status,
                     last_seen: eh.last_seen,
                 })
@@ -283,7 +283,7 @@ pub async fn get_miner_health(
                 miner_id,
                 overall_status: status,
                 last_health_check: health_data.last_health_check,
-                executor_health,
+                node_health,
                 response_time_ms,
             }))
         }
@@ -314,7 +314,7 @@ pub async fn trigger_miner_verification(
             &miner_id,
             &verification_id,
             &request.verification_type,
-            request.executor_id.as_deref(),
+            request.node_id.as_deref(),
         )
         .await
     {
@@ -345,35 +345,35 @@ pub async fn trigger_miner_verification(
     }
 }
 
-/// List executors for a specific miner
-pub async fn list_miner_executors(
+/// List nodes for a specific miner
+pub async fn list_miner_nodes(
     State(state): State<ApiState>,
     Path(miner_id): Path<String>,
-) -> Result<Json<Vec<ExecutorDetails>>, ApiError> {
-    info!("Listing executors for miner: {}", miner_id);
+) -> Result<Json<Vec<NodeDetails>>, ApiError> {
+    info!("Listing nodes for miner: {}", miner_id);
 
-    match state.persistence.get_miner_executors(&miner_id).await {
-        Ok(executors) => {
-            let executor_details = executors
+    match state.persistence.get_miner_nodes(&miner_id).await {
+        Ok(nodes) => {
+            let node_details = nodes
                 .into_iter()
-                .map(|exec| ExecutorDetails {
-                    id: exec.executor_id,
-                    gpu_specs: exec.gpu_specs,
-                    cpu_specs: exec.cpu_specs,
-                    location: exec.location,
+                .map(|node| NodeDetails {
+                    id: node.node_id,
+                    gpu_specs: node.gpu_specs,
+                    cpu_specs: node.cpu_specs,
+                    location: node.location,
                     network_speed: None,
                 })
                 .collect();
 
-            Ok(Json(executor_details))
+            Ok(Json(node_details))
         }
         Err(e) => {
-            error!("Failed to list executors for miner {}: {}", miner_id, e);
+            error!("Failed to list nodes for miner {}: {}", miner_id, e);
             if e.to_string().contains("not found") {
                 Err(ApiError::NotFound("Miner not found".to_string()))
             } else {
                 Err(ApiError::InternalError(
-                    "Failed to retrieve executors".to_string(),
+                    "Failed to retrieve nodes".to_string(),
                 ))
             }
         }
@@ -425,13 +425,13 @@ fn determine_miner_status_from_health(
     if time_since_check.num_minutes() > 5 {
         MinerStatus::Offline
     } else if health_data
-        .executor_health
+        .node_health
         .iter()
         .any(|eh| eh.status == "verifying")
     {
         MinerStatus::Verifying
     } else if health_data
-        .executor_health
+        .node_health
         .iter()
         .all(|eh| eh.status == "healthy")
     {
@@ -452,11 +452,11 @@ fn status_matches_filter(status: &MinerStatus, filter: &str) -> bool {
     }
 }
 
-fn calculate_total_gpu_count(executor_info: &Value) -> u32 {
-    if let Some(executors) = executor_info.as_array() {
-        executors
+fn calculate_total_gpu_count(node_info: &Value) -> u32 {
+    if let Some(nodes) = node_info.as_array() {
+        nodes
             .iter()
-            .filter_map(|exec| exec.get("gpu_count").and_then(|gc| gc.as_u64()))
+            .filter_map(|node| node.get("gpu_count").and_then(|gc| gc.as_u64()))
             .sum::<u64>() as u32
     } else {
         0

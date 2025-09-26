@@ -137,7 +137,7 @@ impl ApiHandler {
             .route("/rentals/:id", get(rental_routes::get_rental_status))
             .route("/rentals/:id", delete(rental_routes::stop_rental))
             .route("/rentals/:id/logs", get(rental_routes::stream_rental_logs))
-            .route("/executors", get(routes::list_available_executors))
+            .route("/nodes", get(routes::list_available_nodes))
             // Existing miner routes
             .route("/miners", get(routes::list_miners))
             .route("/miners/register", post(routes::register_miner))
@@ -149,10 +149,7 @@ impl ApiHandler {
                 "/miners/:miner_id/verify",
                 post(routes::trigger_miner_verification),
             )
-            .route(
-                "/miners/:miner_id/executors",
-                get(routes::list_miner_executors),
-            )
+            .route("/miners/:miner_id/nodes", get(routes::list_miner_nodes))
             .route("/health", get(routes::health_check))
             // new
             .route("/gpu-profiles", get(routes::list_gpu_profiles))

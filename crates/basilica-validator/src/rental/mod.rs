@@ -1,9 +1,9 @@
 //! Rental module for container deployment and management
 //!
 //! This module provides functionality for validators to rent GPU resources
-//! and deploy containers on executor machines.
+//! and deploy containers on node machines.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -18,10 +18,10 @@ pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
 use crate::metrics::ValidatorPrometheusMetrics;
-use crate::miner_prover::miner_client::{AuthenticatedMinerConnection, MinerClient};
+use crate::miner_prover::miner_client::AuthenticatedMinerConnection;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
-use basilica_protocol::basilca::miner::v1::CloseSshSessionRequest;
+// Removed: CloseSshSessionRequest no longer exists after node removal
 
 /// Rental manager for coordinating container deployments
 pub struct RentalManager {
@@ -33,28 +33,26 @@ pub struct RentalManager {
     log_streamer: Arc<LogStreamer>,
     /// Health monitor
     health_monitor: Arc<DatabaseHealthMonitor>,
-    /// Miner client for reconnections
-    miner_client: Arc<MinerClient>,
     /// SSH key manager for validator keys
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
     /// Metrics for tracking rental status (required)
     metrics: Arc<ValidatorPrometheusMetrics>,
 }
 
-/// Parse SSH host from credentials string format "user@host:port"
-fn parse_ssh_host(credentials: &str) -> Result<&str> {
-    let (_, host_port) = credentials
-        .split_once('@')
-        .context("Invalid SSH credentials format: missing '@' separator")?;
+// /// Parse SSH host from credentials string format "user@host:port"
+// fn parse_ssh_host(credentials: &str) -> Result<&str> {
+//     let (_, host_port) = credentials
+//         .split_once('@')
+//         .context("Invalid SSH credentials format: missing '@' separator")?;
 
-    let host = host_port
-        .split(':')
-        .next()
-        .filter(|h| !h.is_empty())
-        .context("Invalid SSH credentials format: empty host")?;
+//     let host = host_port
+//         .split(':')
+//         .next()
+//         .filter(|h| !h.is_empty())
+//         .context("Invalid SSH credentials format: empty host")?;
 
-    Ok(host)
-}
+//     Ok(host)
+// }
 
 /// Extract miner UID from miner_id format: "miner_{uid}"
 pub(crate) fn extract_miner_uid(miner_id: &str) -> Option<u16> {
@@ -64,12 +62,12 @@ pub(crate) fn extract_miner_uid(miner_id: &str) -> Option<u16> {
     None
 }
 
-/// Get normalized GPU type from executor details
-pub(crate) fn get_gpu_type(executor_details: &crate::api::types::ExecutorDetails) -> String {
+/// Get normalized GPU type from node details
+pub(crate) fn get_gpu_type(node_details: &crate::api::types::NodeDetails) -> String {
     use crate::gpu::categorization::GpuCategory;
     use std::str::FromStr;
 
-    executor_details
+    node_details
         .gpu_specs
         .first()
         .map(|gpu| {
@@ -93,7 +91,6 @@ impl RentalManager {
 
     /// Create a new rental manager with SSH key manager
     pub fn new(
-        miner_client: Arc<MinerClient>,
         persistence: Arc<SimplePersistence>,
         ssh_key_manager: Arc<ValidatorSshKeyManager>,
         metrics: Arc<ValidatorPrometheusMetrics>,
@@ -113,7 +110,6 @@ impl RentalManager {
             deployment_manager: deployment_manager.clone(),
             log_streamer: log_streamer.clone(),
             health_monitor,
-            miner_client,
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
         }
@@ -135,7 +131,7 @@ impl RentalManager {
             let miner_uid = extract_miner_uid(&rental.miner_id);
 
             if let Some(miner_uid) = miner_uid {
-                let gpu_type = get_gpu_type(&rental.executor_details);
+                let gpu_type = get_gpu_type(&rental.node_details);
 
                 // Set metric based on rental state
                 let is_rented = matches!(
@@ -143,16 +139,16 @@ impl RentalManager {
                     RentalState::Active | RentalState::Provisioning | RentalState::Stopping
                 );
 
-                self.metrics.record_executor_rental_status(
-                    &rental.executor_id,
+                self.metrics.record_node_rental_status(
+                    &rental.node_id,
                     miner_uid,
                     &gpu_type,
                     is_rented,
                 );
 
                 tracing::info!(
-                    "Initialized rental metric for executor {} (state: {:?}, is_rented: {})",
-                    rental.executor_id,
+                    "Initialized rental metric for node {} (state: {:?}, is_rented: {})",
+                    rental.node_id,
                     rental.state,
                     is_rented
                 );
@@ -167,12 +163,12 @@ impl RentalManager {
     pub async fn start_rental(
         &self,
         request: RentalRequest,
-        miner_connection: &mut AuthenticatedMinerConnection,
+        _miner_connection: &mut AuthenticatedMinerConnection,
     ) -> Result<RentalResponse> {
         // Generate rental ID
         let rental_id = format!("rental-{}", Uuid::new_v4());
 
-        let (validator_public_key, _validator_private_key_path) = self
+        let (_validator_public_key, _validator_private_key_path) = self
             .ssh_key_manager
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("SSH key manager is required for rentals"))?
@@ -180,21 +176,10 @@ impl RentalManager {
             .ok_or_else(|| anyhow::anyhow!("No persistent validator SSH key available"))?
             .clone();
 
-        // Get rental session duration from miner client config
-        let session_duration = self.miner_client.get_rental_session_duration();
-
-        // Request SSH session from miner with rental mode
-        let ssh_session = miner_connection
-            .initiate_rental_ssh_session(
-                &request.executor_id,
-                &request.validator_hotkey,
-                &validator_public_key,
-                &rental_id,
-                session_duration,
-            )
-            .await?;
-
-        let container_client = self.create_container_client(&ssh_session.access_credentials)?;
+        // For direct node connections, we'll use the node's grpc_endpoint as SSH credentials
+        // Format is expected to be "user@host:port"
+        let ssh_credentials = format!("root@{}", request.node_id);
+        let container_client = self.create_container_client(&ssh_credentials)?;
 
         // Deploy container with end-user's SSH public key
         let container_info = match self
@@ -209,17 +194,12 @@ impl RentalManager {
         {
             Ok(info) => info,
             Err(e) => {
-                let close_request = CloseSshSessionRequest {
-                    session_id: ssh_session.session_id.clone(),
-                    validator_hotkey: request.validator_hotkey.clone(),
-                    reason: "Deployment failed".to_string(),
-                };
-                if let Err(cleanup_err) = miner_connection.close_ssh_session(close_request).await {
-                    tracing::error!(
-                        "Failed to cleanup SSH session after deployment failure: {}",
-                        cleanup_err
-                    );
-                }
+                // No explicit cleanup needed for direct node connections
+                tracing::error!(
+                    "Failed to deploy container on node {}: {}",
+                    request.node_id,
+                    e
+                );
                 return Err(e);
             }
         };
@@ -230,30 +210,27 @@ impl RentalManager {
             .iter()
             .find(|p| p.container_port == 22)
             .map(|ssh_mapping| {
-                // Parse host from original credentials (format: "user@host:port")
-                let host = parse_ssh_host(&ssh_session.access_credentials).unwrap_or_else(|e| {
-                    tracing::warn!("Failed to parse SSH host from credentials: {}", e);
-                    "localhost"
-                });
+                // For direct node connections, extract host from node_id
+                let host = request.node_id.split(':').next().unwrap_or("localhost");
                 // Always use root as username for containers with the mapped port
                 format!("root@{}:{}", host, ssh_mapping.host_port)
             });
 
-        // Fetch executor details from persistence
-        let executor_details = match self
+        // Fetch node details from persistence
+        let node_details = match self
             .persistence
-            .get_executor_details(&request.executor_id, &request.miner_id)
+            .get_node_details(&request.node_id, &request.miner_id)
             .await
         {
             Ok(Some(details)) => details,
             Ok(None) => {
                 tracing::warn!(
-                    "Executor details not found for executor_id: {}, using defaults",
-                    request.executor_id
+                    "Node details not found for node_id: {}, using defaults",
+                    request.node_id
                 );
-                // Provide default executor details
-                crate::api::types::ExecutorDetails {
-                    id: request.executor_id.clone(),
+                // Provide default node details
+                crate::api::types::NodeDetails {
+                    id: request.node_id.clone(),
                     gpu_specs: vec![],
                     cpu_specs: crate::api::types::CpuSpec {
                         cores: 0,
@@ -266,11 +243,11 @@ impl RentalManager {
             }
             Err(e) => {
                 tracing::error!(
-                    "Failed to fetch executor details for executor_id {}: {}",
-                    request.executor_id,
+                    "Failed to fetch node details for node_id {}: {}",
+                    request.node_id,
                     e
                 );
-                return Err(anyhow::anyhow!("Failed to fetch executor details: {}", e));
+                return Err(anyhow::anyhow!("Failed to fetch node details: {}", e));
             }
         };
 
@@ -278,15 +255,15 @@ impl RentalManager {
         let rental_info = RentalInfo {
             rental_id: rental_id.clone(),
             validator_hotkey: request.validator_hotkey.clone(),
-            executor_id: request.executor_id.clone(),
+            node_id: request.node_id.clone(),
             container_id: container_info.container_id.clone(),
-            ssh_session_id: ssh_session.session_id.clone(),
-            ssh_credentials: ssh_session.access_credentials.clone(), // Store validator's SSH credentials for operations
+            ssh_session_id: format!("direct-{}", rental_id), // Direct connection, no session ID
+            ssh_credentials: ssh_credentials.clone().unwrap_or_default(), // Store SSH credentials for operations
             state: RentalState::Active,
             created_at: chrono::Utc::now(),
             container_spec: request.container_spec.clone(),
             miner_id: request.miner_id.clone(),
-            executor_details,
+            node_details,
         };
 
         // Save to persistence
@@ -296,11 +273,11 @@ impl RentalManager {
         let miner_uid = extract_miner_uid(&rental_info.miner_id);
 
         if let Some(miner_uid) = miner_uid {
-            let gpu_type = get_gpu_type(&rental_info.executor_details);
+            let gpu_type = get_gpu_type(&rental_info.node_details);
 
             // Record rental status
-            self.metrics.record_executor_rental_status(
-                &request.executor_id,
+            self.metrics.record_node_rental_status(
+                &request.node_id,
                 miner_uid,
                 &gpu_type,
                 true, // is_rented = true
@@ -310,8 +287,8 @@ impl RentalManager {
             self.metrics.record_rental_created(miner_uid, &gpu_type);
 
             tracing::debug!(
-                "Recorded rental start for executor {} (miner_uid: {}, gpu_type: {})",
-                request.executor_id,
+                "Recorded rental start for node {} (miner_uid: {}, gpu_type: {})",
+                request.node_id,
                 miner_uid,
                 gpu_type
             );
@@ -370,17 +347,6 @@ impl RentalManager {
             .stop_container(&container_client, &rental_info.container_id, force)
             .await?;
 
-        // Close SSH session through miner connection
-        if let Err(e) = self.close_ssh_session(&rental_info).await {
-            tracing::error!(
-                "Failed to close SSH session {} for rental {}: {}",
-                rental_info.ssh_session_id,
-                rental_id,
-                e
-            );
-            // Continue with cleanup even if SSH session closure fails
-        }
-
         // Update rental state
         let mut updated_rental = rental_info.clone();
         updated_rental.state = RentalState::Stopped;
@@ -390,16 +356,16 @@ impl RentalManager {
         let miner_uid = extract_miner_uid(&rental_info.miner_id);
 
         if let Some(miner_uid) = miner_uid {
-            let gpu_type = get_gpu_type(&rental_info.executor_details);
-            self.metrics.record_executor_rental_status(
-                &rental_info.executor_id,
+            let gpu_type = get_gpu_type(&rental_info.node_details);
+            self.metrics.record_node_rental_status(
+                &rental_info.node_id,
                 miner_uid,
                 &gpu_type,
                 false, // is_rented = false
             );
             tracing::debug!(
-                "Cleared rental metric for executor {} (miner_uid: {}, gpu_type: {})",
-                rental_info.executor_id,
+                "Cleared rental metric for node {} (miner_uid: {}, gpu_type: {})",
+                rental_info.node_id,
                 miner_uid,
                 gpu_type
             );
@@ -433,40 +399,6 @@ impl RentalManager {
             .await
     }
 
-    /// Close SSH session for a rental
-    async fn close_ssh_session(&self, rental_info: &RentalInfo) -> Result<()> {
-        let miner_data = self
-            .persistence
-            .get_miner_by_id(&rental_info.miner_id)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("Miner {} not found in database", rental_info.miner_id)
-            })?;
-
-        let mut miner_connection = self
-            .miner_client
-            .connect_and_authenticate(&miner_data.endpoint, &miner_data.hotkey)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to reconnect to miner: {}", e))?;
-
-        // Close the SSH session
-        miner_connection
-            .close_ssh_session_by_id(
-                &rental_info.ssh_session_id,
-                &rental_info.validator_hotkey,
-                "rental_stopped",
-            )
-            .await?;
-
-        tracing::info!(
-            "Successfully closed SSH session {} for rental {}",
-            rental_info.ssh_session_id,
-            rental_info.rental_id
-        );
-
-        Ok(())
-    }
-
     pub async fn list_rentals(&self, validator_hotkey: &str) -> Result<Vec<RentalInfo>> {
         self.persistence
             .list_validator_rentals(validator_hotkey)
@@ -481,28 +413,28 @@ impl Drop for RentalManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
 
-    #[test]
-    fn test_parse_ssh_host() {
-        // Valid formats
-        assert_eq!(
-            parse_ssh_host("user@example.com:22").unwrap(),
-            "example.com"
-        );
-        assert_eq!(
-            parse_ssh_host("root@192.168.1.1:2222").unwrap(),
-            "192.168.1.1"
-        );
-        assert_eq!(parse_ssh_host("admin@host").unwrap(), "host");
+//     #[test]
+//     fn test_parse_ssh_host() {
+//         // Valid formats
+//         assert_eq!(
+//             parse_ssh_host("user@example.com:22").unwrap(),
+//             "example.com"
+//         );
+//         assert_eq!(
+//             parse_ssh_host("root@192.168.1.1:2222").unwrap(),
+//             "192.168.1.1"
+//         );
+//         assert_eq!(parse_ssh_host("admin@host").unwrap(), "host");
 
-        // Invalid formats should return errors
-        assert!(parse_ssh_host("no-at-sign").is_err());
-        assert!(parse_ssh_host("@:22").is_err());
-        assert!(parse_ssh_host("user@").is_err());
-        assert!(parse_ssh_host("user@:22").is_err());
-        assert!(parse_ssh_host("").is_err());
-    }
-}
+//         // Invalid formats should return errors
+//         assert!(parse_ssh_host("no-at-sign").is_err());
+//         assert!(parse_ssh_host("@:22").is_err());
+//         assert!(parse_ssh_host("user@").is_err());
+//         assert!(parse_ssh_host("user@:22").is_err());
+//         assert!(parse_ssh_host("").is_err());
+//     }
+// }

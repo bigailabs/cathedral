@@ -15,16 +15,16 @@ use basilica_common::config::{
 use basilica_common::error::ConfigurationError;
 use basilica_common::identity::Hotkey;
 
-/// Remote machine configuration for executor deployment
+/// Remote machine configuration for node deployment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteMachineConfig {
     pub id: String,
     pub name: String,
     pub ssh: SshConnectionConfig,
     pub gpu_count: Option<u32>,
-    pub executor_binary_path: Option<String>,
-    pub executor_data_dir: Option<String>,
-    pub executor_port: u16,
+    pub node_binary_path: Option<String>,
+    pub node_data_dir: Option<String>,
+    pub node_port: u16,
 }
 
 /// SSH connection configuration
@@ -38,12 +38,12 @@ pub struct SshConnectionConfig {
     pub ssh_options: Vec<String>,
 }
 
-/// Remote executor deployment configuration
+/// Remote node deployment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteExecutorDeploymentConfig {
+pub struct RemoteNodeDeploymentConfig {
     pub remote_machines: Vec<RemoteMachineConfig>,
-    pub local_executor_binary: PathBuf,
-    pub executor_config_template: String,
+    pub local_node_binary: PathBuf,
+    pub node_config_template: String,
     pub auto_deploy: bool,
     pub auto_start: bool,
     pub health_check_interval: Duration,
@@ -70,17 +70,17 @@ pub struct MinerConfig {
     /// Validator communications configuration
     pub validator_comms: ValidatorCommsConfig,
 
-    /// Executor management configuration
-    pub executor_management: ExecutorManagementConfig,
+    /// Node management configuration
+    pub node_management: NodeManagementConfig,
 
-    /// Remote executor deployment configuration (optional)
-    pub remote_executor_deployment: Option<RemoteExecutorDeploymentConfig>,
+    /// Remote node deployment configuration (optional)
+    pub remote_node_deployment: Option<RemoteNodeDeploymentConfig>,
 
     /// Security configuration
     pub security: SecurityConfig,
 
     /// SSH session configuration for validator access
-    pub ssh_session: ExecutorSshConfig,
+    pub ssh_session: NodeSshConfig,
 
     /// Advertised address configuration
     #[serde(default)]
@@ -118,6 +118,12 @@ pub struct MinerBittensorConfig {
 /// Validator communications configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorCommsConfig {
+    /// Host to bind the gRPC server to
+    pub host: String,
+
+    /// Port to bind the gRPC server to
+    pub port: u16,
+
     /// TLS configuration for secure communications
     pub tls: Option<TlsConfig>,
 
@@ -134,16 +140,16 @@ pub struct ValidatorCommsConfig {
     pub rate_limit: RateLimitConfig,
 }
 
-/// Executor management configuration
+/// Node management configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutorManagementConfig {
-    /// Static list of executors managed by this miner
-    pub executors: Vec<ExecutorConfig>,
+pub struct NodeManagementConfig {
+    /// Static list of nodes managed by this miner
+    pub nodes: Vec<NodeConfig>,
 
-    /// Health check interval for executors
+    /// Health check interval for nodes
     pub health_check_interval: Duration,
 
-    /// Timeout for executor health checks
+    /// Timeout for node health checks
     pub health_check_timeout: Duration,
 
     /// Maximum retry attempts for failed operations
@@ -153,28 +159,28 @@ pub struct ExecutorManagementConfig {
     pub auto_recovery: bool,
 }
 
-/// Static executor configuration
+/// Static node configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutorConfig {
-    /// gRPC address of the executor (host:port)
+pub struct NodeConfig {
+    /// gRPC address of the node (host:port)
     pub grpc_address: String,
 
-    /// SSH host for the executor
+    /// SSH host for the node
     pub host: String,
 
-    /// gRPC port for the executor
+    /// gRPC port for the node
     pub port: u16,
 
-    /// SSH port for the executor
+    /// SSH port for the node
     pub ssh_port: u16,
 
-    /// SSH username for the executor
+    /// SSH username for the node
     pub ssh_username: String,
 
-    /// Whether this executor is enabled
+    /// Whether this node is enabled
     pub enabled: bool,
 
-    /// Optional metadata about the executor
+    /// Optional metadata about the node
     pub metadata: Option<serde_json::Value>,
 }
 
@@ -188,9 +194,6 @@ pub struct SecurityConfig {
     pub cert_path: Option<PathBuf>,
     pub key_path: Option<PathBuf>,
     pub ca_cert_path: Option<PathBuf>,
-
-    /// JWT secret for authentication tokens
-    pub jwt_secret: String,
 
     /// Token expiration time
     pub token_expiration: Duration,
@@ -238,8 +241,6 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
-    /// JWT token based authentication
-    Jwt,
     /// Bittensor signature based authentication
     BittensorSignature,
     /// mTLS certificate based authentication
@@ -278,14 +279,14 @@ pub struct RateLimitConfig {
     pub window_duration: Duration,
 }
 
-/// SSH configuration for executor access by validators
+/// SSH configuration for node access by validators
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutorSshConfig {
-    /// Path to miner's SSH key for executor access
-    pub miner_executor_key_path: PathBuf,
+pub struct NodeSshConfig {
+    /// Path to miner's SSH key for node access
+    pub miner_node_key_path: PathBuf,
 
-    /// Default username for executor SSH
-    pub default_executor_username: String,
+    /// Default username for node SSH
+    pub default_node_username: String,
 
     /// Session cleanup interval
     pub session_cleanup_interval: Duration,
@@ -322,7 +323,7 @@ pub struct ExecutorSshConfig {
     #[serde(default = "default_enable_session_expiration")]
     pub enable_session_expiration: bool,
 
-    /// Cleanup expired SSH keys from executors
+    /// Cleanup expired SSH keys from nodes
     #[serde(default = "default_enable_key_cleanup")]
     pub enable_key_cleanup: bool,
 
@@ -358,7 +359,7 @@ pub struct ValidatorAssignmentConfig {
     #[serde(default = "default_min_stake_threshold")]
     pub min_stake_threshold: f64,
 
-    /// Specific validator hotkey to assign executors to (for highest_stake strategy)
+    /// Specific validator hotkey to assign nodes to (for highest_stake strategy)
     pub validator_hotkey: Option<String>,
 }
 
@@ -402,10 +403,10 @@ impl Default for MinerConfig {
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
             validator_comms: ValidatorCommsConfig::default(),
-            executor_management: ExecutorManagementConfig::default(),
-            remote_executor_deployment: None,
+            node_management: NodeManagementConfig::default(),
+            remote_node_deployment: None,
             security: SecurityConfig::default(),
-            ssh_session: ExecutorSshConfig::default(),
+            ssh_session: NodeSshConfig::default(),
             advertised_addresses: MinerAdvertisedAddresses::default(),
             validator_assignment: ValidatorAssignmentConfig::default(),
         }
@@ -464,11 +465,11 @@ fn default_min_stake_threshold() -> f64 {
     6000.0 // 6000 TAO
 }
 
-impl Default for ExecutorSshConfig {
+impl Default for NodeSshConfig {
     fn default() -> Self {
         Self {
-            miner_executor_key_path: PathBuf::from("~/.ssh/miner_executor_key"),
-            default_executor_username: "executor".to_string(),
+            miner_node_key_path: PathBuf::from("~/.ssh/miner_node_key"),
+            default_node_username: "node".to_string(),
             session_cleanup_interval: Duration::from_secs(60),
             max_sessions_per_validator: 5,
             session_rate_limit: 200, // 200 sessions per hour
@@ -523,6 +524,8 @@ impl Default for TlsConfig {
 impl Default for ValidatorCommsConfig {
     fn default() -> Self {
         Self {
+            host: "0.0.0.0".to_string(),
+            port: 50051,
             tls: None,
             auth: AuthConfig::default(),
             request_timeout: Duration::from_secs(30),
@@ -532,10 +535,10 @@ impl Default for ValidatorCommsConfig {
     }
 }
 
-impl Default for ExecutorManagementConfig {
+impl Default for NodeManagementConfig {
     fn default() -> Self {
         Self {
-            executors: vec![],
+            nodes: vec![],
             health_check_interval: Duration::from_secs(60),
             health_check_timeout: Duration::from_secs(10),
             max_retry_attempts: 3,
@@ -551,7 +554,6 @@ impl Default for SecurityConfig {
             cert_path: None,
             key_path: None,
             ca_cert_path: None,
-            jwt_secret: "change-me-in-production".to_string(),
             token_expiration: Duration::from_secs(3600),
             allowed_validators: vec![],
             verify_signatures: true,
@@ -620,46 +622,34 @@ impl ConfigValidation for MinerConfig {
             });
         }
 
-        // Validate executor management - allow empty if using remote deployment
-        if self.executor_management.executors.is_empty()
-            && self.remote_executor_deployment.is_none()
-        {
+        // Validate node management - allow empty if using remote deployment
+        if self.node_management.nodes.is_empty() && self.remote_node_deployment.is_none() {
             return Err(ConfigurationError::InvalidValue {
-                key: "executor_management.executors".to_string(),
+                key: "node_management.nodes".to_string(),
                 value: "[]".to_string(),
-                reason:
-                    "At least one executor must be configured or remote deployment must be enabled"
-                        .to_string(),
+                reason: "At least one node must be configured or remote deployment must be enabled"
+                    .to_string(),
             });
         }
 
-        // Validate each executor config
-        for (idx, executor) in self.executor_management.executors.iter().enumerate() {
+        // Validate each node config
+        for (idx, node) in self.node_management.nodes.iter().enumerate() {
             // Allow empty ID as it will be auto-generated
-            // if executor.id.is_empty() {
+            // if node.id.is_empty() {
             //     return Err(ConfigurationError::InvalidValue {
-            //         key: format!("executor_management.executors[{}].id", idx),
-            //         value: executor.id.clone(),
-            //         reason: "Executor ID cannot be empty".to_string(),
+            //         key: format!("node_management.nodes[{}].id", idx),
+            //         value: node.id.clone(),
+            //         reason: "Node ID cannot be empty".to_string(),
             //     });
             // }
 
-            if executor.grpc_address.is_empty() {
+            if node.grpc_address.is_empty() {
                 return Err(ConfigurationError::InvalidValue {
-                    key: format!("executor_management.executors[{idx}].grpc_address"),
-                    value: executor.grpc_address.clone(),
-                    reason: "Executor gRPC address cannot be empty".to_string(),
+                    key: format!("node_management.nodes[{idx}].grpc_address"),
+                    value: node.grpc_address.clone(),
+                    reason: "Node gRPC address cannot be empty".to_string(),
                 });
             }
-        }
-
-        // Validate security configuration
-        if self.security.jwt_secret == "change-me-in-production" {
-            return Err(ConfigurationError::InvalidValue {
-                key: "security.jwt_secret".to_string(),
-                value: "***".to_string(),
-                reason: "JWT secret must be changed from default value in production".to_string(),
-            });
         }
 
         // Validate TLS configuration if enabled
