@@ -105,11 +105,6 @@ pub enum Command {
         all: bool,
     },
 
-    Database {
-        #[command(subcommand)]
-        action: DatabaseAction,
-    },
-
     /// Container rental commands
     Rental {
         #[command(subcommand)]
@@ -118,23 +113,6 @@ pub enum Command {
         /// API URL override (default: from config)
         #[arg(long, global = true)]
         api_url: Option<String>,
-    },
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum DatabaseAction {
-    Migrate,
-
-    Reset {
-        #[arg(long)]
-        confirm: bool,
-    },
-
-    Status,
-
-    Cleanup {
-        #[arg(long, default_value = "30")]
-        days: u32,
     },
 }
 
