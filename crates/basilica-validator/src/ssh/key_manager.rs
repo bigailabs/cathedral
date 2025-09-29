@@ -143,6 +143,12 @@ impl ValidatorSshKeyManager {
         self.persistent_key.as_ref()
     }
 
+    pub fn get_ssh_public_key(&self) -> Option<String> {
+        self.persistent_key
+            .as_ref()
+            .map(|(pub_key, _)| pub_key.clone())
+    }
+
     /// Generate ephemeral SSH keypair for a session
     pub async fn generate_session_keypair(
         &self,

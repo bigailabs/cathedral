@@ -49,9 +49,10 @@ impl Default for MinerClientConfig {
 pub struct MinerClient {
     config: MinerClientConfig,
     validator_hotkey: Hotkey,
-    /// Optional signer for creating signatures
-    /// In production, this should be provided by the validator's key management
-    signer: Option<Box<dyn ValidatorSigner>>,
+    /// Signer for creating cryptographic signatures using validator's key
+    signer: Option<Arc<dyn ValidatorSigner>>,
+    /// Validator's SSH public key for node access
+    validator_ssh_public_key: Option<String>,
 }
 
 /// Trait for validator signing operations
@@ -90,6 +91,7 @@ impl MinerClient {
             config,
             validator_hotkey,
             signer: None,
+            validator_ssh_public_key: None,
         }
     }
 
@@ -97,13 +99,20 @@ impl MinerClient {
     pub fn with_signer(
         config: MinerClientConfig,
         validator_hotkey: Hotkey,
-        signer: Box<dyn ValidatorSigner>,
+        signer: Arc<dyn ValidatorSigner>,
     ) -> Self {
         Self {
             config,
             validator_hotkey,
             signer: Some(signer),
+            validator_ssh_public_key: None,
         }
+    }
+
+    /// Set the validator's SSH public key
+    pub fn with_ssh_public_key(mut self, ssh_public_key: String) -> Self {
+        self.validator_ssh_public_key = Some(ssh_public_key);
+        self
     }
 
     /// Get the configured rental session duration
@@ -111,19 +120,14 @@ impl MinerClient {
         self.config.rental_session_duration
     }
 
-    /// Create a validator signature for authentication
-    fn create_validator_signature(&self, nonce: &str) -> Result<String> {
-        if let Some(ref signer) = self.signer {
-            // Use the provided signer
-            let signature_bytes = signer
-                .sign(nonce.as_bytes())
-                .map_err(|e| anyhow::anyhow!("Failed to create validator signature: {e}"))?;
-            Ok(hex::encode(signature_bytes))
-        } else {
-            Err(anyhow::anyhow!(
-                "No signer provided for validator signature creation"
-            ))
-        }
+    /// Create a validator signature for authentication (required for initial auth)
+    fn create_signature(&self, payload: &str) -> Result<String> {
+        self.signer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No signer provided for validator signature creation"))?
+            .sign(payload.as_bytes())
+            .map(hex::encode)
+            .map_err(|e| anyhow::anyhow!("Failed to create validator signature: {e}"))
     }
 
     /// Extract gRPC endpoint from axon endpoint
@@ -197,12 +201,13 @@ impl MinerClient {
             "{}:{}:{}:{}",
             AUTH_PREFIX, nonce, target_miner_hotkey, timestamp.seconds
         );
-        let signature = self.create_validator_signature(&signature_payload)?;
+        let signature = self.create_signature(&signature_payload)?;
 
         debug!(
             miner_uid = miner_uid,
             "Creating canonical auth signature with timestamp {} for target miner {}",
-            timestamp.seconds, target_miner_hotkey
+            timestamp.seconds,
+            target_miner_hotkey
         );
 
         let auth_request = ValidatorAuthRequest {
@@ -326,7 +331,10 @@ impl MinerClient {
 
         Ok(AuthenticatedMinerConnection {
             client: MinerDiscoveryClient::new(channel),
-            session_token,
+            _session_token: session_token,
+            validator_hotkey: self.validator_hotkey.clone(),
+            signer: self.signer.clone(),
+            validator_ssh_public_key: self.validator_ssh_public_key.clone(),
         })
     }
 
@@ -367,10 +375,33 @@ impl MinerClient {
 /// Authenticated connection to a miner
 pub struct AuthenticatedMinerConnection {
     client: MinerDiscoveryClient<Channel>,
-    session_token: String,
+    _session_token: String,
+    /// Validator's actual hotkey
+    validator_hotkey: Hotkey,
+    /// Optional signer for creating signatures
+    signer: Option<Arc<dyn ValidatorSigner>>,
+    /// Validator's SSH public key
+    validator_ssh_public_key: Option<String>,
 }
 
 impl AuthenticatedMinerConnection {
+    /// Create a validator signature for a payload, returning empty string if unavailable
+    fn create_signature(&self, payload: &str) -> String {
+        self.signer
+            .as_ref()
+            .and_then(|signer| {
+                signer
+                    .sign(payload.as_bytes())
+                    .map(hex::encode)
+                    .map_err(|e| {
+                        debug!("Failed to create signature: {}", e);
+                        e
+                    })
+                    .ok()
+            })
+            .unwrap_or_default()
+    }
+
     /// Request available nodes from the miner
     pub async fn request_nodes(&mut self, miner_uid: u16) -> Result<Vec<NodeConnectionDetails>> {
         info!(
@@ -387,11 +418,26 @@ impl AuthenticatedMinerConnection {
             }),
         };
 
+        let nonce = uuid::Uuid::new_v4().to_string();
+
+        // Create signature if signer is available
+        const DISCOVER_PREFIX: &str = "BASILICA_DISCOVER_V1";
+        let signature_payload = format!(
+            "{}:{}:{}:{}",
+            DISCOVER_PREFIX,
+            self.validator_hotkey,
+            nonce,
+            timestamp.value.as_ref().map(|t| t.seconds).unwrap_or(0)
+        );
+
+        // Create signature using helper method
+        let signature = self.create_signature(&signature_payload);
+
         let request = DiscoverNodesRequest {
-            validator_hotkey: self.session_token.clone(), // Using session token as hotkey
-            signature: String::new(),                     // Signature would be added by signer
-            nonce: uuid::Uuid::new_v4().to_string(),
-            validator_public_key: String::new(), // Public key would be added by signer
+            validator_hotkey: self.validator_hotkey.to_string(),
+            signature,
+            nonce,
+            validator_public_key: self.validator_ssh_public_key.clone().unwrap_or_default(),
             timestamp: Some(timestamp),
             target_miner_hotkey: String::new(), // Target is implicit from connection
         };

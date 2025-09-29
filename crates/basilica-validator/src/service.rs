@@ -5,7 +5,6 @@ use crate::collateral::collateral_scan::Collateral;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
 use crate::metrics::ValidatorMetrics;
-use crate::miner_prover::miner_client::{BittensorServiceSigner, MinerClient, MinerClientConfig};
 use crate::miner_prover::MinerProver;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -184,15 +183,13 @@ impl ValidatorService {
             None
         };
 
-        let miner_client = if let Some(ref bittensor_service) = bittensor_service {
-            let signer = Box::new(BittensorServiceSigner::new(bittensor_service.clone()));
-
-            MinerClient::with_signer(MinerClientConfig::default(), validator_hotkey, signer)
-        } else {
-            MinerClient::new(MinerClientConfig::default(), validator_hotkey)
-        };
-
-        api_handler = api_handler.with_miner_client(Arc::new(miner_client));
+        if let Some(miner_client) = miner_prover_opt.as_ref().and_then(|mp| {
+            mp.get_verification_engine()
+                .create_authenticated_client()
+                .ok()
+        }) {
+            api_handler = api_handler.with_miner_client(Arc::new(miner_client));
+        }
 
         if let Some(rental_manager) = rental_manager {
             api_handler = api_handler.with_rental_manager(Arc::new(rental_manager));

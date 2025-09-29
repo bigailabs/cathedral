@@ -1914,24 +1914,29 @@ impl VerificationEngine {
     }
 
     /// Create authenticated miner client
-    fn create_authenticated_client(&self) -> Result<MinerClient> {
-        Ok(
-            if let Some(ref bittensor_service) = self.bittensor_service {
-                let signer = Box::new(super::miner_client::BittensorServiceSigner::new(
-                    bittensor_service.clone(),
-                ));
-                MinerClient::with_signer(
-                    self.miner_client_config.clone(),
-                    self.validator_hotkey.clone(),
-                    signer,
-                )
-            } else {
-                MinerClient::new(
-                    self.miner_client_config.clone(),
-                    self.validator_hotkey.clone(),
-                )
-            },
-        )
+    pub fn create_authenticated_client(&self) -> Result<MinerClient> {
+        let mut client = if let Some(ref bittensor_service) = self.bittensor_service {
+            let signer = Arc::new(super::miner_client::BittensorServiceSigner::new(
+                bittensor_service.clone(),
+            ));
+            MinerClient::with_signer(
+                self.miner_client_config.clone(),
+                self.validator_hotkey.clone(),
+                signer,
+            )
+        } else {
+            MinerClient::new(
+                self.miner_client_config.clone(),
+                self.validator_hotkey.clone(),
+            )
+        };
+
+        // Add SSH public key if available
+        if let Some(public_key) = self.get_ssh_public_key() {
+            client = client.with_ssh_public_key(public_key);
+        }
+
+        Ok(client)
     }
 
     /// Get whether dynamic discovery is enabled
@@ -2671,6 +2676,14 @@ impl VerificationEngine {
         }
 
         combined
+    }
+
+    pub fn get_ssh_public_key(&self) -> Option<String> {
+        if let Some(ref key_manager) = self.ssh_key_manager {
+            key_manager.get_ssh_public_key()
+        } else {
+            None
+        }
     }
 }
 
