@@ -335,6 +335,9 @@ impl MinerClient {
             validator_hotkey: self.validator_hotkey.clone(),
             signer: self.signer.clone(),
             validator_ssh_public_key: self.validator_ssh_public_key.clone(),
+            miner_uid,
+            miner_axon_endpoint: axon_endpoint.to_string(),
+            target_miner_hotkey: target_miner_hotkey.to_string(),
         })
     }
 
@@ -382,6 +385,12 @@ pub struct AuthenticatedMinerConnection {
     signer: Option<Arc<dyn ValidatorSigner>>,
     /// Validator's SSH public key
     validator_ssh_public_key: Option<String>,
+    /// Miner UID
+    miner_uid: u16,
+    /// Miner Axon endpoint
+    miner_axon_endpoint: String,
+    /// Target miner hotkey
+    target_miner_hotkey: String,
 }
 
 impl AuthenticatedMinerConnection {
@@ -403,7 +412,7 @@ impl AuthenticatedMinerConnection {
     }
 
     /// Request available nodes from the miner
-    pub async fn request_nodes(&mut self, miner_uid: u16) -> Result<Vec<NodeConnectionDetails>> {
+    pub async fn request_nodes(&mut self) -> Result<Vec<NodeConnectionDetails>> {
         info!(
             miner_uid = self.miner_uid,
             "Requesting available nodes from miner"
@@ -439,7 +448,7 @@ impl AuthenticatedMinerConnection {
             nonce,
             validator_public_key: self.validator_ssh_public_key.clone().unwrap_or_default(),
             timestamp: Some(timestamp),
-            target_miner_hotkey: String::new(), // Target is implicit from connection
+            target_miner_hotkey: self.target_miner_hotkey.to_string(),
         };
 
         let response = self

@@ -514,7 +514,7 @@ impl VerificationEngine {
 
         info!(miner_uid = miner_uid, "[EVAL_FLOW] Requesting nodes");
         let request_start = std::time::Instant::now();
-        let node_details = match connection.request_nodes(miner_uid).await {
+        let node_details = match connection.request_nodes().await {
             Ok(details) => {
                 info!(
                     miner_uid = miner_uid,
