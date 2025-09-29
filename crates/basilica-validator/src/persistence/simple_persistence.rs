@@ -2825,7 +2825,7 @@ impl SimplePersistence {
             };
 
             node_metrics.push(NodeMetricData {
-                node_id: node_id,
+                node_id,
                 miner_id,
                 miner_uid,
                 gpu_name,

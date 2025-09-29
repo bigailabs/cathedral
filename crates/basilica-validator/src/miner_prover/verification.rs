@@ -15,7 +15,7 @@ use crate::metrics::ValidatorMetrics;
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
-use crate::ssh::{SshSessionManager, ValidatorSshClient, ValidatorSshKeyManager};
+use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::{Context, Result};
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use chrono::Utc;
@@ -43,8 +43,6 @@ pub struct VerificationEngine {
     bittensor_service: Option<Arc<bittensor::Service>>,
     /// SSH key manager for session keys
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
-    /// SSH session manager for preventing concurrent sessions
-    ssh_session_manager: Arc<SshSessionManager>,
     /// Metrics for tracking rental status and other validator metrics
     metrics: Option<Arc<ValidatorMetrics>>,
     /// Validation strategy selector for determining validation approach
@@ -2055,7 +2053,6 @@ impl VerificationEngine {
             ssh_key_path: None, // Not used when SSH key manager is available
             bittensor_service,
             ssh_key_manager: ssh_key_manager.clone(),
-            ssh_session_manager: Arc::new(SshSessionManager::new()),
             metrics: metrics.clone(),
             validation_strategy_selector: Arc::new(ValidationStrategySelector::new(
                 config.clone(),
