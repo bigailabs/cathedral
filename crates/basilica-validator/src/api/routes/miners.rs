@@ -8,8 +8,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde_json::Value;
-use tracing::{error, info, warn};
-use uuid::Uuid;
+use tracing::{error, info};
 
 /// List all registered miners with filtering and pagination
 pub async fn list_miners(
@@ -85,72 +84,6 @@ pub async fn list_miners(
     }
 }
 
-/// Register a new miner with the validator
-pub async fn register_miner(
-    State(state): State<ApiState>,
-    Json(request): Json<RegisterMinerRequest>,
-) -> Result<Json<RegisterMinerResponse>, ApiError> {
-    info!("Registering miner: {}", request.miner_id);
-
-    if request.miner_id.is_empty() || request.hotkey.is_empty() {
-        return Err(ApiError::BadRequest(
-            "Miner ID and hotkey are required".to_string(),
-        ));
-    }
-
-    if request.nodes.is_empty() {
-        return Err(ApiError::BadRequest(
-            "At least one node must be registered".to_string(),
-        ));
-    }
-
-    match verify_miner_signature(&request).await {
-        Ok(false) => {
-            warn!(
-                "Invalid signature for miner registration: {}",
-                request.miner_id
-            );
-            return Err(ApiError::Unauthorized);
-        }
-        Err(e) => {
-            error!("Failed to verify miner signature: {}", e);
-            return Err(ApiError::InternalError(
-                "Signature verification failed".to_string(),
-            ));
-        }
-        Ok(true) => {}
-    }
-
-    let registration_result = state
-        .persistence
-        .register_miner(
-            &request.miner_id,
-            &request.hotkey,
-            &request.endpoint,
-            &request.nodes,
-        )
-        .await;
-
-    match registration_result {
-        Ok(()) => {
-            info!("Successfully registered miner: {}", request.miner_id);
-            Ok(Json(RegisterMinerResponse {
-                success: true,
-                miner_id: request.miner_id,
-                message: "Miner registered successfully".to_string(),
-            }))
-        }
-        Err(e) => {
-            error!("Failed to register miner {}: {}", request.miner_id, e);
-            if e.to_string().contains("already exists") {
-                Err(ApiError::BadRequest("Miner already registered".to_string()))
-            } else {
-                Err(ApiError::InternalError("Registration failed".to_string()))
-            }
-        }
-    }
-}
-
 /// Get details for a specific miner
 pub async fn get_miner(
     State(state): State<ApiState>,
@@ -182,75 +115,6 @@ pub async fn get_miner(
             Err(ApiError::InternalError(
                 "Failed to retrieve miner".to_string(),
             ))
-        }
-    }
-}
-
-/// Update miner information
-pub async fn update_miner(
-    State(state): State<ApiState>,
-    Path(miner_id): Path<String>,
-    Json(request): Json<UpdateMinerRequest>,
-) -> Result<Json<RegisterMinerResponse>, ApiError> {
-    info!("Updating miner: {}", miner_id);
-
-    match verify_miner_update_signature(&miner_id, &request).await {
-        Ok(false) => {
-            warn!("Invalid signature for miner update: {}", miner_id);
-            return Err(ApiError::Unauthorized);
-        }
-        Err(e) => {
-            error!("Failed to verify miner update signature: {}", e);
-            return Err(ApiError::InternalError(
-                "Signature verification failed".to_string(),
-            ));
-        }
-        Ok(true) => {}
-    }
-
-    match state.persistence.update_miner(&miner_id, &request).await {
-        Ok(()) => {
-            info!("Successfully updated miner: {}", miner_id);
-            Ok(Json(RegisterMinerResponse {
-                success: true,
-                miner_id,
-                message: "Miner updated successfully".to_string(),
-            }))
-        }
-        Err(e) => {
-            error!("Failed to update miner {}: {}", miner_id, e);
-            if e.to_string().contains("not found") {
-                Err(ApiError::NotFound("Miner not found".to_string()))
-            } else {
-                Err(ApiError::InternalError("Update failed".to_string()))
-            }
-        }
-    }
-}
-
-/// Remove a miner from the registry
-pub async fn remove_miner(
-    State(state): State<ApiState>,
-    Path(miner_id): Path<String>,
-) -> Result<Json<RegisterMinerResponse>, ApiError> {
-    info!("Removing miner: {}", miner_id);
-
-    match state.persistence.remove_miner(&miner_id).await {
-        Ok(()) => {
-            info!("Successfully removed miner: {}", miner_id);
-            Ok(Json(RegisterMinerResponse {
-                success: true,
-                miner_id,
-                message: "Miner removed successfully".to_string(),
-            }))
-        }
-        Err(e) => {
-            error!("Failed to remove miner {}: {}", miner_id, e);
-            if e.to_string().contains("not found") {
-                Err(ApiError::NotFound("Miner not found".to_string()))
-            } else {
-                Err(ApiError::InternalError("Removal failed".to_string()))
-            }
         }
     }
 }
@@ -297,54 +161,6 @@ pub async fn get_miner_health(
     }
 }
 
-/// Trigger verification process for a miner
-pub async fn trigger_miner_verification(
-    State(state): State<ApiState>,
-    Path(miner_id): Path<String>,
-    Json(request): Json<TriggerVerificationRequest>,
-) -> Result<Json<TriggerVerificationResponse>, ApiError> {
-    info!("Triggering verification for miner: {}", miner_id);
-
-    let verification_id = Uuid::new_v4().to_string();
-    let estimated_completion = Utc::now() + chrono::Duration::minutes(10);
-
-    match state
-        .persistence
-        .schedule_verification(
-            &miner_id,
-            &verification_id,
-            &request.verification_type,
-            request.node_id.as_deref(),
-        )
-        .await
-    {
-        Ok(()) => {
-            info!(
-                "Scheduled verification {} for miner {}",
-                verification_id, miner_id
-            );
-            Ok(Json(TriggerVerificationResponse {
-                verification_id,
-                status: "scheduled".to_string(),
-                estimated_completion,
-            }))
-        }
-        Err(e) => {
-            error!(
-                "Failed to schedule verification for miner {}: {}",
-                miner_id, e
-            );
-            if e.to_string().contains("not found") {
-                Err(ApiError::NotFound("Miner not found".to_string()))
-            } else {
-                Err(ApiError::InternalError(
-                    "Verification scheduling failed".to_string(),
-                ))
-            }
-        }
-    }
-}
-
 /// List nodes for a specific miner
 pub async fn list_miner_nodes(
     State(state): State<ApiState>,
@@ -378,25 +194,6 @@ pub async fn list_miner_nodes(
             }
         }
     }
-}
-
-// Helper functions
-
-async fn verify_miner_signature(request: &RegisterMinerRequest) -> Result<bool, anyhow::Error> {
-    let message = format!(
-        "{}:{}:{}",
-        request.miner_id, request.hotkey, request.endpoint
-    );
-    basilica_common::crypto::verify_signature(&request.signature, &message, &request.hotkey).await
-}
-
-async fn verify_miner_update_signature(
-    miner_id: &str,
-    request: &UpdateMinerRequest,
-) -> Result<bool, anyhow::Error> {
-    let endpoint = request.endpoint.as_deref().unwrap_or("");
-    let message = format!("{miner_id}:{endpoint}:update");
-    basilica_common::crypto::verify_signature(&request.signature, &message, miner_id).await
 }
 
 fn determine_miner_status(

@@ -14,7 +14,7 @@ use crate::config::ApiConfig;
 use crate::rental;
 use anyhow::Result;
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -140,15 +140,8 @@ impl ApiHandler {
             .route("/nodes", get(routes::list_available_nodes))
             // Existing miner routes
             .route("/miners", get(routes::list_miners))
-            .route("/miners/register", post(routes::register_miner))
             .route("/miners/:miner_id", get(routes::get_miner))
-            .route("/miners/:miner_id", put(routes::update_miner))
-            .route("/miners/:miner_id", delete(routes::remove_miner))
             .route("/miners/:miner_id/health", get(routes::get_miner_health))
-            .route(
-                "/miners/:miner_id/verify",
-                post(routes::trigger_miner_verification),
-            )
             .route("/miners/:miner_id/nodes", get(routes::list_miner_nodes))
             .route("/health", get(routes::health_check))
             // new
