@@ -2571,36 +2571,9 @@ impl VerificationEngine {
 
         // Get SSH connection details for direct node connection
         let ssh_details = if let Some(ref key_manager) = self.ssh_key_manager {
-            // Get node's SSH credentials from node_ssh_endpoint
-            // node_ssh_endpoint format is expected to be "user@host:port" or similar
-            let endpoint_parts: Vec<&str> = node_info.node_ssh_endpoint.split('@').collect();
-            let (username, host_port) = if endpoint_parts.len() == 2 {
-                (endpoint_parts[0], endpoint_parts[1])
-            } else {
-                ("root", node_info.node_ssh_endpoint.as_str())
-            };
-
-            let host_port_parts: Vec<&str> = host_port.split(':').collect();
-            let (host, port) = if host_port_parts.len() == 2 {
-                (
-                    host_port_parts[0],
-                    host_port_parts[1].parse::<u16>().unwrap_or(22),
-                )
-            } else {
-                (host_port, 22)
-            };
-
-            let (_, private_key_path) = key_manager
-                .get_persistent_key()
-                .ok_or_else(|| anyhow::anyhow!("No persistent validator SSH key available"))?;
-
-            basilica_common::ssh::SshConnectionDetails {
-                host: host.to_string(),
-                port,
-                username: username.to_string(),
-                private_key_path: private_key_path.clone(),
-                timeout: std::time::Duration::from_secs(30),
-            }
+            key_manager
+                .get_ssh_connection_details(miner_hotkey, &node_info.node_ssh_endpoint)
+                .unwrap()
         } else {
             return Err(anyhow::anyhow!("SSH key manager not available"));
         };
