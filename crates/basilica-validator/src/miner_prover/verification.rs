@@ -554,6 +554,7 @@ impl VerificationEngine {
                     id: NodeId::from_str(&details.node_id).map_err(|e| {
                         anyhow::anyhow!("Invalid node ID '{}': {}", details.node_id, e)
                     })?,
+                    miner_uid: MinerUid::new(miner_uid),
                     status: "available".to_string(),
                     capabilities: vec!["gpu".to_string()],
                     grpc_endpoint: format!("{}:{}", details.host, details.port),
@@ -1040,8 +1041,11 @@ impl VerificationEngine {
             if !duplicates.is_empty() {
                 let duplicate_count = duplicates.len();
                 warn!(
-                    "Found {} duplicate nodes with same grpc_address {} for miner {}",
-                    duplicate_count, node_grpc_endpoint, miner_id
+                    miner_uid = miner_uid,
+                    "Found {} duplicate nodes with same node_ssh_endpoint {} for miner {}",
+                    duplicate_count,
+                    node_ssh_endpoint,
+                    miner_id
                 );
 
                 // Delete the duplicates to clean up fraudulent registrations
@@ -1050,7 +1054,8 @@ impl VerificationEngine {
                     let dup_node_id: String = duplicate.get("node_id");
 
                     warn!(
-                        "Marking duplicate node {} (id: {}) as offline with same grpc_address as {} for miner {}",
+                        miner_uid = miner_uid,
+                        "Marking duplicate node {} (id: {}) as offline with same node_ssh_endpoint as {} for miner {}",
                         dup_node_id, dup_id, node_id, miner_id
                     );
 
@@ -1074,8 +1079,11 @@ impl VerificationEngine {
                 }
 
                 info!(
-                    "Cleaned up {} duplicate nodes for miner {} with grpc_address {}",
-                    duplicate_count, miner_id, node_grpc_endpoint
+                    miner_uid = miner_uid,
+                    "Cleaned up {} duplicate nodes for miner {} with node_ssh_endpoint {}",
+                    duplicate_count,
+                    miner_id,
+                    node_ssh_endpoint
                 );
             }
         }
@@ -1124,6 +1132,7 @@ impl VerificationEngine {
 
             if deleted.rows_affected() > 0 {
                 info!(
+                    miner_uid = miner_uid,
                     "Cleaned up {} stale GPU assignments for {}/{}",
                     deleted.rows_affected(),
                     miner_id,
@@ -1138,8 +1147,11 @@ impl VerificationEngine {
 
             if deleted_rows > 0 {
                 info!(
+                    miner_uid = miner_uid,
                     "Cleaned up {} GPU assignments for {}/{} (no GPUs reported)",
-                    deleted_rows, miner_id, node_id
+                    deleted_rows,
+                    miner_id,
+                    node_id
                 );
             }
         }
@@ -1184,6 +1196,7 @@ impl VerificationEngine {
                     if can_reassign {
                         // GPU reassignment allowed - previous node is inactive
                         info!(
+                            miner_uid = miner_uid,
                             security = true,
                             gpu_uuid = %gpu_info.gpu_uuid,
                             previous_miner_id = %existing_miner_id,
@@ -1220,6 +1233,7 @@ impl VerificationEngine {
                     } else {
                         // Node is still active - reject the reassignment
                         warn!(
+                            miner_uid = miner_uid,
                             security = true,
                             gpu_uuid = %gpu_info.gpu_uuid,
                             existing_miner_id = %existing_miner_id,
@@ -1272,6 +1286,7 @@ impl VerificationEngine {
                 .await?;
 
                 info!(
+                    miner_uid = miner_uid,
                     security = true,
                     gpu_uuid = %gpu_info.gpu_uuid,
                     gpu_index = gpu_info.index,
@@ -1336,6 +1351,7 @@ impl VerificationEngine {
             );
         } else {
             warn!(
+                miner_uid = miner_uid,
                 security = true,
                 node_id = %node_id,
                 miner_id = %miner_id,
@@ -1355,16 +1371,23 @@ impl VerificationEngine {
 
         if gpu_count != expected_gpu_count {
             warn!(
+                miner_uid = miner_uid,
                 "GPU assignment mismatch for {}/{}: stored {} GPUs but expected {}",
-                miner_id, node_id, gpu_count, expected_gpu_count
+                miner_id,
+                node_id,
+                gpu_count,
+                expected_gpu_count
             );
         }
 
         // Fail verification if node claims GPUs but none were stored
         if expected_gpu_count > 0 && gpu_count == 0 {
             error!(
+                miner_uid = miner_uid,
                 "Failed to store GPU assignments for {}/{}: expected {} GPUs but stored 0",
-                miner_id, node_id, expected_gpu_count
+                miner_id,
+                node_id,
+                expected_gpu_count
             );
             return Err(anyhow::anyhow!(
                 "GPU assignment validation failed: no valid GPU UUIDs stored despite {} GPUs reported",
@@ -1393,8 +1416,10 @@ impl VerificationEngine {
 
         if reported_gpu_uuids.is_empty() {
             debug!(
+                miner_uid = miner_uid,
                 "No valid GPU UUIDs reported for {}/{} in lightweight validation",
-                miner_id, node_id
+                miner_id,
+                node_id
             );
             return Ok(());
         }
@@ -1544,8 +1569,11 @@ impl VerificationEngine {
         if existing_hotkey != new_hotkey {
             // Case: Recycled UID - same UID but different hotkey
             info!(
+                miner_uid = miner_uid,
                 "Miner {} exists with old hotkey {}, updating to new hotkey {}",
-                miner_uid, existing_hotkey, new_hotkey
+                miner_uid,
+                existing_hotkey,
+                new_hotkey
             );
 
             let update_query = r#"
@@ -2639,7 +2667,7 @@ impl VerificationEngine {
     fn convert_db_data_to_node_info(
         &self,
         db_data: Vec<(String, String, i32, String)>,
-        _miner_uid: u16,
+        miner_uid: u16,
     ) -> Result<Vec<NodeInfoDetailed>> {
         let mut nodes = Vec::new();
 
@@ -2649,6 +2677,7 @@ impl VerificationEngine {
 
             nodes.push(NodeInfoDetailed {
                 id: node_id_parsed,
+                miner_uid: MinerUid::new(miner_uid),
                 status,
                 capabilities: if gpu_count > 0 {
                     vec!["gpu".to_string()]

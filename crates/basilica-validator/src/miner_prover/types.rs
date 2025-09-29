@@ -199,7 +199,8 @@ pub struct SmStat {
 /// Detailed node information for verification processes
 #[derive(Debug, Clone)]
 pub struct NodeInfoDetailed {
-    pub id: NodeId, // Using NodeId alias which maps to NodeId
+    pub id: NodeId,
+    pub miner_uid: MinerUid,
     pub status: String,
     pub capabilities: Vec<String>,
     pub grpc_endpoint: String,

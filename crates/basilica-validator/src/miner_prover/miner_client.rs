@@ -457,7 +457,7 @@ impl AuthenticatedMinerConnection {
         let response = response.into_inner();
 
         info!(
-            miner_uid = miner_uid,
+            miner_uid = self.miner_uid,
             "Received {} available nodes from miner",
             response.nodes.len()
         );

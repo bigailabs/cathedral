@@ -1225,6 +1225,7 @@ mod tests {
     fn create_test_node_info(id: &str) -> NodeInfoDetailed {
         NodeInfoDetailed {
             id: NodeId::new("test-node").unwrap(),
+            miner_uid: basilica_common::identity::MinerUid::new(1),
             status: "online".to_string(),
             capabilities: vec!["gpu".to_string()],
             grpc_endpoint: format!("http://node-{}.test:8080", id),
