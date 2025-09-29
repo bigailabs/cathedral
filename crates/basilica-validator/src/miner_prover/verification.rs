@@ -2567,14 +2567,7 @@ impl VerificationEngine {
             ));
         }
 
-        // Step 2: Establish miner connection first
-        let client = self.create_authenticated_client()?;
-        let _connection = client
-            .connect_and_authenticate(miner_uid, miner_endpoint, miner_hotkey)
-            .await?;
-
-        // Step 3: Session management is now handled at connection level
-        // Direct SSH connections are established as needed
+        // Step 2: Direct SSH connections to node
 
         // Get SSH connection details for direct node connection
         let ssh_details = if let Some(ref key_manager) = self.ssh_key_manager {
@@ -2609,11 +2602,10 @@ impl VerificationEngine {
                 timeout: std::time::Duration::from_secs(30),
             }
         } else {
-            // Session cleanup handled at connection level
             return Err(anyhow::anyhow!("SSH key manager not available"));
         };
 
-        // Step 4: Execute validation based on strategy
+        // Step 3: Execute validation based on strategy
         let result = match strategy {
             ValidationStrategy::Lightweight {
                 previous_score,
@@ -2652,11 +2644,6 @@ impl VerificationEngine {
                     .await
             }
         };
-
-        // Step 5: No explicit cleanup needed for direct node connections
-        // The SSH session manager handles connection tracking
-
-        // Step 6: Session cleanup handled at connection level
 
         result
     }
