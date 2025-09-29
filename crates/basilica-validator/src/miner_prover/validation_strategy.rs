@@ -627,7 +627,7 @@ impl ValidationNode {
 
         Ok(NodeVerificationResult {
             node_id: node_info.id.clone(),
-            grpc_endpoint: node_info.grpc_endpoint.clone(),
+            node_ssh_endpoint: node_info.node_ssh_endpoint.clone(),
             verification_score,
             ssh_connection_successful: validation_successful,
             binary_validation_successful: false,
@@ -957,7 +957,7 @@ impl ValidationNode {
 
         Ok(NodeVerificationResult {
             node_id: node_info.id.clone(),
-            grpc_endpoint: node_info.grpc_endpoint.clone(),
+            node_ssh_endpoint: node_info.node_ssh_endpoint.clone(),
             verification_score: combined_score,
             ssh_connection_successful,
             binary_validation_successful: pre_validations_successful

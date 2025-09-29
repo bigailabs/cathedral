@@ -901,7 +901,7 @@ mod tests {
 
             // Seed miner_nodes table
             sqlx::query(
-                "INSERT INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, status, created_at, updated_at)
+                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_id)
@@ -1133,7 +1133,7 @@ mod tests {
 
         // Insert node
         sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, status, created_at, updated_at)
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(format!("{}_{}", miner_id, node_id))

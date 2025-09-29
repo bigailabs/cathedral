@@ -176,7 +176,7 @@ impl RentalManager {
             .ok_or_else(|| anyhow::anyhow!("No persistent validator SSH key available"))?
             .clone();
 
-        // For direct node connections, we'll use the node's grpc_endpoint as SSH credentials
+        // For direct node connections, we'll use the node's node_ssh_endpoint as SSH credentials
         // Format is expected to be "user@host:port"
         let ssh_credentials = format!("root@{}", request.node_id);
         let container_client = self.create_container_client(&ssh_credentials)?;

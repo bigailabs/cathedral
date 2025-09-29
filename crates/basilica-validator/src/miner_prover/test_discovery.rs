@@ -98,10 +98,10 @@ mod tests {
         let node_info = NodeInfo {
             id: NodeId::new("test_node").unwrap(),
             miner_uid: MinerUid::new(1),
-            grpc_endpoint: "http://127.0.0.1:50051".to_string(),
+            node_ssh_endpoint: "root@127.0.0.1:50051".to_string(),
         };
 
         assert_eq!(node_info.miner_uid.as_u16(), 1);
-        assert_eq!(node_info.grpc_endpoint, "http://127.0.0.1:50051");
+        assert_eq!(node_info.node_ssh_endpoint, "root@127.0.0.1:50051");
     }
 }

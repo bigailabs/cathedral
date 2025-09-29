@@ -557,7 +557,7 @@ impl VerificationEngine {
                     miner_uid: MinerUid::new(miner_uid),
                     status: "available".to_string(),
                     capabilities: vec!["gpu".to_string()],
-                    grpc_endpoint: format!("{}:{}", details.host, details.port),
+                    node_ssh_endpoint: format!("{}:{}", details.host, details.port),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -805,7 +805,7 @@ impl VerificationEngine {
                 self.ensure_miner_node_relationship(
                     miner_uid,
                     &node_result.node_id.to_string(),
-                    &node_result.grpc_endpoint,
+                    &node_result.node_ssh_endpoint,
                     miner_info,
                 )
                 .await?;
@@ -899,7 +899,7 @@ impl VerificationEngine {
         &self,
         miner_uid: u16,
         node_id: &str,
-        node_grpc_endpoint: &str,
+        node_ssh_endpoint: &str,
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
         info!(
@@ -927,29 +927,29 @@ impl VerificationEngine {
         let count: i64 = row.get("count");
 
         if count == 0 {
-            // Check if this grpc_address is already used by a different miner
+            // Check if this node_ssh_endpoint is already used by a different miner
             let existing_miner: Option<String> = sqlx::query_scalar(
-                "SELECT miner_id FROM miner_nodes WHERE grpc_address = ? AND miner_id != ? LIMIT 1",
+                "SELECT miner_id FROM miner_nodes WHERE node_ssh_endpoint = ? AND miner_id != ? LIMIT 1",
             )
-            .bind(node_grpc_endpoint)
+            .bind(node_ssh_endpoint)
             .bind(&miner_id)
             .fetch_optional(self.persistence.pool())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to check grpc_address uniqueness: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to check node_ssh_endpoint uniqueness: {}", e))?;
 
             if let Some(other_miner) = existing_miner {
                 return Err(anyhow::anyhow!(
-                    "Cannot create node relationship: grpc_address {} is already registered to {}",
-                    node_grpc_endpoint,
+                    "Cannot create node relationship: node_ssh_endpoint {} is already registered to {}",
+                    node_ssh_endpoint,
                     other_miner
                 ));
             }
 
             // Check if this is an node ID change for the same miner
             let old_node_id: Option<String> = sqlx::query_scalar(
-                "SELECT node_id FROM miner_nodes WHERE grpc_address = ? AND miner_id = ?",
+                "SELECT node_id FROM miner_nodes WHERE node_ssh_endpoint = ? AND miner_id = ?",
             )
-            .bind(node_grpc_endpoint)
+            .bind(node_ssh_endpoint)
             .bind(&miner_id)
             .fetch_optional(self.persistence.pool())
             .await
@@ -958,7 +958,7 @@ impl VerificationEngine {
             if let Some(old_id) = old_node_id {
                 info!(
                     "Miner {} is changing node ID from {} to {} for endpoint {}",
-                    miner_id, old_id, node_id, node_grpc_endpoint
+                    miner_id, old_id, node_id, node_ssh_endpoint
                 );
 
                 let mut tx = self.persistence.pool().begin().await?;
@@ -989,7 +989,7 @@ impl VerificationEngine {
             // Insert new relationship with required fields
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_nodes (
-                    id, miner_id, node_id, grpc_address, gpu_count,
+                    id, miner_id, node_id, node_ssh_endpoint, gpu_count,
                     status, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             "#;
@@ -1000,7 +1000,7 @@ impl VerificationEngine {
                 .bind(&relationship_id)
                 .bind(&miner_id)
                 .bind(node_id)
-                .bind(node_grpc_endpoint)
+                .bind(node_ssh_endpoint)
                 // -- these will be updated from verification details
                 .bind(0) // gpu_count
                 //---------
@@ -1015,7 +1015,7 @@ impl VerificationEngine {
                 "Created miner-node relationship: {} -> {} with endpoint {}",
                 miner_id,
                 node_id,
-                node_grpc_endpoint
+                node_ssh_endpoint
             );
         } else {
             debug!(
@@ -1026,13 +1026,13 @@ impl VerificationEngine {
                 node_id
             );
 
-            // Even if relationship exists, check for duplicates with same grpc_address
+            // Even if relationship exists, check for duplicates with same node_ssh_endpoint
             let duplicate_check_query: &'static str =
-                "SELECT id, node_id FROM miner_nodes WHERE grpc_address = ? AND id != ?";
+                "SELECT id, node_id FROM miner_nodes WHERE node_ssh_endpoint = ? AND id != ?";
             let relationship_id = format!("{miner_id}_{node_id}");
 
             let duplicates = sqlx::query(duplicate_check_query)
-                .bind(node_grpc_endpoint)
+                .bind(node_ssh_endpoint)
                 .bind(&relationship_id)
                 .fetch_all(self.persistence.pool())
                 .await
@@ -1839,16 +1839,16 @@ impl VerificationEngine {
         let mut node_count = 0;
         for node_row in nodes {
             let node_id: String = node_row.get("node_id");
-            let grpc_address: String = node_row.get("grpc_address");
+            let ssh_endpoint: String = node_row.get("ssh_endpoint");
             let gpu_count: i32 = node_row.get("gpu_count");
             let status: String = node_row
                 .try_get("status")
                 .unwrap_or_else(|_| "unknown".to_string());
-            // Check if this grpc_address is already in use by another miner
+            // Check if this ssh_endpoint is already in use by another miner
             let existing_check = sqlx::query(
-                "SELECT COUNT(*) as count FROM miner_nodes WHERE grpc_address = ? AND miner_id != ?"
+                "SELECT COUNT(*) as count FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ?"
             )
-            .bind(&grpc_address)
+            .bind(&ssh_endpoint)
             .bind(new_miner_uid)
             .fetch_one(&mut *tx)
             .await?;
@@ -1856,8 +1856,8 @@ impl VerificationEngine {
             let existing_count: i64 = existing_check.get("count");
             if existing_count > 0 {
                 warn!(
-                    "Skipping node {} during UID migration: grpc_address {} already in use by another miner",
-                    node_id, grpc_address
+                    "Skipping node {} during UID migration: ssh_endpoint {} already in use by another miner",
+                    node_id, ssh_endpoint
                 );
                 continue;
             }
@@ -1866,7 +1866,7 @@ impl VerificationEngine {
 
             let insert_node = r#"
                 INSERT INTO miner_nodes (
-                    id, miner_id, node_id, grpc_address, gpu_count,
+                    id, miner_id, node_id, ssh_endpoint, gpu_count,
                     status, last_health_check,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, datetime('now'), datetime('now'))
@@ -1876,7 +1876,7 @@ impl VerificationEngine {
                 .bind(&new_id)
                 .bind(new_miner_uid)
                 .bind(&node_id)
-                .bind(&grpc_address)
+                .bind(&ssh_endpoint)
                 .bind(gpu_count)
                 .bind(&status)
                 .execute(&mut *tx)
@@ -2578,13 +2578,13 @@ impl VerificationEngine {
 
         // Get SSH connection details for direct node connection
         let ssh_details = if let Some(ref key_manager) = self.ssh_key_manager {
-            // Get node's SSH credentials from grpc_endpoint
-            // grpc_endpoint format is expected to be "user@host:port" or similar
-            let endpoint_parts: Vec<&str> = node_info.grpc_endpoint.split('@').collect();
+            // Get node's SSH credentials from node_ssh_endpoint
+            // node_ssh_endpoint format is expected to be "user@host:port" or similar
+            let endpoint_parts: Vec<&str> = node_info.node_ssh_endpoint.split('@').collect();
             let (username, host_port) = if endpoint_parts.len() == 2 {
                 (endpoint_parts[0], endpoint_parts[1])
             } else {
-                ("root", node_info.grpc_endpoint.as_str())
+                ("root", node_info.node_ssh_endpoint.as_str())
             };
 
             let host_port_parts: Vec<&str> = host_port.split(':').collect();
@@ -2671,7 +2671,7 @@ impl VerificationEngine {
     ) -> Result<Vec<NodeInfoDetailed>> {
         let mut nodes = Vec::new();
 
-        for (node_id, grpc_address, gpu_count, status) in db_data {
+        for (node_id, ssh_endpoint, gpu_count, status) in db_data {
             let node_id_parsed = NodeId::from_str(&node_id)
                 .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", node_id, e))?;
 
@@ -2684,7 +2684,7 @@ impl VerificationEngine {
                 } else {
                     vec![]
                 },
-                grpc_endpoint: grpc_address,
+                node_ssh_endpoint: ssh_endpoint,
             });
         }
 

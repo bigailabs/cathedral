@@ -23,7 +23,7 @@ pub struct MinerInfo {
 pub struct NodeInfo {
     pub id: NodeId, // Using NodeId alias which maps to NodeId
     pub miner_uid: MinerUid,
-    pub grpc_endpoint: String,
+    pub node_ssh_endpoint: String,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ impl std::fmt::Display for ValidationType {
 #[derive(Debug, Clone)]
 pub struct NodeVerificationResult {
     pub node_id: NodeId, // Using NodeId alias which maps to NodeId
-    pub grpc_endpoint: String,
+    pub node_ssh_endpoint: String,
     pub verification_score: f64,
     pub ssh_connection_successful: bool,
     pub binary_validation_successful: bool,
@@ -203,7 +203,7 @@ pub struct NodeInfoDetailed {
     pub miner_uid: MinerUid,
     pub status: String,
     pub capabilities: Vec<String>,
-    pub grpc_endpoint: String,
+    pub node_ssh_endpoint: String,
 }
 
 /// Output from validator binary execution

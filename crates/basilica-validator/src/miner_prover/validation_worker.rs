@@ -372,7 +372,7 @@ impl ValidationWorkerQueue {
         // Create a failed verification result
         let failed_result = super::types::NodeVerificationResult {
             node_id: item.node_info.id.clone(),
-            grpc_endpoint: item.node_info.grpc_endpoint.clone(),
+            node_ssh_endpoint: item.node_info.node_ssh_endpoint.clone(),
             verification_score: 0.0,
             ssh_connection_successful: false,
             binary_validation_successful: false,
@@ -1228,7 +1228,7 @@ mod tests {
             miner_uid: basilica_common::identity::MinerUid::new(1),
             status: "online".to_string(),
             capabilities: vec!["gpu".to_string()],
-            grpc_endpoint: format!("http://node-{}.test:8080", id),
+            node_ssh_endpoint: format!("http://node-{}.test:8080", id),
         }
     }
 

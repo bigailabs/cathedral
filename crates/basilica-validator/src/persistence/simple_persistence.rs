@@ -123,7 +123,7 @@ impl SimplePersistence {
                 id TEXT PRIMARY KEY,
                 miner_id TEXT NOT NULL,
                 node_id TEXT NOT NULL,
-                grpc_address TEXT NOT NULL,
+                ssh_endpoint TEXT NOT NULL,
                 gpu_count INTEGER NOT NULL,
                 status TEXT DEFAULT 'unknown',
                 last_health_check TEXT,
@@ -1353,19 +1353,19 @@ impl SimplePersistence {
 
         let mut tx = self.pool.begin().await?;
 
-        // Validate that grpc_addresses are not already registered
+        // Validate that ssh_endpoint are not already registered
         for node in nodes {
             let existing =
-                sqlx::query("SELECT COUNT(*) as count FROM miner_nodes WHERE grpc_address = ?")
-                    .bind(&node.grpc_address)
+                sqlx::query("SELECT COUNT(*) as count FROM miner_nodes WHERE ssh_endpoint = ?")
+                    .bind(&node.ssh_endpoint)
                     .fetch_one(&mut *tx)
                     .await?;
 
             let count: i64 = existing.get("count");
             if count > 0 {
                 return Err(anyhow::anyhow!(
-                    "Node with grpc_address {} is already registered",
-                    node.grpc_address
+                    "Node with ssh_endpoint {} is already registered",
+                    node.ssh_endpoint
                 ));
             }
         }
@@ -1388,13 +1388,13 @@ impl SimplePersistence {
             let node_id = Uuid::new_v4().to_string();
 
             sqlx::query(
-                "INSERT INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, created_at, updated_at)
+                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at, updated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_id)
             .bind(miner_id)
             .bind(&node.node_id)
-            .bind(&node.grpc_address)
+            .bind(&node.ssh_endpoint)
             .bind(node.gpu_count as i64)
             .bind(&now)
             .bind(&now)
@@ -1486,13 +1486,13 @@ impl SimplePersistence {
             // When updating nodes, we need to handle the miner_nodes table
             let mut tx = self.pool.begin().await?;
 
-            // First, validate that new grpc_addresses aren't already registered by other miners
+            // First, validate that new ssh_endpoints aren't already registered by other miners
             for node in nodes {
                 let existing = sqlx::query(
                     "SELECT COUNT(*) as count FROM miner_nodes
-                     WHERE grpc_address = ? AND miner_id != ?",
+                     WHERE ssh_endpoint = ? AND miner_id != ?",
                 )
-                .bind(&node.grpc_address)
+                .bind(&node.ssh_endpoint)
                 .bind(miner_id)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -1500,8 +1500,8 @@ impl SimplePersistence {
                 let count: i64 = existing.get("count");
                 if count > 0 {
                     return Err(anyhow::anyhow!(
-                        "Node with grpc_address {} is already registered by another miner",
-                        node.grpc_address
+                        "Node with ssh_endpoint {} is already registered by another miner",
+                        node.ssh_endpoint
                     ));
                 }
             }
@@ -1517,13 +1517,13 @@ impl SimplePersistence {
                 let node_id = Uuid::new_v4().to_string();
 
                 sqlx::query(
-                    "INSERT INTO miner_nodes (id, miner_id, node_id, grpc_address, gpu_count, created_at, updated_at)
+                    "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at, updated_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&node_id)
                 .bind(miner_id)
                 .bind(&node.node_id)
-                .bind(&node.grpc_address)
+                .bind(&node.ssh_endpoint)
                 .bind(node.gpu_count as i64)
                 .bind(&now)
                 .bind(&now)
@@ -2177,7 +2177,7 @@ impl SimplePersistence {
         let miner_id = format!("miner_{}", miner_uid);
 
         let query = r#"
-            SELECT node_id, grpc_address, gpu_count, status
+            SELECT node_id, ssh_endpoint, gpu_count, status
             FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
@@ -2192,10 +2192,10 @@ impl SimplePersistence {
         let mut known_nodes = Vec::new();
         for row in rows {
             let node_id: String = row.get("node_id");
-            let grpc_address: String = row.get("grpc_address");
+            let ssh_endpoint: String = row.get("ssh_endpoint");
             let gpu_count: i32 = row.get("gpu_count");
             let status: String = row.get("status");
-            known_nodes.push((node_id, grpc_address, gpu_count, status));
+            known_nodes.push((node_id, ssh_endpoint, gpu_count, status));
         }
 
         Ok(known_nodes)
@@ -2955,7 +2955,7 @@ mod tests {
     use crate::api::types::{CpuSpec, GpuSpec, NodeRegistration, UpdateMinerRequest};
 
     #[tokio::test]
-    async fn test_prevent_duplicate_grpc_address_registration() {
+    async fn test_prevent_duplicate_ssh_endpoint_registration() {
         let db_path = ":memory:";
         let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
             .await
@@ -2964,7 +2964,7 @@ mod tests {
         // First miner registration
         let nodes1 = vec![NodeRegistration {
             node_id: "exec1".to_string(),
-            grpc_address: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
             gpu_count: 2,
             gpu_specs: vec![GpuSpec {
                 name: "RTX 4090".to_string(),
@@ -2984,10 +2984,10 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // Second miner trying to register with same grpc_address
+        // Second miner trying to register with same ssh_endpoint
         let nodes2 = vec![NodeRegistration {
             node_id: "exec2".to_string(),
-            grpc_address: "http://192.168.1.1:8080".to_string(), // Same address!
+            ssh_endpoint: "http://192.168.1.1:8080".to_string(), // Same address!
             gpu_count: 1,
             gpu_specs: vec![GpuSpec {
                 name: "RTX 3090".to_string(),
@@ -3001,7 +3001,7 @@ mod tests {
             },
         }];
 
-        // Should fail due to duplicate grpc_address
+        // Should fail due to duplicate ssh_endpoint
         let result = persistence
             .register_miner("miner2", "hotkey2", "http://miner2.com", &nodes2)
             .await;
@@ -3013,7 +3013,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prevent_duplicate_grpc_address_update() {
+    async fn test_prevent_duplicate_ssh_endpoint_update() {
         let db_path = ":memory:";
         let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
             .await
@@ -3022,7 +3022,7 @@ mod tests {
         // Register first miner
         let nodes1 = vec![NodeRegistration {
             node_id: "exec1".to_string(),
-            grpc_address: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
             cpu_specs: CpuSpec {
@@ -3040,7 +3040,7 @@ mod tests {
         // Register second miner with different address
         let nodes2 = vec![NodeRegistration {
             node_id: "exec2".to_string(),
-            grpc_address: "http://192.168.1.2:8080".to_string(),
+            ssh_endpoint: "http://192.168.1.2:8080".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
             cpu_specs: CpuSpec {
@@ -3055,12 +3055,12 @@ mod tests {
             .await
             .expect("Failed to register miner2");
 
-        // Try to update miner2 with miner1's grpc_address
+        // Try to update miner2 with miner1's ssh_endpoint
         let update_request = UpdateMinerRequest {
             endpoint: None,
             nodes: Some(vec![NodeRegistration {
                 node_id: "exec2_updated".to_string(),
-                grpc_address: "http://192.168.1.1:8080".to_string(), // Trying to use miner1's address
+                ssh_endpoint: "http://192.168.1.1:8080".to_string(), // Trying to use miner1's address
                 gpu_count: 1,
                 gpu_specs: vec![],
                 cpu_specs: CpuSpec {
@@ -3081,7 +3081,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_allow_same_miner_update_with_same_grpc_address() {
+    async fn test_allow_same_miner_update_with_same_ssh_endpoint() {
         let db_path = ":memory:";
         let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
             .await
@@ -3090,7 +3090,7 @@ mod tests {
         // Register miner
         let nodes = vec![NodeRegistration {
             node_id: "exec1".to_string(),
-            grpc_address: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
             cpu_specs: CpuSpec {
@@ -3105,12 +3105,12 @@ mod tests {
             .await
             .expect("Failed to register miner");
 
-        // Update same miner with same grpc_address (should succeed)
+        // Update same miner with same ssh_endpoint (should succeed)
         let update_request = UpdateMinerRequest {
             endpoint: Some("http://miner1-updated.com".to_string()),
             nodes: Some(vec![NodeRegistration {
                 node_id: "exec1_updated".to_string(),
-                grpc_address: "http://192.168.1.1:8080".to_string(), // Same address is OK for same miner
+                ssh_endpoint: "http://192.168.1.1:8080".to_string(), // Same address is OK for same miner
                 gpu_count: 3,                                        // Updated GPU count
                 gpu_specs: vec![],
                 cpu_specs: CpuSpec {
@@ -3136,7 +3136,7 @@ mod tests {
         // Register initial miner with node
         let node1 = NodeRegistration {
             node_id: "exec1".to_string(),
-            grpc_address: "http://192.168.1.100:50051".to_string(),
+            ssh_endpoint: "root@192.168.1.100:50051".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
             cpu_specs: CpuSpec {
@@ -3164,7 +3164,7 @@ mod tests {
         // Register another miner with different node
         let node2 = NodeRegistration {
             node_id: "exec2".to_string(),
-            grpc_address: "http://192.168.1.101:50051".to_string(),
+            ssh_endpoint: "root@192.168.1.101:50051".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
             cpu_specs: CpuSpec {
@@ -3206,7 +3206,7 @@ mod tests {
         // Register a miner with an node
         let node = NodeRegistration {
             node_id: "exec1".to_string(),
-            grpc_address: "http://192.168.1.100:50051".to_string(),
+            ssh_endpoint: "root@192.168.1.100:50051".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
             cpu_specs: CpuSpec {
