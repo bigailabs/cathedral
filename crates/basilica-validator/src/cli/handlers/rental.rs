@@ -66,6 +66,12 @@ pub async fn create_rental_manager(
         .await
         .context("Failed to initialize rental metrics")?;
 
+    // Initialize metrics for all executors
+    rental_manager
+        .initialize_executor_metrics()
+        .await
+        .context("Failed to initialize executor metrics")?;
+
     Ok(rental_manager)
 }
 

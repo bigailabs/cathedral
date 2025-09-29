@@ -4,6 +4,7 @@
 //! and deploy containers on executor machines.
 
 use anyhow::{Context, Result};
+use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -160,6 +161,74 @@ impl RentalManager {
         }
 
         tracing::info!("Initialized metrics for {} existing rentals", rental_count);
+        Ok(())
+    }
+
+    /// Initialize metrics for all executors on startup
+    pub async fn initialize_executor_metrics(&self) -> Result<()> {
+        use crate::gpu::categorization::GpuCategory;
+        use std::str::FromStr;
+
+        // Query all executors from miner_executors table
+        let query = r#"
+            SELECT me.executor_id, me.miner_id
+            FROM miner_executors me
+            WHERE me.status != 'offline'
+        "#;
+
+        let rows = sqlx::query(query)
+            .fetch_all(self.persistence.pool())
+            .await?;
+
+        let executor_count = rows.len();
+        tracing::info!("Initializing metrics for {} executors", executor_count);
+
+        for row in rows {
+            let executor_id: String = row.get("executor_id");
+            let miner_id: String = row.get("miner_id");
+
+            if let Some(miner_uid) = extract_miner_uid(&miner_id) {
+                // Try to get the actual GPU type from gpu_uuid_assignments
+                let gpu_name = self
+                    .persistence
+                    .get_executor_gpu_name_from_assignments(&miner_id, &executor_id)
+                    .await
+                    .ok()
+                    .flatten();
+
+                let gpu_type = gpu_name
+                    .and_then(|name| GpuCategory::from_str(&name).ok())
+                    .map(|category| category.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                // Check if executor has active rental
+                let is_rented = self
+                    .persistence
+                    .has_active_rental(&executor_id, &miner_id)
+                    .await
+                    .unwrap_or(false);
+
+                self.metrics.record_executor_rental_status(
+                    &executor_id,
+                    miner_uid,
+                    &gpu_type,
+                    is_rented,
+                );
+
+                tracing::debug!(
+                    "Initialized executor metric: executor={}, miner_uid={}, gpu_type={}, is_rented={}",
+                    executor_id,
+                    miner_uid,
+                    gpu_type,
+                    is_rented
+                );
+            }
+        }
+
+        tracing::info!(
+            "Successfully initialized metrics for {} executors",
+            executor_count
+        );
         Ok(())
     }
 

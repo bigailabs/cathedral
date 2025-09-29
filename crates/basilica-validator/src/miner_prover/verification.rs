@@ -1019,6 +1019,21 @@ impl VerificationEngine {
                 executor_id,
                 executor_grpc_endpoint
             );
+
+            // Initialize rental status metric to 0 for the new executor
+            if let Some(metrics) = self.validation_executor.read().await.metrics() {
+                metrics.prometheus().record_executor_rental_status(
+                    executor_id,
+                    miner_uid,
+                    "unknown", // GPU type will be updated after validation completes
+                    false,     // is_rented = false (0.0) for newly registered executor
+                );
+                debug!(
+                    miner_uid = miner_uid,
+                    executor_id = executor_id,
+                    "Initialized rental status metric to 0 for new executor"
+                );
+            }
         } else {
             debug!(
                 miner_uid = miner_uid,
