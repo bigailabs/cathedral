@@ -2796,6 +2796,59 @@ impl SimplePersistence {
             Ok(None)
         }
     }
+
+    /// Get all executors with their GPU and rental data for metrics initialization
+    /// This eliminates N+1 queries by fetching everything in a single query with joins
+    pub async fn get_all_executors_for_metrics(
+        &self,
+    ) -> Result<Vec<ExecutorMetricData>, anyhow::Error> {
+        let query = r#"
+            SELECT
+                me.executor_id,
+                me.miner_id,
+                gua.gpu_name,
+                CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END as has_active_rental
+            FROM miner_executors me
+            LEFT JOIN gpu_uuid_assignments gua
+                ON me.executor_id = gua.executor_id
+                AND me.miner_id = gua.miner_id
+            LEFT JOIN rentals r
+                ON me.executor_id = r.executor_id
+                AND me.miner_id = r.miner_id
+                AND r.state = 'active'
+            GROUP BY me.executor_id, me.miner_id
+        "#;
+
+        let rows = sqlx::query(query).fetch_all(&self.pool).await?;
+
+        let mut executor_metrics = Vec::new();
+        for row in rows {
+            let executor_id: String = row.get("executor_id");
+            let miner_id: String = row.get("miner_id");
+            let gpu_name: Option<String> = row.get("gpu_name");
+            let has_active_rental: i32 = row.get("has_active_rental");
+
+            // Extract miner UID from miner_id string (format: "miner_{uid}")
+            let miner_uid = if miner_id.starts_with("miner_") {
+                miner_id
+                    .strip_prefix("miner_")
+                    .and_then(|uid_str| uid_str.parse::<u16>().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            executor_metrics.push(ExecutorMetricData {
+                executor_id,
+                miner_id,
+                miner_uid,
+                gpu_name,
+                has_active_rental: has_active_rental != 0,
+            });
+        }
+
+        Ok(executor_metrics)
+    }
 }
 
 #[async_trait::async_trait]
@@ -2960,6 +3013,16 @@ pub struct AvailableExecutorData {
     pub download_mbps: Option<f64>,
     pub upload_mbps: Option<f64>,
     pub speed_test_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Executor metric data for initializing metrics
+#[derive(Debug, Clone)]
+pub struct ExecutorMetricData {
+    pub executor_id: String,
+    pub miner_id: String,
+    pub miner_uid: u16,
+    pub gpu_name: Option<String>,
+    pub has_active_rental: bool,
 }
 
 #[cfg(test)]
