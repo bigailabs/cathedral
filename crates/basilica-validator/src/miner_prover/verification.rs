@@ -2516,7 +2516,7 @@ impl VerificationEngine {
         miner_endpoint: &str,
         node_info: &NodeInfoDetailed,
         miner_uid: u16,
-        miner_hotkey: &str,
+        _miner_hotkey: &str,
         intended_strategy: ValidationType,
     ) -> Result<NodeVerificationResult> {
         info!(
@@ -2572,7 +2572,7 @@ impl VerificationEngine {
         // Get SSH connection details for direct node connection
         let ssh_details = if let Some(ref key_manager) = self.ssh_key_manager {
             key_manager
-                .get_ssh_connection_details(miner_hotkey, &node_info.node_ssh_endpoint)
+                .get_ssh_connection_details(&node_info.node_ssh_endpoint)
                 .unwrap()
         } else {
             return Err(anyhow::anyhow!("SSH key manager not available"));

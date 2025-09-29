@@ -281,7 +281,6 @@ impl ValidatorSshKeyManager {
 
     pub fn get_ssh_connection_details(
         &self,
-        miner_hotkey: &str,
         node_ssh_endpoint: &str,
     ) -> Result<basilica_common::ssh::SshConnectionDetails> {
         // Get node's SSH credentials from node_ssh_endpoint
