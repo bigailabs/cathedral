@@ -215,7 +215,7 @@ impl ValidationStrategySelector {
                     node_id = node_id,
                     miner_id = miner_id,
                     status = status,
-                    "Binary validation needed - node not in online/verified status"
+                    "[EVAL_FLOW] Binary validation needed - node not in online/verified status"
                 );
                 return Ok(true);
             }
@@ -223,7 +223,7 @@ impl ValidationStrategySelector {
             debug!(
                 node_id = node_id,
                 miner_id = miner_id,
-                "Binary validation needed - node not found in database"
+                "[EVAL_FLOW] Binary validation needed - node not found in database"
             );
             return Ok(true);
         }
@@ -235,7 +235,7 @@ impl ValidationStrategySelector {
                 debug!(
                     node_id = node_id,
                     miner_id = miner_id,
-                    "Binary validation needed - no previous successful validation found"
+                    "[EVAL_FLOW] Binary validation needed - no previous successful validation found"
                 );
                 Ok(true)
             }
@@ -252,7 +252,7 @@ impl ValidationStrategySelector {
                     elapsed_secs = elapsed.num_seconds(),
                     interval_secs = validation_interval.num_seconds(),
                     needs_validation = needs_validation,
-                    "Binary validation check - last validation was {} seconds ago",
+                    "[EVAL_FLOW] Binary validation check - last validation was {} seconds ago",
                     elapsed.num_seconds()
                 );
                 Ok(needs_validation)
