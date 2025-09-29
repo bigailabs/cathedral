@@ -160,13 +160,14 @@ impl MinerClient {
     /// Connect to a miner and authenticate
     pub async fn connect_and_authenticate(
         &self,
+        miner_uid: u16,
         axon_endpoint: &str,
         target_miner_hotkey: &str,
     ) -> Result<AuthenticatedMinerConnection> {
         let grpc_endpoint = self.axon_to_grpc_endpoint(axon_endpoint)?;
         info!(
-            "Connecting to miner gRPC service at {} (from axon: {})",
-            grpc_endpoint, axon_endpoint
+            miner_uid = miner_uid,
+            "Connecting to miner gRPC service at {} (from axon: {})", grpc_endpoint, axon_endpoint
         );
 
         // Create channel with timeout
@@ -199,6 +200,7 @@ impl MinerClient {
         let signature = self.create_validator_signature(&signature_payload)?;
 
         debug!(
+            miner_uid = miner_uid,
             "Creating canonical auth signature with timestamp {} for target miner {}",
             timestamp.seconds, target_miner_hotkey
         );
@@ -214,8 +216,8 @@ impl MinerClient {
         };
 
         debug!(
-            "Authenticating with miner as validator {}",
-            self.validator_hotkey
+            miner_uid = miner_uid,
+            "Authenticating with miner as validator {}", self.validator_hotkey
         );
 
         // Authenticate with retry logic
@@ -246,8 +248,8 @@ impl MinerClient {
         // Verify miner's signature
         if !auth_response.miner_hotkey.is_empty() && !auth_response.miner_signature.is_empty() {
             debug!(
-                "Verifying miner signature from hotkey: {}",
-                auth_response.miner_hotkey
+                miner_uid = miner_uid,
+                "Verifying miner signature from hotkey: {}", auth_response.miner_hotkey
             );
 
             // Parse miner hotkey
@@ -268,8 +270,8 @@ impl MinerClient {
                 canonical_data.as_bytes(),
             ) {
                 warn!(
-                    "Miner signature verification failed for {}: {}",
-                    auth_response.miner_hotkey, e
+                    miner_uid = miner_uid,
+                    "Miner signature verification failed for {}: {}", auth_response.miner_hotkey, e
                 );
                 return Err(anyhow::anyhow!(
                     "Miner signature verification failed: {}",
@@ -279,8 +281,10 @@ impl MinerClient {
 
             if auth_response.miner_hotkey != target_miner_hotkey {
                 error!(
+                    miner_uid = miner_uid,
                     "Miner hotkey mismatch! Expected: {}, Got: {}. Possible MITM attack.",
-                    target_miner_hotkey, auth_response.miner_hotkey
+                    target_miner_hotkey,
+                    auth_response.miner_hotkey
                 );
                 return Err(anyhow::anyhow!(
                     "Security violation: Miner hotkey mismatch. Expected {}, but got {}",
@@ -288,25 +292,37 @@ impl MinerClient {
                     auth_response.miner_hotkey
                 ));
             }
-            debug!("Miner hotkey matches expected target, proceeding with signature verification");
+            debug!(
+                miner_uid = miner_uid,
+                "Miner hotkey matches expected target, proceeding with signature verification"
+            );
 
             info!(
-                "Successfully verified miner signature from {}",
-                auth_response.miner_hotkey
+                miner_uid = miner_uid,
+                "Successfully verified miner signature from {}", auth_response.miner_hotkey
             );
         } else if self.config.require_miner_signature {
             // Signature is required but not provided
-            error!("Miner did not provide required signature for verification");
+            error!(
+                miner_uid = miner_uid,
+                "Miner did not provide required signature for verification"
+            );
             return Err(anyhow::anyhow!(
                 "Miner authentication response missing required signature"
             ));
         } else {
             // Signature not required and not provided
-            warn!("Miner did not provide signature for verification (not required by config)");
+            warn!(
+                miner_uid = miner_uid,
+                "Miner did not provide signature for verification (not required by config)"
+            );
         }
 
         let session_token = auth_response.session_token;
-        info!("Successfully authenticated with miner");
+        info!(
+            miner_uid = miner_uid,
+            "Successfully authenticated with miner"
+        );
 
         Ok(AuthenticatedMinerConnection {
             client: MinerDiscoveryClient::new(channel),
@@ -356,12 +372,11 @@ pub struct AuthenticatedMinerConnection {
 
 impl AuthenticatedMinerConnection {
     /// Request available nodes from the miner
-    pub async fn request_nodes(
-        &mut self,
-        _requirements: Option<basilica_protocol::common::ResourceLimits>,
-        _lease_duration: Duration,
-    ) -> Result<Vec<NodeConnectionDetails>> {
-        info!("Requesting available nodes from miner");
+    pub async fn request_nodes(&mut self, miner_uid: u16) -> Result<Vec<NodeConnectionDetails>> {
+        info!(
+            miner_uid = miner_uid,
+            "Requesting available nodes from miner"
+        );
 
         // Create request with authentication fields
         let now = chrono::Utc::now();
@@ -389,9 +404,8 @@ impl AuthenticatedMinerConnection {
 
         let response = response.into_inner();
 
-        // Response no longer has error field, errors come via gRPC status
-
         info!(
+            miner_uid = miner_uid,
             "Received {} available nodes from miner",
             response.nodes.len()
         );

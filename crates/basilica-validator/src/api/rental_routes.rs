@@ -262,9 +262,18 @@ pub async fn start_rental(
 
     info!("Connecting to miner at endpoint: {}", miner_data.endpoint);
 
+    // Parse miner UID from miner_id string (format: "miner_123")
+    let miner_uid = miner_id
+        .strip_prefix("miner_")
+        .and_then(|uid_str| uid_str.parse::<u16>().ok())
+        .ok_or_else(|| {
+            error!("Invalid miner ID format: {}", miner_id);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
     // Connect to miner
     let mut miner_connection = miner_client
-        .connect_and_authenticate(&miner_data.endpoint, &miner_data.hotkey)
+        .connect_and_authenticate(miner_uid, &miner_data.endpoint, &miner_data.hotkey)
         .await
         .map_err(|e| {
             error!("Failed to connect to miner: {}", e);

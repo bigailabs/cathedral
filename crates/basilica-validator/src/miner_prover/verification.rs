@@ -101,7 +101,7 @@ impl VerificationEngine {
 
         // Step 1: Get nodes from discovery + database fallback
         let discovered_nodes = self
-            .discover_miner_nodes(&task.miner_endpoint, &task.miner_hotkey)
+            .discover_miner_nodes(task.miner_uid, &task.miner_endpoint, &task.miner_hotkey)
             .await
             .unwrap_or_else(|e| {
                 warn!(
@@ -437,21 +437,27 @@ impl VerificationEngine {
     /// Discover nodes from miner via gRPC
     async fn discover_miner_nodes(
         &self,
+        miner_uid: u16,
         miner_endpoint: &str,
         miner_hotkey: &str,
     ) -> Result<Vec<NodeInfoDetailed>> {
         info!(
-            "[EVAL_FLOW] Starting node discovery from miner at: {}",
-            miner_endpoint
+            miner_uid = miner_uid,
+            "[EVAL_FLOW] Starting node discovery from miner at: {}", miner_endpoint
         );
-        debug!("[EVAL_FLOW] Using config: timeout={:?}, grpc_port_offset={:?}, use_dynamic_discovery={}",
-               self.config.discovery_timeout, self.config.grpc_port_offset, self.use_dynamic_discovery);
+        debug!(
+            miner_uid = miner_uid,
+            "[EVAL_FLOW] Using config: timeout={:?}, grpc_port_offset={:?}, use_dynamic_discovery={}",
+            self.config.discovery_timeout,
+            self.config.grpc_port_offset,
+            self.use_dynamic_discovery
+        );
 
         // Validate endpoint before attempting connection
         if self.is_invalid_endpoint(miner_endpoint) {
             error!(
-                "[EVAL_FLOW] Invalid miner endpoint detected: {}",
-                miner_endpoint
+                miner_uid = miner_uid,
+                "[EVAL_FLOW] Invalid miner endpoint detected: {}", miner_endpoint
             );
             return Err(anyhow::anyhow!(
                 "Invalid miner endpoint: {}. Skipping discovery.",
@@ -459,12 +465,13 @@ impl VerificationEngine {
             ));
         }
         info!(
-            "[EVAL_FLOW] Endpoint validation passed for: {}",
-            miner_endpoint
+            miner_uid = miner_uid,
+            "[EVAL_FLOW] Endpoint validation passed for: {}", miner_endpoint
         );
 
         // Create authenticated miner client
         info!(
+            miner_uid = miner_uid,
             "[EVAL_FLOW] Creating authenticated miner client with validator hotkey: {}",
             self.validator_hotkey
                 .to_string()
@@ -477,16 +484,17 @@ impl VerificationEngine {
 
         // Connect and authenticate to miner
         info!(
-            "[EVAL_FLOW] Attempting gRPC connection to miner at: {}",
-            miner_endpoint
+            miner_uid = miner_uid,
+            "[EVAL_FLOW] Attempting gRPC connection to miner at: {}", miner_endpoint
         );
         let connection_start = std::time::Instant::now();
         let mut connection = match client
-            .connect_and_authenticate(miner_endpoint, miner_hotkey)
+            .connect_and_authenticate(miner_uid, miner_endpoint, miner_hotkey)
             .await
         {
             Ok(conn) => {
                 info!(
+                    miner_uid = miner_uid,
                     "[EVAL_FLOW] Successfully connected and authenticated to miner in {:?}",
                     connection_start.elapsed()
                 );
@@ -494,6 +502,7 @@ impl VerificationEngine {
             }
             Err(e) => {
                 error!(
+                    miner_uid = miner_uid,
                     "[EVAL_FLOW] Failed to connect to miner at {} after {:?}: {}",
                     miner_endpoint,
                     connection_start.elapsed(),
@@ -503,27 +512,9 @@ impl VerificationEngine {
             }
         };
 
-        // Request nodes with requirements
-        let requirements = basilica_protocol::common::ResourceLimits {
-            max_cpu_cores: 4,
-            max_memory_mb: 8192,
-            max_storage_mb: 10240,
-            max_containers: 1,
-            max_bandwidth_mbps: 100.0,
-            max_gpus: 1,
-        };
-
-        let lease_duration = Duration::from_secs(3600); // 1 hour lease
-
-        info!("[EVAL_FLOW] Requesting nodes with requirements: cpu_cores={}, memory_mb={}, storage_mb={}, max_gpus={}, lease_duration={:?}",
-              requirements.max_cpu_cores, requirements.max_memory_mb, requirements.max_storage_mb,
-              requirements.max_gpus, lease_duration);
-
+        info!(miner_uid = miner_uid, "[EVAL_FLOW] Requesting nodes");
         let request_start = std::time::Instant::now();
-        let node_details = match connection
-            .request_nodes(Some(requirements), lease_duration)
-            .await
-        {
+        let node_details = match connection.request_nodes(miner_uid).await {
             Ok(details) => {
                 info!(
                     "[EVAL_FLOW] Successfully received node details in {:?}, count={}",
@@ -2538,7 +2529,7 @@ impl VerificationEngine {
         // Step 2: Establish miner connection first
         let client = self.create_authenticated_client()?;
         let _connection = client
-            .connect_and_authenticate(miner_endpoint, miner_hotkey)
+            .connect_and_authenticate(miner_uid, miner_endpoint, miner_hotkey)
             .await?;
 
         // Step 3: Session management is now handled at connection level
