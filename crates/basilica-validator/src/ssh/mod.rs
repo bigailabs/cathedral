@@ -153,7 +153,7 @@ impl ValidatorSshClient {
             connection_pool: Arc::new(Mutex::new(HashMap::new())),
             session_stats: Arc::new(Mutex::new(SshSessionStats::default())),
             max_pool_size: 100,
-            pool_timeout: Duration::from_secs(300), // 5 minutes
+            pool_timeout: Duration::from_secs(900),
             retry_config: RetryConfig::default(),
         }
     }
@@ -165,7 +165,7 @@ impl ValidatorSshClient {
             connection_pool: Arc::new(Mutex::new(HashMap::new())),
             session_stats: Arc::new(Mutex::new(SshSessionStats::default())),
             max_pool_size: 100,
-            pool_timeout: Duration::from_secs(300),
+            pool_timeout: Duration::from_secs(900),
             retry_config: RetryConfig::default(),
         }
     }
@@ -177,7 +177,7 @@ impl ValidatorSshClient {
             connection_pool: Arc::new(Mutex::new(HashMap::new())),
             session_stats: Arc::new(Mutex::new(SshSessionStats::default())),
             max_pool_size: 100,
-            pool_timeout: Duration::from_secs(300),
+            pool_timeout: Duration::from_secs(900),
             retry_config,
         }
     }
@@ -844,7 +844,7 @@ impl ValidatorSshClient {
 
         // Use a longer timeout for package installation operations (5 minutes)
         let mut install_details = ssh_details.clone();
-        install_details.timeout = Duration::from_secs(300);
+        install_details.timeout = Duration::from_secs(900);
 
         self.execute_command(&install_details, &install_cmd, true)
             .await
