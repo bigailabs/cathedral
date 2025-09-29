@@ -517,20 +517,27 @@ impl VerificationEngine {
         let node_details = match connection.request_nodes(miner_uid).await {
             Ok(details) => {
                 info!(
+                    miner_uid = miner_uid,
                     "[EVAL_FLOW] Successfully received node details in {:?}, count={}",
                     request_start.elapsed(),
                     details.len()
                 );
                 for (i, detail) in details.iter().enumerate() {
                     info!(
+                        miner_uid = miner_uid,
+                        node_id = %detail.node_id,
                         "[EVAL_FLOW] Node {}: id={}, endpoint={}:{}",
-                        i, detail.node_id, detail.host, detail.port
+                        i,
+                        detail.node_id,
+                        detail.host,
+                        detail.port
                     );
                 }
                 details
             }
             Err(e) => {
                 error!(
+                    miner_uid = miner_uid,
                     "[EVAL_FLOW] Failed to request nodes from miner after {:?}: {}",
                     request_start.elapsed(),
                     e
@@ -555,6 +562,7 @@ impl VerificationEngine {
             .collect::<Result<Vec<_>, _>>()?;
 
         info!(
+            miner_uid = miner_uid,
             "[EVAL_FLOW] Node discovery completed: {} nodes mapped from {} details",
             nodes.len(),
             node_count

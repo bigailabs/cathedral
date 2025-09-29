@@ -405,7 +405,7 @@ impl AuthenticatedMinerConnection {
     /// Request available nodes from the miner
     pub async fn request_nodes(&mut self, miner_uid: u16) -> Result<Vec<NodeConnectionDetails>> {
         info!(
-            miner_uid = miner_uid,
+            miner_uid = self.miner_uid,
             "Requesting available nodes from miner"
         );
 
