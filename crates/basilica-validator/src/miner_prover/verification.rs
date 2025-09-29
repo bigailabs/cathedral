@@ -47,6 +47,8 @@ pub struct VerificationEngine {
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
     /// SSH session manager for preventing concurrent sessions
     ssh_session_manager: Arc<SshSessionManager>,
+    /// Metrics for tracking rental status and other validator metrics
+    metrics: Option<Arc<ValidatorMetrics>>,
     /// Validation strategy selector for determining validation approach
     validation_strategy_selector: Arc<ValidationStrategySelector>,
     /// Validation executor for running validation strategies
@@ -859,6 +861,33 @@ impl VerificationEngine {
                         miner_uid,
                         profile.gpu_counts.values().sum::<u32>()
                     );
+                }
+
+                // Set rental metrics for successfully validated executors
+                // Marking them as available (not rented)
+                if success {
+                    if let Some(ref metrics) = self.metrics {
+                        // Extract GPU type from the first GPU found
+                        let gpu_type = gpu_infos
+                            .first()
+                            .map(|gpu| {
+                                let category = GpuCategory::from_str(&gpu.gpu_name).unwrap();
+                                category.to_string()
+                            })
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        metrics.prometheus().record_executor_rental_status(
+                            &executor_result.executor_id.to_string(),
+                            miner_uid,
+                            &gpu_type,
+                            false, // is_rented = false (available for rental)
+                        );
+
+                        debug!(
+                            "Set rental metric for validated executor {} (miner_uid: {}, gpu_type: {}, rented: false)",
+                            executor_result.executor_id, miner_uid, gpu_type
+                        );
+                    }
                 }
             }
             ValidationType::Lightweight => {
@@ -1995,6 +2024,7 @@ impl VerificationEngine {
             bittensor_service,
             ssh_key_manager,
             ssh_session_manager: Arc::new(SshSessionManager::new()),
+            metrics: metrics.clone(),
             validation_strategy_selector: Arc::new(ValidationStrategySelector::new(
                 config.clone(),
                 persistence.clone(),

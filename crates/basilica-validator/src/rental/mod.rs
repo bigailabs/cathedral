@@ -163,6 +163,48 @@ impl RentalManager {
         Ok(())
     }
 
+    /// Initialize metrics for all executors on startup
+    pub async fn initialize_executor_metrics(&self) -> Result<()> {
+        use crate::gpu::categorization::GpuCategory;
+        use std::str::FromStr;
+
+        // Get all executors with their GPU and rental data in a single query
+        let executor_metrics = self.persistence.get_all_executors_for_metrics().await?;
+
+        let executor_count = executor_metrics.len();
+        tracing::info!("Initializing metrics for {} executors", executor_count);
+
+        for metric_data in executor_metrics {
+            // Convert GPU name to category
+            let gpu_type = metric_data
+                .gpu_name
+                .and_then(|name| GpuCategory::from_str(&name).ok())
+                .map(|category| category.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            self.metrics.record_executor_rental_status(
+                &metric_data.executor_id,
+                metric_data.miner_uid,
+                &gpu_type,
+                metric_data.has_active_rental,
+            );
+
+            tracing::debug!(
+                "Initialized executor metric: executor={}, miner_uid={}, gpu_type={}, is_rented={}",
+                metric_data.executor_id,
+                metric_data.miner_uid,
+                gpu_type,
+                metric_data.has_active_rental
+            );
+        }
+
+        tracing::info!(
+            "Successfully initialized metrics for {} executors",
+            executor_count
+        );
+        Ok(())
+    }
+
     /// Start a new rental
     pub async fn start_rental(
         &self,
