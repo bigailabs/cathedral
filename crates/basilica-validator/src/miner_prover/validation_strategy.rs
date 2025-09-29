@@ -393,7 +393,6 @@ impl ValidationNode {
         miner_uid: u16,
         node_info: &NodeInfoDetailed,
         ssh_details: &SshConnectionDetails,
-        _session_info: &(), // Direct node connection - no session info needed
         previous_score: f64,
         node_result: Option<NodeResult>,
         gpu_count: u64,
@@ -651,7 +650,6 @@ impl ValidationNode {
         &self,
         node_info: &NodeInfoDetailed,
         ssh_details: &SshConnectionDetails,
-        session_info: &(), // Direct node connection - no session info needed
         binary_config: &crate::config::BinaryValidationConfig,
         _validator_hotkey: &Hotkey,
         miner_uid: u16,
@@ -862,7 +860,6 @@ impl ValidationNode {
                     &node_info.id.to_string(),
                     miner_uid,
                     ssh_details,
-                    session_info,
                     binary_config,
                 )
                 .await

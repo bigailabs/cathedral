@@ -1522,7 +1522,6 @@ impl BinaryValidator {
         node_id: &str,
         miner_uid: u16,
         ssh_details: &SshConnectionDetails,
-        _session_info: &(), // Direct node connection - no session info needed
         binary_config: &crate::config::BinaryValidationConfig,
     ) -> Result<ValidatorBinaryOutput> {
         info!(

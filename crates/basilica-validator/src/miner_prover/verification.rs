@@ -2628,7 +2628,6 @@ impl VerificationEngine {
                         miner_uid,
                         node_info,
                         &ssh_details,
-                        &(), // session_info is not used in lightweight validation
                         previous_score,
                         node_result,
                         gpu_count,
@@ -2646,7 +2645,6 @@ impl VerificationEngine {
                     .execute_full_validation(
                         node_info,
                         &ssh_details,
-                        &(), // session_info is not used in full validation
                         binary_config,
                         &self.validator_hotkey,
                         miner_uid,
