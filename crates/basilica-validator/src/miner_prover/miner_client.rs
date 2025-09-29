@@ -336,7 +336,6 @@ impl MinerClient {
             signer: self.signer.clone(),
             validator_ssh_public_key: self.validator_ssh_public_key.clone(),
             miner_uid,
-            miner_axon_endpoint: axon_endpoint.to_string(),
             target_miner_hotkey: target_miner_hotkey.to_string(),
         })
     }
@@ -387,8 +386,6 @@ pub struct AuthenticatedMinerConnection {
     validator_ssh_public_key: Option<String>,
     /// Miner UID
     miner_uid: u16,
-    /// Miner Axon endpoint
-    miner_axon_endpoint: String,
     /// Target miner hotkey
     target_miner_hotkey: String,
 }
