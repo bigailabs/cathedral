@@ -19,6 +19,7 @@ mod miner_prover;
 mod os_process;
 mod persistence;
 mod rental;
+mod service;
 mod ssh;
 
 use cli::Args;

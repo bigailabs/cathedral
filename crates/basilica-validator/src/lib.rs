@@ -15,6 +15,7 @@ pub mod miner_prover;
 pub mod os_process;
 pub mod persistence;
 pub mod rental;
+pub mod service;
 pub mod ssh;
 
 // Main public API exports
@@ -40,6 +41,7 @@ pub use persistence::entities::{
 };
 pub use persistence::SimplePersistence;
 pub use rental::{RentalInfo, RentalManager, RentalRequest, RentalResponse};
+pub use service::{ServiceStatus, ValidatorService};
 pub use ssh::{NodeSshDetails, ValidatorSshClient};
 
 /// Validator library version
