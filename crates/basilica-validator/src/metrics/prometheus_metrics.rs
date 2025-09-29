@@ -180,8 +180,8 @@ impl ValidatorPrometheusMetrics {
 
         // Validation state tracking metrics
         describe_gauge!(
-            "basilica_validator_executor_validation_state",
-            "Current validation state of executors (0=not in state, 1=current, 2=failed)"
+            "basilica_validator_node_validation_state",
+            "Current validation state of nodes (0=not in state, 1=current, 2=failed)"
         );
 
         Ok(Self {
@@ -544,10 +544,10 @@ impl ValidatorPrometheusMetrics {
         gauge!("basilica_validator_discovered_miners_total").set(count as f64);
     }
 
-    /// Sets executor validation state atomically, clearing all other states for the validation type
-    pub fn set_executor_validation_state(
+    /// Sets node validation state atomically, clearing all other states for the validation type
+    pub fn set_node_validation_state(
         &self,
-        executor_id: &str,
+        node_id: &str,
         miner_uid: u16,
         validation_type: ValidationType,
         current_state: ValidationState,
@@ -569,8 +569,8 @@ impl ValidatorPrometheusMetrics {
                 0.0
             };
 
-            gauge!("basilica_validator_executor_validation_state",
-                "executor_id" => executor_id.to_string(),
+            gauge!("basilica_validator_node_validation_state",
+                "node_id" => node_id.to_string(),
                 "miner_uid" => miner_uid.to_string(),
                 "validation_type" => validation_type_str.to_string(),
                 "state" => state.as_str().to_string()
@@ -579,10 +579,10 @@ impl ValidatorPrometheusMetrics {
         }
     }
 
-    /// Clears all validation states for an executor (sets all to 0.0)
-    pub fn clear_executor_validation_states(
+    /// Clears all validation states for an node (sets all to 0.0)
+    pub fn clear_node_validation_states(
         &self,
-        executor_id: &str,
+        node_id: &str,
         miner_uid: u16,
         validation_type: ValidationType,
     ) {
@@ -594,8 +594,8 @@ impl ValidatorPrometheusMetrics {
         let all_states = ValidationState::states_for_type(validation_type);
 
         for state in all_states {
-            gauge!("basilica_validator_executor_validation_state",
-                "executor_id" => executor_id.to_string(),
+            gauge!("basilica_validator_node_validation_state",
+                "node_id" => node_id.to_string(),
                 "miner_uid" => miner_uid.to_string(),
                 "validation_type" => validation_type_str.to_string(),
                 "state" => state.as_str().to_string()

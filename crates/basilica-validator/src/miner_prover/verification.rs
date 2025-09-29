@@ -15,7 +15,7 @@ use crate::metrics::ValidatorMetrics;
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
-use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
+use crate::ssh::{SshSessionManager, ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::{Context, Result};
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use chrono::Utc;
@@ -43,6 +43,10 @@ pub struct VerificationEngine {
     bittensor_service: Option<Arc<bittensor::Service>>,
     /// SSH key manager for session keys
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
+    /// SSH session manager for preventing concurrent sessions
+    ssh_session_manager: Arc<SshSessionManager>,
+    /// Metrics for tracking rental status and other validator metrics
+    metrics: Option<Arc<ValidatorMetrics>>,
     /// Validation strategy selector for determining validation approach
     validation_strategy_selector: Arc<ValidationStrategySelector>,
     /// Validation node for running validation strategies
@@ -194,7 +198,7 @@ impl VerificationEngine {
 
                     // Set in-queue state for this specific node being validated
                     if let Some(ref metrics) = self_clone.validation_node.read().await.metrics() {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node_info.id.to_string(),
                             miner_uid,
                             intended_strategy,
@@ -389,7 +393,7 @@ impl VerificationEngine {
                     published_count += 1;
                     // Set in-queue state only for nodes successfully published to queue
                     if let Some(ref metrics) = self.validation_node.read().await.metrics() {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node.id.to_string(),
                             task.miner_uid,
                             task.intended_validation_strategy,
@@ -859,6 +863,33 @@ impl VerificationEngine {
                         miner_uid,
                         profile.gpu_counts.values().sum::<u32>()
                     );
+                }
+
+                // Set rental metrics for successfully validated nodes
+                // Marking them as available (not rented)
+                if success {
+                    if let Some(ref metrics) = self.metrics {
+                        // Extract GPU type from the first GPU found
+                        let gpu_type = gpu_infos
+                            .first()
+                            .map(|gpu| {
+                                let category = GpuCategory::from_str(&gpu.gpu_name).unwrap();
+                                category.to_string()
+                            })
+                            .unwrap_or_else(|| "unknown".to_string());
+
+                        metrics.prometheus().record_node_rental_status(
+                            &node_result.node_id.to_string(),
+                            miner_uid,
+                            &gpu_type,
+                            false, // is_rented = false (available for rental)
+                        );
+
+                        debug!(
+                            "Set rental metric for validated node {} (miner_uid: {}, gpu_type: {}, rented: false)",
+                            node_result.node_id, miner_uid, gpu_type
+                        );
+                    }
                 }
             }
             ValidationType::Lightweight => {
@@ -2024,6 +2055,8 @@ impl VerificationEngine {
             ssh_key_path: None, // Not used when SSH key manager is available
             bittensor_service,
             ssh_key_manager: ssh_key_manager.clone(),
+            ssh_session_manager: Arc::new(SshSessionManager::new()),
+            metrics: metrics.clone(),
             validation_strategy_selector: Arc::new(ValidationStrategySelector::new(
                 config.clone(),
                 persistence.clone(),

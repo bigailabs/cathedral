@@ -159,6 +159,45 @@ impl RentalManager {
         Ok(())
     }
 
+    /// Initialize metrics for all nodes on startup
+    pub async fn initialize_node_metrics(&self) -> Result<()> {
+        use crate::gpu::categorization::GpuCategory;
+        use std::str::FromStr;
+
+        // Get all nodes with their GPU and rental data in a single query
+        let node_metrics = self.persistence.get_all_nodes_for_metrics().await?;
+
+        let node_count = node_metrics.len();
+        tracing::info!("Initializing metrics for {} nodes", node_count);
+
+        for metric_data in node_metrics {
+            // Convert GPU name to category
+            let gpu_type = metric_data
+                .gpu_name
+                .and_then(|name| GpuCategory::from_str(&name).ok())
+                .map(|category| category.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            self.metrics.record_node_rental_status(
+                &metric_data.node_id,
+                metric_data.miner_uid,
+                &gpu_type,
+                metric_data.has_active_rental,
+            );
+
+            tracing::debug!(
+                "Initialized node metric: node={}, miner_uid={}, gpu_type={}, is_rented={}",
+                metric_data.node_id,
+                metric_data.miner_uid,
+                gpu_type,
+                metric_data.has_active_rental
+            );
+        }
+
+        tracing::info!("Successfully initialized metrics for {} nodes", node_count);
+        Ok(())
+    }
+
     /// Start a new rental
     pub async fn start_rental(
         &self,

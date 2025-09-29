@@ -2783,6 +2783,58 @@ impl SimplePersistence {
             Ok(None)
         }
     }
+
+    /// Get all nodes with their GPU and rental data for metrics initialization
+    /// This eliminates N+1 queries by fetching everything in a single query with joins
+    pub async fn get_all_nodes_for_metrics(&self) -> Result<Vec<NodeMetricData>, anyhow::Error> {
+        let query = r#"
+            SELECT
+                me.node_id,
+                me.miner_id,
+                gua.gpu_name,
+                CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END as has_active_rental
+            FROM miner_nodes me
+            INNER JOIN gpu_uuid_assignments gua
+                ON me.node_id = gua.node_id
+                AND me.miner_id = gua.miner_id
+            LEFT JOIN rentals r
+                ON me.node_id = r.node_id
+                AND me.miner_id = r.miner_id
+                AND r.state = 'active'
+            WHERE gua.gpu_name IS NOT NULL
+            GROUP BY me.node_id, me.miner_id
+        "#;
+
+        let rows = sqlx::query(query).fetch_all(&self.pool).await?;
+
+        let mut node_metrics = Vec::new();
+        for row in rows {
+            let node_id: String = row.get("node_id");
+            let miner_id: String = row.get("miner_id");
+            let gpu_name: Option<String> = row.get("gpu_name");
+            let has_active_rental: i32 = row.get("has_active_rental");
+
+            // Extract miner UID from miner_id string (format: "miner_{uid}")
+            let miner_uid = if miner_id.starts_with("miner_") {
+                miner_id
+                    .strip_prefix("miner_")
+                    .and_then(|uid_str| uid_str.parse::<u16>().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            node_metrics.push(NodeMetricData {
+                node_id: node_id,
+                miner_id,
+                miner_uid,
+                gpu_name,
+                has_active_rental: has_active_rental != 0,
+            });
+        }
+
+        Ok(node_metrics)
+    }
 }
 
 #[async_trait::async_trait]
@@ -2947,6 +2999,16 @@ pub struct AvailableNodeData {
     pub download_mbps: Option<f64>,
     pub upload_mbps: Option<f64>,
     pub speed_test_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Node metric data for initializing metrics
+#[derive(Debug, Clone)]
+pub struct NodeMetricData {
+    pub node_id: String,
+    pub miner_id: String,
+    pub miner_uid: u16,
+    pub gpu_name: Option<String>,
+    pub has_active_rental: bool,
 }
 
 #[cfg(test)]

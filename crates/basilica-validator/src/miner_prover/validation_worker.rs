@@ -570,7 +570,7 @@ impl ValidationWorkerQueue {
             // Clear in-queue state now that processing has started
             // The validation strategy will set appropriate states during verification
             if let Some(ref metrics) = verification_engine.get_metrics().await {
-                metrics.prometheus().clear_executor_validation_states(
+                metrics.prometheus().clear_node_validation_states(
                     &node_key.node_id.to_string(),
                     node_key.miner_uid,
                     ValidationType::Full,
@@ -786,7 +786,7 @@ impl ValidationWorkerQueue {
             // Clear in-queue state now that processing has started
             // The validation strategy will set appropriate states during verification
             if let Some(ref metrics) = verification_engine.get_metrics().await {
-                metrics.prometheus().clear_executor_validation_states(
+                metrics.prometheus().clear_node_validation_states(
                     &node_key.node_id.to_string(),
                     node_key.miner_uid,
                     ValidationType::Lightweight,

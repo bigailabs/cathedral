@@ -412,7 +412,7 @@ impl ValidationNode {
 
         // Track state: Connecting
         if let Some(ref metrics) = self.metrics {
-            metrics.prometheus().set_executor_validation_state(
+            metrics.prometheus().set_node_validation_state(
                 &node_id,
                 miner_uid,
                 ValidationType::Lightweight,
@@ -433,7 +433,7 @@ impl ValidationNode {
             Ok(output) => {
                 // Move to Connected state
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().set_executor_validation_state(
+                    metrics.prometheus().set_node_validation_state(
                         &node_id,
                         miner_uid,
                         ValidationType::Lightweight,
@@ -444,7 +444,7 @@ impl ValidationNode {
 
                 // Move to ConnectivityChecking state
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().set_executor_validation_state(
+                    metrics.prometheus().set_node_validation_state(
                         &node_id,
                         miner_uid,
                         ValidationType::Lightweight,
@@ -471,7 +471,7 @@ impl ValidationNode {
                 if !gpu_present {
                     // Failed at connectivity check
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node_id,
                             miner_uid,
                             ValidationType::Lightweight,
@@ -492,7 +492,7 @@ impl ValidationNode {
 
                 // Failed at Connecting stage
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().set_executor_validation_state(
+                    metrics.prometheus().set_node_validation_state(
                         &node_id,
                         miner_uid,
                         ValidationType::Lightweight,
@@ -510,7 +510,7 @@ impl ValidationNode {
         } else {
             // Move to NatValidating state
             if let Some(ref metrics) = self.metrics {
-                metrics.prometheus().set_executor_validation_state(
+                metrics.prometheus().set_node_validation_state(
                     &node_id,
                     miner_uid,
                     ValidationType::Lightweight,
@@ -542,7 +542,7 @@ impl ValidationNode {
 
                     // Failed at NAT stage
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node_id,
                             miner_uid,
                             ValidationType::Lightweight,
@@ -613,7 +613,7 @@ impl ValidationNode {
         // Final state - only set if validation was successful
         if validation_successful {
             if let Some(ref metrics) = self.metrics {
-                metrics.prometheus().set_executor_validation_state(
+                metrics.prometheus().set_node_validation_state(
                     &node_id,
                     miner_uid,
                     ValidationType::Lightweight,
@@ -674,7 +674,7 @@ impl ValidationNode {
 
         // Track state: Connecting
         if let Some(ref metrics) = self.metrics {
-            metrics.prometheus().set_executor_validation_state(
+            metrics.prometheus().set_node_validation_state(
                 &node_id,
                 miner_uid,
                 ValidationType::Full,
@@ -690,7 +690,7 @@ impl ValidationNode {
                 Ok(_) => {
                     // Move to Connected state
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node_id,
                             miner_uid,
                             ValidationType::Full,
@@ -709,7 +709,7 @@ impl ValidationNode {
                 Err(e) => {
                     // Failed at Connecting stage
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node_id,
                             miner_uid,
                             ValidationType::Full,
@@ -737,7 +737,7 @@ impl ValidationNode {
         if ssh_connection_successful {
             // Move to DockerValidating state
             if let Some(ref metrics) = self.metrics {
-                metrics.prometheus().set_executor_validation_state(
+                metrics.prometheus().set_node_validation_state(
                     &node_id,
                     miner_uid,
                     ValidationType::Full,
@@ -787,7 +787,7 @@ impl ValidationNode {
             if docker_result.is_none() {
                 // Failed at DockerValidating stage
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().set_executor_validation_state(
+                    metrics.prometheus().set_node_validation_state(
                         &node_id,
                         miner_uid,
                         ValidationType::Full,
@@ -798,7 +798,7 @@ impl ValidationNode {
             } else if !nat_successful {
                 // Docker passed, move to NatValidating and mark as failed
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().set_executor_validation_state(
+                    metrics.prometheus().set_node_validation_state(
                         &node_id,
                         miner_uid,
                         ValidationType::Full,
@@ -809,7 +809,7 @@ impl ValidationNode {
             } else {
                 // Both Docker and NAT passed, move to NatValidating as current
                 if let Some(ref metrics) = self.metrics {
-                    metrics.prometheus().set_executor_validation_state(
+                    metrics.prometheus().set_node_validation_state(
                         &node_id,
                         miner_uid,
                         ValidationType::Full,
@@ -845,7 +845,7 @@ impl ValidationNode {
         if pre_validations_successful && binary_config.enabled {
             // Move to BinaryValidating state
             if let Some(ref metrics) = self.metrics {
-                metrics.prometheus().set_executor_validation_state(
+                metrics.prometheus().set_node_validation_state(
                     &node_id,
                     miner_uid,
                     ValidationType::Full,
@@ -888,7 +888,7 @@ impl ValidationNode {
                 Err(e) => {
                     // Failed at BinaryValidating stage
                     if let Some(ref metrics) = self.metrics {
-                        metrics.prometheus().set_executor_validation_state(
+                        metrics.prometheus().set_node_validation_state(
                             &node_id,
                             miner_uid,
                             ValidationType::Full,
@@ -941,7 +941,7 @@ impl ValidationNode {
         // Final state - only set if validation was successful
         if overall_success {
             if let Some(ref metrics) = self.metrics {
-                metrics.prometheus().set_executor_validation_state(
+                metrics.prometheus().set_node_validation_state(
                     &node_id,
                     miner_uid,
                     ValidationType::Full,
