@@ -6,7 +6,6 @@
 //! - Direct SSH access management
 
 pub mod config;
-pub mod session_manager;
 pub mod validator_access;
 
 // pub use config::*;  // Using NodeSshConfig from crate::config instead

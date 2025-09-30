@@ -354,7 +354,8 @@ fn validate_validator_comms_config(
     }
 
     if config.max_concurrent_sessions > 1000 {
-        warnings.push("Very high max_concurrent_sessions may cause resource exhaustion".to_string());
+        warnings
+            .push("Very high max_concurrent_sessions may cause resource exhaustion".to_string());
     }
 }
 

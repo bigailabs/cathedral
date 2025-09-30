@@ -41,7 +41,6 @@ pub struct MinerState {
     pub node_manager: Arc<NodeManager>,
     pub registration_db: RegistrationDb,
     pub ssh_access_service: ValidatorAccessService,
-    pub ssh_session_manager: ssh::session_manager::SshSessionManager,
     pub metrics: Option<metrics::MinerMetrics>,
     pub validator_discovery: Option<std::sync::Arc<validator_discovery::ValidatorDiscovery>>,
 }
@@ -100,11 +99,6 @@ impl MinerState {
         }
 
         // Initialize SSH services
-        let ssh_session_manager = ssh::session_manager::SshSessionManager::new(
-            config.ssh_session.clone(),
-            registration_db.clone(),
-        )
-        .await?;
         let ssh_access_service = ValidatorAccessService::new(node_manager.clone())?;
 
         // Initialize Bittensor chain registration
@@ -171,7 +165,6 @@ impl MinerState {
             node_manager,
             registration_db,
             ssh_access_service,
-            ssh_session_manager,
             metrics,
             validator_discovery,
         })

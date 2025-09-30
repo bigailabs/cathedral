@@ -697,7 +697,12 @@ impl MinerConfig {
             .grpc_endpoint
             .as_ref()
             .cloned()
-            .unwrap_or_else(|| format!("http://{}:{}", self.validator_comms.host, self.validator_comms.port))
+            .unwrap_or_else(|| {
+                format!(
+                    "http://{}:{}",
+                    self.validator_comms.host, self.validator_comms.port
+                )
+            })
     }
 
     /// Get the advertised axon endpoint for Bittensor registration
@@ -707,7 +712,10 @@ impl MinerConfig {
         } else if let Some(external_ip) = &self.bittensor.external_ip {
             format!("http://{}:{}", external_ip, self.bittensor.axon_port)
         } else {
-            format!("http://{}:{}", self.validator_comms.host, self.bittensor.axon_port)
+            format!(
+                "http://{}:{}",
+                self.validator_comms.host, self.bittensor.axon_port
+            )
         }
     }
 
