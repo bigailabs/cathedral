@@ -1,12 +1,8 @@
 use anyhow::Result;
-use basilica_miner::config::{
-    DatabaseConfig, NodeManagementConfig, MinerConfig, RemoteNodeDeploymentConfig,
-    RemoteMachine, SshConfig,
-};
+use basilica_miner::config::MinerConfig;
 use basilica_miner::node_manager::NodeFleetManager;
 use basilica_miner::persistence::registration_db::RegistrationDb;
 use sqlx::SqlitePool;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -92,70 +88,6 @@ async fn test_node_health_monitoring() -> Result<()> {
     // Verify failure count increases
     let nodes = manager.list_nodes().await?;
     assert_eq!(nodes[0].health_check_failures, 1);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_remote_deployment_configuration() -> Result<()> {
-    let temp_dir = TempDir::new()?;
-    let db_path = temp_dir.path().join("test_miner.db");
-    let db_url = format!("sqlite:{}", db_path.display());
-
-    let pool = SqlitePool::connect(&db_url).await?;
-    sqlx::migrate!("../../migrations").run(&pool).await?;
-
-    let mut config = MinerConfig::default();
-    config.database.url = db_url.clone();
-    config.remote_node_deployment = Some(RemoteNodeDeploymentConfig {
-        remote_machines: vec![
-            RemoteMachine {
-                id: "remote-gpu-1".to_string(),
-                name: "Remote GPU Server 1".to_string(),
-                gpu_count: 4,
-                node_port: 50051,
-                ssh: SshConfig {
-                    host: "gpu1.example.com".to_string(),
-                    port: 22,
-                    username: "ubuntu".to_string(),
-                    private_key_path: PathBuf::from("/home/user/.ssh/id_rsa"),
-                },
-            },
-            RemoteMachine {
-                id: "remote-gpu-2".to_string(),
-                name: "Remote GPU Server 2".to_string(),
-                gpu_count: 2,
-                node_port: 50051,
-                ssh: SshConfig {
-                    host: "gpu2.example.com".to_string(),
-                    port: 22,
-                    username: "admin".to_string(),
-                    private_key_path: PathBuf::from("/home/user/.ssh/id_rsa"),
-                },
-            },
-        ],
-        local_node_binary: PathBuf::from("./target/release/node"),
-        node_config_template: None,
-        health_check_interval: Some(Duration::from_secs(60)),
-        auto_deploy: false,
-        auto_start: false,
-    });
-
-    let db = Arc::new(RwLock::new(RegistrationDb::new(pool.clone())));
-    let manager = NodeFleetManager::new(config.clone(), db.clone());
-
-    // Test deployment info generation
-    let deployment_info = manager.get_deployment_info().await?;
-    assert_eq!(deployment_info.len(), 2);
-    assert!(deployment_info.iter().any(|d| d.id == "remote-gpu-1"));
-    assert!(deployment_info.iter().any(|d| d.id == "remote-gpu-2"));
-
-    // Verify SSH configuration
-    for info in &deployment_info {
-        assert!(!info.ssh_config.private_key_path.as_os_str().is_empty());
-        assert!(!info.ssh_config.host.is_empty());
-        assert!(info.ssh_config.port > 0);
-    }
 
     Ok(())
 }

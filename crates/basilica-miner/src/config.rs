@@ -17,42 +17,6 @@ use basilica_common::identity::Hotkey;
 
 use crate::node_manager::NodeConfig;
 
-/// Remote machine configuration for node deployment
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteMachineConfig {
-    pub id: String,
-    pub name: String,
-    pub ssh: SshConnectionConfig,
-    pub gpu_count: Option<u32>,
-    pub node_binary_path: Option<String>,
-    pub node_data_dir: Option<String>,
-    pub node_port: u16,
-}
-
-/// SSH connection configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SshConnectionConfig {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub private_key_path: PathBuf,
-    pub jump_host: Option<String>,
-    pub ssh_options: Vec<String>,
-}
-
-/// Remote node deployment configuration
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RemoteNodeDeploymentConfig {
-    pub remote_machines: Vec<RemoteMachineConfig>,
-    pub local_node_binary: PathBuf,
-    pub node_config_template: String,
-    pub auto_deploy: bool,
-    pub auto_start: bool,
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub health_check_interval: Duration,
-}
-
 /// Main miner configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MinerConfig {
@@ -73,9 +37,6 @@ pub struct MinerConfig {
 
     /// Node management configuration
     pub node_management: NodeManagementConfig,
-
-    /// Remote node deployment configuration (optional)
-    pub remote_node_deployment: Option<RemoteNodeDeploymentConfig>,
 
     /// Security configuration
     pub security: SecurityConfig,
@@ -393,7 +354,6 @@ impl Default for MinerConfig {
             metrics: MetricsConfig::default(),
             validator_comms: ValidatorCommsConfig::default(),
             node_management: NodeManagementConfig::default(),
-            remote_node_deployment: None,
             security: SecurityConfig::default(),
             ssh_session: NodeSshConfig::default(),
             advertised_addresses: MinerAdvertisedAddresses::default(),
@@ -607,16 +567,6 @@ impl ConfigValidation for MinerConfig {
                 key: "bittensor.axon_port".to_string(),
                 value: self.bittensor.axon_port.to_string(),
                 reason: "Invalid axon port: must be greater than 0".to_string(),
-            });
-        }
-
-        // Validate node management - allow empty if using remote deployment
-        if self.node_management.nodes.is_empty() && self.remote_node_deployment.is_none() {
-            return Err(ConfigurationError::InvalidValue {
-                key: "node_management.nodes".to_string(),
-                value: "[]".to_string(),
-                reason: "At least one node must be configured or remote deployment must be enabled"
-                    .to_string(),
             });
         }
 

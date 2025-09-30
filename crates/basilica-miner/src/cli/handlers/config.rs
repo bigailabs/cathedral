@@ -127,10 +127,6 @@ async fn show_config(config: &MinerConfig, show_sensitive: bool) -> Result<()> {
     );
     println!("Metrics Enabled: {}", config.metrics.enabled);
     println!("Node Count: {}", config.node_management.nodes.len());
-    println!(
-        "Remote Deployment: {}",
-        config.remote_node_deployment.is_some()
-    );
 
     // Show validation status
     let validation_result = perform_comprehensive_validation(config).await?;
@@ -307,11 +303,6 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
         &mut suggestions,
     );
 
-    // Remote deployment validation (if configured)
-    if let Some(ref deployment) = config.remote_node_deployment {
-        validate_remote_deployment_config(deployment, &mut errors, &mut warnings);
-    }
-
     Ok(ValidationResult {
         is_valid: errors.is_empty(),
         errors,
@@ -456,31 +447,6 @@ fn validate_private_key_config(
     }
 }
 
-/// Validate remote deployment configuration
-fn validate_remote_deployment_config(
-    config: &crate::config::RemoteNodeDeploymentConfig,
-    errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-) {
-    if config.remote_machines.is_empty() {
-        warnings.push("Remote deployment configured but no machines specified".to_string());
-    }
-
-    for machine in &config.remote_machines {
-        if machine.ssh.host.is_empty() {
-            errors.push(format!("SSH host empty for machine: {}", machine.id));
-        }
-
-        if machine.ssh.username.is_empty() {
-            errors.push(format!("SSH username empty for machine: {}", machine.id));
-        }
-
-        if machine.ssh.private_key_path.to_string_lossy().is_empty() {
-            warnings.push(format!("No SSH key configured for machine: {}", machine.id));
-        }
-    }
-}
-
 /// Display validation results
 fn display_validation_results(result: &ValidationResult) {
     if result.is_valid {
@@ -516,15 +482,6 @@ fn display_validation_results(result: &ValidationResult) {
 
 /// Mask sensitive configuration fields
 fn mask_sensitive_fields(config: &mut MinerConfig) {
-    // Mask SSH private key paths
-    if let Some(ref mut deployment) = config.remote_node_deployment {
-        for machine in &mut deployment.remote_machines {
-            if !machine.ssh.private_key_path.to_string_lossy().is_empty() {
-                machine.ssh.private_key_path = PathBuf::from("****MASKED****");
-            }
-        }
-    }
-
     // Mask database connection details if they contain passwords
     if config.database.url.contains("password") {
         config.database.url = config
