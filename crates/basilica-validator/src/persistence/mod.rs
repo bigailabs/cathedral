@@ -1,7 +1,10 @@
 pub mod cleanup_task;
 pub mod collateral_persistence;
 pub mod entities;
+pub mod gpu_assignments;
 pub mod gpu_profile_repository;
+pub mod miner_nodes;
+pub mod miners;
 pub mod simple_persistence;
 pub mod validator_persistence;
 
