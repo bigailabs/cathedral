@@ -155,7 +155,7 @@ impl ContainerClient {
 
         // Add container name with sanitized rental ID
         let sanitized_rental_id = self.sanitize_rental_id(rental_id);
-        let container_name = format!("basilica-rental-{sanitized_rental_id}");
+        let container_name = format!("basilica-{sanitized_rental_id}");
         docker_cmd_parts.push("--name");
         docker_cmd_parts.push(&container_name);
 
