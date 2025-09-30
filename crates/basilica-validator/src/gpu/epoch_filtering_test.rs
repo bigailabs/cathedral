@@ -110,10 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_epoch_based_filtering() -> anyhow::Result<()> {
-        // Create test database
-        let db_path = format!("/tmp/test_epoch_filtering_{}.db", uuid::Uuid::new_v4());
-        let persistence =
-            Arc::new(SimplePersistence::new(&db_path, "test_validator".to_string()).await?);
+        let persistence = Arc::new(SimplePersistence::for_testing().await?);
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
 
         let now = Utc::now();
@@ -255,18 +252,12 @@ mod tests {
         assert_eq!(a100_count, 4, "Should have 4 A100 miners");
         assert_eq!(h100_count, 1, "Should have 1 H100 miner");
 
-        // Clean up
-        std::fs::remove_file(&db_path).ok();
-
         Ok(())
     }
 
     #[tokio::test]
     async fn test_scoring_engine_epoch_filtering_logic() -> anyhow::Result<()> {
-        // Create test database
-        let db_path = format!("/tmp/test_scoring_engine_epoch_{}.db", uuid::Uuid::new_v4());
-        let persistence =
-            Arc::new(SimplePersistence::new(&db_path, "test_validator".to_string()).await?);
+        let persistence = Arc::new(SimplePersistence::for_testing().await?);
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
         let scoring_engine = GpuScoringEngine::new(gpu_repo.clone(), EmissionConfig::for_testing());
 
@@ -319,18 +310,12 @@ mod tests {
         let h100_stats = stats.get("H100").unwrap();
         assert_eq!(h100_stats.miner_count, 1);
 
-        // Clean up
-        std::fs::remove_file(&db_path).ok();
-
         Ok(())
     }
 
     #[tokio::test]
     async fn test_multi_gpu_profile_with_epoch() -> anyhow::Result<()> {
-        // Create test database
-        let db_path = format!("/tmp/test_multi_gpu_epoch_{}.db", uuid::Uuid::new_v4());
-        let persistence =
-            Arc::new(SimplePersistence::new(&db_path, "test_validator".to_string()).await?);
+        let persistence = Arc::new(SimplePersistence::for_testing().await?);
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
 
         let now = Utc::now();
@@ -361,9 +346,6 @@ mod tests {
         assert_eq!(retrieved.gpu_counts.get("A100"), Some(&4));
         assert_eq!(retrieved.gpu_counts.get("H100"), Some(&2));
         assert_eq!(retrieved.last_successful_validation, Some(recent));
-
-        // Clean up
-        std::fs::remove_file(&db_path).ok();
 
         Ok(())
     }

@@ -482,7 +482,6 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tempfile::NamedTempFile;
 
     /// Helper function to create a test MinerGpuProfile without specific memory requirements
     fn create_test_profile(
@@ -599,20 +598,15 @@ mod tests {
         Ok(())
     }
 
-    async fn create_test_gpu_profile_repo() -> Result<(Arc<GpuProfileRepository>, NamedTempFile)> {
-        let temp_file = NamedTempFile::new()?;
-        let db_path = temp_file.path().to_str().unwrap();
-
-        let persistence =
-            crate::persistence::SimplePersistence::new(db_path, "test".to_string()).await?;
+    async fn create_test_gpu_profile_repo() -> Result<Arc<GpuProfileRepository>> {
+        let persistence = crate::persistence::SimplePersistence::for_testing().await?;
         let repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-
-        Ok((repo, temp_file))
+        Ok(repo)
     }
 
     #[tokio::test]
     async fn test_verification_score_calculation() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
 
         // Test with valid attestations
@@ -720,7 +714,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gpu_count_weighting() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
 
         // Test different GPU counts
@@ -760,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_miner_profile_update() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
 
         let miner_uid = MinerUid::new(1);
@@ -803,7 +797,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_category_statistics() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
 
         // Create test profiles
@@ -850,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pass_fail_scoring_edge_cases() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
 
         // Test all invalid validations
@@ -916,7 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct_score_update() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
 
         let miner_uid = MinerUid::new(100);
@@ -949,7 +943,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scoring_ignores_gpu_memory() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
 
         // Test various memory sizes all get same score
@@ -973,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_b200_gpu_support() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
 
         // Test that B200 is considered rewardable
@@ -1015,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_emission_config_filtering() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
 
         // Create custom emission config with only A100 and B200 (exclude H100)
         let mut custom_gpu_allocations = HashMap::new();
@@ -1086,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_gpu_category_with_b200() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
         let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
 
         // Create a miner with multiple GPU types including B200
@@ -1136,11 +1130,7 @@ mod tests {
             weight_version_key: 0,
         };
 
-        // Create a minimal repo for testing (we only need the method, not async functionality)
-        let _temp_file = tempfile::NamedTempFile::new().unwrap();
-
         // This test doesn't need async functionality, just the is_gpu_model_rewardable method
-        // So we'll test the underlying logic directly
 
         // Test that various GPU model strings are normalized correctly
         let test_cases = vec![
@@ -1175,7 +1165,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_min_gpu_count_filtering() {
-        let (repo, _temp_file) = create_test_gpu_profile_repo().await.unwrap();
+        let repo = create_test_gpu_profile_repo().await.unwrap();
 
         // Create custom emission config with min_gpu_count requirements
         let mut gpu_allocations = HashMap::new();

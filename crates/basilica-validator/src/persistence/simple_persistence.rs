@@ -2700,9 +2700,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gpu_uuid_duplicate_prevention() {
-        let persistence = SimplePersistence::for_testing()
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         // Register initial miner with node
         let node1 = NodeRegistration {

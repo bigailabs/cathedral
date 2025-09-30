@@ -109,10 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_last_successful_validation_field() -> anyhow::Result<()> {
-        // Create test database
-        let db_path = format!("/tmp/test_validation_field_{}.db", uuid::Uuid::new_v4());
-        let persistence =
-            Arc::new(SimplePersistence::new(&db_path, "test_validator".to_string()).await?);
+        let persistence = Arc::new(SimplePersistence::for_testing().await?);
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
 
         let now = Utc::now();
@@ -148,18 +145,12 @@ mod tests {
         let final_profile = updated.unwrap();
         assert_eq!(final_profile.last_successful_validation, Some(now));
 
-        // Clean up
-        std::fs::remove_file(&db_path).ok();
-
         Ok(())
     }
 
     #[tokio::test]
     async fn test_profile_filtering_by_epoch() -> anyhow::Result<()> {
-        // Create test database
-        let db_path = format!("/tmp/test_epoch_filter_{}.db", uuid::Uuid::new_v4());
-        let persistence =
-            Arc::new(SimplePersistence::new(&db_path, "test_validator".to_string()).await?);
+        let persistence = Arc::new(SimplePersistence::for_testing().await?);
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
 
         let now = Utc::now();
@@ -215,9 +206,6 @@ mod tests {
         // Only miner 1 should pass the filter
         assert_eq!(recent_profiles.len(), 1);
         assert_eq!(recent_profiles[0].miner_uid.as_u16(), 1);
-
-        // Clean up
-        std::fs::remove_file(&db_path).ok();
 
         Ok(())
     }
