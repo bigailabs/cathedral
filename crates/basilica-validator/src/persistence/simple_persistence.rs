@@ -1737,6 +1737,25 @@ impl SimplePersistence {
         Ok(miner_id)
     }
 
+    /// get node ssh-endpoint by node ID, return None if not found
+    pub async fn get_node_ssh_endpoint(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let row = sqlx::query(
+            "SELECT ssh_endpoint FROM miner_nodes \
+                 WHERE node_id = ? AND miner_id = ? \
+                 LIMIT 1",
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get("ssh_endpoint")))
+    }
+
     /// Get detailed node information including GPU and CPU specs
     pub async fn get_node_details(
         &self,
