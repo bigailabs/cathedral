@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use basilica_common::config::{
-    loader, BittensorConfig, ConfigValidation, DatabaseConfig, LoggingConfig, MetricsConfig,
+    loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig,
 };
 use basilica_common::error::ConfigurationError;
 use basilica_common::identity::Hotkey;
@@ -25,9 +25,6 @@ pub struct MinerConfig {
 
     /// Database configuration
     pub database: DatabaseConfig,
-
-    /// Logging configuration
-    pub logging: LoggingConfig,
 
     /// Metrics configuration
     pub metrics: MetricsConfig,
@@ -350,7 +347,6 @@ impl Default for MinerConfig {
                 url: "sqlite:./data/miner.db".to_string(),
                 ..Default::default()
             },
-            logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
             validator_comms: ValidatorCommsConfig::default(),
             node_management: NodeManagementConfig::default(),
