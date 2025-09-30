@@ -165,6 +165,7 @@ mod tests {
         let temp_file = NamedTempFile::new()?;
         let db_path = temp_file.path().to_str().unwrap();
         let persistence = SimplePersistence::new(db_path, "test".to_string()).await?;
+        persistence.run_migrations().await?;
         let repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
         Ok((repo, temp_file))
     }

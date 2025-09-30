@@ -949,6 +949,7 @@ mod tests {
         // Create a new persistence instance which will handle the database creation and migrations
         let persistence =
             crate::persistence::SimplePersistence::new(db_path, "test".to_string()).await?;
+        persistence.run_migrations().await?;
 
         // Return the pool from the persistence instance along with the temp file to keep it alive
         Ok((persistence.pool().clone(), temp_file))

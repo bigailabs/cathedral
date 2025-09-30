@@ -71,14 +71,12 @@ impl SimplePersistence {
         database_path: &str,
         _validator_hotkey: String,
     ) -> Result<Self, anyhow::Error> {
-        // Create database URL with proper connection mode
         let db_url = if database_path.starts_with("sqlite:") {
             database_path.to_string()
         } else {
             format!("sqlite:{database_path}")
         };
 
-        // Add connection mode for read-write-create if not present
         let final_url = if db_url.contains("?") {
             db_url
         } else {
@@ -87,7 +85,6 @@ impl SimplePersistence {
 
         let pool = sqlx::SqlitePool::connect(&final_url).await?;
 
-        // Configure SQLite for better concurrency
         sqlx::query("PRAGMA journal_mode = WAL")
             .execute(&pool)
             .await?;
@@ -98,498 +95,43 @@ impl SimplePersistence {
             .execute(&pool)
             .await?;
 
-        let instance = Self { pool };
-        instance.run_migrations().await?;
-
-        Ok(instance)
+        Ok(Self { pool })
     }
 
-    async fn run_migrations(&self) -> Result<(), anyhow::Error> {
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS miners (
-                id TEXT PRIMARY KEY,
-                hotkey TEXT NOT NULL UNIQUE,
-                endpoint TEXT NOT NULL,
-                verification_score REAL DEFAULT 0.0,
-                uptime_percentage REAL DEFAULT 0.0,
-                last_seen TEXT NOT NULL,
-                registered_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                node_info TEXT NOT NULL DEFAULT '{}'
-            );
+    pub async fn run_migrations(&self) -> Result<(), anyhow::Error> {
+        info!("Running database migrations");
 
-            CREATE TABLE IF NOT EXISTS miner_nodes (
-                id TEXT PRIMARY KEY,
-                miner_id TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                ssh_endpoint TEXT NOT NULL,
-                gpu_count INTEGER NOT NULL,
-                status TEXT DEFAULT 'unknown',
-                last_health_check TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (miner_id) REFERENCES miners (id) ON DELETE CASCADE
-            );
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
 
-            CREATE TABLE IF NOT EXISTS verification_requests (
-                id TEXT PRIMARY KEY,
-                miner_id TEXT NOT NULL,
-                verification_type TEXT NOT NULL,
-                node_id TEXT,
-                status TEXT DEFAULT 'scheduled',
-                scheduled_at TEXT NOT NULL,
-                completed_at TEXT,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (miner_id) REFERENCES miners (id) ON DELETE CASCADE
-            );
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS verification_logs (
-                id TEXT PRIMARY KEY,
-                node_id TEXT NOT NULL,
-                validator_hotkey TEXT NOT NULL,
-                verification_type TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                score REAL NOT NULL,
-                success INTEGER NOT NULL,
-                details TEXT NOT NULL,
-                duration_ms INTEGER NOT NULL,
-                error_message TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
+        self.initialize_collateral_scan_status().await?;
 
-            CREATE TABLE IF NOT EXISTS rentals (
-                id TEXT PRIMARY KEY,
-                validator_hotkey TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                container_id TEXT NOT NULL,
-                ssh_session_id TEXT NOT NULL,
-                ssh_credentials TEXT NOT NULL,
-                state TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                container_spec TEXT NOT NULL,
-                miner_id TEXT NOT NULL DEFAULT '',
-                customer_public_key TEXT,
-                docker_image TEXT,
-                env_vars TEXT,
-                gpu_requirements TEXT,
-                ssh_access_info TEXT,
-                cost_per_hour REAL,
-                status TEXT,
-                updated_at TEXT,
-                started_at TEXT,
-                terminated_at TEXT,
-                termination_reason TEXT,
-                total_cost REAL,
-                end_user_ssh_credentials TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}'
-            );
+        info!("Database migrations completed successfully");
+        Ok(())
+    }
 
-            CREATE TABLE IF NOT EXISTS miner_gpu_profiles (
-                miner_uid INTEGER PRIMARY KEY,
-                gpu_counts_json TEXT NOT NULL,
-                total_score REAL NOT NULL,
-                verification_count INTEGER NOT NULL,
-                last_updated TEXT NOT NULL,
-                last_successful_validation TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    async fn initialize_collateral_scan_status(&self) -> Result<(), anyhow::Error> {
+        use collateral_contract::config::CONTRACT_DEPLOYED_BLOCK_NUMBER;
 
-                CONSTRAINT valid_score CHECK (total_score >= 0.0 AND total_score <= 1.0),
-                CONSTRAINT valid_count CHECK (verification_count >= 0)
-            );
+        let now = Utc::now().to_rfc3339();
+        let insert_query = r#"
+            INSERT OR IGNORE INTO collateral_scan_status (last_scanned_block_number, updated_at, id)
+            VALUES (?, ?, 1)
+        "#;
 
-            CREATE TABLE IF NOT EXISTS emission_metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                burn_amount INTEGER NOT NULL,
-                burn_percentage REAL NOT NULL,
-                category_distributions_json TEXT NOT NULL,
-                total_miners INTEGER NOT NULL,
-                weight_set_block INTEGER NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-
-                CONSTRAINT valid_burn_percentage CHECK (burn_percentage >= 0.0 AND burn_percentage <= 100.0),
-                CONSTRAINT valid_total_miners CHECK (total_miners >= 0)
-            );
-
-            CREATE TABLE IF NOT EXISTS miner_prover_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                gpu_model TEXT NOT NULL,
-                gpu_count INTEGER NOT NULL,
-                gpu_memory_gb REAL NOT NULL,
-                attestation_valid INTEGER NOT NULL,
-                verification_timestamp TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-
-                CONSTRAINT valid_gpu_count CHECK (gpu_count >= 0),
-                CONSTRAINT valid_gpu_memory CHECK (gpu_memory_gb >= 0)
-            );
-
-            CREATE TABLE IF NOT EXISTS node_hardware_profile (
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                cpu_model TEXT,
-                cpu_cores INTEGER,
-                ram_gb INTEGER,
-                disk_gb INTEGER,
-                full_hardware_json TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS node_speedtest_profile (
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                download_mbps REAL,
-                upload_mbps REAL,
-                test_timestamp TEXT NOT NULL,
-                test_server TEXT,
-                full_result_json TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS node_network_profile (
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                ip_address TEXT,
-                hostname TEXT,
-                city TEXT,
-                region TEXT,
-                country TEXT,
-                location TEXT,
-                organization TEXT,
-                postal_code TEXT,
-                timezone TEXT,
-                test_timestamp TEXT NOT NULL,
-                full_result_json TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS node_docker_profile (
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                service_active BOOLEAN NOT NULL,
-                docker_version TEXT,
-                images_pulled TEXT,
-                dind_supported BOOLEAN DEFAULT 0,
-                validation_error TEXT,
-                full_json TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS node_nat_profile (
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                is_accessible BOOLEAN NOT NULL,
-                test_port INTEGER NOT NULL,
-                test_path TEXT NOT NULL,
-                container_id TEXT,
-                response_content TEXT,
-                test_timestamp TEXT NOT NULL,
-                full_json TEXT NOT NULL,
-                error_message TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS node_storage_profile (
-                miner_uid INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                total_bytes INTEGER NOT NULL,
-                available_bytes INTEGER NOT NULL,
-                required_bytes INTEGER NOT NULL,
-                filesystem_details TEXT NOT NULL,
-                collection_timestamp TEXT NOT NULL,
-                full_json TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (miner_uid, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS weight_allocation_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                miner_uid INTEGER NOT NULL,
-                gpu_category TEXT NOT NULL,
-                allocated_weight INTEGER NOT NULL,
-                miner_score REAL NOT NULL,
-                category_total_score REAL NOT NULL,
-                weight_set_block INTEGER NOT NULL,
-                timestamp TEXT NOT NULL,
-
-                emission_metrics_id INTEGER,
-                FOREIGN KEY (emission_metrics_id) REFERENCES emission_metrics(id),
-
-                CONSTRAINT valid_weight CHECK (allocated_weight >= 0),
-                CONSTRAINT valid_scores CHECK (miner_score >= 0.0 AND category_total_score >= 0.0)
-            );
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_gpu_profiles_score ON miner_gpu_profiles(total_score DESC);
-            CREATE INDEX IF NOT EXISTS idx_gpu_profiles_updated ON miner_gpu_profiles(last_updated);
-            CREATE INDEX IF NOT EXISTS idx_emission_metrics_timestamp ON emission_metrics(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_emission_metrics_block ON emission_metrics(weight_set_block);
-            CREATE INDEX IF NOT EXISTS idx_prover_results_miner ON miner_prover_results(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_prover_results_timestamp ON miner_prover_results(verification_timestamp);
-            CREATE INDEX IF NOT EXISTS idx_weight_history_miner ON weight_allocation_history(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_weight_history_category ON weight_allocation_history(gpu_category);
-            CREATE INDEX IF NOT EXISTS idx_weight_history_block ON weight_allocation_history(weight_set_block);
-            CREATE INDEX IF NOT EXISTS idx_node_hardware_miner ON node_hardware_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_node_hardware_updated ON node_hardware_profile(updated_at);
-            CREATE INDEX IF NOT EXISTS idx_node_speedtest_miner ON node_speedtest_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_node_speedtest_timestamp ON node_speedtest_profile(test_timestamp);
-            CREATE INDEX IF NOT EXISTS idx_node_network_miner ON node_network_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_node_network_timestamp ON node_network_profile(test_timestamp);
-            CREATE INDEX IF NOT EXISTS idx_node_network_country ON node_network_profile(country);
-            CREATE INDEX IF NOT EXISTS idx_node_docker_miner ON node_docker_profile(miner_uid);
-            CREATE INDEX IF NOT EXISTS idx_node_docker_updated ON node_docker_profile(updated_at);
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Check if last_successful_validation column exists before adding it
-        let column_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_gpu_profiles')
-            WHERE name = 'last_successful_validation'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !column_exists {
-            // Migration to add last_successful_validation column
-            sqlx::query(
-                r#"
-                ALTER TABLE miner_gpu_profiles
-                ADD COLUMN last_successful_validation TEXT;
-                "#,
-            )
+        let result = sqlx::query(insert_query)
+            .bind(CONTRACT_DEPLOYED_BLOCK_NUMBER as i64)
+            .bind(now)
             .execute(&self.pool)
-            .await?;
+            .await;
 
-            info!("Added last_successful_validation column to miner_gpu_profiles table");
-        }
-
-        // Check if gpu_uuids column exists in miner_prover_results
-        let gpu_uuid_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_prover_results')
-            WHERE name = 'gpu_uuid'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !gpu_uuid_exists {
-            // Migration to add gpu_uuid column to miner_prover_results
-            sqlx::query(
-                r#"
-                ALTER TABLE miner_prover_results
-                ADD COLUMN gpu_uuid TEXT;
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-
-            info!("Added gpu_uuid column to miner_prover_results table");
-        }
-
-        // Check if gpu_uuids column exists in miner_nodes
-        let gpu_uuids_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_nodes')
-            WHERE name = 'gpu_uuids'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !gpu_uuids_exists {
-            // Migration to add gpu_uuids column to miner_nodes
-            sqlx::query(
-                r#"
-                ALTER TABLE miner_nodes
-                ADD COLUMN gpu_uuids TEXT;
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-
-            info!("Added gpu_uuids column to miner_nodes table");
-        }
-
-        // Create GPU UUID assignments table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS gpu_uuid_assignments (
-                gpu_uuid TEXT PRIMARY KEY,
-                gpu_index INTEGER NOT NULL,
-                node_id TEXT NOT NULL,
-                miner_id TEXT NOT NULL,
-                gpu_name TEXT,
-                gpu_memory_gb REAL,
-                last_verified TEXT NOT NULL,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        if let Err(e) = result {
+            warn!(
+                "Error initializing collateral scan status (may already exist): {}",
+                e
             );
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Check if gpu_memory_gb column exists in gpu_uuid_assignments
-        let gpu_memory_gb_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('gpu_uuid_assignments')
-            WHERE name = 'gpu_memory_gb'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !gpu_memory_gb_exists {
-            // Migration to add gpu_memory_gb column to gpu_uuid_assignments
-            sqlx::query(
-                r#"
-                ALTER TABLE gpu_uuid_assignments
-                ADD COLUMN gpu_memory_gb REAL DEFAULT NULL;
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-
-            info!("Added gpu_memory_gb column to gpu_uuid_assignments table");
-        }
-
-        // Create indexes
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_prover_results_gpu_uuid ON miner_prover_results(gpu_uuid);
-            CREATE INDEX IF NOT EXISTS idx_nodes_gpu_uuids ON miner_nodes(gpu_uuids);
-            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_node ON gpu_uuid_assignments(node_id);
-            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_miner ON gpu_uuid_assignments(miner_id);
-            CREATE INDEX IF NOT EXISTS idx_gpu_assignments_miner_node ON gpu_uuid_assignments(miner_id, node_id);
-            CREATE INDEX IF NOT EXISTS idx_miner_nodes_status ON miner_nodes(status);
-            CREATE INDEX IF NOT EXISTS idx_miner_nodes_health_check ON miner_nodes(last_health_check);
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Check if miner_id column exists in rentals table
-        let miner_id_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('rentals')
-            WHERE name = 'miner_id'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !miner_id_exists {
-            sqlx::query(
-                r#"
-                ALTER TABLE rentals
-                ADD COLUMN miner_id TEXT NOT NULL DEFAULT '';
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-
-            info!("Added miner_id column to rentals table");
-        }
-
-        self.create_collateral_scanned_blocks_table().await?;
-        self.add_binary_validation_columns().await?;
-
-        // Migration to remove deprecated columns from miner_nodes table
-        // Check if gpu_specs column exists
-        let gpu_specs_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_nodes')
-            WHERE name = 'gpu_specs'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if gpu_specs_exists {
-            sqlx::query("ALTER TABLE miner_nodes DROP COLUMN gpu_specs")
-                .execute(&self.pool)
-                .await?;
-            info!("Dropped gpu_specs column from miner_nodes table");
-        }
-
-        // Check if cpu_specs column exists
-        let cpu_specs_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_nodes')
-            WHERE name = 'cpu_specs'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if cpu_specs_exists {
-            sqlx::query("ALTER TABLE miner_nodes DROP COLUMN cpu_specs")
-                .execute(&self.pool)
-                .await?;
-            info!("Dropped cpu_specs column from miner_nodes table");
-        }
-
-        // Check if location column exists
-        let location_exists: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('miner_nodes')
-            WHERE name = 'location'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if location_exists {
-            sqlx::query("ALTER TABLE miner_nodes DROP COLUMN location")
-                .execute(&self.pool)
-                .await?;
-            info!("Dropped location column from miner_nodes table");
         }
 
         Ok(())
@@ -2034,59 +1576,6 @@ impl SimplePersistence {
         Ok(count as u32)
     }
 
-    /// Add binary validation tracking columns to verification_logs table
-    async fn add_binary_validation_columns(&self) -> Result<(), anyhow::Error> {
-        let has_last_col: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('verification_logs')
-            WHERE name = 'last_binary_validation'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !has_last_col {
-            sqlx::query(
-                r#"
-                ALTER TABLE verification_logs
-                ADD COLUMN last_binary_validation TEXT;
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        let has_score_col: bool = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*) > 0
-            FROM pragma_table_info('verification_logs')
-            WHERE name = 'last_binary_validation_score'
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false);
-
-        if !has_score_col {
-            sqlx::query(
-                r#"
-                ALTER TABLE verification_logs
-                ADD COLUMN last_binary_validation_score REAL;
-                "#,
-            )
-            .execute(&self.pool)
-            .await?;
-        }
-
-        if !has_last_col || !has_score_col {
-            info!("Ensured binary validation tracking columns exist on verification_logs");
-        }
-
-        Ok(())
-    }
-
     /// Get last successful full validation data for lightweight validation
     pub async fn get_last_full_validation_data(
         &self,
@@ -3042,8 +2531,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prevent_duplicate_ssh_endpoint_registration() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
+        let persistence = SimplePersistence::for_testing()
             .await
             .expect("Failed to create persistence");
 
@@ -3100,8 +2588,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prevent_duplicate_ssh_endpoint_update() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
+        let persistence = SimplePersistence::for_testing()
             .await
             .expect("Failed to create persistence");
 
@@ -3168,8 +2655,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_allow_same_miner_update_with_same_ssh_endpoint() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
+        let persistence = SimplePersistence::for_testing()
             .await
             .expect("Failed to create persistence");
 
@@ -3214,8 +2700,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_gpu_uuid_duplicate_prevention() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
+        let persistence = SimplePersistence::for_testing()
             .await
             .unwrap();
 
@@ -3284,8 +2769,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hardware_profile_enrichment() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "test_validator".to_string())
+        let persistence = SimplePersistence::for_testing()
             .await
             .expect("Failed to create persistence");
 

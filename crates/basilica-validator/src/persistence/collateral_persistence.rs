@@ -1,55 +1,12 @@
 use crate::persistence::SimplePersistence;
 use alloy_primitives::{Address, U256};
 use chrono::Utc;
-use collateral_contract::config::CONTRACT_DEPLOYED_BLOCK_NUMBER;
 use collateral_contract::{Deposit, Reclaimed, Slashed};
 use hex::ToHex;
 use sqlx::Row;
 use tracing::warn;
 
 impl SimplePersistence {
-    pub async fn create_collateral_scanned_blocks_table(&self) -> Result<(), anyhow::Error> {
-        let now = Utc::now().to_rfc3339();
-        let query = r#"
-            CREATE TABLE IF NOT EXISTS collateral_status (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                hotkey TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                miner TEXT NOT NULL,
-                collateral TEXT NOT NULL,
-                url TEXT,
-                url_content_md5_checksum TEXT,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(hotkey, node_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS collateral_scan_status (
-                id INTEGER PRIMARY KEY,
-                last_scanned_block_number INTEGER NOT NULL,
-                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-        "#;
-
-        sqlx::query(query).execute(self.pool()).await?;
-
-        // Insert the contract deployed block number as the initial scanned block number, no need to scan from the block 0
-        let insert_initial_scan_row = r#"
-            INSERT INTO collateral_scan_status (last_scanned_block_number, updated_at, id) VALUES (?, ?, 1) ;
-        "#;
-        let result = sqlx::query(insert_initial_scan_row)
-            .bind(CONTRACT_DEPLOYED_BLOCK_NUMBER as i64)
-            .bind(now)
-            .execute(self.pool())
-            .await;
-
-        // Ignore the error if the row already exists
-        if let Err(e) = result {
-            warn!("Error inserting initial scan row: {}", e);
-        }
-
-        Ok(())
-    }
-
     pub async fn get_last_scanned_block_number(&self) -> Result<u64, anyhow::Error> {
         let query = "SELECT last_scanned_block_number FROM collateral_scan_status WHERE id = 1";
 
@@ -205,6 +162,7 @@ impl SimplePersistence {
 mod tests {
     use super::*;
     use alloy_primitives::FixedBytes;
+    use collateral_contract::config::CONTRACT_DEPLOYED_BLOCK_NUMBER;
 
     fn make_hotkey(byte: u8) -> [u8; 32] {
         [byte; 32]
@@ -243,18 +201,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tables_and_index_creation() {
-        let db_path = ":memory:";
-        let _persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .expect("persistence");
+        let _persistence = SimplePersistence::for_testing().await.expect("persistence");
     }
 
     #[tokio::test]
     async fn test_scan_block_number_roundtrip() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         // seed row
         sqlx::query("UPDATE collateral_scan_status SET last_scanned_block_number = 1 WHERE id = 1")
@@ -280,10 +232,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_deposit_insert_and_update() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(1);
         let ex = make_node_id(2);
@@ -318,10 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_reclaimed_and_slashed() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(9);
         let ex = make_node_id(7);
@@ -359,10 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_collateral_status_id_found() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(5);
         let ex = make_node_id(6);
@@ -385,10 +328,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_collateral_status_id_not_found() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let result = persistence
             .get_collateral_status_id("nonexistent_hotkey", "nonexistent_node")
@@ -400,10 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_reclaimed_not_found() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(10);
         let ex = make_node_id(11);
@@ -419,10 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_slashed_not_found() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(12);
         let ex = make_node_id(13);
@@ -438,10 +372,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_slashed_with_url_data() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(14);
         let ex = make_node_id(15);
@@ -476,10 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_last_scanned_block_number_large_values() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let large_block = u64::MAX - 1000;
         persistence
@@ -493,10 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_deposit_multiple_miners_same_node() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let ex = make_node_id(20);
         let hk1 = make_hotkey(21);
@@ -522,10 +447,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_deposit_overflow_protection() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(25);
         let ex = make_node_id(26);
@@ -556,10 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_reclaimed_underflow_protection() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(27);
         let ex = make_node_id(28);
@@ -588,10 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_unique_constraint() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(30);
         let ex = make_node_id(31);
@@ -631,10 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scan_status_table_initialization() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         // Verify the scan status table has the initial row
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM collateral_scan_status")
@@ -657,10 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_timestamp_fields_updated() {
-        let db_path = ":memory:";
-        let persistence = SimplePersistence::new(db_path, "validator".to_string())
-            .await
-            .unwrap();
+        let persistence = SimplePersistence::for_testing().await.unwrap();
 
         let hk = make_hotkey(35);
         let ex = make_node_id(36);

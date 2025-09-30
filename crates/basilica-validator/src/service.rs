@@ -60,6 +60,8 @@ impl ValidatorService {
             SimplePersistence::new(db_path, self.config.bittensor.common.hotkey_name.clone())
                 .await?;
 
+        persistence.run_migrations().await?;
+
         let persistence_arc = Arc::new(persistence);
 
         // Create GPU profile repository (needed for weight setter and cleanup task)
