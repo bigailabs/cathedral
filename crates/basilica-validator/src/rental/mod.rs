@@ -88,6 +88,48 @@ impl RentalManager {
         ContainerClient::new(ssh_credentials.to_string(), private_key_path)
     }
 
+    /// Cleanup container on rental setup failure
+    async fn cleanup_container_on_failure(
+        &self,
+        ssh_credentials: &str,
+        container_id: &str,
+        node_id: &str,
+        rental_id: &str,
+    ) {
+        tracing::warn!(
+            node_id = %node_id,
+            rental_id = %rental_id,
+            container_id = %container_id,
+            "Cleaning up container due to rental setup failure"
+        );
+
+        match self.create_container_client(ssh_credentials) {
+            Ok(client) => {
+                if let Err(e) = self
+                    .deployment_manager
+                    .stop_container(&client, container_id, true)
+                    .await
+                {
+                    tracing::error!(
+                        node_id = %node_id,
+                        rental_id = %rental_id,
+                        container_id = %container_id,
+                        "Failed to cleanup container: {}",
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    node_id = %node_id,
+                    rental_id = %rental_id,
+                    "Failed to create SSH client for cleanup: {}",
+                    e
+                );
+            }
+        }
+    }
+
     /// Create a new rental manager with SSH key manager
     pub fn new(
         persistence: Arc<SimplePersistence>,
@@ -255,7 +297,7 @@ impl RentalManager {
         let container_client = self.create_container_client(&ssh_credentials)?;
 
         // Deploy container with end-user's SSH public key
-        let container_info = match self
+        let container_info = self
             .deployment_manager
             .deploy_container(
                 &container_client,
@@ -264,10 +306,7 @@ impl RentalManager {
                 &request.ssh_public_key,
             )
             .await
-        {
-            Ok(info) => info,
-            Err(e) => {
-                // No explicit cleanup needed for direct node connections
+            .map_err(|e| {
                 tracing::error!(
                     node_id = %node_id,
                     rental_id = %rental_id,
@@ -276,80 +315,92 @@ impl RentalManager {
                     node_id,
                     e
                 );
-                return Err(e);
-            }
+                e
+            })?;
+
+        // From this point on, cleanup container on any error
+        let container_id = container_info.container_id.clone();
+
+        let finalize_rental = async {
+            // Check if SSH port is mapped and construct proper SSH credentials for end-user
+            let end_user_ssh_credentials = container_info
+                .mapped_ports
+                .iter()
+                .find(|p| p.container_port == 22)
+                .map(|ssh_mapping| {
+                    // Extract host from ssh_endpoint (format: "host:port" or "user@host:port")
+                    let host = if ssh_endpoint.contains('@') {
+                        ssh_endpoint
+                            .split('@')
+                            .nth(1)
+                            .and_then(|hp| hp.split(':').next())
+                            .unwrap_or("localhost")
+                    } else {
+                        ssh_endpoint.split(':').next().unwrap_or("localhost")
+                    };
+                    format!("root@{}:{}", host, ssh_mapping.host_port)
+                });
+
+            // Fetch node details from persistence
+            let node_details = self
+                .persistence
+                .get_node_details(&node_id, &miner_id)
+                .await?
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        miner_uid = miner_uid,
+                        rental_id = %rental_id,
+                        "Node details not found for node {} (miner: {})",
+                        node_id,
+                        miner_id
+                    );
+                    anyhow::anyhow!(
+                        "Node details not found for node {} (miner: {})",
+                        node_id,
+                        miner_id
+                    )
+                })?;
+
+            // Store rental info
+            let rental_info = RentalInfo {
+                rental_id: rental_id.clone(),
+                validator_hotkey: request.validator_hotkey.clone(),
+                node_id: node_id.clone(),
+                container_id: container_id.clone(),
+                ssh_session_id: format!("direct-{}", rental_id),
+                ssh_credentials: ssh_credentials.clone(),
+                state: RentalState::Active,
+                created_at: chrono::Utc::now(),
+                container_spec: request.container_spec.clone(),
+                miner_id: miner_id.clone(),
+                node_details: node_details.clone(),
+                end_user_ssh_credentials: end_user_ssh_credentials.clone().unwrap_or_default(),
+                metadata: HashMap::new(),
+            };
+
+            // Save to persistence
+            self.persistence.save_rental(&rental_info).await?;
+
+            Ok::<(RentalInfo, Option<String>), anyhow::Error>((rental_info, end_user_ssh_credentials))
         };
 
-        // Check if SSH port is mapped and construct proper SSH credentials for end-user
-        let end_user_ssh_credentials = container_info
-            .mapped_ports
-            .iter()
-            .find(|p| p.container_port == 22)
-            .map(|ssh_mapping| {
-                // Extract host from ssh_endpoint (format: "host:port" or "user@host:port")
-                let host = if ssh_endpoint.contains('@') {
-                    ssh_endpoint
-                        .split('@')
-                        .nth(1)
-                        .and_then(|hp| hp.split(':').next())
-                        .unwrap_or("localhost")
-                } else {
-                    ssh_endpoint.split(':').next().unwrap_or("localhost")
-                };
-                // Always use root as username for containers with the mapped port
-                format!("root@{}:{}", host, ssh_mapping.host_port)
-            });
-
-        // Fetch node details from persistence
-        let node_details = match self.persistence.get_node_details(&node_id, &miner_id).await {
-            Ok(Some(details)) => details,
-            Ok(None) => {
-                tracing::warn!(
-                    node_id = %node_id,
-                    miner_uid = miner_uid,
-                    rental_id = %rental_id,
-                    "Node details not found for node {} (miner: {})",
-                    node_id,
-                    miner_id
-                );
-                return Err(anyhow::anyhow!(
-                    "Node details not found for node {} (miner: {})",
-                    node_id,
-                    miner_id
-                ));
-            }
+        let (rental_info, end_user_ssh_credentials) = match finalize_rental.await {
+            Ok(result) => result,
             Err(e) => {
                 tracing::error!(
                     node_id = %node_id,
-                    miner_uid = miner_uid,
                     rental_id = %rental_id,
-                    "Failed to fetch node details for node_id {}: {}",
-                    node_id,
+                    miner_uid = miner_uid,
+                    container_id = %container_id,
+                    "[RENTAL_FLOW] Failed to finalize rental setup: {}",
                     e
                 );
-                return Err(anyhow::anyhow!("Failed to fetch node details: {}", e));
+                self.cleanup_container_on_failure(&ssh_credentials, &container_id, &node_id, &rental_id)
+                    .await;
+                return Err(e);
             }
         };
-
-        // Store rental info
-        let rental_info = RentalInfo {
-            rental_id: rental_id.clone(),
-            validator_hotkey: request.validator_hotkey.clone(),
-            node_id: node_id.clone(),
-            container_id: container_info.container_id.clone(),
-            ssh_session_id: format!("direct-{}", rental_id),
-            ssh_credentials: ssh_credentials.clone(),
-            state: RentalState::Active,
-            created_at: chrono::Utc::now(),
-            container_spec: request.container_spec.clone(),
-            miner_id: miner_id.clone(),
-            node_details,
-            end_user_ssh_credentials: end_user_ssh_credentials.clone().unwrap_or_default(),
-            metadata: HashMap::new(),
-        };
-
-        // Save to persistence
-        self.persistence.save_rental(&rental_info).await?;
 
         if let Some(miner_uid) = miner_uid {
             let gpu_type = get_gpu_type(&rental_info.node_details);
