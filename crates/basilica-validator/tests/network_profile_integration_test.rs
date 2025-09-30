@@ -7,6 +7,7 @@ use basilica_validator::persistence::SimplePersistence;
 async fn test_network_profile_database_integration() -> Result<(), anyhow::Error> {
     // Create in-memory database for testing
     let persistence = SimplePersistence::new(":memory:", "test_validator".to_string()).await?;
+    persistence.run_migrations().await?;
 
     // Test data
     let miner_uid = 1u16;

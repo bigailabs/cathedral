@@ -5,6 +5,7 @@ use sqlx::Row;
 async fn test_network_profile_table_exists() -> Result<(), anyhow::Error> {
     // Create an in-memory database
     let persistence = SimplePersistence::new(":memory:", "test_validator".to_string()).await?;
+    persistence.run_migrations().await?;
 
     // Check if the table exists
     let row = sqlx::query(
