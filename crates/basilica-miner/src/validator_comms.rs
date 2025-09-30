@@ -208,19 +208,18 @@ impl MinerDiscovery for MinerDiscoveryService {
         }
 
         // Check if validator is in allowlist (if configured)
-        if !self.server.security_config.allowed_validators.is_empty() {
-            if !self
+        if !self.server.security_config.allowed_validators.is_empty()
+            && !self
                 .server
                 .security_config
                 .allowed_validators
                 .contains(&validator_hotkey)
-            {
-                warn!(
-                    "Validator {} not in allowlist",
-                    auth_request.validator_hotkey
-                );
-                return Err(Status::permission_denied("Validator not authorized"));
-            }
+        {
+            warn!(
+                "Validator {} not in allowlist",
+                auth_request.validator_hotkey
+            );
+            return Err(Status::permission_denied("Validator not authorized"));
         }
 
         // Check if validator is authorized

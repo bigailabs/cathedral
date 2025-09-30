@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DurationSeconds};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,6 +42,7 @@ pub struct SshConnectionConfig {
 }
 
 /// Remote node deployment configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteNodeDeploymentConfig {
     pub remote_machines: Vec<RemoteMachineConfig>,
@@ -48,6 +50,7 @@ pub struct RemoteNodeDeploymentConfig {
     pub node_config_template: String,
     pub auto_deploy: bool,
     pub auto_start: bool,
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub health_check_interval: Duration,
 }
 
@@ -118,6 +121,7 @@ pub struct MinerBittensorConfig {
 }
 
 /// Validator communications configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorCommsConfig {
     /// Host to bind the gRPC server to
@@ -133,6 +137,7 @@ pub struct ValidatorCommsConfig {
     pub auth: AuthConfig,
 
     /// Request timeout for validator calls
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub request_timeout: Duration,
 
     /// Maximum concurrent validator sessions
@@ -143,15 +148,18 @@ pub struct ValidatorCommsConfig {
 }
 
 /// Node management configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeManagementConfig {
     /// Static list of nodes managed by this miner
     pub nodes: Vec<NodeConfig>,
 
     /// Health check interval for nodes
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub health_check_interval: Duration,
 
     /// Timeout for node health checks
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub health_check_timeout: Duration,
 
     /// Maximum retry attempts for failed operations
@@ -162,6 +170,7 @@ pub struct NodeManagementConfig {
 }
 
 /// Security configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Enable mTLS for all gRPC communications
@@ -173,6 +182,7 @@ pub struct SecurityConfig {
     pub ca_cert_path: Option<PathBuf>,
 
     /// Token expiration time
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub token_expiration: Duration,
 
     /// Allowed validator hotkeys
@@ -225,6 +235,7 @@ pub enum AuthMethod {
 }
 
 /// Token validation configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenValidationConfig {
     /// Issuer validation
@@ -237,10 +248,12 @@ pub struct TokenValidationConfig {
     pub validate_expiration: bool,
 
     /// Clock skew tolerance
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub clock_skew_tolerance: Duration,
 }
 
 /// Rate limiting configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateLimitConfig {
     /// Enable rate limiting
@@ -253,10 +266,12 @@ pub struct RateLimitConfig {
     pub burst_capacity: u32,
 
     /// Rate limit window duration
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub window_duration: Duration,
 }
 
 /// SSH configuration for node access by validators
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeSshConfig {
     /// Path to miner's SSH key for node access
@@ -266,6 +281,7 @@ pub struct NodeSshConfig {
     pub default_node_username: String,
 
     /// Session cleanup interval
+    #[serde_as(as = "DurationSeconds<u64>")]
     pub session_cleanup_interval: Duration,
 
     /// Maximum concurrent sessions per validator
@@ -289,10 +305,12 @@ pub struct NodeSshConfig {
     pub max_session_duration: u64,
 
     /// SSH connection timeout
+    #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_ssh_connection_timeout")]
     pub ssh_connection_timeout: Duration,
 
     /// SSH command execution timeout
+    #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_ssh_command_timeout")]
     pub ssh_command_timeout: Duration,
 
@@ -305,10 +323,12 @@ pub struct NodeSshConfig {
     pub enable_key_cleanup: bool,
 
     /// Interval for cleaning up expired SSH keys
+    #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_key_cleanup_interval")]
     pub key_cleanup_interval: Duration,
 
     /// Rate limit window duration
+    #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_rate_limit_window")]
     pub rate_limit_window: Duration,
 
@@ -317,6 +337,7 @@ pub struct NodeSshConfig {
     pub ssh_retry_attempts: u32,
 
     /// Delay between SSH retry attempts
+    #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_ssh_retry_delay")]
     pub ssh_retry_delay: Duration,
 }

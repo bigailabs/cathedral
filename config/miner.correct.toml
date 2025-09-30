@@ -15,18 +15,9 @@ url = "sqlite:///opt/basilica/data/miner.db"
 max_connections = 10
 min_connections = 1
 run_migrations = true
-
-[database.connect_timeout]
-secs = 30
-nanos = 0
-
-[database.idle_timeout]
-secs = 600
-nanos = 0
-
-[database.max_lifetime]
-secs = 3600
-nanos = 0
+connect_timeout = 30
+idle_timeout = 600
+max_lifetime = 3600
 
 [server]
 host = "0.0.0.0"
@@ -36,14 +27,8 @@ port = 8080
 max_connections = 1000
 advertised_tls = false
 tls_enabled = false
-
-[server.request_timeout]
-secs = 30
-nanos = 0
-
-[server.keep_alive_timeout]
-secs = 60
-nanos = 0
+request_timeout = 30
+keep_alive_timeout = 60
 
 [logging]
 level = "debug"
@@ -56,10 +41,8 @@ max_files = 5
 
 [metrics]
 enabled = true
-
-[metrics.collection_interval]
-secs = 30
-nanos = 0
+collection_interval = 30
+retention_period = 604800
 
 [metrics.prometheus]
 host = "127.0.0.1"
@@ -68,12 +51,9 @@ path = "/metrics"
 
 [metrics.default_labels]
 
-[metrics.retention_period]
-secs = 604800
-nanos = 0
-
 [validator_comms]
 max_concurrent_sessions = 100
+request_timeout = 30
 
 [validator_comms.auth]
 enabled = true
@@ -83,23 +63,13 @@ method = "bittensor_signature"
 validate_issuer = true
 validate_audience = true
 validate_expiration = true
-
-[validator_comms.auth.token_validation.clock_skew_tolerance]
-secs = 60
-nanos = 0
-
-[validator_comms.request_timeout]
-secs = 30
-nanos = 0
+clock_skew_tolerance = 60
 
 [validator_comms.rate_limit]
 enabled = true
 requests_per_second = 10
 burst_capacity = 20
-
-[validator_comms.rate_limit.window_duration]
-secs = 60
-nanos = 0
+window_duration = 60
 
 [executor_management]
 executors = [
@@ -107,14 +77,8 @@ executors = [
 ]
 max_retry_attempts = 3
 auto_recovery = true
-
-[executor_management.health_check_interval]
-secs = 60
-nanos = 0
-
-[executor_management.health_check_timeout]
-secs = 10
-nanos = 0
+health_check_interval = 60
+health_check_timeout = 10
 
 [security]
 enable_mtls = false
@@ -122,10 +86,7 @@ jwt_secret = "0f340697e18b0c88329c8d3366b867d5d02bff18089e62f0a12adffd24cabd3e"
 allowed_validators = []
 verify_signatures = true
 private_key_file = "~/.basilca/private_key"
-
-[security.token_expiration]
-secs = 3600
-nanos = 0
+token_expiration = 3600
 
 [ssh_session]
 miner_executor_key_path = "~/.ssh/miner_executor_key"
@@ -139,30 +100,12 @@ max_session_duration = 3600
 enable_session_expiration = true
 enable_key_cleanup = true
 ssh_retry_attempts = 3
-
-[ssh_session.session_cleanup_interval]
-secs = 60
-nanos = 0
-
-[ssh_session.ssh_connection_timeout]
-secs = 30
-nanos = 0
-
-[ssh_session.ssh_command_timeout]
-secs = 60
-nanos = 0
-
-[ssh_session.key_cleanup_interval]
-secs = 300
-nanos = 0
-
-[ssh_session.rate_limit_window]
-secs = 3600
-nanos = 0
-
-[ssh_session.ssh_retry_delay]
-secs = 2
-nanos = 0
+session_cleanup_interval = 60
+ssh_connection_timeout = 30
+ssh_command_timeout = 60
+key_cleanup_interval = 300
+rate_limit_window = 3600
+ssh_retry_delay = 2
 
 [validator_assignment]
 enabled = true
