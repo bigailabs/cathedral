@@ -188,7 +188,7 @@ impl SimplePersistence {
                 termination_reason TEXT,
                 total_cost REAL,
                 end_user_ssh_credentials TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}',
+                metadata TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS miner_gpu_profiles (
