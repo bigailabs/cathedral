@@ -382,7 +382,10 @@ impl RentalManager {
             // Save to persistence
             self.persistence.save_rental(&rental_info).await?;
 
-            Ok::<(RentalInfo, Option<String>), anyhow::Error>((rental_info, end_user_ssh_credentials))
+            Ok::<(RentalInfo, Option<String>), anyhow::Error>((
+                rental_info,
+                end_user_ssh_credentials,
+            ))
         };
 
         let (rental_info, end_user_ssh_credentials) = match finalize_rental.await {
@@ -396,8 +399,13 @@ impl RentalManager {
                     "[RENTAL_FLOW] Failed to finalize rental setup: {}",
                     e
                 );
-                self.cleanup_container_on_failure(&ssh_credentials, &container_id, &node_id, &rental_id)
-                    .await;
+                self.cleanup_container_on_failure(
+                    &ssh_credentials,
+                    &container_id,
+                    &node_id,
+                    &rental_id,
+                )
+                .await;
                 return Err(e);
             }
         };
