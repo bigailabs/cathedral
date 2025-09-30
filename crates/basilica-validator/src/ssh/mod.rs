@@ -763,7 +763,7 @@ impl ValidatorSshClient {
     /// * `Err` if installation fails or package manager is not supported
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// // Ensure lshw is installed (command and package have same name)
     /// client.ensure_installed(ssh_details, "lshw", "lshw").await?;
     ///
