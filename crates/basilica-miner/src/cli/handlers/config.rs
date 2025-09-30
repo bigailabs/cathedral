@@ -122,8 +122,8 @@ async fn show_config(config: &MinerConfig, show_sensitive: bool) -> Result<()> {
     println!("\n=== Derived Configuration ===");
     println!("Database Type: SQLite");
     println!(
-        "Server Address: {}:{}",
-        config.server.host, config.server.port
+        "Validator Comms Address: {}:{}",
+        config.validator_comms.host, config.validator_comms.port
     );
     println!("Metrics Enabled: {}", config.metrics.enabled);
     println!("Node Count: {}", config.node_management.nodes.len());
@@ -280,8 +280,8 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
     // Database configuration validation
     validate_database_config(&config.database, &mut errors, &mut warnings);
 
-    // Server configuration validation
-    validate_server_config(&config.server, &mut errors, &mut warnings);
+    // Validator communications configuration validation
+    validate_validator_comms_config(&config.validator_comms, &mut errors, &mut warnings);
 
     // Bittensor configuration validation
     validate_bittensor_config(
@@ -340,9 +340,9 @@ fn validate_database_config(
 }
 
 /// Validate server configuration
-fn validate_server_config(
-    config: &basilica_common::config::ServerConfig,
-    _errors: &mut [String],
+fn validate_validator_comms_config(
+    config: &crate::config::ValidatorCommsConfig,
+    _errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
     if config.port < 1024 && config.host != "127.0.0.1" && config.host != "localhost" {
@@ -353,8 +353,8 @@ fn validate_server_config(
         warnings.push("Binding to 0.0.0.0 exposes service to all network interfaces".to_string());
     }
 
-    if config.max_connections > 10000 {
-        warnings.push("Very high max_connections may cause resource exhaustion".to_string());
+    if config.max_concurrent_sessions > 1000 {
+        warnings.push("Very high max_concurrent_sessions may cause resource exhaustion".to_string());
     }
 }
 
@@ -539,8 +539,8 @@ fn mask_sensitive_fields(config: &mut MinerConfig) {
 /// Check if configuration changes require restart
 fn check_restart_required(current: &MinerConfig, new: &MinerConfig) -> bool {
     // Changes that require restart
-    current.server.port != new.server.port
-        || current.server.host != new.server.host
+    current.validator_comms.port != new.validator_comms.port
+        || current.validator_comms.host != new.validator_comms.host
         || current.database.url != new.database.url
         || current.bittensor.common.netuid != new.bittensor.common.netuid
         || current.bittensor.axon_port != new.bittensor.axon_port
@@ -548,16 +548,16 @@ fn check_restart_required(current: &MinerConfig, new: &MinerConfig) -> bool {
 
 /// Print configuration differences that require restart
 fn print_config_differences(current: &MinerConfig, new: &MinerConfig) {
-    if current.server.port != new.server.port {
+    if current.validator_comms.port != new.validator_comms.port {
         println!(
-            "   • Server port: {} → {}",
-            current.server.port, new.server.port
+            "   • Validator comms port: {} → {}",
+            current.validator_comms.port, new.validator_comms.port
         );
     }
-    if current.server.host != new.server.host {
+    if current.validator_comms.host != new.validator_comms.host {
         println!(
-            "   • Server host: {} → {}",
-            current.server.host, new.server.host
+            "   • Validator comms host: {} → {}",
+            current.validator_comms.host, new.validator_comms.host
         );
     }
     if current.database.url != new.database.url {

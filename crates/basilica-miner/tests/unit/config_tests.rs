@@ -180,9 +180,9 @@ port = 9090
         Some("Secondary Node".to_string())
     );
 
-    // Verify server config
-    assert_eq!(loaded_config.server.host, "0.0.0.0");
-    assert_eq!(loaded_config.server.port, 8080);
+    // Verify validator comms config
+    assert_eq!(loaded_config.validator_comms.host, "0.0.0.0");
+    assert_eq!(loaded_config.validator_comms.port, 50051);
 
     // Verify database config
     assert_eq!(

@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use basilica_common::config::{
     loader, BittensorConfig, ConfigValidation, DatabaseConfig, LoggingConfig, MetricsConfig,
-    ServerConfig,
 };
 use basilica_common::error::ConfigurationError;
 use basilica_common::identity::Hotkey;
@@ -62,9 +61,6 @@ pub struct MinerConfig {
 
     /// Database configuration
     pub database: DatabaseConfig,
-
-    /// Server configuration for validator communications
-    pub server: ServerConfig,
 
     /// Logging configuration
     pub logging: LoggingConfig,
@@ -393,11 +389,6 @@ impl Default for MinerConfig {
                 url: "sqlite:./data/miner.db".to_string(),
                 ..Default::default()
             },
-            server: ServerConfig {
-                host: "0.0.0.0".to_string(),
-                port: 8092,
-                ..Default::default()
-            },
             logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
             validator_comms: ValidatorCommsConfig::default(),
@@ -598,7 +589,6 @@ impl ConfigValidation for MinerConfig {
     fn validate(&self) -> Result<(), Self::Error> {
         // Validate common configs using their validation
         self.database.validate()?;
-        self.server.validate()?;
 
         // Validate Bittensor configuration - delegate to common validation
         self.bittensor.common.validate()?;
@@ -706,8 +696,8 @@ impl MinerConfig {
         self.advertised_addresses
             .grpc_endpoint
             .as_ref()
-            .unwrap_or(&self.server.advertised_url("http"))
-            .clone()
+            .cloned()
+            .unwrap_or_else(|| format!("http://{}:{}", self.validator_comms.host, self.validator_comms.port))
     }
 
     /// Get the advertised axon endpoint for Bittensor registration
@@ -717,12 +707,7 @@ impl MinerConfig {
         } else if let Some(external_ip) = &self.bittensor.external_ip {
             format!("http://{}:{}", external_ip, self.bittensor.axon_port)
         } else {
-            let advertised_host = self
-                .server
-                .advertised_host
-                .as_ref()
-                .unwrap_or(&self.server.host);
-            format!("http://{}:{}", advertised_host, self.bittensor.axon_port)
+            format!("http://{}:{}", self.validator_comms.host, self.bittensor.axon_port)
         }
     }
 
@@ -731,27 +716,22 @@ impl MinerConfig {
         self.advertised_addresses
             .metrics_endpoint
             .as_ref()
-            .unwrap_or(&format!(
-                "http://{}:{}",
-                self.server
-                    .advertised_host
-                    .as_ref()
-                    .unwrap_or(&self.server.host),
-                self.metrics
-                    .prometheus
-                    .as_ref()
-                    .map(|p| p.port)
-                    .unwrap_or(9090)
-            ))
-            .clone()
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "http://{}:{}",
+                    self.validator_comms.host,
+                    self.metrics
+                        .prometheus
+                        .as_ref()
+                        .map(|p| p.port)
+                        .unwrap_or(9090)
+                )
+            })
     }
 
     /// Validate all advertised address configurations
     pub fn validate_advertised_addresses(&self) -> Result<()> {
-        self.server
-            .validate_advertised_config()
-            .map_err(|e| anyhow::anyhow!(e))?;
-
         if let Some(ref grpc_endpoint) = self.advertised_addresses.grpc_endpoint {
             if !grpc_endpoint.starts_with("http://") && !grpc_endpoint.starts_with("https://") {
                 return Err(anyhow::anyhow!(

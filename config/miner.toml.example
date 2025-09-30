@@ -19,17 +19,6 @@ connect_timeout = 30
 idle_timeout = 600
 max_lifetime = 3600
 
-[server]
-host = "0.0.0.0"
-advertised_host = "YOUR_PUBLIC_IP_HERE"
-advertised_port = 8080
-port = 8080
-max_connections = 1000
-advertised_tls = false
-tls_enabled = false
-request_timeout = 30
-keep_alive_timeout = 60
-
 [logging]
 level = "info"  # Options: "debug", "info", "warn", "error"
 format = "pretty"
@@ -52,6 +41,8 @@ path = "/metrics"
 [metrics.default_labels]
 
 [validator_comms]
+host = "0.0.0.0"
+port = 50051
 max_concurrent_sessions = 100
 request_timeout = 30
 
@@ -118,6 +109,6 @@ min_stake_threshold = 6000.0
 validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 
 [advertised_addresses]
-grpc_endpoint = "http://YOUR_PUBLIC_IP_HERE:8080"
+grpc_endpoint = "http://YOUR_PUBLIC_IP_HERE:50051"
 axon_endpoint = "http://YOUR_PUBLIC_IP_HERE:8080"
 metrics_endpoint = "http://YOUR_PUBLIC_IP_HERE:9090"
