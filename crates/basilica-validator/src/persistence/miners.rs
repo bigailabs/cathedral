@@ -436,4 +436,58 @@ impl SimplePersistence {
         info!("Completed syncing miners from metagraph");
         Ok(())
     }
+
+    /// Query recent verification logs for a miner's nodes
+    pub async fn query_recent_miner_verification_logs(
+        &self,
+        miner_uid: u16,
+        cutoff_time: &str,
+    ) -> Result<Vec<sqlx::sqlite::SqliteRow>> {
+        let query = r#"
+            SELECT vl.*, me.miner_id, me.status
+            FROM verification_logs vl
+            INNER JOIN miner_nodes me ON vl.node_id = me.node_id
+            WHERE me.miner_id = ?
+                AND vl.timestamp >= ?
+                AND me.status IN ('online', 'verified')
+                AND EXISTS (
+                    SELECT 1 FROM gpu_uuid_assignments ga
+                    WHERE ga.node_id = vl.node_id
+                    AND ga.miner_id = me.miner_id
+                )
+            ORDER BY vl.timestamp DESC
+        "#;
+
+        let miner_id = format!("miner_{miner_uid}");
+        let rows = sqlx::query(query)
+            .bind(&miner_id)
+            .bind(cutoff_time)
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query verification logs: {}", e))?;
+
+        Ok(rows)
+    }
+
+    /// Get all unique miner IDs from recent validations
+    pub async fn get_miners_with_recent_validations(
+        &self,
+        cutoff_time: &str,
+    ) -> Result<Vec<String>> {
+        let query = r#"
+            SELECT DISTINCT me.miner_id
+            FROM miner_nodes me
+            JOIN verification_logs vl ON me.node_id = vl.node_id
+            WHERE vl.timestamp >= ?
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(cutoff_time)
+            .fetch_all(self.pool())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query miners: {}", e))?;
+
+        let miner_ids = rows.into_iter().map(|row| row.get("miner_id")).collect();
+        Ok(miner_ids)
+    }
 }

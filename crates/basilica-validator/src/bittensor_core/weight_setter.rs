@@ -1127,33 +1127,12 @@ impl WeightSetter {
     ) -> Result<Vec<NodeValidationResult>> {
         let cutoff_time = chrono::Utc::now() - chrono::Duration::hours(hours as i64);
 
-        // Query verification logs for nodes belonging to this miner
-        // We verify:
-        //  1) node is online,
-        //  2) has recent verification,
-        //  3) has GPU assignments
-        let query = r#"
-            SELECT vl.*, me.miner_id, me.status
-            FROM verification_logs vl
-            INNER JOIN miner_nodes me ON vl.node_id = me.node_id
-            WHERE me.miner_id = ?
-                AND vl.timestamp >= ?
-                AND me.status IN ('online', 'verified')
-                AND EXISTS (
-                    SELECT 1 FROM gpu_uuid_assignments ga
-                    WHERE ga.node_id = vl.node_id
-                    AND ga.miner_id = me.miner_id
-                )
-            ORDER BY vl.timestamp DESC
-        "#;
+        let rows = self
+            .persistence
+            .query_recent_miner_verification_logs(miner_uid.as_u16(), &cutoff_time.to_rfc3339())
+            .await?;
 
         let miner_id = format!("miner_{}", miner_uid.as_u16());
-        let rows = sqlx::query(query)
-            .bind(&miner_id)
-            .bind(cutoff_time.to_rfc3339())
-            .fetch_all(self.persistence.pool())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to query verification logs: {}", e))?;
 
         let mut validations = Vec::new();
         for row in rows {
@@ -1227,24 +1206,14 @@ impl WeightSetter {
     pub async fn update_all_miner_scores(&self) -> Result<()> {
         info!("Updating scores for all miners based on recent validations");
 
-        // Get all unique miner UIDs from recent validations
-        let query = r#"
-            SELECT DISTINCT me.miner_id
-            FROM miner_nodes me
-            JOIN verification_logs vl ON me.node_id = vl.node_id
-            WHERE vl.timestamp >= ?
-        "#;
-
         let cutoff_time =
             chrono::Utc::now() - chrono::Duration::hours(GPU_CATEGORY_CUTOFF_HOURS as i64);
-        let rows = sqlx::query(query)
-            .bind(cutoff_time.to_rfc3339())
-            .fetch_all(self.persistence.pool())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to query miners: {}", e))?;
+        let miner_ids = self
+            .persistence
+            .get_miners_with_recent_validations(&cutoff_time.to_rfc3339())
+            .await?;
 
-        for row in rows {
-            let miner_id: String = row.get("miner_id");
+        for miner_id in miner_ids {
             if let Some(uid_str) = miner_id.strip_prefix("miner_") {
                 if let Ok(uid) = uid_str.parse::<u16>() {
                     let miner_uid = MinerUid::new(uid);
