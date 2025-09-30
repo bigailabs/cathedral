@@ -118,6 +118,8 @@ pub struct RentalInfo {
     pub container_spec: ContainerSpec,
     pub miner_id: String,
     pub node_details: crate::api::types::NodeDetails,
+    pub end_user_ssh_credentials: String, // End-user SSH access to node
+    pub metadata: HashMap<String, String>,
 }
 
 /// Rental status

@@ -213,72 +213,59 @@ pub async fn start_rental(
     State(state): State<ApiState>,
     Json(request): Json<StartRentalRequest>,
 ) -> Result<Json<RentalResponse>, StatusCode> {
+    let node_id = request.node_id.clone();
     let miner_id = state
         .persistence
-        .get_miner_id_by_node(&request.node_id)
+        .get_miner_id_by_node(&node_id)
         .await
         .map_err(|e| {
-            error!("Failed to get miner ID for node {}: {}", request.node_id, e);
+            error!(
+                "[RENTAL_FLOW] Failed to get miner ID for node {}: {}",
+                node_id, e
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-
-    let miner_data = state
-        .persistence
-        .get_miner_by_id(&miner_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to look up miner: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or_else(|| {
-            error!("Miner with ID {} not found", miner_id);
-            StatusCode::NOT_FOUND
-        })?;
-
-    info!(
-        "Starting rental for node {} on miner {}",
-        request.node_id, miner_id
-    );
-
-    if !is_valid_ssh_public_key(&request.ssh_public_key) {
-        error!("Invalid SSH public key provided");
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    if let Err(e) = validate_docker_image(&request.container_image) {
-        error!("Invalid container image provided: {}", e);
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let rental_manager = state.rental_manager.as_ref().ok_or_else(|| {
-        error!("Rental manager not initialized");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let miner_client = state.miner_client.as_ref().ok_or_else(|| {
-        error!("Miner client not initialized");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    info!("Connecting to miner at endpoint: {}", miner_data.endpoint);
-
-    // Parse miner UID from miner_id string (format: "miner_123")
     let miner_uid = miner_id
         .strip_prefix("miner_")
         .and_then(|uid_str| uid_str.parse::<u16>().ok())
         .ok_or_else(|| {
-            error!("Invalid miner ID format: {}", miner_id);
+            error!("[RENTAL_FLOW] Invalid miner ID format: {}", miner_id);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Connect to miner
-    let mut miner_connection = miner_client
-        .connect_and_authenticate(miner_uid, &miner_data.endpoint, &miner_data.hotkey)
-        .await
-        .map_err(|e| {
-            error!("Failed to connect to miner: {}", e);
-            StatusCode::BAD_GATEWAY
-        })?;
+    info!(
+        miner_uid = miner_uid,
+        node_id = %node_id,
+        "[RENTAL_FLOW] Starting rental for node {} on miner {}", node_id, miner_id
+    );
+
+    if !is_valid_ssh_public_key(&request.ssh_public_key) {
+        error!(
+            miner_uid = miner_uid,
+            node_id = %node_id,
+            "[RENTAL_FLOW] Invalid SSH public key provided"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    if let Err(e) = validate_docker_image(&request.container_image) {
+        error!(
+            miner_uid = miner_uid,
+            node_id = %node_id,
+            "[RENTAL_FLOW] Invalid container image provided: {}",
+            e
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let rental_manager = state.rental_manager.as_ref().ok_or_else(|| {
+        error!(
+            miner_uid = miner_uid,
+            node_id = %node_id,
+            "[RENTAL_FLOW] Rental manager not initialized"
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Filter out any user-specified SSH port mappings and prepare port list
     let mut port_mappings: Vec<crate::rental::PortMapping> = request
@@ -301,7 +288,7 @@ pub async fn start_rental(
     let rental_request = RentalRequest {
         validator_hotkey: state.validator_hotkey.to_string(),
         miner_id: miner_id.clone(),
-        node_id: request.node_id,
+        node_id: node_id.clone(),
         container_spec: crate::rental::ContainerSpec {
             image: request.container_image,
             environment: request.environment,
@@ -329,10 +316,15 @@ pub async fn start_rental(
 
     // Start rental
     let rental_response = rental_manager
-        .start_rental(rental_request, &mut miner_connection)
+        .start_rental(rental_request)
         .await
         .map_err(|e| {
-            error!("Failed to start rental: {}", e);
+            error!(
+                miner_uid = miner_uid,
+                node_id = %node_id,
+                "[RENTAL_FLOW] Failed to start rental: {}",
+                e
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 

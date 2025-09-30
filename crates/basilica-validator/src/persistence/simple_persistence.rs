@@ -186,7 +186,9 @@ impl SimplePersistence {
                 started_at TEXT,
                 terminated_at TEXT,
                 termination_reason TEXT,
-                total_cost REAL
+                total_cost REAL,
+                end_user_ssh_credentials TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}',
             );
 
             CREATE TABLE IF NOT EXISTS miner_gpu_profiles (
@@ -1130,6 +1132,7 @@ impl SimplePersistence {
         let container_spec_str: String = row.get("container_spec");
         let rental_id: String = row.get("id");
         let node_id: String = row.get("node_id");
+        let metadata: String = row.get("metadata");
 
         // Use existing parse_rental_state for consistency
         let state = Self::parse_rental_state(&state_str, &rental_id);
@@ -1146,6 +1149,8 @@ impl SimplePersistence {
             container_spec: serde_json::from_str(&container_spec_str)?,
             miner_id: row.get::<String, _>("miner_id"),
             node_details,
+            end_user_ssh_credentials: row.get("end_user_ssh_credentials"),
+            metadata: serde_json::from_str(&metadata)?,
         })
     }
 
