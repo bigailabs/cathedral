@@ -343,11 +343,6 @@ fn validate_validator_comms_config(
     if config.host == "0.0.0.0" {
         warnings.push("Binding to 0.0.0.0 exposes service to all network interfaces".to_string());
     }
-
-    if config.max_concurrent_sessions > 1000 {
-        warnings
-            .push("Very high max_concurrent_sessions may cause resource exhaustion".to_string());
-    }
 }
 
 /// Validate Bittensor configuration
@@ -407,10 +402,6 @@ fn validate_security_config(
     if !config.verify_signatures {
         warnings.push("Signature verification is disabled".to_string());
         suggestions.push("Enable signature verification for production".to_string());
-    }
-
-    if config.token_expiration.as_secs() > 86400 {
-        warnings.push("Long token expiration may pose security risks".to_string());
     }
 
     match config.get_private_key() {

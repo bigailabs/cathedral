@@ -74,23 +74,12 @@ async fn test_complete_validator_miner_node_workflow() -> Result<()> {
             auto_recovery: true,
         },
         validator_comms: ValidatorCommsConfig {
-            max_concurrent_sessions: 10,
-            session_timeout: Duration::from_secs(3600),
-            auth: AuthConfig {
-                enabled: true,
-                method: "bittensor_signature".to_string(),
-            },
+            host: "0.0.0.0".to_string(),
+            port: 50051,
             request_timeout: Duration::from_secs(30),
-            rate_limit: RateLimitConfig {
-                enabled: true,
-                requests_per_second: 100,
-                burst_capacity: 200,
-            },
         },
         security: SecurityConfig {
-            enable_mtls: false,
             verify_signatures: false, // Disable for E2E test
-            token_expiration: Duration::from_secs(3600),
             ..Default::default()
         },
         ..Default::default()
@@ -215,23 +204,12 @@ async fn test_concurrent_validator_sessions() -> Result<()> {
             request_timeout: Duration::from_secs(30),
         },
         validator_comms: ValidatorCommsConfig {
-            max_concurrent_sessions: 5, // Low limit for testing
-            session_timeout: Duration::from_secs(3600),
-            auth: AuthConfig {
-                enabled: true,
-                method: "bittensor_signature".to_string(),
-            },
+            host: "0.0.0.0".to_string(),
+            port: miner_addr.port(),
             request_timeout: Duration::from_secs(30),
-            rate_limit: RateLimitConfig {
-                enabled: false, // Disable for concurrent test
-                requests_per_second: 100,
-                burst_capacity: 200,
-            },
         },
         security: SecurityConfig {
-            enable_mtls: false,
             verify_signatures: false,
-            token_expiration: Duration::from_secs(3600),
             ..Default::default()
         },
         ..Default::default()

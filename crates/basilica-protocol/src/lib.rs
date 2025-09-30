@@ -311,11 +311,9 @@ pub mod helpers {
         request
     }
 
-    /// Create a gRPC interceptor for mTLS when implemented
+    /// Create a basic gRPC TLS config using system roots
     pub fn create_tls_config(
     ) -> Result<tonic::transport::ClientTlsConfig, Box<dyn std::error::Error>> {
-        // TODO: Implement mTLS configuration when certificates are available
-        // For now, return a placeholder that uses system roots
         Ok(tonic::transport::ClientTlsConfig::new())
     }
 }

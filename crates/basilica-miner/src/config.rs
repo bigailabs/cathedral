@@ -83,21 +83,9 @@ pub struct ValidatorCommsConfig {
     /// Port to bind the gRPC server to
     pub port: u16,
 
-    /// TLS configuration for secure communications
-    pub tls: Option<TlsConfig>,
-
-    /// Authentication configuration
-    pub auth: AuthConfig,
-
     /// Request timeout for validator calls
     #[serde_as(as = "DurationSeconds<u64>")]
     pub request_timeout: Duration,
-
-    /// Maximum concurrent validator sessions
-    pub max_concurrent_sessions: u32,
-
-    /// Rate limiting configuration
-    pub rate_limit: RateLimitConfig,
 }
 
 /// Node management configuration
@@ -123,101 +111,13 @@ pub struct NodeManagementConfig {
 }
 
 /// Security configuration
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
-    /// Enable mTLS for all gRPC communications
-    pub enable_mtls: bool,
-
-    /// Certificate paths for mTLS
-    pub cert_path: Option<PathBuf>,
-    pub key_path: Option<PathBuf>,
-    pub ca_cert_path: Option<PathBuf>,
-
-    /// Token expiration time
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub token_expiration: Duration,
-
     /// Enable request signing verification
     pub verify_signatures: bool,
 
     /// Ethereum private key for collateral contract
     pub private_key_file: Option<PathBuf>,
-}
-
-/// TLS configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TlsConfig {
-    /// Certificate file path
-    pub cert_file: PathBuf,
-
-    /// Private key file path
-    pub key_file: PathBuf,
-
-    /// CA certificate file path (for client cert verification)
-    pub ca_cert_file: Option<PathBuf>,
-
-    /// Require client certificates
-    pub require_client_cert: bool,
-}
-
-/// Authentication configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthConfig {
-    /// Enable authentication for validator requests
-    pub enabled: bool,
-
-    /// Authentication method
-    pub method: AuthMethod,
-
-    /// Token validation settings
-    pub token_validation: TokenValidationConfig,
-}
-
-/// Authentication methods
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMethod {
-    /// Bittensor signature based authentication
-    BittensorSignature,
-    /// mTLS certificate based authentication
-    MutualTls,
-}
-
-/// Token validation configuration
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TokenValidationConfig {
-    /// Issuer validation
-    pub validate_issuer: bool,
-
-    /// Audience validation
-    pub validate_audience: bool,
-
-    /// Expiration validation
-    pub validate_expiration: bool,
-
-    /// Clock skew tolerance
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub clock_skew_tolerance: Duration,
-}
-
-/// Rate limiting configuration
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RateLimitConfig {
-    /// Enable rate limiting
-    pub enabled: bool,
-
-    /// Requests per second limit
-    pub requests_per_second: u32,
-
-    /// Burst capacity
-    pub burst_capacity: u32,
-
-    /// Rate limit window duration
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub window_duration: Duration,
 }
 
 /// SSH configuration for node access by validators
@@ -451,27 +351,12 @@ impl Default for MinerBittensorConfig {
     }
 }
 
-impl Default for TlsConfig {
-    fn default() -> Self {
-        Self {
-            cert_file: PathBuf::from("cert.pem"),
-            key_file: PathBuf::from("key.pem"),
-            ca_cert_file: None,
-            require_client_cert: false,
-        }
-    }
-}
-
 impl Default for ValidatorCommsConfig {
     fn default() -> Self {
         Self {
             host: "0.0.0.0".to_string(),
             port: 50051,
-            tls: None,
-            auth: AuthConfig::default(),
             request_timeout: Duration::from_secs(30),
-            max_concurrent_sessions: 100,
-            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -491,45 +376,8 @@ impl Default for NodeManagementConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            enable_mtls: false,
-            cert_path: None,
-            key_path: None,
-            ca_cert_path: None,
-            token_expiration: Duration::from_secs(3600),
             verify_signatures: true,
             private_key_file: None,
-        }
-    }
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            method: AuthMethod::BittensorSignature,
-            token_validation: TokenValidationConfig::default(),
-        }
-    }
-}
-
-impl Default for TokenValidationConfig {
-    fn default() -> Self {
-        Self {
-            validate_issuer: true,
-            validate_audience: true,
-            validate_expiration: true,
-            clock_skew_tolerance: Duration::from_secs(60),
-        }
-    }
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            requests_per_second: 10,
-            burst_capacity: 20,
-            window_duration: Duration::from_secs(60),
         }
     }
 }
@@ -579,40 +427,11 @@ impl ConfigValidation for MinerConfig {
             }
         }
 
-        // Validate TLS configuration if enabled
-        if let Some(ref tls) = self.validator_comms.tls {
-            if !tls.cert_file.exists() {
-                return Err(ConfigurationError::InvalidValue {
-                    key: "validator_comms.tls.cert_file".to_string(),
-                    value: format!("{:?}", tls.cert_file),
-                    reason: "TLS certificate file does not exist".to_string(),
-                });
-            }
-
-            if !tls.key_file.exists() {
-                return Err(ConfigurationError::InvalidValue {
-                    key: "validator_comms.tls.key_file".to_string(),
-                    value: format!("{:?}", tls.key_file),
-                    reason: "TLS key file does not exist".to_string(),
-                });
-            }
-        }
-
         Ok(())
     }
 
     fn warnings(&self) -> Vec<String> {
-        let mut warnings = Vec::new();
-
-        if !self.security.enable_mtls {
-            warnings.push("mTLS is disabled - consider enabling for production".to_string());
-        }
-
-        if !self.validator_comms.rate_limit.enabled {
-            warnings.push("Rate limiting is disabled - may be vulnerable to DoS".to_string());
-        }
-
-        warnings
+        vec![]
     }
 }
 

@@ -33,17 +33,6 @@ max_weight_uids = 256
 
 [validator_comms]
 request_timeout = { secs = 30, nanos = 0 }
-max_concurrent_sessions = 100
-
-[validator_comms.auth]
-enabled = false
-method = "bittensor_signature"
-
-[validator_comms.rate_limit]
-enabled = false
-requests_per_second = 10
-burst_capacity = 20
-window_duration = { secs = 60, nanos = 0 }
 
 # Traditional executor management (optional - can be empty if using remote deployment)
 [executor_management]
@@ -161,7 +150,4 @@ ssh_options = [
 ]
 
 [security]
-enable_mtls = false
-jwt_secret = "dev-secret-change-in-production"
-token_expiration = { secs = 3600, nanos = 0 }
 verify_signatures = false

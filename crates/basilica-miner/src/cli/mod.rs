@@ -85,7 +85,6 @@ pub async fn show_miner_status(config: &MinerConfig, _db: RegistrationDb) -> Res
     println!("Hotkey: {}", config.bittensor.common.hotkey_name);
     println!("Netuid: {}", config.bittensor.common.netuid);
     println!("Axon Port: {}", config.bittensor.axon_port);
-    println!("Validator Comms: {:?}", config.validator_comms.auth.method);
     println!("Note: UID will be discovered from chain on startup");
     println!();
 

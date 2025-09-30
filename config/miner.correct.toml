@@ -52,24 +52,7 @@ path = "/metrics"
 [metrics.default_labels]
 
 [validator_comms]
-max_concurrent_sessions = 100
 request_timeout = 30
-
-[validator_comms.auth]
-enabled = true
-method = "bittensor_signature"
-
-[validator_comms.auth.token_validation]
-validate_issuer = true
-validate_audience = true
-validate_expiration = true
-clock_skew_tolerance = 60
-
-[validator_comms.rate_limit]
-enabled = true
-requests_per_second = 10
-burst_capacity = 20
-window_duration = 60
 
 [executor_management]
 executors = [
@@ -81,11 +64,8 @@ health_check_interval = 60
 health_check_timeout = 10
 
 [security]
-enable_mtls = false
-jwt_secret = "0f340697e18b0c88329c8d3366b867d5d02bff18089e62f0a12adffd24cabd3e"
 verify_signatures = true
 private_key_file = "~/.basilca/private_key"
-token_expiration = 3600
 
 [ssh_session]
 miner_executor_key_path = "~/.ssh/miner_executor_key"
