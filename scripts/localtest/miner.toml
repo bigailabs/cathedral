@@ -66,7 +66,6 @@ auto_recovery = true
 [security]
 enable_mtls = false
 jwt_secret = "localtest-jwt-secret-change-in-production"
-allowed_validators = []  # Empty = allow all validators for testing
 verify_signatures = false  # Disabled for local testing
 token_expiration = { secs = 3600 }
 skip_registration = true  # Skip chain registration for local testing

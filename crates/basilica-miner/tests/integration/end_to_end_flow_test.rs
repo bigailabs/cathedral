@@ -89,9 +89,9 @@ async fn test_complete_validator_miner_node_workflow() -> Result<()> {
         },
         security: SecurityConfig {
             enable_mtls: false,
-            allowed_validators: vec![],
             verify_signatures: false, // Disable for E2E test
             token_expiration: Duration::from_secs(3600),
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -230,9 +230,9 @@ async fn test_concurrent_validator_sessions() -> Result<()> {
         },
         security: SecurityConfig {
             enable_mtls: false,
-            allowed_validators: vec![],
             verify_signatures: false,
             token_expiration: Duration::from_secs(3600),
+            ..Default::default()
         },
         ..Default::default()
     };

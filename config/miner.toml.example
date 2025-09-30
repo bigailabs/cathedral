@@ -78,7 +78,6 @@ health_check_timeout = 10
 [security]
 enable_mtls = false
 jwt_secret = "YOUR_SECURE_JWT_SECRET_HERE"
-allowed_validators = []
 verify_signatures = true
 token_expiration = 3600
 

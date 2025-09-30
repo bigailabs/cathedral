@@ -13,7 +13,6 @@ use basilica_common::config::{
     loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig,
 };
 use basilica_common::error::ConfigurationError;
-use basilica_common::identity::Hotkey;
 
 use crate::node_manager::NodeConfig;
 
@@ -138,9 +137,6 @@ pub struct SecurityConfig {
     /// Token expiration time
     #[serde_as(as = "DurationSeconds<u64>")]
     pub token_expiration: Duration,
-
-    /// Allowed validator hotkeys
-    pub allowed_validators: Vec<Hotkey>,
 
     /// Enable request signing verification
     pub verify_signatures: bool,
@@ -500,7 +496,6 @@ impl Default for SecurityConfig {
             key_path: None,
             ca_cert_path: None,
             token_expiration: Duration::from_secs(3600),
-            allowed_validators: vec![],
             verify_signatures: true,
             private_key_file: None,
         }
@@ -611,11 +606,6 @@ impl ConfigValidation for MinerConfig {
 
         if !self.security.enable_mtls {
             warnings.push("mTLS is disabled - consider enabling for production".to_string());
-        }
-
-        if self.security.allowed_validators.is_empty() {
-            warnings
-                .push("No validators in allowlist - all validators will be accepted".to_string());
         }
 
         if !self.validator_comms.rate_limit.enabled {

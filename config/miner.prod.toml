@@ -97,7 +97,6 @@ health_check_timeout = 10
 [security]
 enable_mtls = false
 jwt_secret = "GENERATE_NEW_JWT_SECRET_FOR_PRODUCTION"  # Generate new secret: openssl rand -hex 32
-allowed_validators = []
 verify_signatures = true
 token_expiration = 3600
 

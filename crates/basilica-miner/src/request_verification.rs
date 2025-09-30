@@ -39,8 +39,6 @@ pub struct RequestVerificationService {
     max_request_age: Duration,
     /// Used nonces to prevent replay attacks
     used_nonces: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
-    /// Allowed validators (empty means all are allowed)
-    allowed_validators: Vec<Hotkey>,
     /// Whether to verify signatures
     verify_signatures: bool,
 }
@@ -48,15 +46,10 @@ pub struct RequestVerificationService {
 #[allow(dead_code)]
 impl RequestVerificationService {
     /// Create a new request verification service
-    pub fn new(
-        max_request_age: Duration,
-        allowed_validators: Vec<Hotkey>,
-        verify_signatures: bool,
-    ) -> Self {
+    pub fn new(max_request_age: Duration, verify_signatures: bool) -> Self {
         Self {
             max_request_age,
             used_nonces: Arc::new(RwLock::new(HashMap::new())),
-            allowed_validators,
             verify_signatures,
         }
     }
@@ -132,16 +125,6 @@ impl RequestVerificationService {
         let cutoff = now - self.max_request_age - Duration::hours(1);
         used_nonces.retain(|_, timestamp| *timestamp > cutoff);
         drop(used_nonces);
-
-        // Verify validator is allowed
-        if !self.allowed_validators.is_empty() {
-            let validator_hotkey =
-                Hotkey::new(signature_data.validator_hotkey.clone()).map_err(|e| anyhow!(e))?;
-
-            if !self.allowed_validators.contains(&validator_hotkey) {
-                return Err(anyhow!("Validator not in allowlist"));
-            }
-        }
 
         // Verify signature if enabled
         if self.verify_signatures {
@@ -316,7 +299,6 @@ mod tests {
     async fn test_request_verification() {
         let service = RequestVerificationService::new(
             Duration::minutes(5),
-            vec![],
             false, // Disable signature verification for test
         );
 
@@ -339,7 +321,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_age_validation() {
-        let service = RequestVerificationService::new(Duration::minutes(5), vec![], false);
+        let service = RequestVerificationService::new(Duration::minutes(5), false);
 
         // Old request
         let old_signature = RequestSignature {
@@ -396,47 +378,5 @@ mod tests {
         hasher.update(body);
         let expected_hash = hasher.finalize().to_hex().to_string();
         assert!(canonical.contains(&expected_hash));
-    }
-
-    #[tokio::test]
-    async fn test_allowlist_validation() {
-        let allowed_hotkey =
-            Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
-        let service =
-            RequestVerificationService::new(Duration::minutes(5), vec![allowed_hotkey], false);
-
-        // Allowed validator
-        let allowed_signature = RequestSignature {
-            validator_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
-            signature: "test_signature".to_string(),
-            timestamp: Utc::now(),
-            nonce: uuid::Uuid::new_v4().to_string(),
-            method: "POST".to_string(),
-            path: "/api/test".to_string(),
-            body_hash: None,
-        };
-
-        // Should succeed
-        assert!(service
-            .verify_request(&allowed_signature, None)
-            .await
-            .is_ok());
-
-        // Disallowed validator
-        let disallowed_signature = RequestSignature {
-            validator_hotkey: "5C4hrfjw9DjXZTzV3MwzrrAr9P1MJhSrvWGWqi1eSuyUpnhM".to_string(),
-            signature: "test_signature".to_string(),
-            timestamp: Utc::now(),
-            nonce: uuid::Uuid::new_v4().to_string(),
-            method: "POST".to_string(),
-            path: "/api/test".to_string(),
-            body_hash: None,
-        };
-
-        // Should fail
-        assert!(service
-            .verify_request(&disallowed_signature, None)
-            .await
-            .is_err());
     }
 }

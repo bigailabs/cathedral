@@ -71,7 +71,6 @@ executors = [
 [security]
 enable_mtls = ${ENABLE_TLS}
 jwt_secret = "testnet-secret-change-in-production-use-secure-value"
-allowed_validators = []
 require_client_cert = false
 
 # Remote executor deployment is disabled for this deployment

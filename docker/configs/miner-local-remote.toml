@@ -164,5 +164,4 @@ ssh_options = [
 enable_mtls = false
 jwt_secret = "dev-secret-change-in-production"
 token_expiration = { secs = 3600, nanos = 0 }
-allowed_validators = []
 verify_signatures = false
