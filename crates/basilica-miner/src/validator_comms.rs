@@ -169,7 +169,7 @@ impl MinerDiscovery for MinerDiscoveryService {
             const AUTH_PREFIX: &str = "BASILICA_AUTH_V1";
             let canonical_payload = format!(
                 "{}:{}:{}:{}",
-                AUTH_PREFIX, auth_request.validator_hotkey, auth_request.nonce, timestamp_secs
+                AUTH_PREFIX, auth_request.nonce, auth_request.target_miner_hotkey, timestamp_secs
             );
 
             // Verify signature
@@ -207,6 +207,22 @@ impl MinerDiscovery for MinerDiscoveryService {
             }
         }
 
+        // Check if validator is in allowlist (if configured)
+        if !self.server.security_config.allowed_validators.is_empty() {
+            if !self
+                .server
+                .security_config
+                .allowed_validators
+                .contains(&validator_hotkey)
+            {
+                warn!(
+                    "Validator {} not in allowlist",
+                    auth_request.validator_hotkey
+                );
+                return Err(Status::permission_denied("Validator not authorized"));
+            }
+        }
+
         // Check if validator is authorized
         if !self
             .server
@@ -236,25 +252,29 @@ impl MinerDiscovery for MinerDiscoveryService {
         let session_token = generate_session_token();
 
         // Sign the response with miner's hotkey if bittensor service is available
-        let miner_signature = if let Some(ref bittensor_service) = self.bittensor_service {
-            // Create canonical response payload for signing
-            const RESPONSE_PREFIX: &str = "BASILICA_RESPONSE_V1";
-            let canonical_response = format!(
-                "{}:{}:{}:{}",
-                RESPONSE_PREFIX, auth_request.validator_hotkey, session_token, auth_request.nonce
-            );
+        let (miner_hotkey, miner_signature, response_nonce) =
+            if let Some(ref bittensor_service) = self.bittensor_service {
+                // Generate a fresh nonce for the response (security best practice)
+                let response_nonce = uuid::Uuid::new_v4().to_string();
+                let miner_hotkey = bittensor_service.get_account_id().to_string();
 
-            // Sign with miner's hotkey
-            match bittensor_service.sign_data(canonical_response.as_bytes()) {
-                Ok(sig) => sig,
-                Err(e) => {
-                    warn!("Failed to sign response: {}", e);
-                    String::new()
+                // Create canonical response payload for signing
+                let canonical_response = format!(
+                    "MINER_AUTH_RESPONSE:{}:{}:{}",
+                    auth_request.validator_hotkey, response_nonce, session_token
+                );
+
+                // Sign with miner's hotkey
+                match bittensor_service.sign_data(canonical_response.as_bytes()) {
+                    Ok(sig) => (miner_hotkey, sig, response_nonce),
+                    Err(e) => {
+                        warn!("Failed to sign response: {}", e);
+                        (String::new(), String::new(), String::new())
+                    }
                 }
-            }
-        } else {
-            String::new()
-        };
+            } else {
+                (String::new(), String::new(), String::new())
+            };
 
         Ok(Response::new(MinerAuthResponse {
             authenticated: true,
@@ -270,9 +290,9 @@ impl MinerDiscovery for MinerDiscoveryService {
                 }),
             }),
             error: None,
-            miner_hotkey: auth_request.target_miner_hotkey.clone(),
+            miner_hotkey,
             miner_signature,
-            response_nonce: auth_request.nonce.clone(),
+            response_nonce,
         }))
     }
 
