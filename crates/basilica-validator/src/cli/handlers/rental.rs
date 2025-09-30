@@ -9,7 +9,7 @@ use tracing::info;
 
 #[cfg(feature = "client")]
 use crate::api::client::ValidatorClient;
-use crate::api::rental_routes::{
+use crate::api::routes::rentals::{
     PortMappingRequest, ResourceRequirementsRequest, StartRentalRequest,
 };
 use crate::api::types::{ListAvailableNodesQuery, LogQuery, TerminateRentalRequest};

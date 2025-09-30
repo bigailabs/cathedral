@@ -25,7 +25,7 @@ use basilica_sdk::types::{
 };
 use basilica_validator::{
     api::{
-        rental_routes::StartRentalRequest,
+        routes::rentals::StartRentalRequest,
         types::{AvailableNode, ListAvailableNodesQuery, ListAvailableNodesResponse},
     },
     RentalResponse,

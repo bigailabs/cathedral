@@ -6,7 +6,6 @@
 #[cfg(feature = "client")]
 pub mod client;
 
-pub mod rental_routes;
 pub mod routes;
 pub mod types;
 
@@ -132,11 +131,11 @@ impl ApiHandler {
     /// Follows Open/Closed Principle - easy to extend with new routes
     fn create_router(&self) -> Router {
         Router::new()
-            .route("/rentals", get(rental_routes::list_rentals))
-            .route("/rentals", post(rental_routes::start_rental))
-            .route("/rentals/:id", get(rental_routes::get_rental_status))
-            .route("/rentals/:id", delete(rental_routes::stop_rental))
-            .route("/rentals/:id/logs", get(rental_routes::stream_rental_logs))
+            .route("/rentals", get(routes::list_rentals))
+            .route("/rentals", post(routes::start_rental))
+            .route("/rentals/:id", get(routes::get_rental_status))
+            .route("/rentals/:id", delete(routes::stop_rental))
+            .route("/rentals/:id/logs", get(routes::stream_rental_logs))
             .route("/nodes", get(routes::list_available_nodes))
             // Existing miner routes
             .route("/miners", get(routes::list_miners))

@@ -14,7 +14,7 @@ pub use basilica_validator::api::types::{
 pub use basilica_common::LocationProfile;
 
 // Re-export rental-specific types from validator
-pub use basilica_validator::api::rental_routes::{
+pub use basilica_validator::api::routes::rentals::{
     PortMappingRequest, ResourceRequirementsRequest, StartRentalRequest, VolumeMountRequest,
 };
 

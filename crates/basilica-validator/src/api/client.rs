@@ -71,7 +71,7 @@ impl ValidatorClient {
     /// Start a new rental
     pub async fn start_rental(
         &self,
-        request: crate::api::rental_routes::StartRentalRequest,
+        request: crate::api::routes::rentals::StartRentalRequest,
     ) -> Result<crate::rental::RentalResponse> {
         let url = format!("{}/rentals", self.base_url);
 
