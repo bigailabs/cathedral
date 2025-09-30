@@ -342,11 +342,11 @@ fn validate_database_config(
 /// Validate server configuration
 fn validate_validator_comms_config(
     config: &crate::config::ValidatorCommsConfig,
-    _errors: &mut Vec<String>,
+    errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
     if config.port < 1024 && config.host != "127.0.0.1" && config.host != "localhost" {
-        warnings.push("Using privileged port (<1024) requires elevated permissions".to_string());
+        errors.push("Using privileged port (<1024) requires elevated permissions".to_string());
     }
 
     if config.host == "0.0.0.0" {
