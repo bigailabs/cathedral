@@ -79,7 +79,7 @@ pub async fn handle_config_command(command: ConfigCommand, config: &MinerConfig)
 }
 
 /// Show miner status
-pub async fn show_miner_status(config: &MinerConfig, db: RegistrationDb) -> Result<()> {
+pub async fn show_miner_status(config: &MinerConfig, _db: RegistrationDb) -> Result<()> {
     println!("=== Basilca Miner Status ===");
     println!("Network: {}", config.bittensor.common.network);
     println!("Hotkey: {}", config.bittensor.common.hotkey_name);
@@ -92,8 +92,16 @@ pub async fn show_miner_status(config: &MinerConfig, db: RegistrationDb) -> Resu
     // Show configured nodes
     println!("Configured Nodes: {}", config.node_management.nodes.len());
     for node in &config.node_management.nodes {
-        let node_id = db.get_or_create_node_id(&node.grpc_address).await?;
-        println!("  - {} @ {}", node_id.uuid, node.grpc_address);
+        let node_endpoint = format!("{}:{}", node.host, node.port);
+        let node_id = if node.node_id.is_empty() {
+            format!("node-{}", node_endpoint)
+        } else {
+            node.node_id.clone()
+        };
+        println!(
+            "  - {} @ {} (ssh://{}@{})",
+            node_id, node_endpoint, node.username, node.host
+        );
     }
     println!();
 

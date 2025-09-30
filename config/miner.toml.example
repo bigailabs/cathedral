@@ -101,20 +101,22 @@ burst_capacity = 20
 secs = 60
 nanos = 0
 
-[executor_management]
-# Configure your executor fleet here
-# Replace with your actual executor details
-executors = [
-  { grpc_address = "YOUR_EXECUTOR_IP:50051", host = "YOUR_EXECUTOR_IP", port = 50051, ssh_username = "YOUR_SSH_USERNAME", ssh_port = 22, enabled = true },
+[node_management]
+# Configure your GPU nodes here with SSH access details
+# Each node will be accessible to validators via direct SSH
+nodes = [
+  { node_id = "gpu-node-1", host = "192.168.1.100", port = 22, username = "basilica", enabled = true },
+  # Add more nodes as needed:
+  # { node_id = "gpu-node-2", host = "192.168.1.101", port = 22, username = "basilica", enabled = true },
 ]
 max_retry_attempts = 3
 auto_recovery = true
 
-[executor_management.health_check_interval]
+[node_management.health_check_interval]
 secs = 60
 nanos = 0
 
-[executor_management.health_check_timeout]
+[node_management.health_check_timeout]
 secs = 10
 nanos = 0
 
@@ -129,8 +131,9 @@ secs = 3600
 nanos = 0
 
 [ssh_session]
-miner_executor_key_path = "~/.ssh/miner_executor_key"
-default_executor_username = "executor"
+# SSH key used by miner to access nodes for validator key deployment
+miner_node_key_path = "~/.ssh/miner_node_key"
+default_node_username = "basilica"
 max_sessions_per_validator = 5
 session_rate_limit = 200
 enable_audit_log = true

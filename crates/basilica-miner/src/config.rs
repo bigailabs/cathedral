@@ -15,6 +15,8 @@ use basilica_common::config::{
 use basilica_common::error::ConfigurationError;
 use basilica_common::identity::Hotkey;
 
+use crate::node_manager::NodeConfig;
+
 /// Remote machine configuration for node deployment
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteMachineConfig {
@@ -157,31 +159,6 @@ pub struct NodeManagementConfig {
 
     /// Enable automatic status recovery
     pub auto_recovery: bool,
-}
-
-/// Static node configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeConfig {
-    /// gRPC address of the node (host:port)
-    pub grpc_address: String,
-
-    /// SSH host for the node
-    pub host: String,
-
-    /// gRPC port for the node
-    pub port: u16,
-
-    /// SSH port for the node
-    pub ssh_port: u16,
-
-    /// SSH username for the node
-    pub ssh_username: String,
-
-    /// Whether this node is enabled
-    pub enabled: bool,
-
-    /// Optional metadata about the node
-    pub metadata: Option<serde_json::Value>,
 }
 
 /// Security configuration
@@ -634,20 +611,18 @@ impl ConfigValidation for MinerConfig {
 
         // Validate each node config
         for (idx, node) in self.node_management.nodes.iter().enumerate() {
-            // Allow empty ID as it will be auto-generated
-            // if node.id.is_empty() {
-            //     return Err(ConfigurationError::InvalidValue {
-            //         key: format!("node_management.nodes[{}].id", idx),
-            //         value: node.id.clone(),
-            //         reason: "Node ID cannot be empty".to_string(),
-            //     });
-            // }
-
-            if node.grpc_address.is_empty() {
+            if node.host.is_empty() {
                 return Err(ConfigurationError::InvalidValue {
-                    key: format!("node_management.nodes[{idx}].grpc_address"),
-                    value: node.grpc_address.clone(),
-                    reason: "Node gRPC address cannot be empty".to_string(),
+                    key: format!("node_management.nodes[{}].host", idx),
+                    value: node.host.clone(),
+                    reason: "Node host cannot be empty".to_string(),
+                });
+            }
+            if node.username.is_empty() {
+                return Err(ConfigurationError::InvalidValue {
+                    key: format!("node_management.nodes[{}].username", idx),
+                    value: node.username.clone(),
+                    reason: "Node username cannot be empty".to_string(),
                 });
             }
         }

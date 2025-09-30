@@ -8,6 +8,7 @@ use basilica_common::ssh::{SshConnectionDetails, SshConnectionManager, StandardS
 use basilica_protocol::miner_discovery::{
     DiscoverNodesRequest, ListNodeConnectionDetailsResponse, NodeConnectionDetails,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use tracing::{debug, info, warn};
 use crate::config::NodeSshConfig;
 
 /// Configuration for a single node
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     /// Unique identifier for this node
     pub node_id: String,

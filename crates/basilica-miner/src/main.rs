@@ -70,6 +70,35 @@ impl MinerState {
         // Initialize node manager with SSH config
         let node_manager = Arc::new(NodeManager::new(config.ssh_session.clone()));
 
+        // Register all configured nodes
+        info!(
+            "Registering {} configured nodes",
+            config.node_management.nodes.len()
+        );
+        for node_config in &config.node_management.nodes {
+            let mut node = node_config.clone();
+            // Generate node_id if not provided
+            if node.node_id.is_empty() {
+                node.node_id = format!("node-{}:{}", node.host, node.port);
+            }
+
+            match node_manager.register_node(node).await {
+                Ok(_) => info!(
+                    "Registered node {} at {}:{}",
+                    node_config.node_id, node_config.host, node_config.port
+                ),
+                Err(e) => error!("Failed to register node {}: {}", node_config.node_id, e),
+            }
+        }
+
+        // Verify at least one node is registered
+        let registered_nodes = node_manager.list_nodes().await?;
+        if registered_nodes.is_empty() {
+            warn!("No nodes registered - miner will not be able to serve validators");
+        } else {
+            info!("Successfully registered {} nodes", registered_nodes.len());
+        }
+
         // Initialize SSH services
         let ssh_session_manager = ssh::session_manager::SshSessionManager::new(
             config.ssh_session.clone(),
