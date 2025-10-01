@@ -185,7 +185,7 @@ impl IdentityMigrationManager {
                         "Migrated legacy ID '{}' to UUID {} ({})",
                         legacy_id,
                         new_identity.uuid(),
-                        new_identity.huid()
+                        new_identity.uuid()
                     );
                     stats.successful_migrations += 1;
                 }

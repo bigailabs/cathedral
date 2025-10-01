@@ -191,7 +191,7 @@ macro_rules! with_identity {
     ($store:expr, $operation:expr) => {{
         let identity = $store.get_or_create().await?;
         if $crate::node_identity::integration::IdentityConfig::default().log_operations {
-            ::tracing::debug!("Executing operation with identity: {}", identity.huid());
+            ::tracing::debug!("Executing operation with identity: {}", identity.uuid());
         }
         $operation(identity)
     }};
@@ -200,9 +200,8 @@ macro_rules! with_identity {
 /// Helper function to format identity for logging
 pub fn format_identity_log(identity: &dyn NodeIdentity) -> String {
     format!(
-        "NodeID[uuid={}, huid={}, created={}]",
+        "NodeID[uuid={}, created={}]",
         identity.short_uuid(),
-        identity.huid(),
         chrono::DateTime::<chrono::Utc>::from(identity.created_at()).format("%Y-%m-%d %H:%M:%S")
     )
 }
@@ -325,9 +324,6 @@ mod tests {
     impl NodeIdentity for DummyIdentity {
         fn uuid(&self) -> &uuid::Uuid {
             unimplemented!()
-        }
-        fn huid(&self) -> &str {
-            "test-identity-1234"
         }
         fn created_at(&self) -> std::time::SystemTime {
             std::time::SystemTime::now()

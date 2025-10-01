@@ -4,7 +4,6 @@
 //! supporting both exact matches and prefix-based searches.
 
 use crate::node_identity::{
-    constants::MIN_HUID_PREFIX_LENGTH,
     validation::{validate_identifier, IdentifierType},
     NodeIdentity,
 };
@@ -91,31 +90,9 @@ pub fn match_node<'a>(node: &'a dyn NodeIdentity, query: &str) -> Option<MatchRe
                 None
             }
         }
-        IdentifierType::FullHuid(huid) => {
-            // Exact HUID match
-            if node.huid() == huid {
-                Some(MatchResult {
-                    node,
-                    match_type: MatchType::ExactHuid,
-                    confidence: 1.0,
-                })
-            } else {
-                None
-            }
-        }
-        IdentifierType::HuidPrefix(prefix) => {
-            // HUID prefix match
-            if node.huid().starts_with(&prefix) {
-                // Calculate confidence based on prefix length vs HUID length
-                let confidence = prefix.len() as f32 / node.huid().len() as f32;
-                Some(MatchResult {
-                    node,
-                    match_type: MatchType::HuidPrefix,
-                    confidence,
-                })
-            } else {
-                None
-            }
+        IdentifierType::FullHuid(_) | IdentifierType::HuidPrefix(_) => {
+            // HUID support removed, these cases should not occur
+            None
         }
     }
 }
@@ -180,33 +157,20 @@ pub fn suggest_unambiguous_prefix<'a, I>(target: &dyn NodeIdentity, others: I) -
 where
     I: Iterator<Item = &'a dyn NodeIdentity>,
 {
-    let target_huid = target.huid();
     let target_uuid = target.uuid().to_string();
 
-    // Collect all other HUIDs and UUIDs
-    let other_identifiers: Vec<(String, String)> = others
+    // Collect all other UUIDs
+    let other_uuids: Vec<String> = others
         .filter(|e| e.uuid() != target.uuid())
-        .map(|e| (e.huid().to_string(), e.uuid().to_string()))
+        .map(|e| e.uuid().to_string())
         .collect();
 
-    // Try progressively longer HUID prefixes
-    for len in MIN_HUID_PREFIX_LENGTH..=target_huid.len() {
-        let prefix = &target_huid[..len];
-        let is_ambiguous = other_identifiers
-            .iter()
-            .any(|(huid, _)| huid.starts_with(prefix));
-
-        if !is_ambiguous {
-            return prefix.to_string();
-        }
-    }
-
-    // If HUID is not unique, try UUID prefix
-    for len in MIN_HUID_PREFIX_LENGTH..=8 {
+    // Try progressively longer UUID prefixes (from 3 chars up to 8)
+    for len in 3..=8 {
         let prefix = &target_uuid[..len];
-        let is_ambiguous = other_identifiers
+        let is_ambiguous = other_uuids
             .iter()
-            .any(|(_, uuid)| uuid.starts_with(prefix));
+            .any(|uuid| uuid.starts_with(prefix));
 
         if !is_ambiguous {
             return prefix.to_string();
@@ -222,7 +186,6 @@ where
 #[derive(Debug, Clone)]
 struct MockNode {
     uuid: Uuid,
-    huid: String,
     created_at: std::time::SystemTime,
 }
 
@@ -231,23 +194,16 @@ impl NodeIdentity for MockNode {
         &self.uuid
     }
 
-    fn huid(&self) -> &str {
-        &self.huid
-    }
-
     fn created_at(&self) -> std::time::SystemTime {
         self.created_at
     }
 
     fn matches(&self, query: &str) -> bool {
-        if query.len() < MIN_HUID_PREFIX_LENGTH {
-            return false;
-        }
-        self.uuid.to_string().starts_with(query) || self.huid.starts_with(query)
+        self.uuid.to_string().starts_with(query)
     }
 
     fn full_display(&self) -> String {
-        format!("{} ({})", self.huid, self.uuid)
+        self.uuid.to_string()
     }
 
     fn short_uuid(&self) -> String {
@@ -260,10 +216,9 @@ mod tests {
     use super::*;
     use std::time::SystemTime;
 
-    fn create_mock_node(uuid: Uuid, huid: &str) -> MockNode {
+    fn create_mock_node(uuid: Uuid) -> MockNode {
         MockNode {
             uuid,
-            huid: huid.to_string(),
             created_at: SystemTime::now(),
         }
     }
@@ -271,7 +226,7 @@ mod tests {
     #[test]
     fn test_match_node_exact_uuid() {
         let uuid = Uuid::new_v4();
-        let node = create_mock_node(uuid, "swift-falcon-a3f2");
+        let node = create_mock_node(uuid);
 
         let result = match_node(&node, &uuid.to_string()).unwrap();
         assert_eq!(result.match_type, MatchType::ExactUuid);
@@ -281,7 +236,7 @@ mod tests {
     #[test]
     fn test_match_node_uuid_prefix() {
         let uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
-        let node = create_mock_node(uuid, "swift-falcon-a3f2");
+        let node = create_mock_node(uuid);
 
         let result = match_node(&node, "550e8400").unwrap();
         assert_eq!(result.match_type, MatchType::UuidPrefix);
@@ -289,59 +244,45 @@ mod tests {
     }
 
     #[test]
-    fn test_match_node_exact_huid() {
-        let node = create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2");
-
-        let result = match_node(&node, "swift-falcon-a3f2").unwrap();
-        assert_eq!(result.match_type, MatchType::ExactHuid);
-        assert_eq!(result.confidence, 1.0);
-    }
-
-    #[test]
-    fn test_match_node_huid_prefix() {
-        let node = create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2");
-
-        let result = match_node(&node, "swift").unwrap();
-        assert_eq!(result.match_type, MatchType::HuidPrefix);
-        assert!(result.confidence > 0.0 && result.confidence < 1.0);
-
-        let result2 = match_node(&node, "swift-falcon").unwrap();
-        assert!(result2.confidence > result.confidence);
-    }
-
-    #[test]
     fn test_match_node_no_match() {
-        let node = create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2");
+        let node = create_mock_node(Uuid::new_v4());
 
         assert!(match_node(&node, "brave").is_none());
-        assert!(match_node(&node, "12345678").is_none());
+        assert!(match_node(&node, "ffffffff").is_none());
     }
 
     #[test]
     fn test_match_nodes_multiple() {
+        let uuid1 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let uuid2 = Uuid::parse_str("550e8401-e29b-41d4-a716-446655440000").unwrap();
+        let uuid3 = Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap();
+
         let nodes = [
-            create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2"),
-            create_mock_node(Uuid::new_v4(), "swift-eagle-b4c5"),
-            create_mock_node(Uuid::new_v4(), "brave-lion-d6e7"),
+            create_mock_node(uuid1),
+            create_mock_node(uuid2),
+            create_mock_node(uuid3),
         ];
 
         let node_refs: Vec<&dyn NodeIdentity> =
             nodes.iter().map(|e| e as &dyn NodeIdentity).collect();
 
-        let results = match_nodes(node_refs.into_iter(), "swift");
+        let results = match_nodes(node_refs.into_iter(), "550e");
         assert_eq!(results.len(), 2);
         assert!(results
             .iter()
-            .all(|r| r.match_type == MatchType::HuidPrefix));
+            .all(|r| r.match_type == MatchType::UuidPrefix));
     }
 
     #[test]
     fn test_find_best_match() {
         let uuid1 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let uuid2 = Uuid::parse_str("550e8401-e29b-41d4-a716-446655440000").unwrap();
+        let uuid3 = Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap();
+
         let nodes = [
-            create_mock_node(uuid1, "swift-falcon-a3f2"),
-            create_mock_node(Uuid::new_v4(), "swift-eagle-b4c5"),
-            create_mock_node(Uuid::new_v4(), "brave-lion-d6e7"),
+            create_mock_node(uuid1),
+            create_mock_node(uuid2),
+            create_mock_node(uuid3),
         ];
 
         let node_refs: Vec<&dyn NodeIdentity> =
@@ -351,48 +292,52 @@ mod tests {
         let best = find_best_match(node_refs.iter().copied(), &uuid1.to_string()).unwrap();
         assert_eq!(best.match_type, MatchType::ExactUuid);
 
-        // Exact HUID match should win
-        let best = find_best_match(node_refs.iter().copied(), "brave-lion-d6e7").unwrap();
-        assert_eq!(best.match_type, MatchType::ExactHuid);
-
         // Longer prefix should have higher confidence
-        let swift_results = match_nodes(node_refs.iter().copied(), "swift");
-        assert_eq!(swift_results.len(), 2);
+        let results = match_nodes(node_refs.iter().copied(), "550e");
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
     fn test_count_prefix_matches() {
+        let uuid1 = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let uuid2 = Uuid::parse_str("550e8401-e29b-41d4-a716-446655440000").unwrap();
+        let uuid3 = Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap();
+
         let nodes = [
-            create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2"),
-            create_mock_node(Uuid::new_v4(), "swift-eagle-b4c5"),
-            create_mock_node(Uuid::new_v4(), "brave-lion-d6e7"),
+            create_mock_node(uuid1),
+            create_mock_node(uuid2),
+            create_mock_node(uuid3),
         ];
 
         let node_refs: Vec<&dyn NodeIdentity> =
             nodes.iter().map(|e| e as &dyn NodeIdentity).collect();
 
-        assert_eq!(count_prefix_matches(node_refs.iter().copied(), "swift"), 2);
-        assert_eq!(count_prefix_matches(node_refs.iter().copied(), "brave"), 1);
+        assert_eq!(count_prefix_matches(node_refs.iter().copied(), "550e"), 2);
+        assert_eq!(count_prefix_matches(node_refs.iter().copied(), "660e"), 1);
         assert_eq!(
-            count_prefix_matches(node_refs.iter().copied(), "unknown"),
+            count_prefix_matches(node_refs.iter().copied(), "aaaa"),
             0
         );
     }
 
     #[test]
     fn test_suggest_unambiguous_prefix() {
-        let target = create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2");
+        let target_uuid = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let other_uuid1 = Uuid::parse_str("550e8401-e29b-41d4-a716-446655440000").unwrap();
+        let other_uuid2 = Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        let target = create_mock_node(target_uuid);
         let others = [
-            create_mock_node(Uuid::new_v4(), "swift-eagle-b4c5"),
-            create_mock_node(Uuid::new_v4(), "brave-lion-d6e7"),
+            create_mock_node(other_uuid1),
+            create_mock_node(other_uuid2),
         ];
 
         let other_refs: Vec<&dyn NodeIdentity> =
             others.iter().map(|e| e as &dyn NodeIdentity).collect();
 
         let prefix = suggest_unambiguous_prefix(&target, other_refs.into_iter());
-        assert!(prefix.starts_with("swift-f"));
-        assert!(target.huid().starts_with(&prefix));
+        assert!(target_uuid.to_string().starts_with(&prefix));
+        assert!(prefix.len() >= 3 && prefix.len() <= 8);
     }
 
     #[test]
@@ -410,15 +355,16 @@ mod tests {
 
     #[test]
     fn test_confidence_calculation() {
-        let node = create_mock_node(Uuid::new_v4(), "swift-falcon-a3f2");
+        let node = create_mock_node(Uuid::new_v4());
 
         // UUID prefix confidence
         let uuid_str = node.uuid().to_string();
         let result = match_node(&node, &uuid_str[..8]).unwrap();
         assert_eq!(result.confidence, 8.0 / 36.0);
 
-        // HUID prefix confidence
-        let result = match_node(&node, "swift").unwrap();
-        assert_eq!(result.confidence, 5.0 / node.huid().len() as f32);
+        // Longer prefix should have higher confidence
+        let result_short = match_node(&node, &uuid_str[..4]).unwrap();
+        let result_long = match_node(&node, &uuid_str[..12]).unwrap();
+        assert!(result_long.confidence > result_short.confidence);
     }
 }

@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 pub trait NodeIdentity: Send + Sync {
     fn uuid(&self) -> &Uuid;
-    fn huid(&self) -> &str;
     fn created_at(&self) -> SystemTime;
     fn matches(&self, query: &str) -> bool;
     fn full_display(&self) -> String;
@@ -41,17 +40,12 @@ mod tests {
     // Mock implementation of NodeIdentity for testing
     struct MockNodeIdentity {
         uuid: Uuid,
-        huid: String,
         created_at: SystemTime,
     }
 
     impl NodeIdentity for MockNodeIdentity {
         fn uuid(&self) -> &Uuid {
             &self.uuid
-        }
-
-        fn huid(&self) -> &str {
-            &self.huid
         }
 
         fn created_at(&self) -> SystemTime {
@@ -63,11 +57,11 @@ mod tests {
                 return false;
             }
 
-            self.uuid.to_string().starts_with(query) || self.huid.starts_with(query)
+            self.uuid.to_string().starts_with(query)
         }
 
         fn full_display(&self) -> String {
-            format!("{} ({})", self.huid, self.uuid)
+            self.uuid.to_string()
         }
 
         fn short_uuid(&self) -> String {
@@ -95,7 +89,6 @@ mod tests {
             if storage.is_none() {
                 let mock = MockNodeIdentity {
                     uuid: Uuid::new_v4(),
-                    huid: "test-identity-1234".to_string(),
                     created_at: SystemTime::now(),
                 };
                 *storage = Some(Box::new(mock) as Box<dyn NodeIdentity>);
@@ -105,7 +98,6 @@ mod tests {
             let stored = storage.as_ref().unwrap();
             let cloned = MockNodeIdentity {
                 uuid: *stored.uuid(),
-                huid: stored.huid().to_string(),
                 created_at: stored.created_at(),
             };
             Ok(Box::new(cloned))
@@ -117,7 +109,6 @@ mod tests {
                 if stored.matches(id) {
                     let cloned = MockNodeIdentity {
                         uuid: *stored.uuid(),
-                        huid: stored.huid().to_string(),
                         created_at: stored.created_at(),
                     };
                     return Ok(Some(Box::new(cloned)));
@@ -130,7 +121,6 @@ mod tests {
             let mut storage = self.stored.lock().unwrap();
             let saved = MockNodeIdentity {
                 uuid: *id.uuid(),
-                huid: id.huid().to_string(),
                 created_at: id.created_at(),
             };
             *storage = Some(Box::new(saved));
@@ -141,22 +131,21 @@ mod tests {
     // Mock implementation of IdentityDisplay for testing
     struct MockIdentityDisplay {
         uuid: Uuid,
-        huid: String,
     }
 
     impl IdentityDisplay for MockIdentityDisplay {
         fn format_compact(&self) -> String {
-            self.huid.clone()
+            self.uuid.to_string()[..8].to_string()
         }
 
         fn format_verbose(&self) -> String {
-            format!("HUID: {}\nUUID: {}", self.huid, self.uuid)
+            format!("UUID: {}", self.uuid)
         }
 
         fn format_json(&self) -> Result<String> {
             Ok(format!(
-                r#"{{"uuid":"{}","huid":"{}"}}"#,
-                self.uuid, self.huid
+                r#"{{"uuid":"{}"}}"#,
+                self.uuid
             ))
         }
     }
@@ -217,26 +206,18 @@ mod tests {
         let created = SystemTime::now();
         let id = MockNodeIdentity {
             uuid: Uuid::new_v4(),
-            huid: "swift-falcon-a3f2".to_string(),
             created_at: created,
         };
 
         // Test basic methods
-        assert_eq!(id.huid(), "swift-falcon-a3f2");
         assert_eq!(id.created_at(), created);
-        assert!(id.full_display().contains(&id.uuid().to_string()));
-        assert!(id.full_display().contains("swift-falcon-a3f2"));
+        assert_eq!(id.full_display(), id.uuid().to_string());
         assert_eq!(id.short_uuid().len(), 8);
-
-        // Test matching
-        assert!(id.matches("swift"));
-        assert!(id.matches("swift-falcon"));
-        assert!(!id.matches("sw")); // Too short
-        assert!(!id.matches("falcon")); // Doesn't match start
 
         // Test UUID prefix matching
         let uuid_str = id.uuid().to_string();
         assert!(id.matches(&uuid_str[..8]));
+        assert!(!id.matches("sw")); // Too short
     }
 
     #[tokio::test]
@@ -247,10 +228,10 @@ mod tests {
         let id1 = persistence.get_or_create().await.unwrap();
         let id2 = persistence.get_or_create().await.unwrap();
         assert_eq!(id1.uuid(), id2.uuid());
-        assert_eq!(id1.huid(), id2.huid());
 
         // Test find_by_identifier
-        let found = persistence.find_by_identifier(id1.huid()).await.unwrap();
+        let uuid_str = id1.uuid().to_string();
+        let found = persistence.find_by_identifier(&uuid_str[..8]).await.unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().uuid(), id1.uuid());
 
@@ -259,41 +240,39 @@ mod tests {
         assert!(not_found.is_none());
 
         // Test save
+        let new_uuid = Uuid::new_v4();
         let new_id = MockNodeIdentity {
-            uuid: Uuid::new_v4(),
-            huid: "brave-tiger-5678".to_string(),
+            uuid: new_uuid,
             created_at: SystemTime::now(),
         };
         persistence.save(&new_id).await.unwrap();
 
         // Verify saved
         let found = persistence
-            .find_by_identifier("brave-tiger-5678")
+            .find_by_identifier(&new_uuid.to_string()[..8])
             .await
             .unwrap();
         assert!(found.is_some());
-        assert_eq!(found.unwrap().huid(), "brave-tiger-5678");
+        assert_eq!(found.unwrap().uuid(), &new_uuid);
     }
 
     #[test]
     fn test_identity_display_trait() {
+        let uuid = Uuid::new_v4();
         let display = MockIdentityDisplay {
-            uuid: Uuid::new_v4(),
-            huid: "test-display-9999".to_string(),
+            uuid,
         };
 
         // Test format_compact
-        assert_eq!(display.format_compact(), "test-display-9999");
+        assert_eq!(display.format_compact(), uuid.to_string()[..8].to_string());
 
         // Test format_verbose
         let verbose = display.format_verbose();
-        assert!(verbose.contains("HUID: test-display-9999"));
-        assert!(verbose.contains(&display.uuid.to_string()));
+        assert!(verbose.contains(&uuid.to_string()));
 
         // Test format_json
         let json = display.format_json().unwrap();
-        assert!(json.contains(&format!(r#""uuid":"{}""#, display.uuid)));
-        assert!(json.contains(r#""huid":"test-display-9999""#));
+        assert!(json.contains(&format!(r#""uuid":"{}""#, uuid)));
     }
 
     #[test]
@@ -330,7 +309,6 @@ mod tests {
     fn test_node_identity_edge_cases() {
         let id = MockNodeIdentity {
             uuid: Uuid::nil(),
-            huid: "test-nil-0000".to_string(),
             created_at: UNIX_EPOCH,
         };
 
@@ -365,7 +343,6 @@ mod tests {
         let uuid = Uuid::new_v4();
         let display = MockIdentityDisplay {
             uuid,
-            huid: "json-test-1234".to_string(),
         };
 
         let json = display.format_json().unwrap();
@@ -374,11 +351,9 @@ mod tests {
         assert!(json.starts_with('{'));
         assert!(json.ends_with('}'));
         assert!(json.contains(r#""uuid""#));
-        assert!(json.contains(r#""huid""#));
 
         // Verify the values
         assert!(json.contains(&uuid.to_string()));
-        assert!(json.contains("json-test-1234"));
     }
 
     #[tokio::test]

@@ -423,12 +423,10 @@ mod tests {
         let id2 = NodeId::new("test-seed-2").unwrap();
         // Different seeds produce different IDs
         assert_ne!(id1.uuid, id2.uuid);
-        assert_ne!(id1.huid, id2.huid);
 
         // Same seed produces same ID (deterministic)
         let id3 = NodeId::new("test-seed-1").unwrap();
         assert_eq!(id1.uuid, id3.uuid);
-        assert_eq!(id1.huid, id3.huid);
     }
 
     #[test]

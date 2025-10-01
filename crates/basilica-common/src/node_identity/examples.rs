@@ -19,7 +19,6 @@ pub mod sqlite_examples {
         // Get or create the node's identity
         let identity = store.get_or_create().await?;
         println!("Node UUID: {}", identity.uuid());
-        println!("Node HUID: {}", identity.huid());
 
         // Find by UUID
         let found = store
@@ -27,9 +26,9 @@ pub mod sqlite_examples {
             .await?;
         assert!(found.is_some());
 
-        // Find by HUID prefix
-        let huid_prefix = &identity.huid()[..5];
-        let found = store.find_by_identifier(huid_prefix).await?;
+        // Find by UUID prefix
+        let uuid_prefix = &identity.uuid().to_string()[..8];
+        let found = store.find_by_identifier(uuid_prefix).await?;
         assert!(found.is_some());
 
         Ok(())
@@ -115,8 +114,8 @@ pub mod sqlite_examples {
         // Check cache stats
         let stats = store.cache_stats().await;
         println!(
-            "Cache contains {} UUIDs and {} HUIDs",
-            stats.uuid_entries, stats.huid_entries
+            "Cache contains {} UUIDs",
+            stats.uuid_entries
         );
 
         // Second lookup - should hit cache
@@ -249,14 +248,9 @@ pub const EXAMPLE_SCHEMA: &str = r#"
 -- Main node identities table
 CREATE TABLE IF NOT EXISTS node_identities (
     uuid TEXT PRIMARY KEY CHECK(length(uuid) = 36),
-    huid TEXT NOT NULL UNIQUE,
     created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CHECK(huid GLOB '[a-z]*-[a-z]*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]')
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
--- Index for HUID prefix searches
-CREATE INDEX IF NOT EXISTS idx_node_identities_huid ON node_identities(huid);
 
 -- Legacy ID mapping table
 CREATE TABLE IF NOT EXISTS legacy_id_mappings (
@@ -264,15 +258,6 @@ CREATE TABLE IF NOT EXISTS legacy_id_mappings (
     uuid TEXT NOT NULL,
     migrated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (uuid) REFERENCES node_identities(uuid)
-);
-
--- HUID collision tracking (for monitoring)
-CREATE TABLE IF NOT EXISTS huid_collision_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    attempted_huid TEXT NOT NULL,
-    existing_uuid TEXT NOT NULL,
-    new_uuid TEXT NOT NULL,
-    occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Example: Updated node_health table using UUIDs
@@ -312,6 +297,5 @@ mod tests {
         assert!(!EXAMPLE_SCHEMA.is_empty(), "Schema should not be empty");
         assert!(EXAMPLE_SCHEMA.contains("node_identities"));
         assert!(EXAMPLE_SCHEMA.contains("legacy_id_mappings"));
-        assert!(EXAMPLE_SCHEMA.contains("huid_collision_log"));
     }
 }

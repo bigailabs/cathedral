@@ -21,31 +21,29 @@ impl<'a> NodeIdentityDisplay<'a> {
 }
 
 impl<'a> IdentityDisplay for NodeIdentityDisplay<'a> {
-    /// Returns HUID only for human readability
+    /// Returns short UUID for human readability
     ///
     /// This is the default display format for CLI commands
     fn format_compact(&self) -> String {
-        self.identity.huid().to_string()
+        self.identity.short_uuid()
     }
 
-    /// Returns full UUID + HUID display
+    /// Returns full UUID display
     ///
-    /// Format: "HUID: swift-falcon-a3f2\nUUID: 550e8400-e29b-41d4-a716-446655440000"
+    /// Format: "UUID: 550e8400-e29b-41d4-a716-446655440000"
     fn format_verbose(&self) -> String {
         format!(
-            "HUID: {}\nUUID: {}",
-            self.identity.huid(),
+            "UUID: {}",
             self.identity.uuid()
         )
     }
 
-    /// Returns JSON with both identifiers
+    /// Returns JSON with UUID and creation time
     ///
-    /// Format: {"uuid": "...", "huid": "...", "created_at": "..."}
+    /// Format: {"uuid": "...", "created_at": "..."}
     fn format_json(&self) -> Result<String> {
         let json_obj = json!({
             "uuid": self.identity.uuid().to_string(),
-            "huid": self.identity.huid(),
             "created_at": self.identity.created_at()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -77,7 +75,6 @@ mod tests {
 
     struct MockIdentity {
         uuid: Uuid,
-        huid: String,
         created_at: SystemTime,
     }
 
@@ -86,20 +83,16 @@ mod tests {
             &self.uuid
         }
 
-        fn huid(&self) -> &str {
-            &self.huid
-        }
-
         fn created_at(&self) -> SystemTime {
             self.created_at
         }
 
         fn matches(&self, query: &str) -> bool {
-            self.huid.starts_with(query) || self.uuid.to_string().starts_with(query)
+            self.uuid.to_string().starts_with(query)
         }
 
         fn full_display(&self) -> String {
-            format!("{} ({})", self.huid, self.uuid)
+            self.uuid.to_string()
         }
 
         fn short_uuid(&self) -> String {
@@ -109,14 +102,14 @@ mod tests {
 
     #[test]
     fn test_format_compact() {
+        let uuid = Uuid::new_v4();
         let identity = MockIdentity {
-            uuid: Uuid::new_v4(),
-            huid: "swift-falcon-a3f2".to_string(),
+            uuid,
             created_at: SystemTime::now(),
         };
 
         let display = NodeIdentityDisplay::new(&identity);
-        assert_eq!(display.format_compact(), "swift-falcon-a3f2");
+        assert_eq!(display.format_compact(), uuid.to_string()[..8].to_string());
     }
 
     #[test]
@@ -124,16 +117,13 @@ mod tests {
         let uuid = Uuid::new_v4();
         let identity = MockIdentity {
             uuid,
-            huid: "swift-falcon-a3f2".to_string(),
             created_at: SystemTime::now(),
         };
 
         let display = NodeIdentityDisplay::new(&identity);
         let verbose = display.format_verbose();
 
-        assert!(verbose.contains("HUID: swift-falcon-a3f2"));
         assert!(verbose.contains(&format!("UUID: {uuid}")));
-        assert!(verbose.contains('\n'));
     }
 
     #[test]
@@ -141,7 +131,6 @@ mod tests {
         let uuid = Uuid::new_v4();
         let identity = MockIdentity {
             uuid,
-            huid: "swift-falcon-a3f2".to_string(),
             created_at: SystemTime::now(),
         };
 
@@ -149,28 +138,26 @@ mod tests {
         let json = display.format_json().expect("Should format JSON");
 
         assert!(json.contains(&format!("\"uuid\": \"{uuid}\"")));
-        assert!(json.contains("\"huid\": \"swift-falcon-a3f2\""));
         assert!(json.contains("\"created_at\""));
 
         // Verify it's valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("Should be valid JSON");
-        assert_eq!(parsed["huid"], "swift-falcon-a3f2");
         assert_eq!(parsed["uuid"], uuid.to_string());
     }
 
     #[test]
     fn test_display_extension_trait() {
+        let uuid = Uuid::new_v4();
         let identity = MockIdentity {
-            uuid: Uuid::new_v4(),
-            huid: "brave-tiger-5678".to_string(),
+            uuid,
             created_at: SystemTime::now(),
         };
 
         // Test using the extension trait
         let compact = identity.display().format_compact();
-        assert_eq!(compact, "brave-tiger-5678");
+        assert_eq!(compact, uuid.to_string()[..8].to_string());
 
         let verbose = identity.display().format_verbose();
-        assert!(verbose.contains("brave-tiger-5678"));
+        assert!(verbose.contains(&uuid.to_string()));
     }
 }

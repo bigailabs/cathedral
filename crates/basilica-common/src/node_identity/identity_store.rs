@@ -16,11 +16,11 @@ use std::sync::Arc;
 #[cfg(feature = "sqlite")]
 use tokio::sync::RwLock;
 #[cfg(feature = "sqlite")]
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 #[cfg(feature = "sqlite")]
-use crate::node_identity::{constants::is_valid_huid, IdentityPersistence, NodeId, NodeIdentity};
+use crate::node_identity::{IdentityPersistence, NodeId, NodeIdentity};
 
 // Import Result and NodeIdentity for non-sqlite builds
 #[cfg(not(feature = "sqlite"))]
@@ -43,8 +43,6 @@ pub struct SqliteIdentityStore {
 struct IdentityCache {
     /// Map from UUID to cached identity
     by_uuid: HashMap<Uuid, CachedIdentity>,
-    /// Map from HUID to UUID for quick lookups
-    huid_to_uuid: HashMap<String, Uuid>,
 }
 
 /// Cached identity with metadata
@@ -131,22 +129,6 @@ impl SqliteIdentityStore {
         .await
         .context("Failed to create legacy_id_mappings table")?;
 
-        // Create collision tracking table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS huid_collision_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attempted_huid TEXT NOT NULL,
-                existing_uuid TEXT NOT NULL,
-                new_uuid TEXT NOT NULL,
-                occurred_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create huid_collision_log table")?;
-
         info!("Node identity migrations completed");
         Ok(())
     }
@@ -157,78 +139,37 @@ impl SqliteIdentityStore {
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     ) -> Result<Box<dyn NodeIdentity>> {
         // Try to get existing identity first
-        let existing = sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
-            "SELECT uuid, huid, created_at FROM node_identities LIMIT 1",
+        let existing = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+            "SELECT uuid, created_at FROM node_identities LIMIT 1",
         )
         .fetch_optional(&mut **tx)
         .await?;
 
-        if let Some((uuid_str, huid, created_at)) = existing {
+        if let Some((uuid_str, created_at)) = existing {
             let uuid = Uuid::parse_str(&uuid_str)?;
-            let identity = NodeId::from_parts(uuid, huid.clone(), created_at.into())?;
+            let identity = NodeId::from_parts(uuid, created_at.into())?;
 
-            debug!("Found existing identity: {}", huid);
+            debug!("Found existing identity: {}", uuid);
             return Ok(Box::new(identity));
         }
 
-        // Create new identity with collision handling
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: u32 = 10;
+        // Create new identity
+        let new_id = NodeId::new(&Uuid::new_v4().to_string())?;
 
-        loop {
-            attempts += 1;
-            if attempts > MAX_ATTEMPTS {
-                anyhow::bail!(
-                    "Failed to create unique identity after {} attempts",
-                    MAX_ATTEMPTS
-                );
-            }
+        sqlx::query(
+            r#"
+            INSERT INTO node_identities (uuid, created_at, updated_at)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(new_id.uuid().to_string())
+        .bind(DateTime::<Utc>::from(new_id.created_at()))
+        .bind(Utc::now())
+        .execute(&mut **tx)
+        .await?;
 
-            let new_id = NodeId::new("default-seed")?;
-
-            // Try to insert
-            match sqlx::query(
-                r#"
-                INSERT INTO node_identities (uuid, huid, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-                "#,
-            )
-            .bind(new_id.uuid().to_string())
-            .bind(new_id.huid())
-            .bind(DateTime::<Utc>::from(new_id.created_at()))
-            .bind(Utc::now())
-            .execute(&mut **tx)
-            .await
-            {
-                Ok(_) => {
-                    info!("Created new node identity: {}", new_id.huid());
-                    return Ok(Box::new(new_id));
-                }
-                Err(e) => {
-                    if e.to_string().contains("UNIQUE constraint failed") {
-                        warn!("HUID collision detected for {}, retrying", new_id.huid());
-
-                        // Log collision
-                        sqlx::query(
-                            r#"
-                            INSERT INTO huid_collision_log (attempted_huid, existing_uuid, new_uuid)
-                            VALUES (?,
-                                    (SELECT uuid FROM node_identities WHERE huid = ?),
-                                    ?)
-                            "#,
-                        )
-                        .bind(new_id.huid())
-                        .bind(new_id.huid())
-                        .bind(new_id.uuid().to_string())
-                        .execute(&mut **tx)
-                        .await?;
-
-                        continue;
-                    }
-                    return Err(e.into());
-                }
-            }
-        }
+        info!("Created new node identity: {}", new_id.uuid());
+        Ok(Box::new(new_id))
     }
 
     /// Find identity by identifier (UUID or HUID prefix)
@@ -241,7 +182,7 @@ impl SqliteIdentityStore {
         // For non-UUID identifiers, ensure minimum length
         if Uuid::parse_str(id).is_err() && id.len() < 3 {
             return Err(anyhow!(
-                "HUID prefix must be at least 3 characters, got {} characters",
+                "UUID prefix must be at least 3 characters, got {} characters",
                 id.len()
             ));
         }
@@ -249,29 +190,10 @@ impl SqliteIdentityStore {
         // Check cache first
         {
             let cache = self.cache.read().await;
-
-            // Try UUID lookup
             if let Ok(uuid) = Uuid::parse_str(id) {
                 if let Some(cached) = cache.by_uuid.get(&uuid) {
-                    // Clone the identity from cache
-                    let identity = NodeId::from_parts(
-                        *cached.identity.uuid(),
-                        cached.identity.huid().to_string(),
-                        cached.identity.created_at(),
-                    )?;
-                    return Ok(Some(Box::new(identity)));
-                }
-            }
-
-            // Try HUID lookup
-            if let Some(uuid) = cache.huid_to_uuid.get(id) {
-                if let Some(cached) = cache.by_uuid.get(uuid) {
-                    // Clone the identity from cache
-                    let identity = NodeId::from_parts(
-                        *cached.identity.uuid(),
-                        cached.identity.huid().to_string(),
-                        cached.identity.created_at(),
-                    )?;
+                    let identity =
+                        NodeId::from_parts(*cached.identity.uuid(), cached.identity.created_at())?;
                     return Ok(Some(Box::new(identity)));
                 }
             }
@@ -279,17 +201,15 @@ impl SqliteIdentityStore {
 
         // Not in cache, query database
         let result = if Uuid::parse_str(id).is_ok() {
-            // Exact UUID match
-            sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
-                "SELECT uuid, huid, created_at FROM node_identities WHERE uuid = ?",
+            sqlx::query_as::<_, (String, DateTime<Utc>)>(
+                "SELECT uuid, created_at FROM node_identities WHERE uuid = ?",
             )
             .bind(id)
             .fetch_optional(&self.pool)
             .await?
         } else if id.len() >= 3 {
-            // HUID prefix search
-            sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
-                "SELECT uuid, huid, created_at FROM node_identities WHERE huid LIKE ? || '%'",
+            sqlx::query_as::<_, (String, DateTime<Utc>)>(
+                "SELECT uuid, created_at FROM node_identities WHERE uuid LIKE ? || '%'",
             )
             .bind(id)
             .fetch_optional(&self.pool)
@@ -298,19 +218,11 @@ impl SqliteIdentityStore {
             None
         };
 
-        if let Some((uuid_str, huid, created_at)) = result {
+        if let Some((uuid_str, created_at)) = result {
             let uuid = Uuid::parse_str(&uuid_str)?;
-            let identity = NodeId::from_parts(uuid, huid.clone(), created_at.into())?;
-
-            // Update cache
-            // Update cache - recreate identity for caching
-            let cache_identity = NodeId::from_parts(
-                *identity.uuid(),
-                identity.huid().to_string(),
-                identity.created_at(),
-            )?;
+            let identity = NodeId::from_parts(uuid, created_at.into())?;
+            let cache_identity = NodeId::from_parts(*identity.uuid(), identity.created_at())?;
             self.update_cache(Box::new(cache_identity)).await;
-
             Ok(Some(Box::new(identity)))
         } else {
             Ok(None)
@@ -320,11 +232,7 @@ impl SqliteIdentityStore {
     /// Update the cache with an identity
     async fn update_cache(&self, identity: Box<dyn NodeIdentity>) {
         let mut cache = self.cache.write().await;
-
         let uuid = *identity.uuid();
-        let huid = identity.huid().to_string();
-
-        cache.huid_to_uuid.insert(huid, uuid);
         cache.by_uuid.insert(
             uuid,
             CachedIdentity {
@@ -336,11 +244,8 @@ impl SqliteIdentityStore {
         // Implement simple LRU eviction if cache gets too large
         const MAX_CACHE_SIZE: usize = 1000;
         if cache.by_uuid.len() > MAX_CACHE_SIZE {
-            // Find oldest entry
             if let Some((&oldest_uuid, _)) = cache.by_uuid.iter().min_by_key(|(_, v)| v.cached_at) {
-                if let Some(removed) = cache.by_uuid.remove(&oldest_uuid) {
-                    cache.huid_to_uuid.remove(removed.identity.huid());
-                }
+                cache.by_uuid.remove(&oldest_uuid);
             }
         }
     }
@@ -355,14 +260,8 @@ impl IdentityPersistence for SqliteIdentityStore {
         let identity = self.get_or_create_with_tx(&mut tx).await?;
         tx.commit().await?;
 
-        // Update cache - recreate identity for caching
-        let cache_identity = NodeId::from_parts(
-            *identity.uuid(),
-            identity.huid().to_string(),
-            identity.created_at(),
-        )?;
+        let cache_identity = NodeId::from_parts(*identity.uuid(), identity.created_at())?;
         self.update_cache(Box::new(cache_identity)).await;
-
         Ok(identity)
     }
 
@@ -371,34 +270,25 @@ impl IdentityPersistence for SqliteIdentityStore {
     }
 
     async fn save(&self, id: &dyn NodeIdentity) -> Result<()> {
-        // Validate HUID format
-        if !is_valid_huid(id.huid()) {
-            anyhow::bail!("Invalid HUID format: {}", id.huid());
-        }
-
-        // Use UPSERT to handle both insert and update
         sqlx::query(
             r#"
-            INSERT INTO node_identities (uuid, huid, created_at, updated_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO node_identities (uuid, created_at, updated_at)
+            VALUES (?, ?, ?)
             ON CONFLICT(uuid) DO UPDATE SET
-                huid = excluded.huid,
                 updated_at = excluded.updated_at
             "#,
         )
         .bind(id.uuid().to_string())
-        .bind(id.huid())
         .bind(DateTime::<Utc>::from(id.created_at()))
         .bind(Utc::now())
         .execute(&self.pool)
         .await
         .context("Failed to save node identity")?;
 
-        // Update cache
-        let identity = NodeId::from_parts(*id.uuid(), id.huid().to_string(), id.created_at())?;
+        let identity = NodeId::from_parts(*id.uuid(), id.created_at())?;
         self.update_cache(Box::new(identity)).await;
 
-        debug!("Saved node identity: {}", id.huid());
+        debug!("Saved node identity: {}", id.uuid());
         Ok(())
     }
 }
@@ -447,7 +337,7 @@ impl SqliteIdentityStore {
         info!(
             "Migrated legacy ID {} to {}",
             legacy_id,
-            new_identity.huid()
+            new_identity.uuid()
         );
         Ok(new_identity)
     }
@@ -470,18 +360,9 @@ impl SqliteIdentityStore {
 
     /// Get collision statistics
     pub async fn get_collision_stats(&self) -> Result<CollisionStats> {
-        let total_collisions: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM huid_collision_log")
-            .fetch_one(&self.pool)
-            .await?;
-
-        let unique_huids: (i64,) =
-            sqlx::query_as("SELECT COUNT(DISTINCT attempted_huid) FROM huid_collision_log")
-                .fetch_one(&self.pool)
-                .await?;
-
         Ok(CollisionStats {
-            total_collisions: total_collisions.0 as u64,
-            unique_huid_collisions: unique_huids.0 as u64,
+            total_collisions: 0,
+            unique_huid_collisions: 0,
         })
     }
 
@@ -489,7 +370,6 @@ impl SqliteIdentityStore {
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.write().await;
         cache.by_uuid.clear();
-        cache.huid_to_uuid.clear();
         debug!("Cleared identity cache");
     }
 
@@ -499,7 +379,6 @@ impl SqliteIdentityStore {
         CacheStats {
             total_entries: cache.by_uuid.len(),
             uuid_entries: cache.by_uuid.len(),
-            huid_entries: cache.huid_to_uuid.len(),
         }
     }
 }
@@ -516,7 +395,6 @@ pub struct CollisionStats {
 pub struct CacheStats {
     pub total_entries: usize,
     pub uuid_entries: usize,
-    pub huid_entries: usize,
 }
 
 // Fallback for when sqlite feature is not enabled
@@ -549,7 +427,6 @@ impl SqliteIdentityStore {
         CacheStats {
             total_entries: 0,
             uuid_entries: 0,
-            huid_entries: 0,
         }
     }
 }
@@ -573,7 +450,6 @@ mod tests {
 
         // Should return the same identity
         assert_eq!(id1.uuid(), id2.uuid());
-        assert_eq!(id1.huid(), id2.huid());
 
         // Test find_by_identifier with UUID
         let found = store
@@ -583,12 +459,12 @@ mod tests {
             .expect("Should find identity");
         assert_eq!(found.uuid(), id1.uuid());
 
-        // Test find_by_identifier with HUID prefix
-        let huid_prefix = &id1.huid()[..5];
+        // Test find_by_identifier with UUID prefix
+        let uuid_prefix = &id1.uuid().to_string()[..8];
         let found = store
-            .find_by_identifier(huid_prefix)
+            .find_by_identifier(uuid_prefix)
             .await
-            .expect("Should find by HUID prefix")
+            .expect("Should find by UUID prefix")
             .expect("Should find identity");
         assert_eq!(found.uuid(), id1.uuid());
 
@@ -601,7 +477,7 @@ mod tests {
             .await
             .expect("Should find saved identity")
             .expect("Should find identity");
-        assert_eq!(found.huid(), new_id.huid());
+        assert_eq!(found.uuid(), new_id.uuid());
     }
 
     #[tokio::test]
@@ -616,13 +492,11 @@ mod tests {
         // Check cache stats
         let stats = store.cache_stats().await;
         assert_eq!(stats.uuid_entries, 1);
-        assert_eq!(stats.huid_entries, 1);
 
         // Clear cache
         store.clear_cache().await;
         let stats = store.cache_stats().await;
         assert_eq!(stats.uuid_entries, 0);
-        assert_eq!(stats.huid_entries, 0);
 
         // Finding should repopulate cache
         let _ = store
@@ -631,7 +505,6 @@ mod tests {
             .expect("Should find");
         let stats = store.cache_stats().await;
         assert_eq!(stats.uuid_entries, 1);
-        assert_eq!(stats.huid_entries, 1);
     }
 
     #[tokio::test]
@@ -655,7 +528,6 @@ mod tests {
             .expect("Should return existing migration");
 
         assert_eq!(migrated1.uuid(), migrated2.uuid());
-        assert_eq!(migrated1.huid(), migrated2.huid());
 
         // Check mapping
         let mappings = store
@@ -780,6 +652,6 @@ mod tests {
 
         // Test basic operation
         let id = store.get_or_create().await.expect("Should create identity");
-        assert!(!id.huid().is_empty());
+        assert!(!id.uuid().to_string().is_empty());
     }
 }
