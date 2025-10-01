@@ -509,7 +509,7 @@ mod tests {
         let validations = vec![NodeValidationResult::new_for_testing(
             "exec1".to_string(),
             "A100".to_string(),
-            0, // Zero GPUs
+            0,
             true,
             true,
         )];
@@ -517,7 +517,7 @@ mod tests {
         let profile = MinerGpuProfile::new(miner_uid, &validations, 0.0);
 
         assert_eq!(profile.total_gpu_count(), 0);
-        assert!(profile.has_gpu_model("A100"));
+        assert!(!profile.has_gpu_model("A100"));
         assert_eq!(profile.get_gpu_count("A100"), 0);
     }
 

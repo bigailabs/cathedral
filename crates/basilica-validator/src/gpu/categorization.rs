@@ -147,7 +147,7 @@ impl GpuCategorizer {
         // Count GPUs per unique node to avoid double-counting
         for validation in node_validations
             .iter()
-            .filter(|v| v.is_valid && v.attestation_valid)
+            .filter(|v| v.is_valid && v.attestation_valid && v.gpu_count > 0)
         {
             // Only count each node once
             if seen_nodes.insert(&validation.node_id) {
