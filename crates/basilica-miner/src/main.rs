@@ -90,16 +90,15 @@ impl MinerState {
                 .await
             {
                 Ok(_) => info!(
-                    "Registered node {} (HUID: {}) at {}@{}:{}",
+                    "Registered node {} at {}@{}:{}",
                     node_id.uuid(),
-                    node_id.huid(),
                     node_config.username,
                     node_config.host,
                     node_config.port
                 ),
                 Err(e) => error!(
                     "Failed to register node {} at {}@{}:{}: {}",
-                    node_id.huid(),
+                    node_id.uuid(),
                     node_config.username,
                     node_config.host,
                     node_config.port,

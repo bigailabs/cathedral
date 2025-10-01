@@ -8,7 +8,10 @@ use std::path::Path;
 use tokio::fs;
 use tracing::{debug, info};
 
-use basilica_common::{config::DatabaseConfig, node_identity::NodeId};
+use basilica_common::{
+    config::DatabaseConfig,
+    node_identity::{NodeId, NodeIdentity},
+};
 
 /// Registration database client
 #[derive(Debug, Clone)]
@@ -165,7 +168,7 @@ impl RegistrationDb {
         Ok(())
     }
 
-    /// Generate a deterministic node ID based on SSH credentials (in-memory only)
+    /// Get or create a deterministic node ID based on SSH credentials
     ///
     /// # Arguments
     /// * `username` - SSH username
@@ -174,19 +177,49 @@ impl RegistrationDb {
     ///
     /// # Returns
     /// A deterministic NodeId based on the SSH credentials. The same credentials
-    /// will always generate the same node ID. This is generated in-memory only
-    /// and not persisted to the database.
+    /// will always generate the same node ID. The identity is persisted to the database.
     pub async fn get_or_create_node_id(
         &self,
         username: &str,
         host: &str,
         port: u16,
     ) -> Result<NodeId> {
-        // Create deterministic seed from SSH credentials
-        let ssh_credentials = format!("{}@{}:{}", username, host, port);
+        use chrono::{DateTime, Utc};
 
-        // Generate deterministic NodeId from SSH credentials (in-memory only)
-        let node_id = NodeId::new(&ssh_credentials)?;
+        // Create deterministic node address from SSH credentials
+        let node_address = format!("{}@{}:{}", username, host, port);
+
+        // First try to get existing identity from database
+        let existing = sqlx::query_as::<_, (String, String)>(
+            "SELECT uuid, created_at FROM node_uuids WHERE node_address = ?",
+        )
+        .bind(&node_address)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some((uuid_str, created_at_str)) = existing {
+            let uuid = uuid::Uuid::parse_str(&uuid_str)?;
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .context("Failed to parse timestamp")?
+                .with_timezone(&Utc);
+            let node_id = NodeId::from_parts(uuid, created_at.into())?;
+            return Ok(node_id);
+        }
+
+        // Generate new deterministic NodeId from SSH credentials
+        let node_id = NodeId::new(&node_address)?;
+
+        // Persist to database
+        let created_at: DateTime<Utc> = node_id.created_at().into();
+        sqlx::query(
+            "INSERT INTO node_uuids (node_address, uuid, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(&node_address)
+        .bind(node_id.uuid().to_string())
+        .bind(created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .context("Failed to insert node identity")?;
 
         Ok(node_id)
     }
@@ -212,7 +245,6 @@ pub struct TableStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basilica_common::node_identity::constants::is_valid_huid;
     use basilica_common::node_identity::NodeIdentity;
 
     // ===== AUTOMATIC IDENTITY GENERATION TESTS =====
@@ -234,18 +266,16 @@ mod tests {
             .unwrap();
 
         // Verify the identity was generated correctly
-        assert!(is_valid_huid(&node_id.huid));
-        assert_eq!(node_id.uuid.get_version(), Some(uuid::Version::Random));
-        assert!(!node_id.uuid.to_string().is_empty());
-        assert!(!node_id.huid.is_empty());
+        assert_eq!(node_id.uuid().get_version(), Some(uuid::Version::Random));
+        assert!(!node_id.uuid().to_string().is_empty());
 
         // Verify the identity was stored in the database
         let stored_id = db
             .get_or_create_node_id("testuser", "127.0.0.1", 50051)
             .await
             .unwrap();
-        assert_eq!(stored_id.uuid, node_id.uuid);
-        assert_eq!(stored_id.huid, node_id.huid);
+        assert_eq!(stored_id.uuid(), node_id.uuid());
+        assert_eq!(stored_id.created_at(), node_id.created_at());
     }
 
     #[tokio::test]
@@ -270,8 +300,8 @@ mod tests {
                 .get_or_create_node_id("testuser", "192.168.1.100", 8080)
                 .await
                 .unwrap();
-            assert_eq!(id2.uuid, id1.uuid);
-            assert_eq!(id2.huid, id1.huid);
+            assert_eq!(id2.uuid(), id1.uuid());
+            assert_eq!(id2.created_at(), id1.created_at());
         }
     }
 
@@ -305,11 +335,9 @@ mod tests {
 
         // Verify all identities are unique
         let mut uuids = std::collections::HashSet::new();
-        let mut huids = std::collections::HashSet::new();
 
         for (_, id) in &identities {
-            assert!(uuids.insert(id.uuid));
-            assert!(huids.insert(id.huid.clone()));
+            assert!(uuids.insert(*id.uuid()));
         }
 
         // Verify each node maps to the correct identity
@@ -324,8 +352,8 @@ mod tests {
                 .get_or_create_node_id(username, host, port)
                 .await
                 .unwrap();
-            assert_eq!(retrieved_id.uuid, expected_id.uuid);
-            assert_eq!(retrieved_id.huid, expected_id.huid);
+            assert_eq!(retrieved_id.uuid(), expected_id.uuid());
+            assert_eq!(retrieved_id.created_at(), expected_id.created_at());
         }
     }
 
@@ -356,10 +384,10 @@ mod tests {
             .unwrap();
 
         // Verify deterministic generation (same credentials = same IDs)
-        assert_eq!(id1.uuid, id2.uuid);
-        assert_eq!(id1.uuid, id3.uuid);
-        assert_eq!(id1.huid, id2.huid);
-        assert_eq!(id1.huid, id3.huid);
+        assert_eq!(id1.uuid(), id2.uuid());
+        assert_eq!(id1.uuid(), id3.uuid());
+        assert_eq!(id1.created_at(), id2.created_at());
+        assert_eq!(id1.created_at(), id3.created_at());
     }
 
     #[tokio::test]
@@ -380,12 +408,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Verify HUID format
-            assert!(is_valid_huid(&id.huid), "HUID should be valid: {}", id.huid);
-
             // Verify UUID format
-            assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
-            assert_eq!(id.uuid.to_string().len(), 36); // Standard UUID length
+            assert_eq!(id.uuid().get_version(), Some(uuid::Version::Random));
+            assert_eq!(id.uuid().to_string().len(), 36); // Standard UUID length
         }
     }
 
@@ -414,8 +439,7 @@ mod tests {
                 .get_or_create_node_id(username, host, port)
                 .await
                 .unwrap();
-            assert!(is_valid_huid(&id.huid));
-            assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
+            assert_eq!(id.uuid().get_version(), Some(uuid::Version::Random));
         }
     }
 
@@ -430,7 +454,6 @@ mod tests {
         let db = RegistrationDb::new(&config).await.unwrap();
 
         let mut uuids = std::collections::HashSet::new();
-        let mut huids = std::collections::HashSet::new();
 
         // Generate many identities to test uniqueness
         for i in 0..50 {
@@ -443,23 +466,14 @@ mod tests {
 
             // Verify UUID uniqueness
             assert!(
-                uuids.insert(id.uuid),
+                uuids.insert(*id.uuid()),
                 "UUID collision detected at iteration {}: {}",
                 i,
-                id.uuid
-            );
-
-            // Verify HUID uniqueness
-            assert!(
-                huids.insert(id.huid.clone()),
-                "HUID collision detected at iteration {}: {}",
-                i,
-                id.huid
+                id.uuid()
             );
         }
 
         assert_eq!(uuids.len(), 50);
-        assert_eq!(huids.len(), 50);
     }
 
     #[tokio::test]
@@ -489,13 +503,9 @@ mod tests {
         }
 
         // Verify all IDs are unique (different credentials = different IDs)
-        assert_ne!(ids[0].uuid, ids[1].uuid);
-        assert_ne!(ids[0].uuid, ids[2].uuid);
-        assert_ne!(ids[1].uuid, ids[2].uuid);
-
-        assert_ne!(ids[0].huid, ids[1].huid);
-        assert_ne!(ids[0].huid, ids[2].huid);
-        assert_ne!(ids[1].huid, ids[2].huid);
+        assert_ne!(ids[0].uuid(), ids[1].uuid());
+        assert_ne!(ids[0].uuid(), ids[2].uuid());
+        assert_ne!(ids[1].uuid(), ids[2].uuid());
 
         // Verify database integrity (table exists but empty)
         let integrity_check = db.integrity_check().await.unwrap();
@@ -533,8 +543,7 @@ mod tests {
             .get_or_create_node_id("", "127.0.0.1", 50051)
             .await
             .unwrap();
-        assert!(is_valid_huid(&id.huid));
-        assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
+        assert_eq!(id.uuid().get_version(), Some(uuid::Version::Random));
     }
 
     #[tokio::test]
@@ -560,8 +569,7 @@ mod tests {
                 .get_or_create_node_id(username, host, port)
                 .await
                 .unwrap();
-            assert!(is_valid_huid(&id.huid));
-            assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
+            assert_eq!(id.uuid().get_version(), Some(uuid::Version::Random));
         }
     }
 
@@ -582,7 +590,6 @@ mod tests {
             .unwrap();
 
         // Verify the identity was created correctly
-        assert!(is_valid_huid(&original_node_id.huid));
         assert_eq!(original_node_id.uuid().to_string().len(), 36);
 
         // Get the same node ID back from the database
@@ -593,7 +600,6 @@ mod tests {
 
         // Verify all fields match exactly
         assert_eq!(original_node_id.uuid(), retrieved_node_id.uuid());
-        assert_eq!(original_node_id.huid(), retrieved_node_id.huid());
         assert_eq!(
             original_node_id.created_at(),
             retrieved_node_id.created_at()
