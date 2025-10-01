@@ -53,7 +53,7 @@ pub struct JobStatusResponse {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Queued,
-    StartingNode,
+    StartingExecutor,
     Generated,
     Challenged,
     Verifying,
