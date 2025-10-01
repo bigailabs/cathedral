@@ -700,7 +700,7 @@ impl BinaryValidator {
         let job_id = client
             .submit_job(
                 ssh_details,
-                &binary_config.node_binary_path.to_string_lossy(),
+                &binary_config.executor_binary_path.to_string_lossy(),
                 binary_config.execution_timeout_secs,
             )
             .await?;

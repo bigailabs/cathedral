@@ -197,13 +197,13 @@ impl VerificationConfig {
     }
 }
 
-/// Configuration for binary validation using validator-binary and node-binary
+/// Configuration for binary validation using validator-binary and executor-binary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryValidationConfig {
     /// Path to validator-binary executable
     pub validator_binary_path: PathBuf,
-    /// Path to node-binary for upload
-    pub node_binary_path: PathBuf,
+    /// Path to executor-binary for upload
+    pub executor_binary_path: PathBuf,
     /// Binary execution timeout in seconds
     pub execution_timeout_secs: u64,
     /// Output format for binary execution
@@ -359,7 +359,7 @@ impl Default for BinaryValidationConfig {
     fn default() -> Self {
         Self {
             validator_binary_path: PathBuf::from("./validator-binary"),
-            node_binary_path: PathBuf::from("./node-binary"),
+            executor_binary_path: PathBuf::from("./executor-binary"),
             execution_timeout_secs: 1200,
             output_format: "json".to_string(),
             enabled: true,
