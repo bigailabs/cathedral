@@ -8,10 +8,7 @@ use std::path::Path;
 use tokio::fs;
 use tracing::{debug, info};
 
-use basilica_common::{
-    config::DatabaseConfig,
-    node_identity::NodeId,
-};
+use basilica_common::{config::DatabaseConfig, node_identity::NodeId};
 
 /// Registration database client
 #[derive(Debug, Clone)]
@@ -484,7 +481,8 @@ mod tests {
 
         let mut ids = Vec::new();
         for (username, host, port) in &nodes {
-            let id = db.get_or_create_node_id(username, host, *port)
+            let id = db
+                .get_or_create_node_id(username, host, *port)
                 .await
                 .unwrap();
             ids.push(id);
