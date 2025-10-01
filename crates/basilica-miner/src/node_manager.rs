@@ -21,8 +21,6 @@ use crate::config::NodeSshConfig;
 /// Configuration for a single node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
-    /// Unique identifier for this node
-    pub node_id: String,
     /// SSH hostname or IP address
     pub host: String,
     /// SSH port (typically 22)
@@ -62,6 +60,13 @@ pub struct NodeManager {
     ssh_config: NodeSshConfig,
 }
 
+/// Node configuration with generated ID
+#[derive(Clone, Debug)]
+pub struct RegisteredNode {
+    pub node_id: String,
+    pub config: NodeConfig,
+}
+
 impl std::fmt::Debug for NodeManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeManager")
@@ -89,14 +94,14 @@ impl NodeManager {
         }
     }
 
-    /// Register a node for availability
-    pub async fn register_node(&self, config: NodeConfig) -> Result<()> {
+    /// Register a node for availability with an auto-generated node_id
+    pub async fn register_node(&self, node_id: String, config: NodeConfig) -> Result<()> {
         let mut nodes = self.nodes.write().await;
         info!(
             "Registering node {} at {}:{}",
-            config.node_id, config.host, config.port
+            node_id, config.host, config.port
         );
-        nodes.insert(config.node_id.clone(), config);
+        nodes.insert(node_id, config);
         Ok(())
     }
 
@@ -111,10 +116,17 @@ impl NodeManager {
         Ok(())
     }
 
-    /// Get all available nodes
-    pub async fn list_nodes(&self) -> Result<Vec<NodeConfig>> {
+    /// Get all available nodes with their IDs
+    pub async fn list_nodes(&self) -> Result<Vec<RegisteredNode>> {
         let nodes = self.nodes.read().await;
-        Ok(nodes.values().filter(|n| n.enabled).cloned().collect())
+        Ok(nodes
+            .iter()
+            .filter(|(_, config)| config.enabled)
+            .map(|(node_id, config)| RegisteredNode {
+                node_id: node_id.clone(),
+                config: config.clone(),
+            })
+            .collect())
     }
 
     /// Get a specific node by ID
@@ -141,17 +153,19 @@ impl NodeManager {
         let private_key_path = self.get_ssh_key_path();
 
         // Deploy the SSH key to each node
-        for node in &nodes {
+        for registered_node in &nodes {
             info!(
                 "Deploying SSH key for validator {} to node {}",
-                validator_hotkey, node.node_id
+                validator_hotkey, registered_node.node_id
             );
 
             // Create the SSH key entry with validator identifier
             let key_entry = format!("{} validator-{}", ssh_public_key, validator_hotkey);
 
             // Build SSH connection details
-            let connection_details = node.to_ssh_connection_details(private_key_path.clone());
+            let connection_details = registered_node
+                .config
+                .to_ssh_connection_details(private_key_path.clone());
 
             // Use the SSH client to add the key to the remote node's authorized_keys
             let ssh_command = format!(
@@ -167,14 +181,17 @@ impl NodeManager {
                 Ok(_) => {
                     debug!(
                         "Successfully deployed SSH key for validator {} to node {}",
-                        validator_hotkey, node.node_id
+                        validator_hotkey, registered_node.node_id
                     );
                 }
                 Err(e) => {
-                    warn!("Failed to add SSH key to node {}: {}", node.node_id, e);
+                    warn!(
+                        "Failed to add SSH key to node {}: {}",
+                        registered_node.node_id, e
+                    );
                     return Err(anyhow::anyhow!(
                         "Failed to add SSH key to node {}: {}",
-                        node.node_id,
+                        registered_node.node_id,
                         e
                     ));
                 }
@@ -205,14 +222,16 @@ impl NodeManager {
         let private_key_path = self.get_ssh_key_path();
 
         // Remove the SSH key from each node
-        for node in &nodes {
+        for registered_node in &nodes {
             info!(
                 "Removing SSH key for validator {} from node {}",
-                validator_hotkey, node.node_id
+                validator_hotkey, registered_node.node_id
             );
 
             // Build SSH connection details
-            let connection_details = node.to_ssh_connection_details(private_key_path.clone());
+            let connection_details = registered_node
+                .config
+                .to_ssh_connection_details(private_key_path.clone());
 
             // Remove lines containing the validator identifier from authorized_keys
             let ssh_command = format!(
@@ -228,11 +247,14 @@ impl NodeManager {
                 Ok(_) => {
                     debug!(
                         "Successfully removed SSH key for validator {} from node {}",
-                        validator_hotkey, node.node_id
+                        validator_hotkey, registered_node.node_id
                     );
                 }
                 Err(e) => {
-                    warn!("Failed to remove SSH key from node {}: {}", node.node_id, e);
+                    warn!(
+                        "Failed to remove SSH key from node {}: {}",
+                        registered_node.node_id, e
+                    );
                 }
             }
         }
@@ -277,13 +299,13 @@ impl NodeManager {
         // Convert to protocol format
         let node_details: Vec<NodeConnectionDetails> = nodes
             .into_iter()
-            .map(|node| NodeConnectionDetails {
-                node_id: node.node_id,
-                host: node.host,
-                port: node.port.to_string(),
-                username: node.username,
-                additional_opts: node.additional_opts.unwrap_or_default(),
-                gpu_spec: node.gpu_spec,
+            .map(|registered_node| NodeConnectionDetails {
+                node_id: registered_node.node_id,
+                host: registered_node.config.host,
+                port: registered_node.config.port.to_string(),
+                username: registered_node.config.username,
+                additional_opts: registered_node.config.additional_opts.unwrap_or_default(),
+                gpu_spec: registered_node.config.gpu_spec,
                 status: "available".to_string(),
             })
             .collect();
@@ -364,7 +386,6 @@ mod tests {
         let manager = NodeManager::new(NodeSshConfig::default());
 
         let config = NodeConfig {
-            node_id: "test-node-1".to_string(),
             host: "192.168.1.100".to_string(),
             port: 22,
             username: "basilica".to_string(),
@@ -373,7 +394,11 @@ mod tests {
             enabled: true,
         };
 
-        manager.register_node(config.clone()).await.unwrap();
+        let node_id = "test-node-1".to_string();
+        manager
+            .register_node(node_id.clone(), config.clone())
+            .await
+            .unwrap();
 
         let nodes = manager.list_nodes().await.unwrap();
         assert_eq!(nodes.len(), 1);
@@ -407,7 +432,6 @@ mod tests {
 
         // Register a node
         let config = NodeConfig {
-            node_id: "gpu-node-1".to_string(),
             host: "10.0.0.50".to_string(),
             port: 22,
             username: "gpu_user".to_string(),
@@ -429,7 +453,8 @@ mod tests {
             enabled: true,
         };
 
-        manager.register_node(config).await.unwrap();
+        let node_id = "gpu-node-1".to_string();
+        manager.register_node(node_id, config).await.unwrap();
 
         // Create a discovery request
         let request = DiscoverNodesRequest {

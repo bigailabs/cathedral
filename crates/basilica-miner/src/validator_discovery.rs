@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::node_manager::{NodeConfig, NodeManager};
+use crate::node_manager::{NodeManager, RegisteredNode};
 
 /// Information about a validator
 #[derive(Debug, Clone)]
@@ -39,8 +39,8 @@ pub trait AssignmentStrategy: Send + Sync {
     async fn select_validators(
         &self,
         validators: Vec<ValidatorInfo>,
-        nodes: Vec<NodeConfig>,
-    ) -> Result<Vec<(ValidatorInfo, Vec<NodeConfig>)>>;
+        nodes: Vec<RegisteredNode>,
+    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>>;
 }
 
 /// Round-robin assignment strategy
@@ -185,8 +185,8 @@ impl AssignmentStrategy for RoundRobinAssignment {
     async fn select_validators(
         &self,
         validators: Vec<ValidatorInfo>,
-        nodes: Vec<NodeConfig>,
-    ) -> Result<Vec<(ValidatorInfo, Vec<NodeConfig>)>> {
+        nodes: Vec<RegisteredNode>,
+    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>> {
         if validators.is_empty() || nodes.is_empty() {
             return Ok(vec![]);
         }
@@ -244,8 +244,8 @@ impl AssignmentStrategy for HighestStakeAssignment {
     async fn select_validators(
         &self,
         mut validators: Vec<ValidatorInfo>,
-        nodes: Vec<NodeConfig>,
-    ) -> Result<Vec<(ValidatorInfo, Vec<NodeConfig>)>> {
+        nodes: Vec<RegisteredNode>,
+    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>> {
         // Filter by minimum stake
         validators.retain(|v| v.stake >= self.min_stake_threshold);
 

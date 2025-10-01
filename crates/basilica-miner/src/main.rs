@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use basilica_common::identity::MinerUid;
+use basilica_common::node_identity::NodeIdentity;
 use clap::Parser;
 use std::path::Path;
 use std::sync::Arc;
@@ -63,36 +64,47 @@ impl MinerState {
         // Initialize node manager with SSH config
         let node_manager = Arc::new(NodeManager::new(config.ssh_session.clone()));
 
-        // Register all configured nodes
+        // Register all configured nodes with auto-generated deterministic IDs
         info!(
             "Registering {} configured nodes",
             config.node_management.nodes.len()
         );
         for node_config in &config.node_management.nodes {
-            let mut node = node_config.clone();
-            // Generate stable UUID-based node_id if not provided
-            if node.node_id.is_empty() {
-                let node_address = format!("{}:{}", node.host, node.port);
-                match registration_db.get_or_create_node_id(&node_address).await {
-                    Ok(node_id) => {
-                        node.node_id = node_id.to_string();
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to get or create node ID for {}: {}",
-                            node_address, e
-                        );
-                        continue;
-                    }
+            // Generate deterministic node_id from SSH credentials
+            let node_id = match registration_db
+                .get_or_create_node_id(&node_config.username, &node_config.host, node_config.port)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    error!(
+                        "Failed to generate node ID for {}@{}:{}: {}",
+                        node_config.username, node_config.host, node_config.port, e
+                    );
+                    continue;
                 }
-            }
+            };
 
-            match node_manager.register_node(node).await {
+            match node_manager
+                .register_node(node_id.to_string(), node_config.clone())
+                .await
+            {
                 Ok(_) => info!(
-                    "Registered node {} at {}:{}",
-                    node_config.node_id, node_config.host, node_config.port
+                    "Registered node {} (HUID: {}) at {}@{}:{}",
+                    node_id.uuid(),
+                    node_id.huid(),
+                    node_config.username,
+                    node_config.host,
+                    node_config.port
                 ),
-                Err(e) => error!("Failed to register node {}: {}", node_config.node_id, e),
+                Err(e) => error!(
+                    "Failed to register node {} at {}@{}:{}: {}",
+                    node_id.huid(),
+                    node_config.username,
+                    node_config.host,
+                    node_config.port,
+                    e
+                ),
             }
         }
 

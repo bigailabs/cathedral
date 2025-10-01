@@ -169,12 +169,31 @@ impl RegistrationDb {
         Ok(())
     }
 
-    pub async fn get_or_create_node_id(&self, node_address: &str) -> Result<NodeId> {
+    /// Get or create a deterministic node ID based on SSH credentials
+    ///
+    /// # Arguments
+    /// * `username` - SSH username
+    /// * `host` - SSH hostname or IP address
+    /// * `port` - SSH port
+    ///
+    /// # Returns
+    /// A deterministic NodeId based on the SSH credentials. The same credentials
+    /// will always generate the same node ID.
+    pub async fn get_or_create_node_id(
+        &self,
+        username: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<NodeId> {
+        // Create deterministic seed from SSH credentials
+        let ssh_credentials = format!("{}@{}:{}", username, host, port);
+        let node_address = format!("{}:{}", host, port);
+
         // First try to get existing identity
         let existing = sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
             "SELECT uuid, huid, created_at FROM node_uuids WHERE node_address = ?",
         )
-        .bind(node_address)
+        .bind(&node_address)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -184,13 +203,14 @@ impl RegistrationDb {
             return Ok(node_id);
         }
 
-        let node_id = NodeId::new(node_address)?;
+        // Generate deterministic NodeId from SSH credentials
+        let node_id = NodeId::new(&ssh_credentials)?;
 
         // Try to insert with conflict handling
         match sqlx::query(
             "INSERT INTO node_uuids (node_address, uuid, huid, created_at) VALUES (?, ?, ?, ?)",
         )
-        .bind(node_address)
+        .bind(&node_address)
         .bind(node_id.uuid.to_string())
         .bind(node_id.huid.clone())
         .bind(DateTime::<Utc>::from(node_id.created_at()))
@@ -238,7 +258,10 @@ mod tests {
         let db = RegistrationDb::new(&config).await.unwrap();
 
         // First call should create a new identity
-        let node_id = db.get_or_create_node_id("127.0.0.1:50051").await.unwrap();
+        let node_id = db
+            .get_or_create_node_id("testuser", "127.0.0.1", 50051)
+            .await
+            .unwrap();
 
         // Verify the identity was generated correctly
         assert!(is_valid_huid(&node_id.huid));
@@ -247,7 +270,10 @@ mod tests {
         assert!(!node_id.huid.is_empty());
 
         // Verify the identity was stored in the database
-        let stored_id = db.get_or_create_node_id("127.0.0.1:50051").await.unwrap();
+        let stored_id = db
+            .get_or_create_node_id("testuser", "127.0.0.1", 50051)
+            .await
+            .unwrap();
         assert_eq!(stored_id.uuid, node_id.uuid);
         assert_eq!(stored_id.huid, node_id.huid);
     }
@@ -262,14 +288,18 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        let address = "192.168.1.100:8080";
-
         // Create identity
-        let id1 = db.get_or_create_node_id(address).await.unwrap();
+        let id1 = db
+            .get_or_create_node_id("testuser", "192.168.1.100", 8080)
+            .await
+            .unwrap();
 
         // Retrieve multiple times - should always return the same identity
         for _ in 0..5 {
-            let id2 = db.get_or_create_node_id(address).await.unwrap();
+            let id2 = db
+                .get_or_create_node_id("testuser", "192.168.1.100", 8080)
+                .await
+                .unwrap();
             assert_eq!(id2.uuid, id1.uuid);
             assert_eq!(id2.huid, id1.huid);
         }
@@ -285,19 +315,22 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        let addresses = vec![
-            "127.0.0.1:50051",
-            "127.0.0.1:50052",
-            "192.168.1.100:8080",
-            "10.0.0.50:9090",
+        let nodes = vec![
+            ("user1", "127.0.0.1", 50051),
+            ("user2", "127.0.0.1", 50052),
+            ("user3", "192.168.1.100", 8080),
+            ("user4", "10.0.0.50", 9090),
         ];
 
         let mut identities = Vec::new();
 
         // Create identities for multiple nodes
-        for address in &addresses {
-            let id = db.get_or_create_node_id(address).await.unwrap();
-            identities.push((address.to_string(), id));
+        for (username, host, port) in &nodes {
+            let id = db
+                .get_or_create_node_id(username, host, *port)
+                .await
+                .unwrap();
+            identities.push((format!("{}@{}:{}", username, host, port), id));
         }
 
         // Verify all identities are unique
@@ -309,9 +342,18 @@ mod tests {
             assert!(huids.insert(id.huid.clone()));
         }
 
-        // Verify each address maps to the correct identity
-        for (address, expected_id) in &identities {
-            let retrieved_id = db.get_or_create_node_id(address).await.unwrap();
+        // Verify each node maps to the correct identity
+        for (credentials, expected_id) in &identities {
+            let parts: Vec<&str> = credentials.split('@').collect();
+            let username = parts[0];
+            let host_port: Vec<&str> = parts[1].split(':').collect();
+            let host = host_port[0];
+            let port: u16 = host_port[1].parse().unwrap();
+
+            let retrieved_id = db
+                .get_or_create_node_id(username, host, port)
+                .await
+                .unwrap();
             assert_eq!(retrieved_id.uuid, expected_id.uuid);
             assert_eq!(retrieved_id.huid, expected_id.huid);
         }
@@ -327,21 +369,22 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        let address = "127.0.0.1:50051";
-
         // Create identity
-        let original_id = db.get_or_create_node_id(address).await.unwrap();
+        let original_id = db
+            .get_or_create_node_id("testuser", "127.0.0.1", 50051)
+            .await
+            .unwrap();
 
         // Verify it's stored in the database by querying directly
         let stored = sqlx::query_as::<_, (String, String, String)>(
             "SELECT node_address, uuid, huid FROM node_uuids WHERE node_address = ?",
         )
-        .bind(address)
+        .bind("127.0.0.1:50051")
         .fetch_one(&db.pool)
         .await
         .unwrap();
 
-        assert_eq!(stored.0, address);
+        assert_eq!(stored.0, "127.0.0.1:50051");
         assert_eq!(stored.1, original_id.uuid.to_string());
         assert_eq!(stored.2, original_id.huid);
     }
@@ -358,8 +401,11 @@ mod tests {
 
         // Generate multiple identities to test format consistency
         for i in 0..10 {
-            let address = format!("127.0.0.1:{}", 50051 + i);
-            let id = db.get_or_create_node_id(&address).await.unwrap();
+            let port = 50051 + i;
+            let id = db
+                .get_or_create_node_id("testuser", "127.0.0.1", port)
+                .await
+                .unwrap();
 
             // Verify HUID format
             assert!(is_valid_huid(&id.huid), "HUID should be valid: {}", id.huid);
@@ -380,18 +426,21 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        // Test with various address formats
-        let test_addresses = vec![
-            "localhost:50051",
-            "0.0.0.0:8080",
-            "::1:9090",
-            "example.com:12345",
-            "192.168.1.1:1",
-            "10.0.0.1:65535",
+        // Test with various host/port combinations
+        let test_nodes = vec![
+            ("user", "localhost", 50051),
+            ("root", "0.0.0.0", 8080),
+            ("admin", "::1", 9090),
+            ("ubuntu", "example.com", 12345),
+            ("test", "192.168.1.1", 1),
+            ("prod", "10.0.0.1", 65535),
         ];
 
-        for address in test_addresses {
-            let id = db.get_or_create_node_id(address).await.unwrap();
+        for (username, host, port) in test_nodes {
+            let id = db
+                .get_or_create_node_id(username, host, port)
+                .await
+                .unwrap();
             assert!(is_valid_huid(&id.huid));
             assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
         }
@@ -412,8 +461,12 @@ mod tests {
 
         // Generate many identities to test uniqueness
         for i in 0..50 {
-            let address = format!("127.0.0.1:{}", 50051 + i);
-            let id = db.get_or_create_node_id(&address).await.unwrap();
+            let port = 50051 + i;
+            let username = format!("user{}", i);
+            let id = db
+                .get_or_create_node_id(&username, "127.0.0.1", port)
+                .await
+                .unwrap();
 
             // Verify UUID uniqueness
             assert!(
@@ -447,10 +500,16 @@ mod tests {
         let db = RegistrationDb::new(&config).await.unwrap();
 
         // Create several identities
-        let addresses = vec!["127.0.0.1:50051", "127.0.0.1:50052", "192.168.1.100:8080"];
+        let nodes = vec![
+            ("user1", "127.0.0.1", 50051),
+            ("user2", "127.0.0.1", 50052),
+            ("user3", "192.168.1.100", 8080),
+        ];
 
-        for address in &addresses {
-            db.get_or_create_node_id(address).await.unwrap();
+        for (username, host, port) in &nodes {
+            db.get_or_create_node_id(username, host, *port)
+                .await
+                .unwrap();
         }
 
         // Verify database integrity
@@ -484,7 +543,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_node_id_empty_address() {
+    async fn test_get_or_create_node_id_empty_username() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -493,8 +552,11 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        // Test with empty address (edge case)
-        let id = db.get_or_create_node_id("").await.unwrap();
+        // Test with empty username (edge case)
+        let id = db
+            .get_or_create_node_id("", "127.0.0.1", 50051)
+            .await
+            .unwrap();
         assert!(is_valid_huid(&id.huid));
         assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
     }
@@ -509,16 +571,19 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        // Test with addresses containing special characters
-        let test_addresses = vec![
-            "test-host:50051",
-            "my-node.local:8080",
-            "node-01.example.com:9090",
-            "192.168.1.100:12345",
+        // Test with hosts containing special characters
+        let test_nodes = vec![
+            ("user", "test-host", 50051),
+            ("admin", "my-node.local", 8080),
+            ("root", "node-01.example.com", 9090),
+            ("basilica", "192.168.1.100", 12345),
         ];
 
-        for address in test_addresses {
-            let id = db.get_or_create_node_id(address).await.unwrap();
+        for (username, host, port) in test_nodes {
+            let id = db
+                .get_or_create_node_id(username, host, port)
+                .await
+                .unwrap();
             assert!(is_valid_huid(&id.huid));
             assert_eq!(id.uuid.get_version(), Some(uuid::Version::Random));
         }
@@ -535,14 +600,20 @@ mod tests {
         let db = RegistrationDb::new(&config).await.unwrap();
 
         // Create a new node ID
-        let original_node_id = db.get_or_create_node_id("test-node:50051").await.unwrap();
+        let original_node_id = db
+            .get_or_create_node_id("testuser", "test-node", 50051)
+            .await
+            .unwrap();
 
         // Verify the identity was created correctly
         assert!(is_valid_huid(&original_node_id.huid));
         assert_eq!(original_node_id.uuid().to_string().len(), 36);
 
         // Get the same node ID back from the database
-        let retrieved_node_id = db.get_or_create_node_id("test-node:50051").await.unwrap();
+        let retrieved_node_id = db
+            .get_or_create_node_id("testuser", "test-node", 50051)
+            .await
+            .unwrap();
 
         // Verify all fields match exactly
         assert_eq!(original_node_id.uuid(), retrieved_node_id.uuid());

@@ -77,18 +77,13 @@ pub async fn show_miner_status(config: &MinerConfig, _db: RegistrationDb) -> Res
     println!("Note: UID will be discovered from chain on startup");
     println!();
 
-    // Show configured nodes
+    // Show configured nodes (IDs will be auto-generated on startup)
     println!("Configured Nodes: {}", config.node_management.nodes.len());
     for node in &config.node_management.nodes {
         let node_endpoint = format!("{}:{}", node.host, node.port);
-        let node_id = if node.node_id.is_empty() {
-            format!("node-{}", node_endpoint)
-        } else {
-            node.node_id.clone()
-        };
         println!(
-            "  - {} @ {} (ssh://{}@{})",
-            node_id, node_endpoint, node.username, node.host
+            "  - ssh://{}@{} (ID will be auto-generated from credentials)",
+            node.username, node_endpoint
         );
     }
     println!();

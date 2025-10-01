@@ -8,7 +8,6 @@ async fn test_node_registration() {
     let manager = NodeManager::new(NodeSshConfig::default());
 
     let config = NodeConfig {
-        node_id: "test-node-1".to_string(),
         host: "192.168.1.100".to_string(),
         port: 22,
         username: "basilica".to_string(),
@@ -17,16 +16,17 @@ async fn test_node_registration() {
         enabled: true,
     };
 
+    let node_id = "test-node-1".to_string();
+
     // Register node
-    let result = manager.register_node(config.clone()).await;
+    let result = manager.register_node(node_id.clone(), config.clone()).await;
     assert!(result.is_ok());
 
     // Get node
-    let node = manager.get_node("test-node-1").await.unwrap();
+    let node = manager.get_node(&node_id).await.unwrap();
     assert!(node.is_some());
 
     let node = node.unwrap();
-    assert_eq!(node.node_id, "test-node-1");
     assert_eq!(node.host, "192.168.1.100");
     assert!(node.enabled);
 }
@@ -37,41 +37,47 @@ async fn test_list_nodes() {
 
     // Register multiple nodes
     manager
-        .register_node(NodeConfig {
-            node_id: "node-1".to_string(),
-            host: "192.168.1.100".to_string(),
-            port: 22,
-            username: "basilica".to_string(),
-            additional_opts: None,
-            gpu_spec: None,
-            enabled: true,
-        })
+        .register_node(
+            "node-1".to_string(),
+            NodeConfig {
+                host: "192.168.1.100".to_string(),
+                port: 22,
+                username: "basilica".to_string(),
+                additional_opts: None,
+                gpu_spec: None,
+                enabled: true,
+            },
+        )
         .await
         .unwrap();
 
     manager
-        .register_node(NodeConfig {
-            node_id: "node-2".to_string(),
-            host: "192.168.1.101".to_string(),
-            port: 22,
-            username: "basilica".to_string(),
-            additional_opts: None,
-            gpu_spec: None,
-            enabled: true,
-        })
+        .register_node(
+            "node-2".to_string(),
+            NodeConfig {
+                host: "192.168.1.101".to_string(),
+                port: 22,
+                username: "basilica".to_string(),
+                additional_opts: None,
+                gpu_spec: None,
+                enabled: true,
+            },
+        )
         .await
         .unwrap();
 
     manager
-        .register_node(NodeConfig {
-            node_id: "node-3".to_string(),
-            host: "192.168.1.102".to_string(),
-            port: 22,
-            username: "basilica".to_string(),
-            additional_opts: None,
-            gpu_spec: None,
-            enabled: false, // Disabled
-        })
+        .register_node(
+            "node-3".to_string(),
+            NodeConfig {
+                host: "192.168.1.102".to_string(),
+                port: 22,
+                username: "basilica".to_string(),
+                additional_opts: None,
+                gpu_spec: None,
+                enabled: false, // Disabled
+            },
+        )
         .await
         .unwrap();
 
@@ -87,23 +93,27 @@ async fn test_list_nodes() {
 async fn test_node_status_update() {
     let manager = NodeManager::new(NodeSshConfig::default());
 
+    let node_id = "test-node".to_string();
+
     // Register a node
     manager
-        .register_node(NodeConfig {
-            node_id: "test-node".to_string(),
-            host: "192.168.1.100".to_string(),
-            port: 22,
-            username: "basilica".to_string(),
-            additional_opts: None,
-            gpu_spec: None,
-            enabled: true,
-        })
+        .register_node(
+            node_id.clone(),
+            NodeConfig {
+                host: "192.168.1.100".to_string(),
+                port: 22,
+                username: "basilica".to_string(),
+                additional_opts: None,
+                gpu_spec: None,
+                enabled: true,
+            },
+        )
         .await
         .unwrap();
 
     // Disable the node
     manager
-        .update_node_status("test-node", false)
+        .update_node_status(&node_id, false)
         .await
         .unwrap();
 
@@ -113,7 +123,7 @@ async fn test_node_status_update() {
 
     // Re-enable the node
     manager
-        .update_node_status("test-node", true)
+        .update_node_status(&node_id, true)
         .await
         .unwrap();
 
@@ -126,29 +136,33 @@ async fn test_node_status_update() {
 async fn test_unregister_node() {
     let manager = NodeManager::new(NodeSshConfig::default());
 
+    let node_id = "test-node".to_string();
+
     // Register a node
     manager
-        .register_node(NodeConfig {
-            node_id: "test-node".to_string(),
-            host: "192.168.1.100".to_string(),
-            port: 22,
-            username: "basilica".to_string(),
-            additional_opts: None,
-            gpu_spec: None,
-            enabled: true,
-        })
+        .register_node(
+            node_id.clone(),
+            NodeConfig {
+                host: "192.168.1.100".to_string(),
+                port: 22,
+                username: "basilica".to_string(),
+                additional_opts: None,
+                gpu_spec: None,
+                enabled: true,
+            },
+        )
         .await
         .unwrap();
 
     // Verify it exists
-    let node = manager.get_node("test-node").await.unwrap();
+    let node = manager.get_node(&node_id).await.unwrap();
     assert!(node.is_some());
 
     // Unregister it
-    manager.unregister_node("test-node").await.unwrap();
+    manager.unregister_node(&node_id).await.unwrap();
 
     // Verify it's gone
-    let node = manager.get_node("test-node").await.unwrap();
+    let node = manager.get_node(&node_id).await.unwrap();
     assert!(node.is_none());
 }
 

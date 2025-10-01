@@ -47,11 +47,12 @@ request_timeout = 30
 
 [node_management]
 # Configure your GPU nodes here with SSH access details
-# Each node will be accessible to validators via direct SSH
+# Node IDs are automatically generated from SSH credentials (username@host:port)
+# The same credentials will always generate the same deterministic node ID
 nodes = [
-  { node_id = "gpu-node-1", host = "192.168.1.100", port = 22, username = "basilica", enabled = true },
+  { host = "192.168.1.100", port = 22, username = "basilica", enabled = true },
   # Add more nodes as needed:
-  # { node_id = "gpu-node-2", host = "192.168.1.101", port = 22, username = "basilica", enabled = true },
+  # { host = "192.168.1.101", port = 22, username = "basilica", enabled = true },
 ]
 max_retry_attempts = 3
 auto_recovery = true
