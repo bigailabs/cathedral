@@ -143,10 +143,7 @@ mod tests {
         }
 
         fn format_json(&self) -> Result<String> {
-            Ok(format!(
-                r#"{{"uuid":"{}"}}"#,
-                self.uuid
-            ))
+            Ok(format!(r#"{{"uuid":"{}"}}"#, self.uuid))
         }
     }
 
@@ -231,7 +228,10 @@ mod tests {
 
         // Test find_by_identifier
         let uuid_str = id1.uuid().to_string();
-        let found = persistence.find_by_identifier(&uuid_str[..8]).await.unwrap();
+        let found = persistence
+            .find_by_identifier(&uuid_str[..8])
+            .await
+            .unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().uuid(), id1.uuid());
 
@@ -259,9 +259,7 @@ mod tests {
     #[test]
     fn test_identity_display_trait() {
         let uuid = Uuid::new_v4();
-        let display = MockIdentityDisplay {
-            uuid,
-        };
+        let display = MockIdentityDisplay { uuid };
 
         // Test format_compact
         assert_eq!(display.format_compact(), uuid.to_string()[..8].to_string());
@@ -341,9 +339,7 @@ mod tests {
     #[test]
     fn test_identity_display_json_format() {
         let uuid = Uuid::new_v4();
-        let display = MockIdentityDisplay {
-            uuid,
-        };
+        let display = MockIdentityDisplay { uuid };
 
         let json = display.format_json().unwrap();
 

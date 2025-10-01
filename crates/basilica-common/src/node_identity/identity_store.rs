@@ -97,10 +97,8 @@ impl SqliteIdentityStore {
             r#"
             CREATE TABLE IF NOT EXISTS node_identities (
                 uuid TEXT PRIMARY KEY CHECK(length(uuid) = 36),
-                huid TEXT NOT NULL UNIQUE,
                 created_at TIMESTAMP NOT NULL,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CHECK(huid GLOB '[a-z]*-[a-z]*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]')
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             "#,
         )
@@ -108,11 +106,11 @@ impl SqliteIdentityStore {
         .await
         .context("Failed to create node_identities table")?;
 
-        // Create index on HUID for prefix searches
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_node_identities_huid ON node_identities(huid)")
+        // Create index on UUID for faster lookups
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_node_identities_uuid ON node_identities(uuid)")
             .execute(&self.pool)
             .await
-            .context("Failed to create HUID index")?;
+            .context("Failed to create UUID index")?;
 
         // Create legacy ID mapping table for migration support
         sqlx::query(
@@ -172,7 +170,7 @@ impl SqliteIdentityStore {
         Ok(Box::new(new_id))
     }
 
-    /// Find identity by identifier (UUID or HUID prefix)
+    /// Find identity by identifier (UUID)
     async fn find_by_identifier_internal(&self, id: &str) -> Result<Option<Box<dyn NodeIdentity>>> {
         // Validate input
         if id.is_empty() {
@@ -296,7 +294,7 @@ impl IdentityPersistence for SqliteIdentityStore {
 /// Migration support for legacy string IDs
 #[cfg(feature = "sqlite")]
 impl SqliteIdentityStore {
-    /// Migrate a legacy string ID to UUID+HUID
+    /// Migrate a legacy string ID to UUID
     pub async fn migrate_legacy_id(&self, legacy_id: &str) -> Result<Box<dyn NodeIdentity>> {
         // Check if already migrated
         let existing = sqlx::query_as::<_, (String,)>(
@@ -362,7 +360,6 @@ impl SqliteIdentityStore {
     pub async fn get_collision_stats(&self) -> Result<CollisionStats> {
         Ok(CollisionStats {
             total_collisions: 0,
-            unique_huid_collisions: 0,
         })
     }
 
@@ -383,11 +380,10 @@ impl SqliteIdentityStore {
     }
 }
 
-/// Statistics about HUID collisions
+/// Statistics about UUID collisions
 #[derive(Debug)]
 pub struct CollisionStats {
     pub total_collisions: u64,
-    pub unique_huid_collisions: u64,
 }
 
 /// Statistics about the in-memory cache
@@ -544,12 +540,11 @@ mod tests {
             .await
             .expect("Should create store");
 
-        // This test would require mocking or manipulating the HUID generation
+        // This test would require mocking or manipulating the UUID generation
         // to force collisions, which is complex. For now, we just test that
         // collision stats work when there are no collisions
         let stats = store.get_collision_stats().await.expect("Should get stats");
         assert_eq!(stats.total_collisions, 0);
-        assert_eq!(stats.unique_huid_collisions, 0);
     }
 
     #[tokio::test]
@@ -565,9 +560,9 @@ mod tests {
             .expect("Should complete search");
         assert!(result.is_none());
 
-        // Test finding non-existent HUID
+        // Test finding non-existent UUID
         let result = store
-            .find_by_identifier("nonexistent-huid")
+            .find_by_identifier("nonexistent-uuid-string")
             .await
             .expect("Should complete search");
         assert!(result.is_none());
@@ -578,7 +573,7 @@ mod tests {
         let err = result.err().unwrap();
         assert!(err
             .to_string()
-            .contains("HUID prefix must be at least 3 characters"));
+            .contains("at least 3 characters"));
     }
 
     #[tokio::test]

@@ -32,10 +32,7 @@ impl<'a> IdentityDisplay for NodeIdentityDisplay<'a> {
     ///
     /// Format: "UUID: 550e8400-e29b-41d4-a716-446655440000"
     fn format_verbose(&self) -> String {
-        format!(
-            "UUID: {}",
-            self.identity.uuid()
-        )
+        format!("UUID: {}", self.identity.uuid())
     }
 
     /// Returns JSON with UUID and creation time

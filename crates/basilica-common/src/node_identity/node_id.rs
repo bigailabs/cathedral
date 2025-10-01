@@ -41,12 +41,8 @@ impl NodeId {
         let created_at =
             SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(duration_since_epoch.as_secs());
 
-        Ok(Self {
-            uuid,
-            created_at,
-        })
+        Ok(Self { uuid, created_at })
     }
-
 
     /// Creates a NodeId from existing UUID value
     ///
@@ -56,10 +52,7 @@ impl NodeId {
     /// * `uuid` - The UUID to use
     /// * `created_at` - The creation timestamp
     pub fn from_parts(uuid: Uuid, created_at: SystemTime) -> Result<Self> {
-        Ok(Self {
-            uuid,
-            created_at,
-        })
+        Ok(Self { uuid, created_at })
     }
 
     /// Generates a UUID using the provided RNG
@@ -298,5 +291,4 @@ mod tests {
         set.insert(id1.clone());
         assert_eq!(set.len(), 2);
     }
-
 }

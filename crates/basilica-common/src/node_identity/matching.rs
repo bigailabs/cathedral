@@ -168,9 +168,7 @@ where
     // Try progressively longer UUID prefixes (from 3 chars up to 8)
     for len in 3..=8 {
         let prefix = &target_uuid[..len];
-        let is_ambiguous = other_uuids
-            .iter()
-            .any(|uuid| uuid.starts_with(prefix));
+        let is_ambiguous = other_uuids.iter().any(|uuid| uuid.starts_with(prefix));
 
         if !is_ambiguous {
             return prefix.to_string();
@@ -314,10 +312,7 @@ mod tests {
 
         assert_eq!(count_prefix_matches(node_refs.iter().copied(), "550e"), 2);
         assert_eq!(count_prefix_matches(node_refs.iter().copied(), "660e"), 1);
-        assert_eq!(
-            count_prefix_matches(node_refs.iter().copied(), "aaaa"),
-            0
-        );
+        assert_eq!(count_prefix_matches(node_refs.iter().copied(), "aaaa"), 0);
     }
 
     #[test]
@@ -327,10 +322,7 @@ mod tests {
         let other_uuid2 = Uuid::parse_str("660e8400-e29b-41d4-a716-446655440000").unwrap();
 
         let target = create_mock_node(target_uuid);
-        let others = [
-            create_mock_node(other_uuid1),
-            create_mock_node(other_uuid2),
-        ];
+        let others = [create_mock_node(other_uuid1), create_mock_node(other_uuid2)];
 
         let other_refs: Vec<&dyn NodeIdentity> =
             others.iter().map(|e| e as &dyn NodeIdentity).collect();

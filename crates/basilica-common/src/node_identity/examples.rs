@@ -113,10 +113,7 @@ pub mod sqlite_examples {
 
         // Check cache stats
         let stats = store.cache_stats().await;
-        println!(
-            "Cache contains {} UUIDs",
-            stats.uuid_entries
-        );
+        println!("Cache contains {} UUIDs", stats.uuid_entries);
 
         // Second lookup - should hit cache
         let cached = store.find_by_identifier(&uuid).await?;

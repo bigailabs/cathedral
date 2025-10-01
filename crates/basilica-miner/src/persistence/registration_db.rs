@@ -211,15 +211,13 @@ impl RegistrationDb {
 
         // Persist to database
         let created_at: DateTime<Utc> = node_id.created_at().into();
-        sqlx::query(
-            "INSERT INTO node_uuids (node_address, uuid, created_at) VALUES (?, ?, ?)",
-        )
-        .bind(&node_address)
-        .bind(node_id.uuid().to_string())
-        .bind(created_at.to_rfc3339())
-        .execute(&self.pool)
-        .await
-        .context("Failed to insert node identity")?;
+        sqlx::query("INSERT INTO node_uuids (node_address, uuid, created_at) VALUES (?, ?, ?)")
+            .bind(&node_address)
+            .bind(node_id.uuid().to_string())
+            .bind(created_at.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .context("Failed to insert node identity")?;
 
         Ok(node_id)
     }
