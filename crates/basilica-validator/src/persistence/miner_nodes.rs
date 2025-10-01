@@ -55,24 +55,24 @@ impl SimplePersistence {
 
         if count == 0 {
             let existing_miner: Option<String> = sqlx::query_scalar(
-                "SELECT miner_id FROM miner_nodes WHERE node_ssh_endpoint = ? AND miner_id != ? LIMIT 1",
+                "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ? LIMIT 1",
             )
             .bind(node_ssh_endpoint)
             .bind(&miner_id)
             .fetch_optional(self.pool())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to check node_ssh_endpoint uniqueness: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to check ssh_endpoint uniqueness: {}", e))?;
 
             if let Some(other_miner) = existing_miner {
                 return Err(anyhow::anyhow!(
-                    "Cannot create node relationship: node_ssh_endpoint {} is already registered to {}",
+                    "Cannot create node relationship: ssh_endpoint {} is already registered to {}",
                     node_ssh_endpoint,
                     other_miner
                 ));
             }
 
             let old_node_id: Option<String> = sqlx::query_scalar(
-                "SELECT node_id FROM miner_nodes WHERE node_ssh_endpoint = ? AND miner_id = ?",
+                "SELECT node_id FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id = ?",
             )
             .bind(node_ssh_endpoint)
             .bind(&miner_id)
@@ -113,7 +113,7 @@ impl SimplePersistence {
 
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_nodes (
-                    id, miner_id, node_id, node_ssh_endpoint, gpu_count,
+                    id, miner_id, node_id, ssh_endpoint, gpu_count,
                     status, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             "#;
@@ -149,7 +149,7 @@ impl SimplePersistence {
             );
 
             let duplicate_check_query: &'static str =
-                "SELECT id, node_id FROM miner_nodes WHERE node_ssh_endpoint = ? AND id != ?";
+                "SELECT id, node_id FROM miner_nodes WHERE ssh_endpoint = ? AND id != ?";
             let relationship_id = format!("{miner_id}_{node_id}");
 
             let duplicates = sqlx::query(duplicate_check_query)
@@ -163,7 +163,7 @@ impl SimplePersistence {
                 let duplicate_count = duplicates.len();
                 warn!(
                     miner_uid = miner_uid,
-                    "Found {} duplicate nodes with same node_ssh_endpoint {} for miner {}",
+                    "Found {} duplicate nodes with same ssh_endpoint {} for miner {}",
                     duplicate_count,
                     node_ssh_endpoint,
                     miner_id
@@ -175,7 +175,7 @@ impl SimplePersistence {
 
                     warn!(
                         miner_uid = miner_uid,
-                        "Marking duplicate node {} (id: {}) as offline with same node_ssh_endpoint as {} for miner {}",
+                        "Marking duplicate node {} (id: {}) as offline with same ssh_endpoint as {} for miner {}",
                         dup_node_id, dup_id, node_id, miner_id
                     );
 
@@ -199,7 +199,7 @@ impl SimplePersistence {
 
                 info!(
                     miner_uid = miner_uid,
-                    "Cleaned up {} duplicate nodes for miner {} with node_ssh_endpoint {}",
+                    "Cleaned up {} duplicate nodes for miner {} with ssh_endpoint {}",
                     duplicate_count,
                     miner_id,
                     node_ssh_endpoint
