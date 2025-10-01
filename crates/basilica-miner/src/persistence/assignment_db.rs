@@ -23,51 +23,10 @@ impl AssignmentDb {
     pub async fn run_migrations(&self) -> Result<()> {
         info!("Running assignment database migrations");
 
-        // Create node_assignments table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS node_assignments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id TEXT NOT NULL UNIQUE,
-                validator_hotkey TEXT NOT NULL,
-                assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                assigned_by TEXT NOT NULL,
-                notes TEXT
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create validator_stakes table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS validator_stakes (
-                validator_hotkey TEXT PRIMARY KEY,
-                stake_amount REAL NOT NULL,
-                percentage_of_total REAL NOT NULL,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
-
-        // Create assignment_history table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS assignment_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id TEXT NOT NULL,
-                validator_hotkey TEXT,
-                action TEXT NOT NULL,
-                performed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                performed_by TEXT NOT NULL
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to run migrations: {}", e))?;
 
         info!("Assignment database migrations completed");
         Ok(())

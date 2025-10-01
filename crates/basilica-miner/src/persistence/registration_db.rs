@@ -108,81 +108,12 @@ impl RegistrationDb {
 
     /// Run database migrations
     async fn run_migrations(&self) -> Result<()> {
-        info!("Running database migrations...");
+        info!("Running database migrations");
 
-        // Create node health table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS node_health (
-                node_id TEXT PRIMARY KEY,
-                is_healthy BOOLEAN NOT NULL DEFAULT FALSE,
-                last_health_check TIMESTAMP,
-                consecutive_failures INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create node_health table")?;
-
-        // Create validator interactions table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS validator_interactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                validator_hotkey TEXT NOT NULL,
-                interaction_type TEXT NOT NULL,
-                success BOOLEAN NOT NULL,
-                details TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create validator_interactions table")?;
-
-        // Create SSH access grants table
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS ssh_access_grants (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                validator_hotkey TEXT NOT NULL,
-                node_ids TEXT NOT NULL,
-                granted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP,
-                is_active BOOLEAN NOT NULL DEFAULT TRUE
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create ssh_access_grants table")?;
-
-        // Create indices for performance
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_validator_interactions_hotkey ON validator_interactions(validator_hotkey)")
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_grants_validator ON ssh_access_grants(validator_hotkey)")
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS node_uuids (
-                node_address TEXT NOT NULL UNIQUE,
-                uuid TEXT NOT NULL UNIQUE,
-                huid TEXT NOT NULL UNIQUE,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create ssh_sessions table")?;
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .context("Failed to run migrations")?;
 
         info!("Database migrations completed successfully");
         Ok(())
