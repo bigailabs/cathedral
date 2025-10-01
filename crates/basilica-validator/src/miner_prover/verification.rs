@@ -552,6 +552,13 @@ impl VerificationEngine {
         let nodes: Vec<NodeInfoDetailed> = node_details
             .into_iter()
             .map(|details| -> Result<NodeInfoDetailed> {
+                debug!(
+                    miner_uid = miner_uid,
+                    node_id = %details.node_id,
+                    "[EVAL_FLOW] Discovered node details from miner: miner_uid={}, node_id={}",
+                    miner_uid, details.node_id
+                );
+
                 Ok(NodeInfoDetailed {
                     id: NodeId::from_str(&details.node_id).map_err(|e| {
                         anyhow::anyhow!("Invalid node ID '{}': {}", details.node_id, e)
