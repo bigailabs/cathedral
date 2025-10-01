@@ -3,7 +3,6 @@
 //! Simplified SQLite database for the miner with node UUID tracking
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 use std::path::Path;
 use tokio::fs;
@@ -11,7 +10,7 @@ use tracing::{debug, info};
 
 use basilica_common::{
     config::DatabaseConfig,
-    node_identity::{NodeId, NodeIdentity},
+    node_identity::NodeId,
 };
 
 /// Registration database client
@@ -169,7 +168,7 @@ impl RegistrationDb {
         Ok(())
     }
 
-    /// Get or create a deterministic node ID based on SSH credentials
+    /// Generate a deterministic node ID based on SSH credentials (in-memory only)
     ///
     /// # Arguments
     /// * `username` - SSH username
@@ -178,7 +177,8 @@ impl RegistrationDb {
     ///
     /// # Returns
     /// A deterministic NodeId based on the SSH credentials. The same credentials
-    /// will always generate the same node ID.
+    /// will always generate the same node ID. This is generated in-memory only
+    /// and not persisted to the database.
     pub async fn get_or_create_node_id(
         &self,
         username: &str,
@@ -187,39 +187,11 @@ impl RegistrationDb {
     ) -> Result<NodeId> {
         // Create deterministic seed from SSH credentials
         let ssh_credentials = format!("{}@{}:{}", username, host, port);
-        let node_address = format!("{}:{}", host, port);
 
-        // First try to get existing identity
-        let existing = sqlx::query_as::<_, (String, String, DateTime<Utc>)>(
-            "SELECT uuid, huid, created_at FROM node_uuids WHERE node_address = ?",
-        )
-        .bind(&node_address)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some((uid_str, huid, created_at)) = existing {
-            let uuid = uuid::Uuid::parse_str(&uid_str)?;
-            let node_id = NodeId::from_parts(uuid, huid, created_at.into())?;
-            return Ok(node_id);
-        }
-
-        // Generate deterministic NodeId from SSH credentials
+        // Generate deterministic NodeId from SSH credentials (in-memory only)
         let node_id = NodeId::new(&ssh_credentials)?;
 
-        // Try to insert with conflict handling
-        match sqlx::query(
-            "INSERT INTO node_uuids (node_address, uuid, huid, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(&node_address)
-        .bind(node_id.uuid.to_string())
-        .bind(node_id.huid.clone())
-        .bind(DateTime::<Utc>::from(node_id.created_at()))
-        .execute(&self.pool)
-        .await
-        {
-            Ok(_) => Ok(node_id),
-            Err(e) => Err(e.into()),
-        }
+        Ok(node_id)
     }
 }
 
@@ -244,6 +216,7 @@ pub struct TableStatistics {
 mod tests {
     use super::*;
     use basilica_common::node_identity::constants::is_valid_huid;
+    use basilica_common::node_identity::NodeIdentity;
 
     // ===== AUTOMATIC IDENTITY GENERATION TESTS =====
 
@@ -360,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_node_id_database_persistence() {
+    async fn test_get_or_create_node_id_determinism() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -369,24 +342,27 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        // Create identity
-        let original_id = db
+        // Create identity multiple times with same credentials
+        let id1 = db
             .get_or_create_node_id("testuser", "127.0.0.1", 50051)
             .await
             .unwrap();
 
-        // Verify it's stored in the database by querying directly
-        let stored = sqlx::query_as::<_, (String, String, String)>(
-            "SELECT node_address, uuid, huid FROM node_uuids WHERE node_address = ?",
-        )
-        .bind("127.0.0.1:50051")
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+        let id2 = db
+            .get_or_create_node_id("testuser", "127.0.0.1", 50051)
+            .await
+            .unwrap();
 
-        assert_eq!(stored.0, "127.0.0.1:50051");
-        assert_eq!(stored.1, original_id.uuid.to_string());
-        assert_eq!(stored.2, original_id.huid);
+        let id3 = db
+            .get_or_create_node_id("testuser", "127.0.0.1", 50051)
+            .await
+            .unwrap();
+
+        // Verify deterministic generation (same credentials = same IDs)
+        assert_eq!(id1.uuid, id2.uuid);
+        assert_eq!(id1.uuid, id3.uuid);
+        assert_eq!(id1.huid, id2.huid);
+        assert_eq!(id1.huid, id3.huid);
     }
 
     #[tokio::test]
@@ -490,7 +466,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_or_create_node_id_database_integrity() {
+    async fn test_get_or_create_node_id_different_credentials() {
         let config = DatabaseConfig {
             url: "sqlite::memory:".to_string(),
             run_migrations: true,
@@ -499,31 +475,33 @@ mod tests {
 
         let db = RegistrationDb::new(&config).await.unwrap();
 
-        // Create several identities
+        // Create identities with different credentials
         let nodes = vec![
             ("user1", "127.0.0.1", 50051),
             ("user2", "127.0.0.1", 50052),
             ("user3", "192.168.1.100", 8080),
         ];
 
+        let mut ids = Vec::new();
         for (username, host, port) in &nodes {
-            db.get_or_create_node_id(username, host, *port)
+            let id = db.get_or_create_node_id(username, host, *port)
                 .await
                 .unwrap();
+            ids.push(id);
         }
 
-        // Verify database integrity
+        // Verify all IDs are unique (different credentials = different IDs)
+        assert_ne!(ids[0].uuid, ids[1].uuid);
+        assert_ne!(ids[0].uuid, ids[2].uuid);
+        assert_ne!(ids[1].uuid, ids[2].uuid);
+
+        assert_ne!(ids[0].huid, ids[1].huid);
+        assert_ne!(ids[0].huid, ids[2].huid);
+        assert_ne!(ids[1].huid, ids[2].huid);
+
+        // Verify database integrity (table exists but empty)
         let integrity_check = db.integrity_check().await.unwrap();
         assert!(integrity_check, "Database integrity check should pass");
-
-        // Verify table statistics
-        let stats = db.get_database_stats().await.unwrap();
-        let node_uuids_stats = stats
-            .table_stats
-            .iter()
-            .find(|s| s.table_name == "node_uuids")
-            .unwrap();
-        assert_eq!(node_uuids_stats.row_count, 3);
     }
 
     #[tokio::test]

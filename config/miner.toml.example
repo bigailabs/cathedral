@@ -49,10 +49,12 @@ request_timeout = 30
 # Configure your GPU nodes here with SSH access details
 # Node IDs are automatically generated from SSH credentials (username@host:port)
 # The same credentials will always generate the same deterministic node ID
+# GPU specs are discovered by validators via SSH (not configured here)
 nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica", enabled = true },
+  { host = "192.168.1.100", port = 22, username = "basilica" },
   # Add more nodes as needed:
-  # { host = "192.168.1.101", port = 22, username = "basilica", enabled = true },
+  # { host = "192.168.1.101", port = 22, username = "basilica" },
+  # { host = "192.168.1.102", port = 22, username = "basilica", additional_opts = "-o StrictHostKeyChecking=no" },
 ]
 max_retry_attempts = 3
 auto_recovery = true

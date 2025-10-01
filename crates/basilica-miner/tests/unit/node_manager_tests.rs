@@ -12,8 +12,6 @@ async fn test_node_registration() {
         port: 22,
         username: "basilica".to_string(),
         additional_opts: None,
-        gpu_spec: None,
-        enabled: true,
     };
 
     let node_id = "test-node-1".to_string();
@@ -28,7 +26,6 @@ async fn test_node_registration() {
 
     let node = node.unwrap();
     assert_eq!(node.host, "192.168.1.100");
-    assert!(node.enabled);
 }
 
 #[tokio::test]
@@ -44,8 +41,6 @@ async fn test_list_nodes() {
                 port: 22,
                 username: "basilica".to_string(),
                 additional_opts: None,
-                gpu_spec: None,
-                enabled: true,
             },
         )
         .await
@@ -59,8 +54,6 @@ async fn test_list_nodes() {
                 port: 22,
                 username: "basilica".to_string(),
                 additional_opts: None,
-                gpu_spec: None,
-                enabled: true,
             },
         )
         .await
@@ -74,62 +67,17 @@ async fn test_list_nodes() {
                 port: 22,
                 username: "basilica".to_string(),
                 additional_opts: None,
-                gpu_spec: None,
-                enabled: false, // Disabled
             },
         )
         .await
         .unwrap();
 
-    // List nodes - should only return enabled nodes
+    // List nodes - all configured nodes are returned
     let nodes = manager.list_nodes().await.unwrap();
-    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes.len(), 3);
     assert!(nodes.iter().any(|n| n.node_id == "node-1"));
     assert!(nodes.iter().any(|n| n.node_id == "node-2"));
-    assert!(!nodes.iter().any(|n| n.node_id == "node-3"));
-}
-
-#[tokio::test]
-async fn test_node_status_update() {
-    let manager = NodeManager::new(NodeSshConfig::default());
-
-    let node_id = "test-node".to_string();
-
-    // Register a node
-    manager
-        .register_node(
-            node_id.clone(),
-            NodeConfig {
-                host: "192.168.1.100".to_string(),
-                port: 22,
-                username: "basilica".to_string(),
-                additional_opts: None,
-                gpu_spec: None,
-                enabled: true,
-            },
-        )
-        .await
-        .unwrap();
-
-    // Disable the node
-    manager
-        .update_node_status(&node_id, false)
-        .await
-        .unwrap();
-
-    // Verify it's not in the list of enabled nodes
-    let nodes = manager.list_nodes().await.unwrap();
-    assert_eq!(nodes.len(), 0);
-
-    // Re-enable the node
-    manager
-        .update_node_status(&node_id, true)
-        .await
-        .unwrap();
-
-    // Verify it's back in the list
-    let nodes = manager.list_nodes().await.unwrap();
-    assert_eq!(nodes.len(), 1);
+    assert!(nodes.iter().any(|n| n.node_id == "node-3"));
 }
 
 #[tokio::test]
@@ -147,8 +95,6 @@ async fn test_unregister_node() {
                 port: 22,
                 username: "basilica".to_string(),
                 additional_opts: None,
-                gpu_spec: None,
-                enabled: true,
             },
         )
         .await

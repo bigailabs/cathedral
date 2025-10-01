@@ -29,10 +29,6 @@ pub struct NodeConfig {
     pub username: String,
     /// Additional SSH options
     pub additional_opts: Option<String>,
-    /// GPU specifications if available
-    pub gpu_spec: Option<basilica_protocol::common::GpuSpec>,
-    /// Whether this node is currently enabled
-    pub enabled: bool,
 }
 
 impl NodeConfig {
@@ -121,7 +117,6 @@ impl NodeManager {
         let nodes = self.nodes.read().await;
         Ok(nodes
             .iter()
-            .filter(|(_, config)| config.enabled)
             .map(|(node_id, config)| RegisteredNode {
                 node_id: node_id.clone(),
                 config: config.clone(),
@@ -305,7 +300,7 @@ impl NodeManager {
                 port: registered_node.config.port.to_string(),
                 username: registered_node.config.username,
                 additional_opts: registered_node.config.additional_opts.unwrap_or_default(),
-                gpu_spec: registered_node.config.gpu_spec,
+                gpu_spec: None, // Validators discover GPU specs via SSH
                 status: "available".to_string(),
             })
             .collect();
@@ -313,22 +308,6 @@ impl NodeManager {
         Ok(ListNodeConnectionDetailsResponse {
             nodes: node_details,
         })
-    }
-
-    /// Update node status
-    pub async fn update_node_status(&self, node_id: &str, enabled: bool) -> Result<()> {
-        let mut nodes = self.nodes.write().await;
-        if let Some(node) = nodes.get_mut(node_id) {
-            node.enabled = enabled;
-            info!(
-                "Updated node {} status to {}",
-                node_id,
-                if enabled { "enabled" } else { "disabled" }
-            );
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Node {} not found", node_id))
-        }
     }
 
     /// Validate SSH public key format
@@ -390,8 +369,6 @@ mod tests {
             port: 22,
             username: "basilica".to_string(),
             additional_opts: None,
-            gpu_spec: None,
-            enabled: true,
         };
 
         let node_id = "test-node-1".to_string();
@@ -436,21 +413,6 @@ mod tests {
             port: 22,
             username: "gpu_user".to_string(),
             additional_opts: Some("-o StrictHostKeyChecking=no".to_string()),
-            gpu_spec: Some(basilica_protocol::common::GpuSpec {
-                model: "RTX 4090".to_string(),
-                memory_mb: 24576,
-                uuid: "GPU-123".to_string(),
-                driver_version: "535.86.05".to_string(),
-                cuda_version: "12.2".to_string(),
-                utilization_percent: 0.0,
-                memory_utilization_percent: 0.0,
-                temperature_celsius: 45.0,
-                power_watts: 100.0,
-                core_clock_mhz: 2520,
-                memory_clock_mhz: 10501,
-                compute_capability: "8.9".to_string(),
-            }),
-            enabled: true,
         };
 
         let node_id = "gpu-node-1".to_string();
