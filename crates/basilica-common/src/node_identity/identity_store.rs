@@ -571,9 +571,7 @@ mod tests {
         let result = store.find_by_identifier("ab").await;
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err
-            .to_string()
-            .contains("at least 3 characters"));
+        assert!(err.to_string().contains("at least 3 characters"));
     }
 
     #[tokio::test]
