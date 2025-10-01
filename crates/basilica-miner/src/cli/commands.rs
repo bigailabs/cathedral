@@ -2,11 +2,6 @@ use clap::Subcommand;
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Validator management commands
-    Validator {
-        #[command(subcommand)]
-        validator_cmd: ValidatorCommand,
-    },
     /// Service management commands
     Service {
         #[command(subcommand)]
@@ -26,23 +21,6 @@ pub enum Commands {
     Status,
     /// Run database migrations
     Migrate,
-}
-
-/// Validator management subcommands
-#[derive(Subcommand, Debug)]
-pub enum ValidatorCommand {
-    /// List recent validator interactions
-    List {
-        /// Number of recent interactions to show
-        #[arg(short, long, default_value = "100")]
-        limit: i64,
-    },
-
-    /// Show SSH access grants for a validator
-    ShowAccess {
-        /// Validator hotkey
-        hotkey: String,
-    },
 }
 
 /// Service management subcommands
@@ -81,13 +59,6 @@ pub enum DatabaseCommand {
 
     /// Show database statistics
     Stats,
-
-    /// Clean up old database records
-    Cleanup {
-        /// Number of days to keep records (default: 30)
-        #[arg(short, long, default_value = "30")]
-        days: u32,
-    },
 
     /// Vacuum database to reclaim space
     Vacuum,

@@ -16,14 +16,6 @@ pub mod handlers;
 pub use args::*;
 pub use commands::*;
 
-/// Handle validator management commands
-pub async fn handle_validator_command(command: ValidatorCommand, db: RegistrationDb) -> Result<()> {
-    match command {
-        ValidatorCommand::List { limit } => list_validator_interactions(db, limit).await,
-        ValidatorCommand::ShowAccess { hotkey } => show_validator_ssh_access(db, hotkey).await,
-    }
-}
-
 /// Handle service management commands
 pub async fn handle_service_command(command: ServiceCommand, config: &MinerConfig) -> Result<()> {
     let operation = match command {
@@ -43,9 +35,6 @@ pub async fn handle_database_command(command: DatabaseCommand, config: &MinerCon
         DatabaseCommand::Backup { path } => handlers::DatabaseOperation::Backup { path },
         DatabaseCommand::Restore { path } => handlers::DatabaseOperation::Restore { path },
         DatabaseCommand::Stats => handlers::DatabaseOperation::Stats,
-        DatabaseCommand::Cleanup { days } => {
-            handlers::DatabaseOperation::Cleanup { days: Some(days) }
-        }
         DatabaseCommand::Vacuum => handlers::DatabaseOperation::Vacuum,
         DatabaseCommand::Integrity => handlers::DatabaseOperation::Integrity,
     };
@@ -112,85 +101,6 @@ pub async fn show_miner_status(config: &MinerConfig, _db: RegistrationDb) -> Res
         Err(e) => {
             error!("Database connection failed: {}", e);
             println!("Database: ✗ Failed to connect");
-        }
-    }
-
-    // Show health status summary
-    if let Ok(health_records) = db.get_all_node_health().await {
-        let healthy_count = health_records.iter().filter(|h| h.is_healthy).count();
-        println!("Healthy Nodes: {}/{}", healthy_count, health_records.len());
-    }
-
-    Ok(())
-}
-
-/// List recent validator interactions
-async fn list_validator_interactions(db: RegistrationDb, limit: i64) -> Result<()> {
-    let interactions = db.get_recent_validator_interactions(limit).await?;
-
-    if interactions.is_empty() {
-        println!("No validator interactions found");
-        return Ok(());
-    }
-
-    println!("=== Recent Validator Interactions ===");
-    println!(
-        "{:<44} {:<20} {:<10} {:<20}",
-        "Validator", "Type", "Success", "Time"
-    );
-    println!("{}", "-".repeat(100));
-
-    for interaction in interactions {
-        println!(
-            "{:<44} {:<20} {:<10} {:<20}",
-            interaction.validator_hotkey,
-            interaction.interaction_type,
-            if interaction.success { "Yes" } else { "No" },
-            interaction.created_at.format("%Y-%m-%d %H:%M:%S")
-        );
-
-        if let Some(details) = &interaction.details {
-            println!("  Details: {details}");
-        }
-    }
-
-    Ok(())
-}
-
-/// Show SSH access grants for a validator
-async fn show_validator_ssh_access(db: RegistrationDb, hotkey: String) -> Result<()> {
-    let grants = db.get_active_ssh_grants(&hotkey).await?;
-
-    if grants.is_empty() {
-        println!("No active SSH access grants found for validator {hotkey}");
-        return Ok(());
-    }
-
-    println!("=== SSH Access Grants for {hotkey} ===");
-    println!(
-        "{:<10} {:<30} {:<20} {:<10}",
-        "Grant ID", "Nodes", "Granted At", "Active"
-    );
-    println!("{}", "-".repeat(80));
-
-    for grant in grants {
-        let node_ids: Vec<String> = serde_json::from_str(&grant.node_ids).unwrap_or_default();
-        let nodes = node_ids.join(", ");
-
-        println!(
-            "{:<10} {:<30} {:<20} {:<10}",
-            grant.id,
-            if nodes.len() > 30 {
-                &nodes[..30]
-            } else {
-                &nodes
-            },
-            grant.granted_at.format("%Y-%m-%d %H:%M:%S"),
-            if grant.is_active { "Yes" } else { "No" }
-        );
-
-        if let Some(expires) = grant.expires_at {
-            println!("  Expires: {}", expires.format("%Y-%m-%d %H:%M:%S"));
         }
     }
 

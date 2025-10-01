@@ -3,7 +3,7 @@
 //! Bittensor neuron that manages a fleet of nodes and serves
 //! validator requests for GPU rental and computational challenges.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use basilica_common::identity::MinerUid;
 use clap::Parser;
 use std::path::Path;
@@ -60,11 +60,6 @@ impl MinerState {
         // Initialize persistence layer
         let registration_db = RegistrationDb::new(&config.database).await?;
 
-        // Initialize assignment database and run migrations
-        let assignment_pool = sqlx::SqlitePool::connect(&config.database.url).await?;
-        let assignment_db = persistence::AssignmentDb::new(assignment_pool.clone());
-        assignment_db.run_migrations().await?;
-
         // Initialize node manager with SSH config
         let node_manager = Arc::new(NodeManager::new(config.ssh_session.clone()));
 
@@ -75,9 +70,21 @@ impl MinerState {
         );
         for node_config in &config.node_management.nodes {
             let mut node = node_config.clone();
-            // Generate node_id if not provided
+            // Generate stable UUID-based node_id if not provided
             if node.node_id.is_empty() {
-                node.node_id = format!("node-{}:{}", node.host, node.port);
+                let node_address = format!("{}:{}", node.host, node.port);
+                match registration_db.get_or_create_node_id(&node_address).await {
+                    Ok(node_id) => {
+                        node.node_id = node_id.to_string();
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to get or create node ID for {}: {}",
+                            node_address, e
+                        );
+                        continue;
+                    }
+                }
             }
 
             match node_manager.register_node(node).await {
@@ -209,27 +216,6 @@ impl MinerState {
             })
         };
 
-        // Start stake monitor service
-        let stake_monitor_handle = {
-            let config = self.config.clone();
-            let pool = sqlx::SqlitePool::connect(&config.database.url)
-                .await
-                .context("Failed to create pool for stake monitor")?;
-            tokio::spawn(async move {
-                match services::StakeMonitor::new(&config, pool).await {
-                    Ok(monitor) => {
-                        info!("Starting stake monitor service");
-                        if let Err(e) = monitor.start().await {
-                            error!("Stake monitor error: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to create stake monitor: {}", e);
-                    }
-                }
-            })
-        };
-
         // Start validator discovery service if enabled
         let discovery_handle = if let Some(ref discovery) = self.validator_discovery {
             let discovery = discovery.clone();
@@ -259,9 +245,6 @@ impl MinerState {
                 _ = validator_handle => {
                     error!("Validator comms server stopped unexpectedly");
                 }
-                _ = stake_monitor_handle => {
-                    error!("Stake monitor service stopped unexpectedly");
-                }
                 _ = discovery_handle => {
                     error!("Validator discovery service stopped unexpectedly");
                 }
@@ -273,9 +256,6 @@ impl MinerState {
                 }
                 _ = validator_handle => {
                     error!("Validator comms server stopped unexpectedly");
-                }
-                _ = stake_monitor_handle => {
-                    error!("Stake monitor service stopped unexpectedly");
                 }
             }
         }
@@ -332,10 +312,6 @@ async fn main() -> Result<()> {
 /// Handle CLI commands
 async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<()> {
     match command {
-        Commands::Validator { validator_cmd } => {
-            let db = RegistrationDb::new(&config.database).await?;
-            cli::handle_validator_command(validator_cmd, db).await
-        }
         Commands::Service { service_cmd } => cli::handle_service_command(service_cmd, config).await,
         Commands::Database { database_cmd } => {
             cli::handle_database_command(database_cmd, config).await
@@ -349,10 +325,6 @@ async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<(
             let mut db_config = config.database.clone();
             db_config.run_migrations = true;
             let _db = RegistrationDb::new(&db_config).await?;
-            // Also run assignment migrations
-            let assignment_pool = sqlx::SqlitePool::connect(&config.database.url).await?;
-            let assignment_db = persistence::AssignmentDb::new(assignment_pool);
-            assignment_db.run_migrations().await?;
             println!("Database migrations completed successfully");
             Ok(())
         }

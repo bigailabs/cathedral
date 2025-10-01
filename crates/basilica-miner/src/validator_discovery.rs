@@ -231,10 +231,7 @@ pub struct HighestStakeAssignment {
 }
 
 impl HighestStakeAssignment {
-    pub fn new(
-        min_stake_threshold: u128,
-        validator_hotkey: Option<String>,
-    ) -> Self {
+    pub fn new(min_stake_threshold: u128, validator_hotkey: Option<String>) -> Self {
         Self {
             min_stake_threshold,
             validator_hotkey,

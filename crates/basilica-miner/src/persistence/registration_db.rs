@@ -1,14 +1,10 @@
 //! # Registration Database
 //!
-//! Simplified SQLite database for the miner according to SPEC v1.6:
-//! - Track node health status (no dynamic registration)
-//! - Log validator interactions and SSH access grants
-//! - Simple audit trail for compliance
+//! Simplified SQLite database for the miner with node UUID tracking
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, SqlitePool};
+use sqlx::SqlitePool;
 use std::path::Path;
 use tokio::fs;
 use tracing::{debug, info};
@@ -22,57 +18,6 @@ use basilica_common::{
 #[derive(Debug, Clone)]
 pub struct RegistrationDb {
     pool: SqlitePool,
-}
-
-/// Node health status
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct NodeHealth {
-    /// Node ID (from config)
-    pub node_id: String,
-    /// Is the node healthy?
-    pub is_healthy: bool,
-    /// Last successful health check
-    pub last_health_check: Option<DateTime<Utc>>,
-    /// Number of consecutive failures
-    pub consecutive_failures: i32,
-    /// Last error message
-    pub last_error: Option<String>,
-    /// When this record was last updated
-    pub updated_at: DateTime<Utc>,
-}
-
-/// Validator interaction log
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct ValidatorInteraction {
-    /// Unique ID for this interaction
-    pub id: i64,
-    /// Validator hotkey
-    pub validator_hotkey: String,
-    /// Type of interaction (auth, list_nodes, ssh_access)
-    pub interaction_type: String,
-    /// Was the interaction successful?
-    pub success: bool,
-    /// Additional details (JSON)
-    pub details: Option<String>,
-    /// When this occurred
-    pub created_at: DateTime<Utc>,
-}
-
-/// SSH access grant record
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
-pub struct SshAccessGrant {
-    /// Unique ID for this grant
-    pub id: i64,
-    /// Validator who was granted access
-    pub validator_hotkey: String,
-    /// Node IDs that were granted access to
-    pub node_ids: String, // JSON array
-    /// When access was granted
-    pub granted_at: DateTime<Utc>,
-    /// When access expires (if applicable)
-    pub expires_at: Option<DateTime<Utc>>,
-    /// Is this grant still active?
-    pub is_active: bool,
 }
 
 impl RegistrationDb {
@@ -117,181 +62,6 @@ impl RegistrationDb {
 
         info!("Database migrations completed successfully");
         Ok(())
-    }
-
-    /// Update node health status
-    pub async fn update_node_health(&self, node_id: &str, is_healthy: bool) -> Result<()> {
-        let now = Utc::now();
-
-        let consecutive_failures = if is_healthy {
-            0
-        } else {
-            // Get current failures and increment
-            let current: Option<(i32,)> =
-                sqlx::query_as("SELECT consecutive_failures FROM node_health WHERE node_id = ?")
-                    .bind(node_id)
-                    .fetch_optional(&self.pool)
-                    .await?;
-
-            current.map(|(f,)| f + 1).unwrap_or(1)
-        };
-
-        sqlx::query(
-            r#"
-            INSERT INTO node_health (node_id, is_healthy, last_health_check, consecutive_failures, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET
-                is_healthy = excluded.is_healthy,
-                last_health_check = CASE WHEN excluded.is_healthy THEN excluded.last_health_check ELSE node_health.last_health_check END,
-                consecutive_failures = excluded.consecutive_failures,
-                updated_at = excluded.updated_at
-            "#,
-        )
-        .bind(node_id)
-        .bind(is_healthy)
-        .bind(if is_healthy { Some(now) } else { None })
-        .bind(consecutive_failures)
-        .bind(now)
-        .execute(&self.pool)
-        .await?;
-
-        debug!(
-            "Updated health status for node {}: healthy={}",
-            node_id, is_healthy
-        );
-        Ok(())
-    }
-
-    /// Get health status of all nodes
-    pub async fn get_all_node_health(&self) -> Result<Vec<NodeHealth>> {
-        let health_records =
-            sqlx::query_as::<_, NodeHealth>("SELECT * FROM node_health ORDER BY node_id")
-                .fetch_all(&self.pool)
-                .await?;
-
-        Ok(health_records)
-    }
-
-    /// Check if a specific node is healthy
-    pub async fn is_node_healthy(&self, node_id: &str) -> Result<bool> {
-        let result =
-            sqlx::query_scalar::<_, bool>("SELECT is_healthy FROM node_health WHERE node_id = ?")
-                .bind(node_id)
-                .fetch_optional(&self.pool)
-                .await?;
-
-        Ok(result.unwrap_or(false))
-    }
-
-    /// Record a validator interaction
-    pub async fn update_validator_interaction(
-        &self,
-        validator_hotkey: &str,
-        success: bool,
-    ) -> Result<()> {
-        self.record_validator_interaction(validator_hotkey, "authentication", success, None)
-            .await
-    }
-
-    /// Record a validator interaction with details
-    pub async fn record_validator_interaction(
-        &self,
-        validator_hotkey: &str,
-        interaction_type: &str,
-        success: bool,
-        details: Option<String>,
-    ) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO validator_interactions (validator_hotkey, interaction_type, success, details)
-            VALUES (?, ?, ?, ?)
-            "#,
-        )
-        .bind(validator_hotkey)
-        .bind(interaction_type)
-        .bind(success)
-        .bind(details)
-        .execute(&self.pool)
-        .await?;
-
-        debug!(
-            "Recorded {} interaction for validator {}",
-            interaction_type, validator_hotkey
-        );
-        Ok(())
-    }
-
-    /// Record SSH access grant
-    pub async fn record_ssh_access_grant(
-        &self,
-        validator_hotkey: &str,
-        node_ids: &[String],
-    ) -> Result<()> {
-        let node_ids_json = serde_json::to_string(node_ids)?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO ssh_access_grants (validator_hotkey, node_ids)
-            VALUES (?, ?)
-            "#,
-        )
-        .bind(validator_hotkey)
-        .bind(node_ids_json)
-        .execute(&self.pool)
-        .await?;
-
-        info!(
-            "Recorded SSH access grant for validator {} to {} nodes",
-            validator_hotkey,
-            node_ids.len()
-        );
-        Ok(())
-    }
-
-    /// Get recent validator interactions
-    pub async fn get_recent_validator_interactions(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<ValidatorInteraction>> {
-        let interactions = sqlx::query_as::<_, ValidatorInteraction>(
-            "SELECT * FROM validator_interactions ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(interactions)
-    }
-
-    /// Get active SSH grants for a validator
-    pub async fn get_active_ssh_grants(
-        &self,
-        validator_hotkey: &str,
-    ) -> Result<Vec<SshAccessGrant>> {
-        let grants = sqlx::query_as::<_, SshAccessGrant>(
-            r#"
-            SELECT * FROM ssh_access_grants
-            WHERE validator_hotkey = ? AND is_active = TRUE
-            ORDER BY granted_at DESC
-            "#,
-        )
-        .bind(validator_hotkey)
-        .fetch_all(&self.pool)
-        .await?;
-
-        Ok(grants)
-    }
-
-    /// Clean up old records (for maintenance)
-    pub async fn cleanup_old_records(&self, days_to_keep: i64) -> Result<u64> {
-        let cutoff = Utc::now() - chrono::Duration::days(days_to_keep);
-
-        let result = sqlx::query("DELETE FROM validator_interactions WHERE created_at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result.rows_affected())
     }
 
     /// Health check for database connection
@@ -383,43 +153,6 @@ impl RegistrationDb {
         Ok(stats)
     }
 
-    /// Clean up old validator interactions
-    pub async fn cleanup_old_validator_interactions(
-        &self,
-        cutoff_date: DateTime<Utc>,
-    ) -> Result<u64> {
-        let result = sqlx::query("DELETE FROM validator_interactions WHERE created_at < ?")
-            .bind(cutoff_date)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(result.rows_affected())
-    }
-
-    /// Clean up old SSH grants
-    pub async fn cleanup_old_ssh_grants(&self, cutoff_date: DateTime<Utc>) -> Result<u64> {
-        let result =
-            sqlx::query("DELETE FROM ssh_access_grants WHERE granted_at < ? AND is_active = 0")
-                .bind(cutoff_date)
-                .execute(&self.pool)
-                .await?;
-
-        Ok(result.rows_affected())
-    }
-
-    /// Clean up stale node health records
-    pub async fn cleanup_stale_node_health(&self, cutoff_date: DateTime<Utc>) -> Result<u64> {
-        // Only clean up records that haven't been updated recently and are not healthy
-        let result = sqlx::query(
-            "DELETE FROM node_health WHERE updated_at < ? AND is_healthy = 0 AND consecutive_failures > 10"
-        )
-        .bind(cutoff_date)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(result.rows_affected())
-    }
-
     /// Ensure database directory exists
     async fn ensure_database_directory(database_url: &str) -> Result<()> {
         if let Some(path) = database_url.strip_prefix("sqlite:") {
@@ -491,46 +224,6 @@ pub struct TableStatistics {
 mod tests {
     use super::*;
     use basilica_common::node_identity::constants::is_valid_huid;
-
-    #[tokio::test]
-    async fn test_validator_interaction_logging() {
-        let config = DatabaseConfig {
-            url: "sqlite::memory:".to_string(),
-            run_migrations: true,
-            ..Default::default()
-        };
-
-        let db = RegistrationDb::new(&config).await.unwrap();
-
-        // Record interactions
-        db.update_validator_interaction("validator-1", true)
-            .await
-            .unwrap();
-
-        // Small delay to ensure different timestamps
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        db.record_validator_interaction(
-            "validator-1",
-            "list_nodes",
-            true,
-            Some(r#"{"count": 5}"#.to_string()),
-        )
-        .await
-        .unwrap();
-
-        // Get recent interactions (should be in reverse chronological order)
-        let interactions = db.get_recent_validator_interactions(10).await.unwrap();
-        assert_eq!(interactions.len(), 2);
-
-        // Check both interaction types are present (order may vary due to timestamp precision)
-        let interaction_types: Vec<&str> = interactions
-            .iter()
-            .map(|i| i.interaction_type.as_str())
-            .collect();
-        assert!(interaction_types.contains(&"authentication"));
-        assert!(interaction_types.contains(&"list_nodes"));
-    }
 
     // ===== AUTOMATIC IDENTITY GENERATION TESTS =====
 
