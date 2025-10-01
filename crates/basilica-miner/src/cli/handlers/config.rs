@@ -404,13 +404,19 @@ fn validate_security_config(
         suggestions.push("Enable signature verification for production".to_string());
     }
 
-    match config.get_private_key() {
-        Ok(private_key) => {
-            validate_private_key_config(&private_key, errors, warnings, suggestions);
+    if config.private_key_file.is_some() {
+        match config.get_private_key() {
+            Ok(private_key) => {
+                validate_private_key_config(&private_key, errors, warnings, suggestions);
+            }
+            Err(e) => {
+                errors.push(format!("Failed to get private key: {e}"));
+            }
         }
-        Err(e) => {
-            errors.push(format!("Failed to get private key: {e}"));
-        }
+    } else {
+        suggestions.push(
+            "Consider setting private_key_file for collateral contract operations".to_string(),
+        );
     }
 }
 
