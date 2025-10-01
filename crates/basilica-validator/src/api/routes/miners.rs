@@ -196,9 +196,7 @@ pub async fn list_miner_nodes(
     }
 }
 
-fn determine_miner_status(
-    miner_data: &crate::persistence::simple_persistence::MinerData,
-) -> MinerStatus {
+fn determine_miner_status(miner_data: &crate::persistence::MinerData) -> MinerStatus {
     let now = Utc::now();
     let time_since_last_seen = now.signed_duration_since(miner_data.last_seen);
 
@@ -214,7 +212,7 @@ fn determine_miner_status(
 }
 
 fn determine_miner_status_from_health(
-    health_data: &crate::persistence::simple_persistence::MinerHealthData,
+    health_data: &crate::persistence::MinerHealthData,
 ) -> MinerStatus {
     let now = Utc::now();
     let time_since_check = now.signed_duration_since(health_data.last_health_check);

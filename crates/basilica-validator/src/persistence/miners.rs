@@ -2,11 +2,16 @@
 //!
 //! This module contains all SQL operations related to miners table management.
 
+use crate::api::types::{NodeRegistration, UpdateMinerRequest};
 use crate::miner_prover::types::MinerInfo;
+use crate::persistence::types::{MinerData, MinerHealthData, NodeHealthData, NodeMetricData};
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
+use serde_json::Value;
 use sqlx::Row;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 impl SimplePersistence {
     /// Check if a miner with the given UID exists
@@ -489,5 +494,397 @@ impl SimplePersistence {
 
         let miner_ids = rows.into_iter().map(|row| row.get("miner_id")).collect();
         Ok(miner_ids)
+    }
+
+    /// Get all registered miners
+    pub async fn get_all_registered_miners(&self) -> Result<Vec<MinerData>, anyhow::Error> {
+        self.get_registered_miners(0, 10000).await
+    }
+
+    /// Get registered miners with pagination
+    pub async fn get_registered_miners(
+        &self,
+        offset: u32,
+        page_size: u32,
+    ) -> Result<Vec<MinerData>, anyhow::Error> {
+        let rows = sqlx::query(
+            "SELECT
+                id, hotkey, endpoint, verification_score, uptime_percentage,
+                last_seen, registered_at, node_info,
+                (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
+             FROM miners
+             ORDER BY registered_at DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(page_size as i64)
+        .bind(offset as i64)
+        .fetch_all(self.pool())
+        .await?;
+
+        let mut miners = Vec::new();
+        for row in rows {
+            let node_info_str: String = row.get("node_info");
+            let node_count: i64 = row.get("node_count");
+            let last_seen_str: String = row.get("last_seen");
+            let registered_at_str: String = row.get("registered_at");
+
+            miners.push(MinerData {
+                miner_id: row.get("id"),
+                hotkey: row.get("hotkey"),
+                endpoint: row.get("endpoint"),
+                node_count: node_count as u32,
+                verification_score: row.get("verification_score"),
+                uptime_percentage: row.get("uptime_percentage"),
+                last_seen: chrono::NaiveDateTime::parse_from_str(
+                    &last_seen_str,
+                    "%Y-%m-%d %H:%M:%S",
+                )
+                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+                .or_else(|_| {
+                    DateTime::parse_from_rfc3339(&last_seen_str).map(|dt| dt.with_timezone(&Utc))
+                })?,
+                registered_at: chrono::NaiveDateTime::parse_from_str(
+                    &registered_at_str,
+                    "%Y-%m-%d %H:%M:%S",
+                )
+                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+                .or_else(|_| {
+                    DateTime::parse_from_rfc3339(&registered_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                })?,
+                node_info: serde_json::from_str(&node_info_str)
+                    .unwrap_or(Value::Object(serde_json::Map::new())),
+            });
+        }
+
+        Ok(miners)
+    }
+
+    /// Register a new miner
+    pub async fn register_miner(
+        &self,
+        miner_id: &str,
+        hotkey: &str,
+        endpoint: &str,
+        nodes: &[NodeRegistration],
+    ) -> Result<(), anyhow::Error> {
+        let now = Utc::now().to_rfc3339();
+        let node_info = serde_json::to_string(&nodes)?;
+
+        let mut tx = self.pool().begin().await?;
+
+        // Validate that ssh_endpoint are not already registered
+        for node in nodes {
+            let existing =
+                sqlx::query("SELECT COUNT(*) as count FROM miner_nodes WHERE ssh_endpoint = ?")
+                    .bind(&node.ssh_endpoint)
+                    .fetch_one(&mut *tx)
+                    .await?;
+
+            let count: i64 = existing.get("count");
+            if count > 0 {
+                return Err(anyhow::anyhow!(
+                    "Node with ssh_endpoint {} is already registered",
+                    node.ssh_endpoint
+                ));
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(miner_id)
+        .bind(hotkey)
+        .bind(endpoint)
+        .bind(&now)
+        .bind(&now)
+        .bind(&now)
+        .bind(&node_info)
+        .execute(&mut *tx)
+        .await?;
+
+        for node in nodes {
+            let node_id = Uuid::new_v4().to_string();
+
+            sqlx::query(
+                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )
+            .bind(&node_id)
+            .bind(miner_id)
+            .bind(&node.node_id)
+            .bind(&node.ssh_endpoint)
+            .bind(node.gpu_count as i64)
+            .bind(&now)
+            .bind(&now)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Get miner by ID
+    pub async fn get_miner_by_id(
+        &self,
+        miner_id: &str,
+    ) -> Result<Option<MinerData>, anyhow::Error> {
+        let row = sqlx::query(
+            "SELECT
+                id, hotkey, endpoint, verification_score, uptime_percentage,
+                last_seen, registered_at, node_info,
+                (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
+             FROM miners
+             WHERE id = ?",
+        )
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(row) = row {
+            let node_info_str: String = row.get("node_info");
+            let node_count: i64 = row.get("node_count");
+            let last_seen_str: String = row.get("last_seen");
+            let registered_at_str: String = row.get("registered_at");
+
+            Ok(Some(MinerData {
+                miner_id: row.get("id"),
+                hotkey: row.get("hotkey"),
+                endpoint: row.get("endpoint"),
+                node_count: node_count as u32,
+                verification_score: row.get("verification_score"),
+                uptime_percentage: row.get("uptime_percentage"),
+                last_seen: chrono::NaiveDateTime::parse_from_str(
+                    &last_seen_str,
+                    "%Y-%m-%d %H:%M:%S",
+                )
+                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+                .or_else(|_| {
+                    DateTime::parse_from_rfc3339(&last_seen_str).map(|dt| dt.with_timezone(&Utc))
+                })?,
+                registered_at: chrono::NaiveDateTime::parse_from_str(
+                    &registered_at_str,
+                    "%Y-%m-%d %H:%M:%S",
+                )
+                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+                .or_else(|_| {
+                    DateTime::parse_from_rfc3339(&registered_at_str)
+                        .map(|dt| dt.with_timezone(&Utc))
+                })?,
+                node_info: serde_json::from_str(&node_info_str)
+                    .unwrap_or(Value::Object(serde_json::Map::new())),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Update miner information
+    pub async fn update_miner(
+        &self,
+        miner_id: &str,
+        request: &UpdateMinerRequest,
+    ) -> Result<(), anyhow::Error> {
+        let now = Utc::now().to_rfc3339();
+
+        if let Some(endpoint) = &request.endpoint {
+            let result = sqlx::query("UPDATE miners SET endpoint = ?, updated_at = ? WHERE id = ?")
+                .bind(endpoint)
+                .bind(&now)
+                .bind(miner_id)
+                .execute(self.pool())
+                .await?;
+
+            if result.rows_affected() == 0 {
+                return Err(anyhow::anyhow!("Miner not found"));
+            }
+        }
+
+        if let Some(nodes) = &request.nodes {
+            // When updating nodes, we need to handle the miner_nodes table
+            let mut tx = self.pool().begin().await?;
+
+            // First, validate that new ssh_endpoints aren't already registered by other miners
+            for node in nodes {
+                let existing = sqlx::query(
+                    "SELECT COUNT(*) as count FROM miner_nodes
+                     WHERE ssh_endpoint = ? AND miner_id != ?",
+                )
+                .bind(&node.ssh_endpoint)
+                .bind(miner_id)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                let count: i64 = existing.get("count");
+                if count > 0 {
+                    return Err(anyhow::anyhow!(
+                        "Node with ssh_endpoint {} is already registered by another miner",
+                        node.ssh_endpoint
+                    ));
+                }
+            }
+
+            // Delete existing nodes for this miner
+            sqlx::query("DELETE FROM miner_nodes WHERE miner_id = ?")
+                .bind(miner_id)
+                .execute(&mut *tx)
+                .await?;
+
+            // Insert new nodes
+            for node in nodes {
+                let node_id = Uuid::new_v4().to_string();
+
+                sqlx::query(
+                    "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                )
+                .bind(&node_id)
+                .bind(miner_id)
+                .bind(&node.node_id)
+                .bind(&node.ssh_endpoint)
+                .bind(node.gpu_count as i64)
+                .bind(&now)
+                .bind(&now)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            // Also update the node_info JSON in the miners table
+            let node_info = serde_json::to_string(nodes)?;
+            let result =
+                sqlx::query("UPDATE miners SET node_info = ?, updated_at = ? WHERE id = ?")
+                    .bind(&node_info)
+                    .bind(&now)
+                    .bind(miner_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+            if result.rows_affected() == 0 {
+                tx.rollback().await?;
+                return Err(anyhow::anyhow!("Miner not found"));
+            }
+
+            tx.commit().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Remove miner
+    pub async fn remove_miner(&self, miner_id: &str) -> Result<(), anyhow::Error> {
+        let result = sqlx::query("DELETE FROM miners WHERE id = ?")
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?;
+
+        if result.rows_affected() == 0 {
+            Err(anyhow::anyhow!("Miner not found"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Get miner health status
+    pub async fn get_miner_health(
+        &self,
+        miner_id: &str,
+    ) -> Result<Option<MinerHealthData>, anyhow::Error> {
+        let rows = sqlx::query(
+            "SELECT node_id, status, last_health_check, created_at
+             FROM miner_nodes
+             WHERE miner_id = ?",
+        )
+        .bind(miner_id)
+        .fetch_all(self.pool())
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let mut node_health = Vec::new();
+        let mut latest_check = Utc::now() - chrono::Duration::hours(24);
+
+        for row in rows {
+            let last_health_str: Option<String> = row.get("last_health_check");
+            let created_at_str: String = row.get("created_at");
+
+            let last_seen = if let Some(health_str) = last_health_str {
+                DateTime::parse_from_rfc3339(&health_str)?.with_timezone(&Utc)
+            } else {
+                DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc)
+            };
+
+            if last_seen > latest_check {
+                latest_check = last_seen;
+            }
+
+            node_health.push(NodeHealthData {
+                node_id: row.get("node_id"),
+                status: row
+                    .get::<Option<String>, _>("status")
+                    .unwrap_or_else(|| "unknown".to_string()),
+                last_seen,
+            });
+        }
+
+        Ok(Some(MinerHealthData {
+            last_health_check: latest_check,
+            node_health,
+        }))
+    }
+
+    /// Get all nodes with their GPU and rental data for metrics initialization
+    /// This eliminates N+1 queries by fetching everything in a single query with joins
+    pub async fn get_all_nodes_for_metrics(&self) -> Result<Vec<NodeMetricData>, anyhow::Error> {
+        let query = r#"
+            SELECT
+                me.node_id,
+                me.miner_id,
+                gua.gpu_name,
+                CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END as has_active_rental
+            FROM miner_nodes me
+            INNER JOIN gpu_uuid_assignments gua
+                ON me.node_id = gua.node_id
+                AND me.miner_id = gua.miner_id
+            LEFT JOIN rentals r
+                ON me.node_id = r.node_id
+                AND me.miner_id = r.miner_id
+                AND r.state = 'active'
+            WHERE gua.gpu_name IS NOT NULL
+            GROUP BY me.node_id, me.miner_id
+        "#;
+
+        let rows = sqlx::query(query).fetch_all(self.pool()).await?;
+
+        let mut node_metrics = Vec::new();
+        for row in rows {
+            let node_id: String = row.get("node_id");
+            let miner_id: String = row.get("miner_id");
+            let gpu_name: Option<String> = row.get("gpu_name");
+            let has_active_rental: i32 = row.get("has_active_rental");
+
+            // Extract miner UID from miner_id string (format: "miner_{uid}")
+            let miner_uid = if miner_id.starts_with("miner_") {
+                miner_id
+                    .strip_prefix("miner_")
+                    .and_then(|uid_str| uid_str.parse::<u16>().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            node_metrics.push(NodeMetricData {
+                node_id,
+                miner_id,
+                miner_uid,
+                gpu_name,
+                has_active_rental: has_active_rental != 0,
+            });
+        }
+
+        Ok(node_metrics)
     }
 }

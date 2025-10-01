@@ -3,12 +3,24 @@
 //! This module contains all SQL operations related to miner-node relationships.
 
 use crate::miner_prover::types::MinerInfo;
+use crate::persistence::types::{AvailableNodeData, NodeData};
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, info, warn};
+
+fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
+    use regex::Regex;
+    let re = Regex::new(r"(\d+)GB").unwrap();
+    if let Some(captures) = re.captures(gpu_name) {
+        captures[1].parse().unwrap_or(0)
+    } else {
+        0
+    }
+}
 
 impl SimplePersistence {
     /// Ensure miner-node relationship exists
@@ -560,5 +572,548 @@ impl SimplePersistence {
         }
 
         Ok(())
+    }
+
+    /// Get available nodes for rental (not currently rented)
+    pub async fn get_available_nodes(
+        &self,
+        min_gpu_memory: Option<u32>,
+        gpu_type: Option<String>,
+        min_gpu_count: Option<u32>,
+        location: Option<basilica_common::LocationProfile>,
+    ) -> Result<Vec<AvailableNodeData>, anyhow::Error> {
+        let mut query_str = String::from(
+            "SELECT
+                me.node_id,
+                me.miner_id,
+                me.status,
+                me.gpu_count,
+                m.verification_score,
+                m.uptime_percentage,
+                GROUP_CONCAT(gua.gpu_name) as gpu_names,
+                ehp.cpu_model,
+                ehp.cpu_cores,
+                ehp.ram_gb,
+                enp.city,
+                enp.region,
+                enp.country,
+                esp.download_mbps,
+                esp.upload_mbps,
+                esp.test_timestamp
+            FROM miner_nodes me
+            JOIN miners m ON me.miner_id = m.id
+            LEFT JOIN rentals r ON me.node_id = r.node_id
+                AND r.miner_id = me.miner_id
+                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
+            LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+            LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
+            LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
+            LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
+            WHERE r.id IS NULL
+                AND (me.status IS NULL OR me.status != 'offline')",
+        );
+
+        if let Some(ref loc) = location {
+            if let Some(ref country) = loc.country {
+                query_str.push_str(&format!(" AND LOWER(enp.country) = LOWER('{}')", country));
+            }
+            if let Some(ref region) = loc.region {
+                query_str.push_str(&format!(" AND LOWER(enp.region) = LOWER('{}')", region));
+            }
+            if let Some(ref city) = loc.city {
+                query_str.push_str(&format!(" AND LOWER(enp.city) = LOWER('{}')", city));
+            }
+        }
+
+        query_str.push_str(" GROUP BY me.node_id");
+
+        if let Some(min_count) = min_gpu_count {
+            query_str.push_str(&format!(" HAVING COUNT(gua.gpu_uuid) >= {}", min_count));
+        }
+
+        let rows = sqlx::query(&query_str).fetch_all(self.pool()).await?;
+
+        let mut nodes = Vec::new();
+        for row in rows {
+            let gpu_names: Option<String> = row.get("gpu_names");
+
+            let mut gpu_specs: Vec<crate::api::types::GpuSpec> = vec![];
+
+            if let Some(names) = gpu_names {
+                if !names.is_empty() {
+                    for gpu_name in names.split(',') {
+                        let memory_gb = extract_gpu_memory_gb(gpu_name);
+
+                        gpu_specs.push(crate::api::types::GpuSpec {
+                            name: gpu_name.to_string(),
+                            memory_gb,
+                            compute_capability: "8.0".to_string(),
+                        });
+                    }
+                }
+            }
+
+            if let Some(min_memory) = min_gpu_memory {
+                let meets_memory = gpu_specs.iter().any(|gpu| gpu.memory_gb >= min_memory);
+                if !meets_memory && !gpu_specs.is_empty() {
+                    continue;
+                }
+            }
+
+            if let Some(ref gpu_type_filter) = gpu_type {
+                let matches_type = gpu_specs.iter().any(|gpu| {
+                    gpu.name
+                        .to_lowercase()
+                        .contains(&gpu_type_filter.to_lowercase())
+                });
+                if !matches_type && !gpu_specs.is_empty() {
+                    continue;
+                }
+            }
+
+            let cpu_model: Option<String> = row.get("cpu_model");
+            let cpu_cores: Option<i32> = row.get("cpu_cores");
+            let ram_gb: Option<i32> = row.get("ram_gb");
+
+            let cpu_specs = crate::api::types::CpuSpec {
+                cores: cpu_cores.unwrap_or(0) as u32,
+                model: cpu_model.unwrap_or_else(|| "Unknown".to_string()),
+                memory_gb: ram_gb.unwrap_or(0) as u32,
+            };
+
+            let city: Option<String> = row.get("city");
+            let region: Option<String> = row.get("region");
+            let country: Option<String> = row.get("country");
+
+            let location_profile = basilica_common::LocationProfile::new(city, region, country);
+            let location = Some(location_profile.to_string());
+
+            let download_mbps: Option<f64> = row.get("download_mbps");
+            let upload_mbps: Option<f64> = row.get("upload_mbps");
+            let test_timestamp_str: Option<String> = row.get("test_timestamp");
+
+            let speed_test_timestamp = test_timestamp_str.and_then(|ts| {
+                chrono::DateTime::parse_from_rfc3339(&ts)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+            });
+
+            nodes.push(AvailableNodeData {
+                node_id: row.get("node_id"),
+                miner_id: row.get("miner_id"),
+                gpu_specs,
+                cpu_specs,
+                location,
+                verification_score: row.get("verification_score"),
+                uptime_percentage: row.get("uptime_percentage"),
+                status: row.get("status"),
+                download_mbps,
+                upload_mbps,
+                speed_test_timestamp,
+            });
+        }
+
+        Ok(nodes)
+    }
+
+    /// Get miner nodes
+    pub async fn get_miner_nodes(&self, miner_id: &str) -> Result<Vec<NodeData>, anyhow::Error> {
+        let rows = sqlx::query(
+            "SELECT
+                me.node_id,
+                GROUP_CONCAT(gua.gpu_name) as gpu_names,
+                ehp.cpu_model,
+                ehp.cpu_cores,
+                ehp.ram_gb,
+                enp.city,
+                enp.region,
+                enp.country
+             FROM miner_nodes me
+             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
+             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
+             WHERE me.miner_id = ?
+             GROUP BY me.node_id,
+                      ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
+                      enp.city, enp.region, enp.country",
+        )
+        .bind(miner_id)
+        .fetch_all(self.pool())
+        .await?;
+
+        let mut nodes = Vec::new();
+        for row in rows {
+            let gpu_names: Option<String> = row.get("gpu_names");
+
+            let mut gpu_specs: Vec<crate::api::types::GpuSpec> = vec![];
+
+            if let Some(names) = gpu_names {
+                if !names.is_empty() {
+                    for gpu_name in names.split(',') {
+                        let memory_gb = extract_gpu_memory_gb(gpu_name);
+
+                        gpu_specs.push(crate::api::types::GpuSpec {
+                            name: gpu_name.to_string(),
+                            memory_gb,
+                            compute_capability: "8.0".to_string(),
+                        });
+                    }
+                }
+            }
+
+            let cpu_model: Option<String> = row.get("cpu_model");
+            let cpu_cores: Option<i32> = row.get("cpu_cores");
+            let ram_gb: Option<i32> = row.get("ram_gb");
+
+            let cpu_specs = crate::api::types::CpuSpec {
+                cores: cpu_cores.unwrap_or(0) as u32,
+                model: cpu_model.unwrap_or_else(|| "Unknown".to_string()),
+                memory_gb: ram_gb.unwrap_or(0) as u32,
+            };
+
+            let city: Option<String> = row.get("city");
+            let region: Option<String> = row.get("region");
+            let country: Option<String> = row.get("country");
+
+            let location_profile = basilica_common::LocationProfile::new(city, region, country);
+            let location = Some(location_profile.to_string());
+
+            nodes.push(NodeData {
+                node_id: row.get("node_id"),
+                gpu_specs,
+                cpu_specs,
+                location,
+            });
+        }
+
+        Ok(nodes)
+    }
+
+    /// Get miner ID by node ID
+    pub async fn get_miner_id_by_node(&self, node_id: &str) -> Result<String, anyhow::Error> {
+        let miner_id: String = sqlx::query(
+            "SELECT miner_id FROM miner_nodes \
+                 WHERE node_id = ? \
+                 LIMIT 1",
+        )
+        .bind(node_id)
+        .fetch_one(self.pool())
+        .await?
+        .get("miner_id");
+
+        Ok(miner_id)
+    }
+
+    /// get node ssh-endpoint by node ID, return None if not found
+    pub async fn get_node_ssh_endpoint(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let row = sqlx::query(
+            "SELECT ssh_endpoint FROM miner_nodes \
+                 WHERE node_id = ? AND miner_id = ? \
+                 LIMIT 1",
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(row.map(|r| r.get("ssh_endpoint")))
+    }
+
+    /// Get detailed node information including GPU and CPU specs
+    pub async fn get_node_details(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+    ) -> Result<Option<crate::api::types::NodeDetails>, anyhow::Error> {
+        let row = sqlx::query(
+            "SELECT
+                me.node_id,
+                GROUP_CONCAT(gua.gpu_name) as gpu_names,
+                ehp.cpu_model,
+                ehp.cpu_cores,
+                ehp.ram_gb,
+                enp.city,
+                enp.region,
+                enp.country,
+                esp.download_mbps,
+                esp.upload_mbps,
+                esp.test_timestamp
+             FROM miner_nodes me
+             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
+             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
+             LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
+             WHERE me.node_id = ? AND me.miner_id = ?
+             GROUP BY me.node_id,
+                      ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
+                      enp.city, enp.region, enp.country,
+                      esp.download_mbps, esp.upload_mbps, esp.test_timestamp
+             LIMIT 1",
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(row) = row {
+            let node_id: String = row.get("node_id");
+
+            let gpu_names: Option<String> = row.get("gpu_names");
+
+            let mut gpu_specs: Vec<crate::api::types::GpuSpec> = vec![];
+
+            if let Some(names) = gpu_names {
+                if !names.is_empty() {
+                    for gpu_name in names.split(',') {
+                        let memory_gb = extract_gpu_memory_gb(gpu_name);
+
+                        gpu_specs.push(crate::api::types::GpuSpec {
+                            name: gpu_name.to_string(),
+                            memory_gb,
+                            compute_capability: "8.0".to_string(),
+                        });
+                    }
+                }
+            }
+
+            let hw_cpu_model: Option<String> = row.get("cpu_model");
+            let hw_cpu_cores: Option<i32> = row.get("cpu_cores");
+            let hw_ram_gb: Option<i32> = row.get("ram_gb");
+
+            let net_city: Option<String> = row.get("city");
+            let net_region: Option<String> = row.get("region");
+            let net_country: Option<String> = row.get("country");
+
+            let download_mbps: Option<f64> = row.get("download_mbps");
+            let upload_mbps: Option<f64> = row.get("upload_mbps");
+            let test_timestamp: Option<String> = row.get("test_timestamp");
+
+            let cpu_specs: crate::api::types::CpuSpec = crate::api::types::CpuSpec {
+                cores: hw_cpu_cores.unwrap_or(0) as u32,
+                model: hw_cpu_model.unwrap_or_else(|| "Unknown".to_string()),
+                memory_gb: hw_ram_gb.unwrap_or(0) as u32,
+            };
+
+            let final_location =
+                if net_city.is_some() || net_region.is_some() || net_country.is_some() {
+                    let loc_profile = basilica_common::LocationProfile {
+                        city: net_city,
+                        region: net_region,
+                        country: net_country,
+                    };
+                    Some(loc_profile.to_string())
+                } else {
+                    None
+                };
+
+            let network_speed = if download_mbps.is_some() || upload_mbps.is_some() {
+                Some(crate::api::types::NetworkSpeedInfo {
+                    download_mbps,
+                    upload_mbps,
+                    test_timestamp: test_timestamp.and_then(|ts| {
+                        DateTime::parse_from_rfc3339(&ts)
+                            .ok()
+                            .map(|dt| dt.with_timezone(&Utc))
+                    }),
+                })
+            } else {
+                None
+            };
+
+            Ok(Some(crate::api::types::NodeDetails {
+                id: node_id,
+                gpu_specs,
+                cpu_specs,
+                location: final_location,
+                network_speed,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the actual gpu_count for an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_count_from_assignments(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<u32, anyhow::Error> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT gpu_uuid) FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(count as u32)
+    }
+
+    /// Get the actual gpu_memory_gb for a specific GPU index of an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_memory_gb_by_index(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+        index: u32,
+    ) -> Result<f64, anyhow::Error> {
+        let memory: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(gpu_memory_gb, 0.0) FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND node_id = ? AND gpu_index = ?",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .bind(index)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(memory)
+    }
+
+    /// Get the actual gpu_memory_gb for a specific GPU index of an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_memory_gb_by_gpu_uuid(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+        gpu_uuid: &str,
+    ) -> Result<f64, anyhow::Error> {
+        let memory: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(gpu_memory_gb, 0.0) FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND node_id = ? AND gpu_uuid = ?",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .bind(gpu_uuid)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(memory)
+    }
+
+    /// Get the actual gpu_memory_gb for the first GPU (index 0) of an node from gpu_uuid_assignments
+    pub async fn get_node_first_gpu_memory_gb(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<f64, anyhow::Error> {
+        let memory: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(gpu_memory_gb, 0.0) FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND node_id = ? AND gpu_index = 0",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(memory)
+    }
+
+    /// Get the GPU name/model for an node from gpu_uuid_assignments
+    pub async fn get_node_gpu_name_from_assignments(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let gpu_name: Option<String> = sqlx::query_scalar(
+            "SELECT gpu_name FROM gpu_uuid_assignments
+             WHERE miner_id = ? AND node_id = ?
+             LIMIT 1",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(gpu_name)
+    }
+
+    /// Get the actual gpu_count for all ONLINE nodes of a miner from gpu_uuid_assignments
+    pub async fn get_miner_gpu_uuid_assignments(
+        &self,
+        miner_id: &str,
+    ) -> Result<Vec<(String, u32, String, f64)>, anyhow::Error> {
+        let rows = sqlx::query(
+            "SELECT
+                ga.node_id,
+                COUNT(DISTINCT ga.gpu_uuid) as gpu_count,
+                ga.gpu_name,
+                MAX(ga.gpu_memory_gb) as gpu_memory_gb
+             FROM gpu_uuid_assignments ga
+             JOIN miner_nodes me ON ga.node_id = me.node_id AND ga.miner_id = me.miner_id
+             WHERE ga.miner_id = ?
+                AND me.status IN ('online', 'verified')
+             GROUP BY ga.node_id, ga.gpu_name
+             HAVING COUNT(DISTINCT ga.gpu_uuid) > 0",
+        )
+        .bind(miner_id)
+        .fetch_all(self.pool())
+        .await?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let node_id: String = row.get("node_id");
+            let gpu_count: i64 = row.get("gpu_count");
+            let gpu_name: String = row.get("gpu_name");
+            let gpu_memory_gb: f64 = row.get("gpu_memory_gb");
+
+            results.push((node_id, gpu_count as u32, gpu_name, gpu_memory_gb));
+        }
+
+        Ok(results)
+    }
+
+    /// Get total GPU count for a miner from gpu_uuid_assignments
+    pub async fn get_miner_total_gpu_count_from_assignments(
+        &self,
+        miner_id: &str,
+    ) -> Result<u32, anyhow::Error> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT ga.gpu_uuid)
+             FROM gpu_uuid_assignments ga
+             INNER JOIN miner_nodes me ON ga.node_id = me.node_id AND ga.miner_id = me.miner_id
+             WHERE ga.miner_id = ?
+                AND me.status IN ('online', 'verified')",
+        )
+        .bind(miner_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        Ok(count as u32)
+    }
+
+    /// Get known nodes from database for a miner
+    pub async fn get_known_nodes_for_miner(
+        &self,
+        miner_uid: u16,
+    ) -> Result<Vec<(String, String, i32, String)>, anyhow::Error> {
+        let miner_id = format!("miner_{}", miner_uid);
+
+        let query = r#"
+            SELECT node_id, ssh_endpoint, gpu_count, status
+            FROM miner_nodes
+            WHERE miner_id = ?
+            AND status IN ('online', 'verified')
+            AND (last_health_check IS NULL OR last_health_check > datetime('now', '-1 hour'))
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(&miner_id)
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut known_nodes = Vec::new();
+        for row in rows {
+            let node_id: String = row.get("node_id");
+            let ssh_endpoint: String = row.get("ssh_endpoint");
+            let gpu_count: i32 = row.get("gpu_count");
+            let status: String = row.get("status");
+            known_nodes.push((node_id, ssh_endpoint, gpu_count, status));
+        }
+
+        Ok(known_nodes)
     }
 }
