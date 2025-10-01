@@ -9,6 +9,7 @@ Comprehensive guide for running a Basilica miner node that provides GPU compute 
 **What it does**: Miner orchestrates validator access to your GPU nodes via SSH. No executor binaries needed.
 
 **Minimum Requirements**:
+
 - Miner server: Linux with 8+ CPU cores, 16GB RAM, public IP
 - GPU node(s): NVIDIA GPU (A100/H100/B200), CUDA ≥12.8, Docker with nvidia runtime
 - Bittensor wallet registered on subnet 39 (mainnet) or 387 (testnet)
@@ -22,19 +23,35 @@ ssh-keygen -t ed25519 -f ~/.ssh/miner_node_key -N ""
 # 2. Deploy key to GPU nodes
 ssh-copy-id -i ~/.ssh/miner_node_key.pub basilica@<gpu_node_ip>
 
-# 3. Create minimal config
+# 3. Create minimal config (also see config/miner.prod.toml)
 cat > miner.toml <<EOF
 [bittensor]
 wallet_name = "your_wallet"
 hotkey_name = "your_hotkey"
 external_ip = "your_public_ip"
 axon_port = 8080
+network = "finney"
+netuid = 39
+weight_interval_secs = 300
 
 [node_management]
-nodes = [{ host = "gpu_node_ip", port = 22, username = "basilica" }]
+nodes = [
+  { host = "<node 1 IP>", port = 22, username = "root" },
+  { host = "<node 2 IP>", port = 22, username = "root" },
+]
+
+[validator_comms]
+host = "0.0.0.0"
+port = 8080
 
 [ssh_session]
 miner_node_key_path = "~/.ssh/miner_node_key"
+
+[validator_assignment]
+enabled = true
+strategy = "highest_stake"
+min_stake_threshold = 12000.0
+validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 EOF
 
 # 4. Build and run
