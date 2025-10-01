@@ -559,7 +559,7 @@ pub struct TableStatistics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use basilica_common::node_identity::{constants::is_valid_huid, NodeIdentity};
+    use basilica_common::node_identity::constants::is_valid_huid;
 
     #[tokio::test]
     async fn test_validator_interaction_logging() {

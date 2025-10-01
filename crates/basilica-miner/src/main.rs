@@ -17,7 +17,6 @@ mod config;
 mod metrics;
 mod node_manager;
 mod persistence;
-mod request_verification;
 mod services;
 mod ssh;
 mod validator_comms;
@@ -121,7 +120,6 @@ impl MinerState {
                     let min_stake_rao =
                         (config.validator_assignment.min_stake_threshold * 1_000_000_000.0) as u128;
                     let strategy = validator_discovery::HighestStakeAssignment::new(
-                        assignment_pool.clone(),
                         min_stake_rao,
                         config.validator_assignment.validator_hotkey.clone(),
                     );

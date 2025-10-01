@@ -10,7 +10,6 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::node_manager::{NodeConfig, NodeManager};
-use sqlx::SqlitePool;
 
 /// Information about a validator
 #[derive(Debug, Clone)]
@@ -227,19 +226,16 @@ impl AssignmentStrategy for RoundRobinAssignment {
 
 /// Highest stake assignment strategy
 pub struct HighestStakeAssignment {
-    _pool: SqlitePool,
     min_stake_threshold: u128,
     validator_hotkey: Option<String>,
 }
 
 impl HighestStakeAssignment {
     pub fn new(
-        pool: SqlitePool,
         min_stake_threshold: u128,
         validator_hotkey: Option<String>,
     ) -> Self {
         Self {
-            _pool: pool,
             min_stake_threshold,
             validator_hotkey,
         }
