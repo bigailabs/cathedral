@@ -8,10 +8,7 @@ use std::path::Path;
 use tokio::fs;
 use tracing::{debug, info};
 
-use basilica_common::{
-    config::DatabaseConfig,
-    node_identity::{NodeId, NodeIdentity},
-};
+use basilica_common::{config::DatabaseConfig, node_identity::NodeId};
 
 /// Registration database client
 #[derive(Debug, Clone)]
@@ -168,7 +165,7 @@ impl RegistrationDb {
         Ok(())
     }
 
-    /// Get or create a deterministic node ID based on SSH credentials
+    /// Generate a deterministic node ID based on SSH credentials (in-memory only)
     ///
     /// # Arguments
     /// * `username` - SSH username
@@ -177,47 +174,19 @@ impl RegistrationDb {
     ///
     /// # Returns
     /// A deterministic NodeId based on the SSH credentials. The same credentials
-    /// will always generate the same node ID. The identity is persisted to the database.
+    /// will always generate the same node ID. This is generated in-memory only
+    /// and not persisted to the database.
     pub async fn get_or_create_node_id(
         &self,
         username: &str,
         host: &str,
         port: u16,
     ) -> Result<NodeId> {
-        use chrono::{DateTime, Utc};
+        // Create deterministic seed from SSH credentials
+        let ssh_credentials = format!("{}@{}:{}", username, host, port);
 
-        // Create deterministic node address from SSH credentials
-        let node_address = format!("{}@{}:{}", username, host, port);
-
-        // First try to get existing identity from database
-        let existing = sqlx::query_as::<_, (String, String)>(
-            "SELECT uuid, created_at FROM node_uuids WHERE node_address = ?",
-        )
-        .bind(&node_address)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some((uuid_str, created_at_str)) = existing {
-            let uuid = uuid::Uuid::parse_str(&uuid_str)?;
-            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
-                .context("Failed to parse timestamp")?
-                .with_timezone(&Utc);
-            let node_id = NodeId::from_parts(uuid, created_at.into())?;
-            return Ok(node_id);
-        }
-
-        // Generate new deterministic NodeId from SSH credentials
-        let node_id = NodeId::new(&node_address)?;
-
-        // Persist to database
-        let created_at: DateTime<Utc> = node_id.created_at().into();
-        sqlx::query("INSERT INTO node_uuids (node_address, uuid, created_at) VALUES (?, ?, ?)")
-            .bind(&node_address)
-            .bind(node_id.uuid().to_string())
-            .bind(created_at.to_rfc3339())
-            .execute(&self.pool)
-            .await
-            .context("Failed to insert node identity")?;
+        // Generate deterministic NodeId from SSH credentials (in-memory only)
+        let node_id = NodeId::new(&ssh_credentials)?;
 
         Ok(node_id)
     }
@@ -267,7 +236,7 @@ mod tests {
         assert_eq!(node_id.uuid().get_version(), Some(uuid::Version::Random));
         assert!(!node_id.uuid().to_string().is_empty());
 
-        // Verify the identity was stored in the database
+        // Verify the identity is deterministically generated (same credentials = same ID)
         let stored_id = db
             .get_or_create_node_id("testuser", "127.0.0.1", 50051)
             .await
@@ -292,7 +261,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Retrieve multiple times - should always return the same identity
+        // Generate multiple times - should always return the same identity due to determinism
         for _ in 0..5 {
             let id2 = db
                 .get_or_create_node_id("testuser", "192.168.1.100", 8080)
