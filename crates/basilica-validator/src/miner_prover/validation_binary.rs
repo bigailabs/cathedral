@@ -27,7 +27,7 @@ struct ValidationRequest {
     ssh_port: u16,
     ssh_user: String,
     ssh_key: String,
-    node_path: String,
+    executor_path: String,
     timeout: u64,
 }
 
@@ -330,7 +330,7 @@ impl ValidationServerClient {
     pub async fn submit_job(
         &self,
         ssh_details: &SshConnectionDetails,
-        node_path: &str,
+        executor_path: &str,
         timeout_secs: u64,
     ) -> Result<String> {
         let request = ValidationRequest {
@@ -338,7 +338,7 @@ impl ValidationServerClient {
             ssh_port: ssh_details.port,
             ssh_user: ssh_details.username.clone(),
             ssh_key: ssh_details.private_key_path.to_string_lossy().to_string(),
-            node_path: node_path.to_string(),
+            executor_path: executor_path.to_string(),
             timeout: timeout_secs,
         };
 
