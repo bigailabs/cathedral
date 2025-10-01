@@ -559,7 +559,7 @@ impl VerificationEngine {
                     miner_uid: MinerUid::new(miner_uid),
                     status: "available".to_string(),
                     capabilities: vec!["gpu".to_string()],
-                    node_ssh_endpoint: format!("{}:{}", details.host, details.port),
+                    node_ssh_endpoint: format!("{}@{}:{}", details.username, details.host, details.port),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
