@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use super::Commands;
@@ -18,10 +17,6 @@ pub struct Args {
     /// Enable prometheus metrics endpoint
     #[arg(long)]
     pub metrics: bool,
-
-    /// Metrics server address
-    #[arg(long, default_value = "0.0.0.0:9091")]
-    pub metrics_addr: SocketAddr,
 
     /// Generate sample configuration file
     #[arg(long)]

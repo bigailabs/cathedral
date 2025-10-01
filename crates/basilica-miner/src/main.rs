@@ -259,13 +259,13 @@ impl MinerState {
                     info!("Received shutdown signal, stopping miner...");
                 }
                 _ = validator_handle => {
-                    warn!("Validator comms server stopped unexpectedly");
+                    error!("Validator comms server stopped unexpectedly");
                 }
                 _ = stake_monitor_handle => {
-                    warn!("Stake monitor service stopped unexpectedly");
+                    error!("Stake monitor service stopped unexpectedly");
                 }
                 _ = discovery_handle => {
-                    warn!("Validator discovery service stopped unexpectedly");
+                    error!("Validator discovery service stopped unexpectedly");
                 }
             }
         } else {
@@ -274,10 +274,10 @@ impl MinerState {
                     info!("Received shutdown signal, stopping miner...");
                 }
                 _ = validator_handle => {
-                    warn!("Validator comms server stopped unexpectedly");
+                    error!("Validator comms server stopped unexpectedly");
                 }
                 _ = stake_monitor_handle => {
-                    warn!("Stake monitor service stopped unexpectedly");
+                    error!("Stake monitor service stopped unexpectedly");
                 }
             }
         }

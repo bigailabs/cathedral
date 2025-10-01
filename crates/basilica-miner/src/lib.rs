@@ -7,7 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod node_manager;
 pub mod persistence;
-pub mod request_verification;
+// pub mod request_verification;
 pub mod services;
 pub mod ssh;
 pub mod validator_comms;
