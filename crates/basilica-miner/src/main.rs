@@ -358,14 +358,6 @@ async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<(
             println!("Database migrations completed successfully");
             Ok(())
         }
-        Commands::DeployNodes {
-            dry_run: _,
-            only_machines: _,
-            status_only: _,
-        } => {
-            error!("Deploy nodes command is no longer supported - nodes are managed directly");
-            Err(anyhow::anyhow!("This command has been deprecated"))
-        }
     }
 }
 

@@ -26,18 +26,6 @@ pub enum Commands {
     Status,
     /// Run database migrations
     Migrate,
-    /// Deploy nodes to remote machines
-    DeployNodes {
-        /// Only show what would be deployed without actually deploying
-        #[arg(long)]
-        dry_run: bool,
-        /// Deploy to specific machine IDs only (comma-separated)
-        #[arg(long)]
-        only_machines: Option<String>,
-        /// Skip deployment and only check status
-        #[arg(long)]
-        status_only: bool,
-    },
 }
 
 /// Validator management subcommands

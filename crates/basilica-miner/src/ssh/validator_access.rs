@@ -59,22 +59,4 @@ impl ValidatorAccessService {
             .is_validator_authorized(&validator_hotkey.to_string())
             .await)
     }
-
-    /// Clean up expired validator access
-    pub async fn cleanup_expired(&self) -> Result<CleanupStats> {
-        // Return empty stats as there's no session management in direct access model
-        Ok(CleanupStats {
-            cleaned_keys: 0,
-            cleaned_users: 0,
-            errors_encountered: 0,
-        })
-    }
-}
-
-/// Statistics from cleanup operations
-#[derive(Debug, Clone, Default)]
-pub struct CleanupStats {
-    pub cleaned_keys: usize,
-    pub cleaned_users: usize,
-    pub errors_encountered: usize,
 }

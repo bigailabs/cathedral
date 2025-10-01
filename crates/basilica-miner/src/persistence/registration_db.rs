@@ -161,44 +161,12 @@ impl RegistrationDb {
         .await
         .context("Failed to create ssh_access_grants table")?;
 
-        // Create SSH sessions table for temporary access tracking
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS ssh_sessions (
-                session_id TEXT PRIMARY KEY,
-                validator_hotkey TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                ssh_username TEXT NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                revocation_reason TEXT,
-                revoked_at TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&self.pool)
-        .await
-        .context("Failed to create ssh_sessions table")?;
-
         // Create indices for performance
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_validator_interactions_hotkey ON validator_interactions(validator_hotkey)")
             .execute(&self.pool)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_grants_validator ON ssh_access_grants(validator_hotkey)")
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_sessions_validator ON ssh_sessions(validator_hotkey)")
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_sessions_node ON ssh_sessions(node_id)")
-            .execute(&self.pool)
-            .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_ssh_sessions_status ON ssh_sessions(status)")
             .execute(&self.pool)
             .await?;
 
