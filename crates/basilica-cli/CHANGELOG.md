@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0]
+
 ### Changed
 - All CLI output messages now use "node" terminology instead of "executor"
   - List output shows "available nodes" instead of "available executors"
