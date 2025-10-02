@@ -128,10 +128,75 @@ async fn test_validator_authorization_tracking() {
     let ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... test@example.com";
 
     // This will fail because there are no nodes to deploy to, but that's expected
-    let result = manager.authorize_validator(validator_hotkey, ssh_public_key).await;
+    let result = manager
+        .authorize_validator(validator_hotkey, ssh_public_key)
+        .await;
 
     // The error is expected since we have no nodes, but the authorization tracking
     // is separate and happens after successful deployment
     // For now, we just verify the method exists and can be called
     assert!(result.is_err() || result.is_ok());
+}
+
+#[test]
+fn test_normalize_ssh_key() {
+    use basilica_miner::node_manager::NodeManager;
+
+    let validator_hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+
+    // Test with key that has existing comment
+    let key_with_comment = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC user@hostname";
+    let normalized = NodeManager::normalize_ssh_key(key_with_comment, validator_hotkey);
+    assert_eq!(
+        normalized,
+        format!(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC validator-{}",
+            validator_hotkey
+        )
+    );
+
+    // Test with key without comment
+    let key_without_comment = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+    let normalized = NodeManager::normalize_ssh_key(key_without_comment, validator_hotkey);
+    assert_eq!(
+        normalized,
+        format!(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI validator-{}",
+            validator_hotkey
+        )
+    );
+
+    // Test with key with multiple spaces/comments
+    let key_complex = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC user@host extra comment";
+    let normalized = NodeManager::normalize_ssh_key(key_complex, validator_hotkey);
+    assert_eq!(
+        normalized,
+        format!(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC validator-{}",
+            validator_hotkey
+        )
+    );
+}
+
+#[test]
+fn test_extract_key_core() {
+    use basilica_miner::node_manager::NodeManager;
+
+    // Test with key that has comment
+    let key_with_comment = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC user@hostname";
+    let core = NodeManager::extract_key_core(key_with_comment);
+    assert_eq!(core, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC");
+
+    // Test with key without comment
+    let key_without_comment = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI";
+    let core = NodeManager::extract_key_core(key_without_comment);
+    assert_eq!(core, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI");
+
+    // Test that different comments result in same core
+    let key1 = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC comment1";
+    let key2 = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC comment2";
+    assert_eq!(
+        NodeManager::extract_key_core(key1),
+        NodeManager::extract_key_core(key2)
+    );
 }

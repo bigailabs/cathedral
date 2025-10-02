@@ -1,3 +1,5 @@
+mod unit;
+
 #[cfg(test)]
 mod tests {
     use alloy::signers::local::PrivateKeySigner;
