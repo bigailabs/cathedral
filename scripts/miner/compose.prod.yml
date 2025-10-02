@@ -4,26 +4,26 @@ services:
     container_name: basilica-miner
     restart: unless-stopped
     labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.enable=true"  # Enable automatic updates via Watchtower
 
     environment:
-      - RUST_LOG=debug
-      - RUST_BACKTRACE=1
+      - RUST_LOG=debug           # Log level: trace, debug, info, warn, error
+      - RUST_BACKTRACE=1          # Enable stack traces for debugging
 
     volumes:
-      - /opt/basilica/config/miner.toml:/opt/basilica/config/miner.toml:ro
-      - /opt/basilica/data:/opt/basilica/data:rw
-      - ~/.ssh:/opt/basilica/keys:ro
-      - ~/.bittensor:/root/.bittensor:rw
-      - /var/log/basilica:/var/log/basilica:rw
+      - /opt/basilica/config/miner.toml:/opt/basilica/config/miner.toml:ro  # Miner configuration file
+      - /opt/basilica/data:/opt/basilica/data:rw                            # SQLite database and persistent data
+      - ~/.ssh:/root/.ssh:ro                                                 # SSH keys for GPU node access
+      - ~/.bittensor:/root/.bittensor:ro                                     # Bittensor wallet (read-only for security)
+      - /var/log/basilica:/var/log/basilica:rw                              # Application logs
 
     ports:
-      - "8080:8080"     # Server/API port (from config server.port)
-      - "9090:9090"     # Metrics port (from config metrics.prometheus.port)
+      - "8080:8080"     # gRPC server for validator communications (config: validator_comms.port)
+      - "9090:9090"     # Prometheus metrics endpoint (config: metrics.prometheus.port)
 
     dns:
-      - 1.1.1.1
-      - 1.0.0.1
+      - 1.1.1.1        # Cloudflare DNS (primary)
+      - 1.0.0.1        # Cloudflare DNS (secondary)
 
     networks:
       - basilica_network
@@ -45,12 +45,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - WATCHTOWER_CLEANUP=true
-      - WATCHTOWER_POLL_INTERVAL=60
-      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_POLL_INTERVAL=300      # Check for updates every 5 minutes
+      - WATCHTOWER_LABEL_ENABLE=true      # Only update containers with watchtower.enable label
     dns:
-      - 1.1.1.1
-      - 1.0.0.1
-    command: --label-enable --cleanup --interval 60
+      - 1.1.1.1        # Cloudflare DNS (primary)
+      - 1.0.0.1        # Cloudflare DNS (secondary)
+    command: --label-enable --cleanup --interval 300
 
 networks:
   basilica_network:
