@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS miner_nodes (
   node_id TEXT NOT NULL,
   ssh_endpoint TEXT NOT NULL,
   gpu_count INTEGER NOT NULL,
+  gpu_uuids TEXT,
   status TEXT DEFAULT 'unknown',
   last_health_check TEXT,
   created_at TEXT NOT NULL,
@@ -52,6 +53,8 @@ CREATE TABLE IF NOT EXISTS verification_logs (
   details TEXT NOT NULL,
   duration_ms INTEGER NOT NULL,
   error_message TEXT,
+  last_binary_validation TEXT,
+  last_binary_validation_score REAL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS rentals (
   id TEXT PRIMARY KEY,
   validator_hotkey TEXT NOT NULL,
   node_id TEXT NOT NULL,
+  miner_id TEXT NOT NULL DEFAULT '',
   container_id TEXT NOT NULL,
   ssh_session_id TEXT NOT NULL,
   ssh_credentials TEXT NOT NULL,
@@ -79,7 +83,6 @@ CREATE TABLE IF NOT EXISTS rentals (
   terminated_at TEXT,
   termination_reason TEXT,
   total_cost REAL,
-  end_user_ssh_credentials TEXT NOT NULL,
   metadata TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -90,6 +93,7 @@ CREATE TABLE IF NOT EXISTS miner_gpu_profiles (
   total_score REAL NOT NULL,
   verification_count INTEGER NOT NULL,
   last_updated TEXT NOT NULL,
+  last_successful_validation TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT valid_score CHECK (
     total_score >= 0.0
@@ -123,6 +127,7 @@ CREATE TABLE IF NOT EXISTS miner_prover_results (
   gpu_model TEXT NOT NULL,
   gpu_count INTEGER NOT NULL,
   gpu_memory_gb REAL NOT NULL,
+  gpu_uuid TEXT,
   attestation_valid INTEGER NOT NULL,
   verification_timestamp TEXT NOT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -251,6 +256,7 @@ CREATE TABLE IF NOT EXISTS gpu_uuid_assignments (
   node_id TEXT NOT NULL,
   miner_id TEXT NOT NULL,
   gpu_name TEXT,
+  gpu_memory_gb REAL DEFAULT NULL,
   last_verified TEXT NOT NULL,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -291,6 +297,8 @@ CREATE INDEX IF NOT EXISTS idx_prover_results_miner ON miner_prover_results(mine
 
 CREATE INDEX IF NOT EXISTS idx_prover_results_timestamp ON miner_prover_results(verification_timestamp);
 
+CREATE INDEX IF NOT EXISTS idx_prover_results_gpu_uuid ON miner_prover_results(gpu_uuid);
+
 -- Performance indexes for weight_allocation_history
 CREATE INDEX IF NOT EXISTS idx_weight_history_miner ON weight_allocation_history(miner_uid);
 
@@ -328,3 +336,5 @@ CREATE INDEX IF NOT EXISTS idx_gpu_assignments_miner_node ON gpu_uuid_assignment
 CREATE INDEX IF NOT EXISTS idx_miner_nodes_status ON miner_nodes(status);
 
 CREATE INDEX IF NOT EXISTS idx_miner_nodes_health_check ON miner_nodes(last_health_check);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_gpu_uuids ON miner_nodes(gpu_uuids);
