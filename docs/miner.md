@@ -54,7 +54,16 @@ min_stake_threshold = 12000.0
 validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 EOF
 
-# 4. Build and run
+# 4. Build and run (with docker compose)
+cp ./scripts/miner/compose.prod.yml compose.yml
+docker compose up -d
+
+# Check status
+docker compose ps
+# View logs
+docker compose logs -f miner
+
+# 4. Build and run (with self compiled binary)
 ./scripts/miner/build.sh
 ./basilica-miner --config miner.toml
 
