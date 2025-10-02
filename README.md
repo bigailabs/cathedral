@@ -9,8 +9,8 @@
 ---
 
 <p align="center">
-  <a href="docs/miner.md">Miner</a> • 
-  <a href="docs/validator.md">Validator</a> • 
+  <a href="docs/miner.md">Miner</a> •
+  <a href="docs/validator.md">Validator</a> •
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
