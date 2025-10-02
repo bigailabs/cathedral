@@ -107,14 +107,6 @@ pub enum Commands {
         args: Vec<String>,
     },
 
-    /// Run node (delegates to basilica-node)
-    #[command(disable_help_flag = true)]
-    Node {
-        /// Arguments to pass to basilica-node
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
     /// Log in to Basilica
     Login {
         /// Use device authorization flow (for WSL, SSH, containers)
@@ -183,8 +175,7 @@ impl Commands {
             Commands::Login { .. }
             | Commands::Logout
             | Commands::Validator { .. }
-            | Commands::Miner { .. }
-            | Commands::Node { .. } => false,
+            | Commands::Miner { .. } => false,
 
             // Test auth command requires authentication
             #[cfg(debug_assertions)]

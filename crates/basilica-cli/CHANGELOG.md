@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- All CLI output messages now use "node" terminology instead of "executor"
+  - List output shows "available nodes" instead of "available executors"
+  - Error messages refer to "nodes" instead of "executors"
+- The `--detailed` flag help text now references "node IDs" instead of "executor IDs"
+
+### Removed
+- Removed `basilica executor` command (previously `basilica-executor` binary) as this component is no longer part of the architecture
+
 ## [0.3.5]
 
 ### Fixed

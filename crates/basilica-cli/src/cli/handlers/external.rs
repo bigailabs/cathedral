@@ -35,12 +35,6 @@ pub fn handle_miner(args: Vec<String>) -> Result<(), CliError> {
     delegate_to_binary("basilica-miner", args)
 }
 
-/// Handle node delegation
-pub fn handle_node(args: Vec<String>) -> Result<(), CliError> {
-    debug!("Delegating to basilica-node with args: {:?}", args);
-    delegate_to_binary("basilica-node", args)
-}
-
 /// Delegate execution to another binary
 fn delegate_to_binary(binary_name: &str, args: Vec<String>) -> Result<(), CliError> {
     // Handle platform-specific executable extension
