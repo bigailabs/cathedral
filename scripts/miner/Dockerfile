@@ -70,6 +70,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     libsqlite3-0 \
+    openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary
@@ -88,6 +89,11 @@ RUN useradd --system --home /var/lib/basilica/miner --shell /bin/false basilica
 
 # Set ownership of data directory
 RUN chown -R basilica:basilica /var/lib/basilica/miner
+
+# Create SSH directory for the basilica user
+RUN mkdir -p /var/lib/basilica/miner/.ssh && \
+    chmod 700 /var/lib/basilica/miner/.ssh && \
+    chown -R basilica:basilica /var/lib/basilica/miner/.ssh
 
 # Switch to non-root user
 USER basilica
