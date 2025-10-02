@@ -248,9 +248,9 @@ impl StandardSshClient {
             .arg("-p")
             .arg(details.port.to_string())
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
+            .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -421,9 +421,9 @@ impl SshFileTransferManager for StandardSshClient {
             .arg("-P")
             .arg(details.port.to_string())
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
+            .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg(format!(
                 "ConnectTimeout={}",
@@ -486,9 +486,9 @@ impl SshFileTransferManager for StandardSshClient {
             .arg("-P")
             .arg(details.port.to_string())
             .arg("-o")
-            .arg("StrictHostKeyChecking=no")
+            .arg("StrictHostKeyChecking=accept-new")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
+            .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg(format!(
                 "ConnectTimeout={}",

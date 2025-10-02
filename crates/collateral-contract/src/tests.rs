@@ -106,7 +106,7 @@ async fn test_collateral_deploy() {
 
     // Test deposit
     let hotkey = [1u8; 32];
-    let executor_id = 1u128;
+    let node_id = 1u128;
     let amount = U256::from(2_000_000_000_000_000_000u128); // 2 TAO
 
     // Call through proxy address
@@ -115,7 +115,7 @@ async fn test_collateral_deploy() {
     let tx = proxied
         .deposit(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id.to_be_bytes()),
+            FixedBytes::from_slice(&node_id.to_be_bytes()),
         )
         .value(amount);
     let tx = tx.send().await.unwrap();
@@ -135,20 +135,20 @@ async fn test_collateral_deploy() {
     let decision_timeout_result = proxied.DECISION_TIMEOUT().call().await.unwrap();
     assert_eq!(decision_timeout_result, decision_timeout);
 
-    let executor_to_miner_result = proxied
-        .executorToMiner(
+    let node_to_miner_result = proxied
+        .nodeToMiner(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id.to_be_bytes()),
+            FixedBytes::from_slice(&node_id.to_be_bytes()),
         )
         .call()
         .await
         .unwrap();
-    assert_eq!(executor_to_miner_result, signer.address());
+    assert_eq!(node_to_miner_result, signer.address());
 
     let collaterals_result = proxied
         .collaterals(
             FixedBytes::from_slice(&hotkey),
-            FixedBytes::from_slice(&executor_id.to_be_bytes()),
+            FixedBytes::from_slice(&node_id.to_be_bytes()),
         )
         .call()
         .await
