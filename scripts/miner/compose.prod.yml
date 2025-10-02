@@ -11,15 +11,16 @@ services:
       - RUST_BACKTRACE=1          # Enable stack traces for debugging
 
     volumes:
-      - ./config/miner.toml:/opt/basilica/config/miner.toml:ro  # Miner configuration file
-      - ./data:/opt/basilica/data:rw                            # SQLite database and persistent data
-      - ~/.ssh:/root/.ssh:ro                                                 # SSH keys for GPU node access
-      - ~/.bittensor:/root/.bittensor:ro                                     # Bittensor wallet (read-only for security)
-      - ./log/basilica:/var/log/basilica:rw                              # Application logs
+      - ./config/miner.toml:/var/lib/basilica/miner/miner.toml:ro       # Miner configuration file
+      - ./data:/var/lib/basilica/miner/data:rw                          # SQLite database and persistent data
+      - ~/.ssh:/var/lib/basilica/miner/.ssh:ro                          # SSH keys for GPU executor access
+      - ~/.bittensor:/var/lib/basilica/miner/.bittensor:ro              # Bittensor wallet (read-only for security)
+      - ./log:/var/lib/basilica/miner/log:rw                            # Application logs
 
     ports:
-      - "8080:8080"     # gRPC server for validator communications (config: validator_comms.port)
-      - "9090:9090"     # Prometheus metrics endpoint (config: metrics.prometheus.port)
+      - "8080:8080"     # gRPC server for validator communications
+      - "8091:8091"     # Bittensor axon server port
+      - "9090:9090"     # Prometheus metrics endpoint
 
     dns:
       - 1.1.1.1        # Cloudflare DNS (primary)
@@ -28,10 +29,10 @@ services:
     networks:
       - basilica_network
 
-    command: ["--config", "/opt/basilica/config/miner.toml"]
+    command: ["--config", "/var/lib/basilica/miner/miner.toml"]
 
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "pgrep", "-f", "basilica-miner"]
       interval: 30s
       timeout: 10s
       retries: 3
