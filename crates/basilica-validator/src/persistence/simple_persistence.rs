@@ -120,14 +120,15 @@ impl ValidatorPersistence for SimplePersistence {
         sqlx::query(
             "INSERT INTO rentals (
                 id, validator_hotkey, node_id, container_id, ssh_session_id,
-                ssh_credentials, state, created_at, container_spec, miner_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ssh_credentials, state, created_at, container_spec, miner_id, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 state = excluded.state,
                 container_id = excluded.container_id,
                 ssh_session_id = excluded.ssh_session_id,
                 ssh_credentials = excluded.ssh_credentials,
-                miner_id = excluded.miner_id",
+                miner_id = excluded.miner_id,
+                metadata = excluded.metadata",
         )
         .bind(&rental.rental_id)
         .bind(&rental.validator_hotkey)
@@ -145,6 +146,7 @@ impl ValidatorPersistence for SimplePersistence {
         .bind(rental.created_at.to_rfc3339())
         .bind(serde_json::to_string(&rental.container_spec)?)
         .bind(&rental.miner_id)
+        .bind(serde_json::to_string(&rental.metadata)?)
         .execute(&self.pool)
         .await?;
 

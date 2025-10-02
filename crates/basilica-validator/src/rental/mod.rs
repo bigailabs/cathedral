@@ -321,26 +321,26 @@ impl RentalManager {
         // From this point on, cleanup container on any error
         let container_id = container_info.container_id.clone();
 
-        let finalize_rental = async {
-            // Check if SSH port is mapped and construct proper SSH credentials for end-user
-            let end_user_ssh_credentials = container_info
-                .mapped_ports
-                .iter()
-                .find(|p| p.container_port == 22)
-                .map(|ssh_mapping| {
-                    // Extract host from ssh_endpoint (format: "host:port" or "user@host:port")
-                    let host = if ssh_endpoint.contains('@') {
-                        ssh_endpoint
-                            .split('@')
-                            .nth(1)
-                            .and_then(|hp| hp.split(':').next())
-                            .unwrap_or("localhost")
-                    } else {
-                        ssh_endpoint.split(':').next().unwrap_or("localhost")
-                    };
-                    format!("root@{}:{}", host, ssh_mapping.host_port)
-                });
+        // Check if SSH port is mapped and construct proper SSH credentials for end-user
+        let end_user_ssh_credentials = container_info
+            .mapped_ports
+            .iter()
+            .find(|p| p.container_port == 22)
+            .map(|ssh_mapping| {
+                // Extract host from ssh_endpoint (format: "host:port" or "user@host:port")
+                let host = if ssh_endpoint.contains('@') {
+                    ssh_endpoint
+                        .split('@')
+                        .nth(1)
+                        .and_then(|hp| hp.split(':').next())
+                        .unwrap_or("localhost")
+                } else {
+                    ssh_endpoint.split(':').next().unwrap_or("localhost")
+                };
+                format!("root@{}:{}", host, ssh_mapping.host_port)
+            });
 
+        let finalize_rental = async {
             // Fetch node details from persistence
             let node_details = self
                 .persistence
@@ -375,20 +375,16 @@ impl RentalManager {
                 container_spec: request.container_spec.clone(),
                 miner_id: miner_id.clone(),
                 node_details: node_details.clone(),
-                end_user_ssh_credentials: end_user_ssh_credentials.clone().unwrap_or_default(),
                 metadata: HashMap::new(),
             };
 
             // Save to persistence
             self.persistence.save_rental(&rental_info).await?;
 
-            Ok::<(RentalInfo, Option<String>), anyhow::Error>((
-                rental_info,
-                end_user_ssh_credentials,
-            ))
+            Ok::<RentalInfo, anyhow::Error>(rental_info)
         };
 
-        let (rental_info, end_user_ssh_credentials) = match finalize_rental.await {
+        let rental_info = match finalize_rental.await {
             Ok(result) => result,
             Err(e) => {
                 tracing::error!(

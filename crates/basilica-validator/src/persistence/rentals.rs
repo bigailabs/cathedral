@@ -180,7 +180,6 @@ impl SimplePersistence {
             container_spec: serde_json::from_str(&container_spec_str)?,
             miner_id: row.get::<String, _>("miner_id"),
             node_details,
-            end_user_ssh_credentials: row.get("end_user_ssh_credentials"),
             metadata: serde_json::from_str(&metadata)?,
         })
     }
