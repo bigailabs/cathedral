@@ -1021,8 +1021,8 @@ services:
     restart: unless-stopped
     volumes:
       - ~/.bittensor:/root/.bittensor:ro
-      - /opt/basilica/config:/opt/basilica/config:ro
-      - /opt/basilica/data:/opt/basilica/data
+      - ./config/miner.toml:/opt/basilica/config/miner.toml:ro
+      - ./data:/opt/basilica/data
       - ~/.ssh:/root/.ssh:ro
       - /var/log/basilica:/var/log/basilica
     ports:

@@ -11,11 +11,11 @@ services:
       - RUST_BACKTRACE=1          # Enable stack traces for debugging
 
     volumes:
-      - /opt/basilica/config/miner.toml:/opt/basilica/config/miner.toml:ro  # Miner configuration file
-      - /opt/basilica/data:/opt/basilica/data:rw                            # SQLite database and persistent data
+      - ./config/miner.toml:/opt/basilica/config/miner.toml:ro  # Miner configuration file
+      - ./data:/opt/basilica/data:rw                            # SQLite database and persistent data
       - ~/.ssh:/root/.ssh:ro                                                 # SSH keys for GPU node access
       - ~/.bittensor:/root/.bittensor:ro                                     # Bittensor wallet (read-only for security)
-      - /var/log/basilica:/var/log/basilica:rw                              # Application logs
+      - ./log/basilica:/var/log/basilica:rw                              # Application logs
 
     ports:
       - "8080:8080"     # gRPC server for validator communications (config: validator_comms.port)
