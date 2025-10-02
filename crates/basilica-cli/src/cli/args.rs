@@ -44,7 +44,6 @@ GPU RENTAL:
 NETWORK COMPONENTS:
   basilica validator                # Run validator
   basilica miner                    # Run miner
-  basilica executor                 # Run executor
 
 AUTHENTICATION:
   basilica login                    # Log in to Basilica
@@ -188,7 +187,6 @@ impl Args {
             // Network component delegation
             Commands::Validator { args } => handlers::external::handle_validator(args.clone())?,
             Commands::Miner { args } => handlers::external::handle_miner(args.clone())?,
-            Commands::Executor { args } => handlers::external::handle_executor(args.clone())?,
 
             // Token management
             Commands::Tokens { action } => {

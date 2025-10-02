@@ -2,7 +2,6 @@
 members = [
   "crates/basilica-common",
   "crates/basilica-protocol",
-  "crates/basilica-executor",
   "crates/basilica-miner",
   "crates/basilica-validator",
   "crates/basilica-billing",
@@ -39,6 +38,7 @@ anyhow = "1.0"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_with = "3.4"
 toml = "0.8"
 hex = "0.4"
 # Logging and metrics
@@ -107,7 +107,7 @@ tempfile = "3.8"
 # Build dependencies
 dotenvy = "0.15"
 
-# Executor-specific dependencies
+# Node-specific dependencies
 tokio-stream = { version = "0.1", features = ["net"] }
 nvml-wrapper = "0.9"
 num_cpus = "1.16"
