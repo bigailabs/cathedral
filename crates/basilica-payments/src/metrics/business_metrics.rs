@@ -318,13 +318,13 @@ impl BasilcaMetrics for PaymentsBusinessMetrics {
             .await;
     }
 
-    async fn record_executor_health(&self, executor_id: &str, healthy: bool) {
+    async fn record_node_health(&self, node_id: &str, healthy: bool) {
         let health_value = if healthy { 1.0 } else { 0.0 };
         self.recorder
             .record_gauge(
                 "basilca_executor_health_status",
                 health_value,
-                &[("executor_id", executor_id)],
+                &[("executor_id", node_id)],
             )
             .await;
     }
