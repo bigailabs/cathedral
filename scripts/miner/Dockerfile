@@ -83,23 +83,16 @@ COPY --from=builder /tmp/target/${BUILD_MODE}/basilica-miner /usr/local/bin/basi
 # Make binary executable
 RUN chmod +x /usr/local/bin/basilica-miner
 
-# Create user for running the service
-RUN useradd --system --home /var/lib/basilica/miner --shell /bin/bash basilica
-
 # Create required directories
 RUN mkdir -p /var/lib/basilica/miner/data && \
     mkdir -p /var/lib/basilica/miner/.ssh && \
     mkdir -p /var/lib/basilica/miner/.bittensor && \
     chmod 755 /var/lib/basilica/miner && \
-    chmod 700 /var/lib/basilica/miner/.ssh && \
-    chmod 700 /var/lib/basilica/miner/.bittensor && \
-    chown -R basilica:basilica /var/lib/basilica/miner
+    chmod 755 /var/lib/basilica/miner/.ssh && \
+    chmod 755 /var/lib/basilica/miner/.bittensor
 
 # Set HOME environment variable for the basilica user
 ENV HOME=/var/lib/basilica/miner
-
-# Switch to non-root user
-USER basilica
 
 # Set working directory
 WORKDIR /var/lib/basilica/miner
