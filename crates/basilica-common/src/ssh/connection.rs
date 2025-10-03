@@ -24,6 +24,10 @@ pub struct SshConnectionConfig {
     pub retry_attempts: u32,
     /// Whether to cleanup remote files after operations
     pub cleanup_remote_files: bool,
+    /// Enable strict host key checking
+    pub strict_host_key_checking: bool,
+    /// Path to known_hosts file (only used when strict_host_key_checking is true)
+    pub known_hosts_file: Option<std::path::PathBuf>,
 }
 
 impl Default for SshConnectionConfig {
@@ -34,6 +38,8 @@ impl Default for SshConnectionConfig {
             max_transfer_size: 100 * 1024 * 1024, // 100MB
             retry_attempts: 3,
             cleanup_remote_files: true,
+            strict_host_key_checking: false,
+            known_hosts_file: None,
         }
     }
 }
@@ -246,10 +252,21 @@ impl StandardSshClient {
         cmd.arg("-i")
             .arg(&details.private_key_path)
             .arg("-p")
-            .arg(details.port.to_string())
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
+            .arg(details.port.to_string());
+
+        // Configure host key checking based on settings
+        if self.config.strict_host_key_checking {
+            cmd.arg("-o").arg("StrictHostKeyChecking=yes");
+            if let Some(ref known_hosts) = self.config.known_hosts_file {
+                cmd.arg("-o")
+                    .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
+            }
+        } else {
+            cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
+        }
+
+        cmd.arg("-o")
             .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg("BatchMode=yes")
@@ -419,10 +436,21 @@ impl SshFileTransferManager for StandardSshClient {
         cmd.arg("-i")
             .arg(&details.private_key_path)
             .arg("-P")
-            .arg(details.port.to_string())
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
+            .arg(details.port.to_string());
+
+        // Configure host key checking based on settings
+        if self.config.strict_host_key_checking {
+            cmd.arg("-o").arg("StrictHostKeyChecking=yes");
+            if let Some(ref known_hosts) = self.config.known_hosts_file {
+                cmd.arg("-o")
+                    .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
+            }
+        } else {
+            cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
+        }
+
+        cmd.arg("-o")
             .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg(format!(
@@ -484,10 +512,21 @@ impl SshFileTransferManager for StandardSshClient {
         cmd.arg("-i")
             .arg(&details.private_key_path)
             .arg("-P")
-            .arg(details.port.to_string())
-            .arg("-o")
-            .arg("StrictHostKeyChecking=accept-new")
-            .arg("-o")
+            .arg(details.port.to_string());
+
+        // Configure host key checking based on settings
+        if self.config.strict_host_key_checking {
+            cmd.arg("-o").arg("StrictHostKeyChecking=yes");
+            if let Some(ref known_hosts) = self.config.known_hosts_file {
+                cmd.arg("-o")
+                    .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
+            }
+        } else {
+            cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
+        }
+
+        cmd.arg("-o")
             .arg("IdentitiesOnly=yes")
             .arg("-o")
             .arg(format!(

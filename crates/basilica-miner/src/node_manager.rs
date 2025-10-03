@@ -4,7 +4,9 @@
 //! Nodes are compute resources with SSH access that validators can use directly.
 
 use anyhow::{Context, Result};
-use basilica_common::ssh::{SshConnectionDetails, SshConnectionManager, StandardSshClient};
+use basilica_common::ssh::{
+    SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
+};
 use basilica_protocol::miner_discovery::{
     DiscoverNodesRequest, ListNodeConnectionDetailsResponse, NodeConnectionDetails,
 };
@@ -82,10 +84,16 @@ impl Default for NodeManager {
 impl NodeManager {
     /// Create a new node manager
     pub fn new(ssh_config: NodeSshConfig) -> Self {
+        // Use permissive SSH config to avoid host key verification issues
+        let config = SshConnectionConfig {
+            strict_host_key_checking: false,
+            known_hosts_file: None,
+            ..Default::default()
+        };
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             authorized_validators: Arc::new(RwLock::new(HashMap::new())),
-            ssh_client: Arc::new(StandardSshClient::new()),
+            ssh_client: Arc::new(StandardSshClient::with_config(config)),
             ssh_config,
         }
     }
