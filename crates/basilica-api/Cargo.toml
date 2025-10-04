@@ -24,6 +24,9 @@ tower-http = { workspace = true, features = ["cors", "timeout", "trace"] }
 
 # HTTP client
 reqwest = { workspace = true }
+uuid = { workspace = true }
+http = "0.2"
+hyper = { version = "0.14", features = ["client", "http1"] }
 
 # Serialization
 serde = { workspace = true }
@@ -45,6 +48,7 @@ jsonwebtoken = { workspace = true }
 argon2 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+async-trait = "0.1"
 
 # Rate limiting
 governor = { workspace = true }

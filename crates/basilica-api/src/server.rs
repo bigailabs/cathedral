@@ -48,6 +48,9 @@ pub struct AppState {
 
     /// Database pool for user rental tracking
     pub db: PgPool,
+
+    /// Optional K8s client seam for Jobs/Rentals backed by K3s
+    pub k8s: Option<Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>>, 
 }
 
 /// Process health check for a single rental
@@ -214,6 +217,7 @@ impl Server {
             validator_hotkey: config.bittensor.validator_hotkey.clone(),
             http_client: http_client.clone(),
             db,
+            k8s: None,
         };
 
         // Start optional health check task using HTTP client

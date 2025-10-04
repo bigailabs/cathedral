@@ -20,6 +20,15 @@ pub fn routes(state: AppState) -> Router<AppState> {
 
     // Protected routes with unified authentication and scope validation
     let protected_routes = Router::new()
+        .route("/jobs", post(routes::jobs::create_job))
+        .route("/jobs/:id", get(routes::jobs::get_job_status).delete(routes::jobs::delete_job))
+        .route("/jobs/:id/logs", get(routes::jobs::get_job_logs))
+        .route("/k8s/rentals", post(routes::rentals_k8s::create_rental))
+        .route(
+            "/k8s/rentals/:id",
+            get(routes::rentals_k8s::get_rental_status)
+                .delete(routes::rentals_k8s::delete_rental),
+        )
         .route("/rentals", get(routes::rentals::list_rentals_validator))
         .route("/rentals", post(routes::rentals::start_rental))
         .route("/rentals/:id", get(routes::rentals::get_rental_status))

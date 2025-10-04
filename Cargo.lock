@@ -2043,6 +2043,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-stream",
+ "async-trait",
  "axum 0.7.9",
  "base64 0.21.7",
  "basilica-common",
@@ -2057,6 +2058,8 @@ dependencies = [
  "futures",
  "governor",
  "hex",
+ "http 0.2.12",
+ "hyper 0.14.32",
  "jsonwebtoken",
  "moka",
  "once_cell",
@@ -2071,6 +2074,7 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.5.2",
  "tracing",
+ "uuid",
  "wiremock",
 ]
 
