@@ -8,7 +8,9 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-use crate::crd::gpu_rental::{AccessType, GpuRentalSpec, GpuSpec, RentalNetwork};
+use crate::crd::gpu_rental::{AccessType, GpuRental, GpuRentalSpec, GpuRentalStatus, GpuSpec, RentalNetwork};
+use crate::k8s_client::K8sClient;
+use anyhow::Result;
 
 fn to_quantity(s: &str) -> Quantity { Quantity(s.to_string()) }
 
@@ -149,7 +151,7 @@ pub fn render_rental_service(name: &str, spec: &GpuRentalSpec) -> Option<Service
         .collect();
     let selector = Some(vec![("basilica.io/rental".to_string(), name.to_string())].into_iter().collect());
     Some(Service {
-        metadata: ObjectMeta { name: Some(format!("rental-svc-{}", name)), ..Default::default() },
+        metadata: ObjectMeta { name: Some(format!("rental-svc-{}", name)), labels: Some(vec![("basilica.io/rental".into(), name.into())].into_iter().collect()), ..Default::default() },
         spec: Some(ServiceSpec { type_: Some(svc_type.into()), selector, ports: Some(ports), ..Default::default() }),
         ..Default::default()
     })
@@ -205,10 +207,77 @@ pub fn render_rental_pvc(name: &str, spec: &GpuRentalSpec) -> Option<PersistentV
     })
 }
 
+pub struct RentalController<C: K8sClient> {
+    pub client: C,
+}
+
+impl<C: K8sClient> RentalController<C> {
+    pub fn new(client: C) -> Self { Self { client } }
+
+    pub async fn reconcile(&self, ns: &str, cr: &GpuRental) -> Result<()> {
+        let name = cr.metadata.name.clone().unwrap_or_default();
+        let spec = cr.spec.clone();
+
+        // Ensure PVC if requested
+        if spec.storage.is_some() {
+            if let Some(pvc) = render_rental_pvc(&name, &spec) {
+                // Best-effort create; mock will overwrite in-memory
+                let _ = self.client.create_pvc(ns, &pvc).await;
+            }
+        }
+
+        // Ensure Pod exists
+        let pod = render_rental_pod(&name, &spec);
+        // Create or replace
+        let _ = self.client.create_pod(ns, &pod).await;
+
+        // Ensure Service if ingress requested
+        if let Some(svc) = render_rental_service(&name, &spec) {
+            let _ = self.client.create_service(ns, &svc).await;
+        }
+
+        // Ensure NetworkPolicies
+        for np in render_network_policies(&name, &spec) {
+            let _ = self.client.create_network_policy(ns, &np).await;
+        }
+
+        // Derive status
+        let pods = self.client.list_pods_with_label(ns, "basilica.io/rental", &name).await?;
+        let (state, pod_name) = compute_rental_state_from_pods(&pods);
+        let status = GpuRentalStatus { state: Some(state), pod_name, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None };
+        self.client.update_gpu_rental_status(ns, &name, status).await?;
+        Ok(())
+    }
+}
+
+fn compute_rental_state_from_pods(pods: &[Pod]) -> (String, Option<String>) {
+    // Map Pod phases to rental state
+    let mut running: Option<String> = None;
+    let mut failed: Option<String> = None;
+    let mut pending: Option<String> = None;
+    for p in pods {
+        let n = p.metadata.name.clone();
+        if let Some(st) = &p.status { if let Some(ph) = &st.phase {
+            match ph.as_str() {
+                "Running" => running = n,
+                "Failed" => failed = n,
+                "Pending" => pending = n,
+                _ => {}
+            }
+        }}
+    }
+    if let Some(n) = running { return ("Active".into(), Some(n)); }
+    if let Some(n) = failed { return ("Failed".into(), Some(n)); }
+    if let Some(n) = pending { return ("Provisioning".into(), Some(n)); }
+    ("Provisioning".into(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crd::gpu_rental::{RentalContainer, RentalPort, RentalStorage, Resources as RResources};
+    use crate::k8s_client::MockK8sClient;
+    use k8s_openapi::api::core::v1::PodStatus;
 
     fn base_spec() -> GpuRentalSpec {
         GpuRentalSpec {
@@ -282,5 +351,32 @@ mod tests {
         assert_eq!(pvc.metadata.name.as_deref(), Some("rental-pvc-r1"));
         let pod = render_rental_pod("r1", &spec);
         assert_eq!(pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0].name, "data");
+    }
+
+    #[tokio::test]
+    async fn reconcile_creates_resources_and_updates_status() {
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone());
+
+        let mut spec = base_spec();
+        spec.network.ingress = vec![crate::crd::gpu_rental::IngressRule { port: 8080, exposure: "NodePort".into() }];
+        let cr = GpuRental::new("rent1", spec);
+        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
+
+        // First reconcile, no pods yet -> Provisioning
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller.client.get_gpu_rental("ns", "rent1").await.unwrap();
+        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Provisioning"));
+
+        // Create a running pod and reconcile again
+        let pod = Pod { metadata: ObjectMeta { name: Some("p1".into()), labels: Some(vec![("basilica.io/rental".into(), "rent1".into())].into_iter().collect()), ..Default::default() }, status: Some(PodStatus { phase: Some("Running".into()), ..Default::default() }), ..Default::default() };
+        controller.client.create_pod("ns", &pod).await.unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated2 = controller.client.get_gpu_rental("ns", "rent1").await.unwrap();
+        assert_eq!(updated2.status.as_ref().unwrap().state.as_deref(), Some("Active"));
+        assert_eq!(updated2.status.as_ref().unwrap().pod_name.as_deref(), Some("p1"));
+        // Service should exist
+        let svcs = controller.client.list_services_with_label("ns", "basilica.io/rental", "rent1").await.unwrap();
+        assert!(!svcs.is_empty());
     }
 }

@@ -22,6 +22,7 @@ pub trait K8sClient: Send + Sync {
     async fn create_gpu_rental(&self, ns: &str, obj: &GpuRental) -> Result<GpuRental>;
     async fn get_gpu_rental(&self, ns: &str, name: &str) -> Result<GpuRental>;
     async fn delete_gpu_rental(&self, ns: &str, name: &str) -> Result<()>;
+    async fn update_gpu_rental_status(&self, ns: &str, name: &str, status: crate::crd::gpu_rental::GpuRentalStatus) -> Result<()>;
 
     // Core
     async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod>;
@@ -109,6 +110,14 @@ impl K8sClient for MockK8sClient {
     async fn delete_gpu_rental(&self, ns: &str, name: &str) -> Result<()> {
         let mut map = self.rent_crds.write().await;
         map.get_mut(ns).and_then(|m| m.remove(name));
+        Ok(())
+    }
+
+    async fn update_gpu_rental_status(&self, ns: &str, name: &str, status: crate::crd::gpu_rental::GpuRentalStatus) -> Result<()> {
+        let mut map = self.rent_crds.write().await;
+        let ns_map = map.get_mut(ns).ok_or_else(|| anyhow!("namespace not found: {}", ns))?;
+        let gr = ns_map.get_mut(name).ok_or_else(|| anyhow!("GpuRental not found: {}/{}", ns, name))?;
+        gr.status = Some(status);
         Ok(())
     }
 
