@@ -156,6 +156,20 @@ impl<C: K8sClient> JobController<C> {
         let start = Instant::now();
         let name = cr.metadata.name.clone().unwrap_or_default();
         let spec = cr.spec.clone();
+        // Enforce BasilicaQueue concurrency (if configured)
+        if let Ok(queues) = self.client.list_basilica_queues(ns).await {
+            if let Some(q) = queues.first() {
+                // Count running job pods in namespace
+                let pods = self.client.list_pods_with_label(ns, "basilica.io/type", "job").await?;
+                let running = pods.iter().filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")).count() as u32;
+                if running >= q.spec.concurrency {
+                    // Mark queued and exit
+                    let status = crate::crd::basilica_job::BasilicaJobStatus { phase: Some("Queued".into()), pod_name: None, start_time: None, completion_time: None };
+                    self.client.update_basilica_job_status(ns, &name, status).await?;
+                    return Ok(());
+                }
+            }
+        }
         // Observe previous status (if any) to record transitions
         let prev = self
             .client

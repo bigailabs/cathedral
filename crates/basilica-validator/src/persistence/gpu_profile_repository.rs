@@ -76,7 +76,7 @@ impl GpuProfileRepository {
                 HashMapEntry::Occupied(mut entry) => {
                     // impossible case, but log a warning if it happens
                     let (existing_count, existing_name, existing_memory) = entry.get();
-                    let total_count = existing_count + count;
+                    let total_count = *existing_count + count;
                     warn!(
                         "Data inconsistency: node {} has multiple GPU models ({} and {}). Aggregating counts.",
                         node_id, existing_name, name

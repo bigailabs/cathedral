@@ -421,8 +421,11 @@ mod tests {
     use super::*;
 
     fn test_config() -> BittensorConfig {
+        // Use a bogus endpoint and the "local" network so no default
+        // fallbacks are appended. This ensures the connection attempt fails
+        // in environments with network access.
         BittensorConfig {
-            network: "test".to_string(),
+            network: "local".to_string(),
             chain_endpoint: Some("wss://test.endpoint:443".to_string()),
             wallet_name: "test_wallet".to_string(),
             hotkey_name: "test_hotkey".to_string(),

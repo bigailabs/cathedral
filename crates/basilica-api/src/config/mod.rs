@@ -205,8 +205,9 @@ mod tests {
 /// Rental backend selector
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RentalBackend {
+    #[serde(rename = "auto")] Auto,
     #[serde(rename = "legacy")] Legacy,
     #[serde(rename = "k8s")] K8s,
 }
 
-impl Default for RentalBackend { fn default() -> Self { RentalBackend::Legacy } }
+impl Default for RentalBackend { fn default() -> Self { RentalBackend::Auto } }

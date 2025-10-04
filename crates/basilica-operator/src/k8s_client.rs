@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::crd::basilica_job::BasilicaJob;
 use crate::crd::gpu_rental::GpuRental;
+use crate::crd::basilica_queue::BasilicaQueue;
 
 #[async_trait]
 pub trait K8sClient: Send + Sync {
@@ -41,6 +42,10 @@ pub trait K8sClient: Send + Sync {
 
     async fn create_job(&self, ns: &str, job: &Job) -> Result<Job>;
     async fn get_job(&self, ns: &str, name: &str) -> Result<Job>;
+
+    // Queues
+    async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue>;
+    async fn list_basilica_queues(&self, ns: &str) -> Result<Vec<BasilicaQueue>>;
 }
 
 /// In-memory mock client implementing a subset of the Kubernetes API for tests.
@@ -55,6 +60,7 @@ pub struct MockK8sClient {
     secrets: Arc<RwLock<HashMap<String, HashMap<String, Secret>>>>,
     rent_crds: Arc<RwLock<HashMap<String, HashMap<String, GpuRental>>>>,
     job_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaJob>>>>,
+    queue_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaQueue>>>>,
 }
 
 fn key(ns: &str) -> String { ns.to_string() }
@@ -231,6 +237,19 @@ impl K8sClient for MockK8sClient {
             .and_then(|m| m.get(name))
             .cloned()
             .ok_or_else(|| anyhow!("Job not found: {}/{}", ns, name))
+    }
+
+    async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue> {
+        let name = obj.name_any();
+        if name.is_empty() { return Err(anyhow!("BasilicaQueue missing metadata.name")); }
+        let mut map = self.queue_crds.write().await;
+        map.entry(key(ns)).or_default().insert(name.clone(), obj.clone());
+        Ok(obj.clone())
+    }
+
+    async fn list_basilica_queues(&self, ns: &str) -> Result<Vec<BasilicaQueue>> {
+        let map = self.queue_crds.read().await;
+        Ok(map.get(ns).map(|m| m.values().cloned().collect()).unwrap_or_default())
     }
 }
 
@@ -418,6 +437,23 @@ impl K8sClient for KubeClient {
         let api: kube::Api<Job> = self.api(ns);
         api.get(name).await.map_err(|e| anyhow!(e))
     }
+
+    async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue> {
+        use kube::api::PostParams;
+        let api: kube::Api<BasilicaQueue> = self.api(ns);
+        match api.create(&PostParams::default(), obj).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(obj.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn list_basilica_queues(&self, ns: &str) -> Result<Vec<BasilicaQueue>> {
+        use kube::api::ListParams;
+        let api: kube::Api<BasilicaQueue> = self.api(ns);
+        let list = api.list(&ListParams::default()).await?;
+        Ok(list.items)
+    }
 }
 
 #[cfg(test)]
@@ -456,7 +492,7 @@ mod tests {
             },
             duration: crate::crd::gpu_rental::RentalDuration { hours: 24, auto_extend: false, max_extensions: 0 },
             access_type: crate::crd::gpu_rental::AccessType::Ssh,
-            network: Default::default(), storage: None, ssh: None, jupyter_access: None, environment: None, miner_selector: None, billing: None,
+            network: Default::default(), storage: None, artifacts: None, ssh: None, jupyter_access: None, environment: None, miner_selector: None, billing: None,
             ttl_seconds: 0, tenancy: None, exclusive: false,
         });
         client.create_gpu_rental("ns", &gr).await.unwrap();
@@ -477,5 +513,11 @@ mod tests {
         assert_eq!(list[0].name_any(), "p1");
         client.delete_pod("ns", "p2").await.unwrap();
         assert!(client.get_pod("ns", "p2").await.is_err());
+
+        // Queues
+        let q = crate::crd::basilica_queue::BasilicaQueue::new("q1", crate::crd::basilica_queue::BasilicaQueueSpec { concurrency: 1, gpu_limits: None });
+        client.create_basilica_queue("ns", &q).await.unwrap();
+        let qs = client.list_basilica_queues("ns").await.unwrap();
+        assert_eq!(qs.len(), 1);
     }
 }

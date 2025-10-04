@@ -1,7 +1,7 @@
 use k8s_openapi::api::core::v1::{
-    Affinity, Capabilities, Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext,
+    Affinity, Capabilities, Container, EnvFromSource, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext,
     PodSpec, ResourceRequirements, SecurityContext, Service, ServicePort, ServiceSpec, Toleration, Volume,
-    VolumeMount, PersistentVolumeClaimVolumeSource, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, VolumeResourceRequirements,
+    VolumeMount, PersistentVolumeClaimVolumeSource, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, VolumeResourceRequirements, SecretEnvSource,
 };
 use k8s_openapi::api::networking::v1::{IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -108,6 +108,29 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
             });
         }
         AccessType::Vscode | AccessType::Custom => {}
+    }
+
+    // Optional artifacts sidecar
+    if let Some(art) = &spec.artifacts {
+        if art.enabled {
+            let mut env = Vec::new();
+            env.push(EnvVar { name: "DESTINATION".into(), value: Some(art.destination.clone()), ..Default::default() });
+            env.push(EnvVar { name: "FROM_PATH".into(), value: Some(art.from_path.clone()), ..Default::default() });
+            env.push(EnvVar { name: "PROVIDER".into(), value: Some(if art.provider.is_empty() { "s3".into() } else { art.provider.clone() }), ..Default::default() });
+            let env_from: Option<Vec<EnvFromSource>> = art
+                .credentials_secret
+                .as_ref()
+                .map(|name| vec![EnvFromSource { secret_ref: Some(SecretEnvSource { name: Some(name.clone()), optional: Some(false) }), ..Default::default() }]);
+            containers.push(Container {
+                name: format!("artifact-uploader-{}", name),
+                image: Some("basilica/artifact-uploader:latest".into()),
+                command: Some(vec!["/uploader".into()]),
+                env: Some(env),
+                env_from,
+                security_context: container_sc.clone(),
+                ..Default::default()
+            });
+        }
     }
 
     // Volumes
@@ -280,6 +303,109 @@ impl<C: K8sClient> RentalController<C> {
             .unwrap_or_default();
         let prev_state = prev_status.state.clone().unwrap_or_else(|| "Unknown".into());
 
+        // Enforce BasilicaQueue concurrency and GPU model limits (if configured) before creating resources
+        if let Ok(queues) = self.client.list_basilica_queues(ns).await {
+            if let Some(q) = queues.first() {
+                // Count Running + Pending rental pods in namespace
+                let pods = self
+                    .client
+                    .list_pods_with_label(ns, "basilica.io/type", "rental")
+                    .await
+                    .unwrap_or_default();
+                let running_or_pending = pods
+                    .iter()
+                    .filter(|p| {
+                        p.status
+                            .as_ref()
+                            .and_then(|s| s.phase.as_deref())
+                            .map(|ph| ph == "Running" || ph == "Pending")
+                            .unwrap_or(false)
+                    })
+                    .count() as u32;
+                if running_or_pending >= q.spec.concurrency {
+                    let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints: None };
+                    self.client.update_gpu_rental_status(ns, &name, queued).await?;
+                    return Ok(());
+                }
+
+                // Optional: enforce GPU total and per-model limits
+                if let Some(ref limits) = q.spec.gpu_limits {
+                    // Sum current GPUs across active/provisioning pods
+                    let mut total_gpus_in_use: u32 = 0;
+                    let mut model_gpus: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+
+                    for p in &pods {
+                        // Count GPUs requested by containers
+                        let mut pod_gpu_count: u32 = 0;
+                        if let Some(spec) = &p.spec {
+                            for c in spec.containers.iter() {
+                                if let Some(res) = &c.resources {
+                                    if let Some(req) = &res.requests {
+                                        if let Some(q) = req.get("nvidia.com/gpu") {
+                                            if let Ok(v) = q.0.parse::<u32>() {
+                                                pod_gpu_count += v;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Attribute GPUs to models based on node affinity selector
+                            if let Some(aff) = &spec.affinity {
+                                if let Some(na) = &aff.node_affinity {
+                                    if let Some(req) = &na.required_during_scheduling_ignored_during_execution {
+                                        for term in &req.node_selector_terms {
+                                            if let Some(exprs) = &term.match_expressions {
+                                                for expr in exprs {
+                                                    if expr.key == "basilica.io/gpu-model" {
+                                                        if let Some(values) = &expr.values {
+                                                            for m in values {
+                                                                *model_gpus.entry(m.clone()).or_insert(0) += pod_gpu_count.max(1);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        total_gpus_in_use += pod_gpu_count.max(1);
+                    }
+
+                    // Include the current request
+                    let requested_gpu_count = spec.container.resources.gpus.count.max(1);
+                    let requested_models = if spec.container.resources.gpus.model.is_empty() {
+                        vec!["any".to_string()]
+                    } else {
+                        spec.container.resources.gpus.model.clone()
+                    };
+
+                    if limits.total > 0 {
+                        if total_gpus_in_use.saturating_add(requested_gpu_count) > limits.total {
+                            let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints: None };
+                            self.client.update_gpu_rental_status(ns, &name, queued).await?;
+                            return Ok(());
+                        }
+                    }
+
+                    if let Some(ref per_model) = limits.models {
+                        for m in requested_models {
+                            if let Some(&cap) = per_model.get(&m) {
+                                let current = *model_gpus.get(&m).unwrap_or(&0);
+                                if current.saturating_add(requested_gpu_count) > cap {
+                                    let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints: None };
+                                    self.client.update_gpu_rental_status(ns, &name, queued).await?;
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Ensure PVC if requested
         if spec.storage.is_some() {
             if let Some(pvc) = render_rental_pvc(&name, &spec) {
@@ -416,6 +542,7 @@ mod tests {
             access_type: AccessType::Ssh,
             network: RentalNetwork { ingress: vec![], egress_policy: "restricted".into(), allowed_egress: vec![], public_ip_required: false, bandwidth_mbps: None },
             storage: None,
+            artifacts: None,
             ssh: None,
             jupyter_access: None,
             environment: None,
@@ -510,6 +637,25 @@ mod tests {
     }
 
     #[test]
+    fn artifacts_sidecar_renders_when_enabled() {
+        let mut spec = base_spec();
+        spec.artifacts = Some(crate::crd::gpu_rental::RentalArtifacts {
+            destination: "s3://bucket/prefix".into(),
+            from_path: "/outputs".into(),
+            provider: "s3".into(),
+            credentials_secret: None,
+            enabled: true,
+        });
+        let pod = render_rental_pod("artifacts", &spec);
+        let containers = &pod.spec.as_ref().unwrap().containers;
+        assert!(containers.iter().any(|c| c.name.starts_with("artifact-uploader-")));
+        let sidecar = containers.iter().find(|c| c.name.starts_with("artifact-uploader-")).unwrap();
+        let envs = sidecar.env.as_ref().unwrap();
+        assert!(envs.iter().any(|e| e.name == "DESTINATION"));
+        assert!(envs.iter().any(|e| e.name == "FROM_PATH"));
+    }
+
+    #[test]
     fn exclusive_rental_adds_toleration() {
         let mut spec = base_spec();
         spec.exclusive = true;
@@ -550,6 +696,66 @@ mod tests {
         // Metrics present
         // Exercise metrics path (no-op if already installed)
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+    }
+
+    #[tokio::test]
+    async fn queue_gates_on_running_plus_pending() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Create a queue with concurrency 1
+        let q = crate::crd::basilica_queue::BasilicaQueue::new("q1", crate::crd::basilica_queue::BasilicaQueueSpec { concurrency: 1, gpu_limits: None });
+        controller.client.create_basilica_queue("ns", &q).await.unwrap();
+
+        // Existing Pending pod (consumes the one slot)
+        let p = Pod { metadata: ObjectMeta { name: Some("p-exist".into()), labels: Some(vec![("basilica.io/type".into(), "rental".into())].into_iter().collect()), ..Default::default() }, status: Some(PodStatus { phase: Some("Pending".into()), ..Default::default() }), ..Default::default() };
+        controller.client.create_pod("ns", &p).await.unwrap();
+
+        // New rental should be queued
+        let spec = base_spec();
+        let cr = GpuRental::new("rent-q", spec);
+        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller.client.get_gpu_rental("ns", "rent-q").await.unwrap();
+        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Queued"));
+    }
+
+    #[tokio::test]
+    async fn queue_enforces_gpu_model_limits() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Queue with per-model limit A100:1
+        let mut models = std::collections::BTreeMap::new();
+        models.insert("A100".to_string(), 1);
+        let limits = crate::crd::basilica_queue::GpuLimits { total: 0, models: Some(models) };
+        let q = crate::crd::basilica_queue::BasilicaQueue::new("q2", crate::crd::basilica_queue::BasilicaQueueSpec { concurrency: 10, gpu_limits: Some(limits) });
+        controller.client.create_basilica_queue("ns", &q).await.unwrap();
+
+        // Existing Pod requesting A100 with 1 GPU
+        let aff = super::build_node_affinity(&GpuSpec { count: 1, model: vec!["A100".into()] });
+        let c = k8s_openapi::api::core::v1::Container {
+            name: "main".into(),
+            resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+                limits: None,
+                requests: Some(vec![("nvidia.com/gpu".into(), Quantity("1".into()))].into_iter().collect()),
+                claims: None,
+            }),
+            ..Default::default()
+        };
+        let p = Pod { metadata: ObjectMeta { name: Some("p-a100".into()), labels: Some(vec![("basilica.io/type".into(), "rental".into())].into_iter().collect()), ..Default::default() }, spec: Some(PodSpec { containers: vec![c], affinity: aff, ..Default::default() }), status: Some(PodStatus { phase: Some("Running".into()), ..Default::default() }), ..Default::default() };
+        controller.client.create_pod("ns", &p).await.unwrap();
+
+        // New rental also requests A100; should be Queued due to limit 1
+        let mut spec = base_spec();
+        spec.container.resources.gpus = GpuSpec { count: 1, model: vec!["A100".into()] };
+        let cr = GpuRental::new("rent-a100", spec);
+        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller.client.get_gpu_rental("ns", "rent-a100").await.unwrap();
+        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Queued"));
     }
     #[tokio::test]
     async fn terminate_when_out_of_credits() {

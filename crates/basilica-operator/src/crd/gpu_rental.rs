@@ -15,6 +15,8 @@ pub struct GpuRentalSpec {
     #[serde(default)]
     pub storage: Option<RentalStorage>,
     #[serde(default)]
+    pub artifacts: Option<RentalArtifacts>,
+    #[serde(default)]
     pub ssh: Option<RentalSsh>,
     #[serde(default)]
     pub jupyter_access: Option<RentalJupyter>,
@@ -134,6 +136,24 @@ pub struct RentalEnvironment { pub base_image: Option<String>, pub pre_install_s
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RentalStorage { pub persistent_volume_gb: u32, pub storage_class: Option<String>, pub mount_path: String }
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RentalArtifacts {
+    /// Destination URI (e.g., s3://bucket/prefix)
+    pub destination: String,
+    /// Path inside the container to upload from
+    pub from_path: String,
+    /// Provider identifier (e.g., s3, gcs). Optional; default s3
+    #[serde(default)]
+    pub provider: String,
+    /// Optional K8s Secret name containing credentials
+    #[serde(default)]
+    pub credentials_secret: Option<String>,
+    /// Whether artifact upload sidecar is enabled
+    #[serde(default)]
+    pub enabled: bool,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]

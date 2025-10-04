@@ -208,6 +208,7 @@ mod tests {
             access_type: AccessType::Ssh,
             network: RentalNetwork::default(),
             storage: None,
+            artifacts: None,
             ssh: None,
             jupyter_access: None,
             environment: None,

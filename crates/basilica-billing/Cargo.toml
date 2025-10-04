@@ -67,3 +67,8 @@ path = "src/main.rs"
 [lib]
 name = "basilica_billing"
 path = "src/lib.rs"
+
+[features]
+default = []
+# Enable DB-backed integration tests (requires Postgres running locally)
+with-billing-db-tests = []

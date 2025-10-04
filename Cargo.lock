@@ -2370,6 +2370,8 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "k8s-openapi",
+ "kube",
  "libc",
  "lru 0.12.5",
  "metrics",

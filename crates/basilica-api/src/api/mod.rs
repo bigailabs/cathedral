@@ -51,7 +51,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api-keys/:name", delete(routes::api_keys::revoke_key));
 
     // Conditionally map legacy vs k8s backend under /rentals
-    let use_k8s_backend = matches!(state.config.rental_backend, RentalBackend::K8s) && state.k8s.is_some();
+    let use_k8s_backend = match state.config.rental_backend {
+        RentalBackend::K8s => state.k8s.is_some(),
+        RentalBackend::Auto => state.k8s.is_some(),
+        RentalBackend::Legacy => false,
+    };
     if use_k8s_backend {
         protected_routes = protected_routes
             .route("/rentals", get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental))

@@ -19,6 +19,7 @@ pub mod service;
 pub mod ssh;
 pub mod agent_installer;
 pub mod node_profile;
+pub mod k8s_profile_publisher;
 pub mod rental_adapter;
 
 // Main public API exports
