@@ -34,6 +34,9 @@ pub mod ssh;
 pub mod storage;
 pub mod types;
 pub mod utils;
+pub mod compute;
+pub mod rental;
+pub mod convert;
 
 // Re-export commonly used types at the crate root for convenience
 pub use auth_constants::*;
@@ -53,6 +56,8 @@ pub use storage::{KeyValueStorage, MemoryStorage};
 // Re-export the main types directly
 pub use metrics::traits::*;
 pub use persistence::traits::*;
+pub use compute::*;
+pub use rental::*;
 
 /// Version of the common crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
