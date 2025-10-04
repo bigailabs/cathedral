@@ -4,7 +4,10 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::api::core::v1::{NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm};
 
-use crate::crd::basilica_job::{BasilicaJobSpec, GpuSpec as JobGpuSpec, Resources as JobResources};
+use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, BasilicaJobStatus, GpuSpec as JobGpuSpec, Resources as JobResources};
+use crate::k8s_client::K8sClient;
+use anyhow::Result;
+use k8s_openapi::api::core::v1::PodStatus;
 
 fn to_quantity(s: &str) -> Quantity { Quantity(s.to_string()) }
 
@@ -91,7 +94,14 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         ..Default::default()
     };
 
-    let labels = Some(vec![("basilica.io/type".to_string(), "job".to_string())].into_iter().collect());
+    let labels = Some(
+        vec![
+            ("basilica.io/type".to_string(), "job".to_string()),
+            ("basilica.io/job".to_string(), name.to_string()),
+        ]
+        .into_iter()
+        .collect(),
+    );
     let template = PodTemplateSpec { metadata: Some(ObjectMeta { labels: labels.clone(), ..Default::default() }), spec: Some(pod_spec) };
 
     let active_deadline_seconds = if spec.ttl_seconds > 0 { Some(spec.ttl_seconds as i64) } else { None };
@@ -101,6 +111,68 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         spec: Some(JobSpec { template, backoff_limit: Some(0), active_deadline_seconds, ..Default::default() }),
         status: None,
     }
+}
+
+pub struct JobController<C: K8sClient> {
+    pub client: C,
+}
+
+impl<C: K8sClient> JobController<C> {
+    pub fn new(client: C) -> Self { Self { client } }
+
+    pub async fn reconcile(&self, ns: &str, cr: &BasilicaJob) -> Result<()> {
+        let name = cr.metadata.name.clone().unwrap_or_default();
+        let spec = cr.spec.clone();
+
+        // Ensure Job exists
+        if self.client.get_job(ns, &name).await.is_err() {
+            let job = render_job(&name, &spec);
+            self.client.create_job(ns, &job).await?;
+        }
+
+        // Derive status from Pods with our label
+        let pods = self
+            .client
+            .list_pods_with_label(ns, "basilica.io/job", &name)
+            .await?;
+
+        let (phase, pod_name) = compute_phase_from_pods(&pods);
+        let status = BasilicaJobStatus {
+            phase: Some(phase),
+            pod_name,
+            start_time: None,
+            completion_time: None,
+        };
+        self.client.update_basilica_job_status(ns, &name, status).await?;
+        Ok(())
+    }
+}
+
+fn compute_phase_from_pods(pods: &[k8s_openapi::api::core::v1::Pod]) -> (String, Option<String>) {
+    // Prefer running over pending; succeeded/failed if any pod indicates so.
+    let mut running: Option<String> = None;
+    let mut succeeded: Option<String> = None;
+    let mut failed: Option<String> = None;
+    let mut pending: Option<String> = None;
+
+    for p in pods {
+        let name = p.metadata.name.clone();
+        if let Some(PodStatus { phase: Some(ph), .. }) = &p.status {
+            match ph.as_str() {
+                "Running" => running = name,
+                "Succeeded" => succeeded = name,
+                "Failed" => failed = name,
+                "Pending" => pending = name,
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(n) = running { return ("Running".into(), Some(n)); }
+    if let Some(n) = succeeded { return ("Succeeded".into(), Some(n)); }
+    if let Some(n) = failed { return ("Failed".into(), Some(n)); }
+    if let Some(n) = pending { return ("Pending".into(), Some(n)); }
+    ("Pending".into(), None)
 }
 
 #[cfg(test)]
@@ -165,5 +237,33 @@ mod tests {
         assert_eq!(req.key, "basilica.io/gpu-model");
         assert_eq!(req.operator, "In");
         assert_eq!(req.values.unwrap()[0], "A100");
+    }
+
+    use crate::k8s_client::MockK8sClient;
+    use k8s_openapi::api::core::v1::PodStatus;
+
+    #[tokio::test]
+    async fn reconcile_creates_job_and_updates_status() {
+        let client = MockK8sClient::default();
+        let controller = super::JobController::new(client.clone());
+
+        let spec = sample_spec();
+        let bj = BasilicaJob::new("bj1", spec);
+
+        // First register CR in mock and reconcile: creates Job, status pending
+        controller.client.create_basilica_job("ns", &bj).await.unwrap();
+        controller.reconcile("ns", &bj).await.unwrap();
+        // Create a running pod labeled for this job
+        let mut pod = k8s_openapi::api::core::v1::Pod {
+            metadata: ObjectMeta { name: Some("pod1".into()), labels: Some(vec![("basilica.io/job".into(), "bj1".into())].into_iter().collect()), ..Default::default() },
+            status: Some(PodStatus { phase: Some("Running".into()), ..Default::default() }),
+            ..Default::default()
+        };
+        controller.client.create_pod("ns", &pod).await.unwrap();
+
+        // Second reconcile: sees running pod, updates status
+        controller.reconcile("ns", &bj).await.unwrap();
+        let updated = controller.client.get_basilica_job("ns", "bj1").await.unwrap();
+        assert_eq!(updated.status.unwrap().phase.unwrap(), "Running");
     }
 }

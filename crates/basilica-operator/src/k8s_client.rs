@@ -17,6 +17,7 @@ pub trait K8sClient: Send + Sync {
     async fn create_basilica_job(&self, ns: &str, obj: &BasilicaJob) -> Result<BasilicaJob>;
     async fn get_basilica_job(&self, ns: &str, name: &str) -> Result<BasilicaJob>;
     async fn delete_basilica_job(&self, ns: &str, name: &str) -> Result<()>;
+    async fn update_basilica_job_status(&self, ns: &str, name: &str, status: crate::crd::basilica_job::BasilicaJobStatus) -> Result<()>;
 
     async fn create_gpu_rental(&self, ns: &str, obj: &GpuRental) -> Result<GpuRental>;
     async fn get_gpu_rental(&self, ns: &str, name: &str) -> Result<GpuRental>;
@@ -38,6 +39,7 @@ pub trait K8sClient: Send + Sync {
     async fn create_secret(&self, ns: &str, secret: &Secret) -> Result<Secret>;
 
     async fn create_job(&self, ns: &str, job: &Job) -> Result<Job>;
+    async fn get_job(&self, ns: &str, name: &str) -> Result<Job>;
 }
 
 /// In-memory mock client implementing a subset of the Kubernetes API for tests.
@@ -77,6 +79,14 @@ impl K8sClient for MockK8sClient {
     async fn delete_basilica_job(&self, ns: &str, name: &str) -> Result<()> {
         let mut map = self.job_crds.write().await;
         map.get_mut(ns).and_then(|m| m.remove(name));
+        Ok(())
+    }
+
+    async fn update_basilica_job_status(&self, ns: &str, name: &str, status: crate::crd::basilica_job::BasilicaJobStatus) -> Result<()> {
+        let mut map = self.job_crds.write().await;
+        let ns_map = map.get_mut(ns).ok_or_else(|| anyhow!("namespace not found: {}", ns))?;
+        let bj = ns_map.get_mut(name).ok_or_else(|| anyhow!("BasilicaJob not found: {}/{}", ns, name))?;
+        bj.status = Some(status);
         Ok(())
     }
 
@@ -205,6 +215,14 @@ impl K8sClient for MockK8sClient {
         map.entry(key(ns)).or_default().insert(name.clone(), job.clone());
         Ok(job.clone())
     }
+
+    async fn get_job(&self, ns: &str, name: &str) -> Result<Job> {
+        let map = self.jobs.read().await;
+        map.get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("Job not found: {}/{}", ns, name))
+    }
 }
 
 #[cfg(test)]
@@ -266,4 +284,3 @@ mod tests {
         assert!(client.get_pod("ns", "p2").await.is_err());
     }
 }
-
