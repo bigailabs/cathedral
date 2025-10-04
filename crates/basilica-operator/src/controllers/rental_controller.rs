@@ -13,6 +13,8 @@ use crate::k8s_client::K8sClient;
 use crate::billing::BillingClient;
 use k8s_openapi::chrono::{DateTime, Duration, Utc};
 use anyhow::Result;
+use std::time::Instant;
+use crate::metrics as opmetrics;
 
 fn to_quantity(s: &str) -> Quantity { Quantity(s.to_string()) }
 
@@ -263,8 +265,16 @@ impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
     pub fn new(client: C, billing: B) -> Self { Self { client, billing } }
 
     pub async fn reconcile(&self, ns: &str, cr: &GpuRental) -> Result<()> {
+        let start = Instant::now();
         let name = cr.metadata.name.clone().unwrap_or_default();
         let spec = cr.spec.clone();
+        let prev_state = self
+            .client
+            .get_gpu_rental(ns, &name)
+            .await
+            .ok()
+            .and_then(|r| r.status.and_then(|s| s.state))
+            .unwrap_or_else(|| "Unknown".into());
 
         // Ensure PVC if requested
         if spec.storage.is_some() {
@@ -288,6 +298,8 @@ impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
         for np in render_network_policies(&name, &spec) {
             let _ = self.client.create_network_policy(ns, &np).await;
         }
+        // Record netpol mode (egress policy label)
+        opmetrics::record_rental_netpol(&spec.network.egress_policy, ns);
 
         // Derive status and expiry
         let pods = self.client.list_pods_with_label(ns, "basilica.io/rental", &name).await?;
@@ -312,10 +324,12 @@ impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
                                 expiry_time_str = Some(new_exp.to_rfc3339());
                                 renewal_time_str = Some(Utc::now().to_rfc3339());
                                 total_extensions = Some(current.total_extensions.unwrap_or(0) + 1);
+                                opmetrics::record_rental_extension(ns, true);
                             } else {
                                 // mark suspended when cannot extend
                                 let suspended = GpuRentalStatus { state: Some("Suspended".into()), pod_name: pod_name.clone(), node_name: None, start_time: None, expiry_time: current.expiry_time.clone(), renewal_time: current.renewal_time.clone(), total_cost: None, total_extensions: current.total_extensions };
                                 self.client.update_gpu_rental_status(ns, &name, suspended).await?;
+                                opmetrics::record_rental_extension(ns, false);
                                 return Ok(());
                             }
                         }
@@ -323,8 +337,13 @@ impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
                 }
             }
         }
-        let status = GpuRentalStatus { state: Some(state), pod_name, node_name: None, start_time: None, expiry_time: expiry_time_str, renewal_time: renewal_time_str, total_cost: None, total_extensions };
+        let status = GpuRentalStatus { state: Some(state.clone()), pod_name, node_name: None, start_time: None, expiry_time: expiry_time_str, renewal_time: renewal_time_str, total_cost: None, total_extensions };
         self.client.update_gpu_rental_status(ns, &name, status).await?;
+        let created = true; // Pod and associated resources are ensured; for metrics, treat as created/ensured event
+        opmetrics::record_rental_reconcile(ns, &name, created, &prev_state, &state, start);
+        let prev_active = prev_state == "Active";
+        let new_active = state == "Active";
+        opmetrics::record_rental_active_change(ns, prev_active, new_active);
         Ok(())
     }
 }
@@ -477,6 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_creates_resources_and_updates_status() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
         let client = MockK8sClient::default();
         let controller = RentalController::new(client.clone(), MockBillingClient::default());
 
@@ -500,9 +520,13 @@ mod tests {
         // Service should exist
         let svcs = controller.client.list_services_with_label("ns", "basilica.io/rental", "rent1").await.unwrap();
         assert!(!svcs.is_empty());
+        // Metrics present
+        // Exercise metrics path (no-op if already installed)
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
     }
     #[tokio::test]
     async fn auto_extend_on_expired_rental_when_approved() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
         let client = MockK8sClient::default();
         let billing = MockBillingClient::default();
         let controller = RentalController::new(client.clone(), billing);

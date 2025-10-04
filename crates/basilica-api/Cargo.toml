@@ -39,6 +39,7 @@ anyhow = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+metrics = { workspace = true }
 
 # Configuration
 figment = { workspace = true }
@@ -74,6 +75,7 @@ rand = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [features]
 default = ["server", "utoipa"]

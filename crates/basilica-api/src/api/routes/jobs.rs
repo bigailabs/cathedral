@@ -6,6 +6,8 @@ use crate::{
     k8s_client::{ApiK8sClient, JobSpecDto, JobStatusDto, Resources},
     server::AppState,
 };
+use crate::metrics as apimetrics;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateJobRequest {
@@ -29,14 +31,20 @@ pub struct CreateJobRequest {
 pub struct CreateJobResponse { pub job_id: String }
 
 pub async fn create_job(State(state): State<AppState>, Json(req): Json<CreateJobRequest>) -> Result<Json<CreateJobResponse>> {
-    let client = state
-        .k8s
-        .as_ref()
-        .ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("jobs.create", "POST", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let name = req.name.clone().unwrap_or_else(|| format!("job-{}", rand::random::<u32>()));
     let ns = req.namespace.clone().unwrap_or_else(|| "default".into());
     let spec = JobSpecDto { image: req.image, command: req.command, args: req.args, env: req.env, resources: req.resources, ttl_seconds: req.ttl_seconds };
     let id = client.create_job(&ns, &name, spec).await?;
+    apimetrics::record_job_created(&ns);
+    apimetrics::record_request("jobs.create", "POST", start, true);
     Ok(Json(CreateJobResponse { job_id: id }))
 }
 
@@ -44,9 +52,17 @@ pub async fn create_job(State(state): State<AppState>, Json(req): Json<CreateJob
 pub struct JobStatusResponse { pub job_id: String, pub status: JobStatusDto }
 
 pub async fn get_job_status(State(state): State<AppState>, axum::extract::Path(job_id): axum::extract::Path<String>) -> Result<Json<JobStatusResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("jobs.status", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let ns = "default"; // could be inferred from tenancy in future
     let st = client.get_job_status(ns, &job_id).await?;
+    apimetrics::record_request("jobs.status", "GET", start, true);
     Ok(Json(JobStatusResponse { job_id, status: st }))
 }
 
@@ -54,9 +70,17 @@ pub async fn get_job_status(State(state): State<AppState>, axum::extract::Path(j
 pub struct DeleteJobResponse { pub job_id: String }
 
 pub async fn delete_job(State(state): State<AppState>, axum::extract::Path(job_id): axum::extract::Path<String>) -> Result<Json<DeleteJobResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("jobs.delete", "DELETE", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let ns = "default";
     client.delete_job(ns, &job_id).await?;
+    apimetrics::record_request("jobs.delete", "DELETE", start, true);
     Ok(Json(DeleteJobResponse { job_id }))
 }
 
@@ -64,9 +88,17 @@ pub async fn delete_job(State(state): State<AppState>, axum::extract::Path(job_i
 pub struct JobLogsResponse { pub job_id: String, pub logs: String }
 
 pub async fn get_job_logs(State(state): State<AppState>, axum::extract::Path(job_id): axum::extract::Path<String>) -> Result<Json<JobLogsResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("jobs.logs", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let ns = "default";
     let logs = client.get_job_logs(ns, &job_id).await?;
+    apimetrics::record_request("jobs.logs", "GET", start, true);
     Ok(Json(JobLogsResponse { job_id, logs }))
 }
 

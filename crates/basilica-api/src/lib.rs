@@ -18,6 +18,7 @@ pub mod country_mapping;
 pub mod error;
 pub mod server;
 pub mod k8s_client;
+pub mod metrics;
 
 // Re-export commonly used types
 pub use config::Config;

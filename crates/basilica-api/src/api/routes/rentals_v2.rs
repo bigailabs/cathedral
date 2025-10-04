@@ -11,6 +11,8 @@ use crate::{
     k8s_client::{ApiK8sClient, RentalSpecDto, RentalStatusDto, Resources},
     server::AppState,
 };
+use crate::metrics as apimetrics;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateRentalRequest {
@@ -28,11 +30,20 @@ pub struct CreateRentalResponse {
 }
 
 pub async fn create_rental(State(state): State<AppState>, Json(req): Json<CreateRentalRequest>) -> Result<Json<CreateRentalResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("rentals_v2.create", "POST", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let name = req.name.clone().unwrap_or_else(|| format!("rent-{}", rand::random::<u32>()));
     let ns = req.namespace.clone().unwrap_or_else(|| "default".into());
     let spec = RentalSpecDto { container_image: req.container_image, resources: req.resources, name: Some(name.clone()), namespace: Some(ns.clone()) };
     let id = client.create_rental(&ns, &name, spec).await?;
+    apimetrics::record_rental_created(&ns);
+    apimetrics::record_request("rentals_v2.create", "POST", start, true);
     Ok(Json(CreateRentalResponse { rental_id: id }))
 }
 
@@ -43,8 +54,16 @@ pub struct RentalStatusResponse {
 }
 
 pub async fn get_rental_status(State(state): State<AppState>, axum::extract::Path(rental_id): axum::extract::Path<String>) -> Result<Json<RentalStatusResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("rentals_v2.status", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let st = client.get_rental_status("default", &rental_id).await?;
+    apimetrics::record_request("rentals_v2.status", "GET", start, true);
     Ok(Json(RentalStatusResponse { rental_id, status: st }))
 }
 
@@ -54,8 +73,16 @@ pub struct DeleteRentalResponse {
 }
 
 pub async fn delete_rental(State(state): State<AppState>, axum::extract::Path(rental_id): axum::extract::Path<String>) -> Result<Json<DeleteRentalResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("rentals_v2.delete", "DELETE", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     client.delete_rental("default", &rental_id).await?;
+    apimetrics::record_request("rentals_v2.delete", "DELETE", start, true);
     Ok(Json(DeleteRentalResponse { rental_id }))
 }
 
@@ -65,7 +92,14 @@ pub async fn stream_rental_logs(
     axum::extract::Path(rental_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<basilica_sdk::types::LogStreamQuery>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, std::io::Error>>>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("rentals_v2.logs", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let logs = client.get_rental_logs("default", &rental_id).await?;
 
     let follow = query.follow.unwrap_or(false);
@@ -87,6 +121,7 @@ pub async fn stream_rental_logs(
         }
     };
 
+    apimetrics::record_request("rentals_v2.logs", "GET", start, true);
     Ok(Sse::new(stream))
 }
 
@@ -112,8 +147,16 @@ pub async fn exec_rental(
     axum::extract::Path(rental_id): axum::extract::Path<String>,
     Json(req): Json<ExecRequest>,
 ) -> Result<Json<ExecResponse>> {
-    let client = state.k8s.as_ref().ok_or_else(|| ApiError::ServiceUnavailable)?;
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("rentals_v2.exec", "POST", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
     let out = client.exec_rental("default", &rental_id, req.command).await?;
+    apimetrics::record_request("rentals_v2.exec", "POST", start, true);
     Ok(Json(ExecResponse { stdout: out, stderr: String::new(), exit_code: 0 }))
 }
 

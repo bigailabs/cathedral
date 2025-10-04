@@ -7,6 +7,8 @@ use k8s_openapi::api::core::v1::{NodeAffinity, NodeSelector, NodeSelectorRequire
 use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, BasilicaJobStatus, GpuSpec as JobGpuSpec, Resources as JobResources};
 use crate::k8s_client::K8sClient;
 use anyhow::Result;
+use std::time::Instant;
+use crate::metrics as opmetrics;
 use k8s_openapi::api::core::v1::PodStatus;
 
 fn to_quantity(s: &str) -> Quantity { Quantity(s.to_string()) }
@@ -142,14 +144,24 @@ impl<C: K8sClient> JobController<C> {
     pub fn new(client: C) -> Self { Self { client } }
 
     pub async fn reconcile(&self, ns: &str, cr: &BasilicaJob) -> Result<()> {
+        let start = Instant::now();
         let name = cr.metadata.name.clone().unwrap_or_default();
         let spec = cr.spec.clone();
+        // Observe previous status (if any) to record transitions
+        let prev = self
+            .client
+            .get_basilica_job(ns, &name)
+            .await
+            .ok()
+            .and_then(|bj| bj.status.and_then(|s| s.phase))
+            .unwrap_or_else(|| "Unknown".into());
 
         // Ensure Job exists
-        if self.client.get_job(ns, &name).await.is_err() {
+        let created = if self.client.get_job(ns, &name).await.is_err() {
             let job = render_job(&name, &spec);
             self.client.create_job(ns, &job).await?;
-        }
+            true
+        } else { false };
 
         // Derive status from Pods with our label
         let pods = self
@@ -164,7 +176,12 @@ impl<C: K8sClient> JobController<C> {
             start_time: None,
             completion_time: None,
         };
+        let to = status.phase.clone().unwrap_or_else(|| "Unknown".into());
         self.client.update_basilica_job_status(ns, &name, status).await?;
+        opmetrics::record_job_reconcile(ns, &name, created, &prev, &to, start);
+        let prev_active = prev == "Running";
+        let new_active = to == "Running";
+        opmetrics::record_job_active_change(ns, prev_active, new_active);
         Ok(())
     }
 }
@@ -287,6 +304,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconcile_creates_job_and_updates_status() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
         let client = MockK8sClient::default();
         let controller = super::JobController::new(client.clone());
 
@@ -308,5 +326,7 @@ mod tests {
         controller.reconcile("ns", &bj).await.unwrap();
         let updated = controller.client.get_basilica_job("ns", "bj1").await.unwrap();
         assert_eq!(updated.status.unwrap().phase.unwrap(), "Running");
+        // Exercise metrics path (no-op if already installed)
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
     }
 }

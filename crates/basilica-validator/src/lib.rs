@@ -17,6 +17,9 @@ pub mod persistence;
 pub mod rental;
 pub mod service;
 pub mod ssh;
+pub mod agent_installer;
+pub mod node_profile;
+pub mod rental_adapter;
 
 // Main public API exports
 #[cfg(feature = "client")]
