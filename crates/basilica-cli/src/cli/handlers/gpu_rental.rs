@@ -13,8 +13,7 @@ use crate::CliError;
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
     GpuRequirements, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile, NodeSelection,
-    RentalState, RentalStatusResponse, ResourceRequirementsRequest, SshAccess,
-    StartRentalApiRequest,
+    RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use basilica_validator::gpu::categorization::GpuCategory;
@@ -291,6 +290,21 @@ pub async fn handle_up(
         response.rental_id
     ));
 
+    // Display port mappings if available
+    if !response.container_info.mapped_ports.is_empty() {
+        println!("\nPort Mappings:");
+        for port_mapping in &response.container_info.mapped_ports {
+            if port_mapping.container_port == 22 {
+                // SSH port is already shown in SSH connection instructions
+                continue;
+            }
+            println!(
+                "  Container Port {} → Host Port {} ({})",
+                port_mapping.container_port, port_mapping.host_port, port_mapping.protocol
+            );
+        }
+    }
+
     // Handle SSH based on options
     if options.no_ssh {
         // SSH disabled entirely, nothing to do
@@ -437,15 +451,7 @@ pub async fn handle_status(
     if json {
         json_output(&status)?;
     } else {
-        // Convert to validator's RentalStatusResponse for display (without SSH credentials)
-        let display_status = RentalStatusResponse {
-            rental_id: status.rental_id,
-            status: status.status,
-            node: status.node,
-            created_at: status.created_at,
-            updated_at: status.updated_at,
-        };
-        display_rental_status(&display_status);
+        display_rental_status_with_details(&status);
     }
 
     Ok(())
@@ -1016,7 +1022,7 @@ fn split_remote_path(path: &str) -> (Option<String>, String) {
     }
 }
 
-fn display_rental_status(status: &RentalStatusResponse) {
+fn display_rental_status_with_details(status: &basilica_sdk::types::RentalStatusWithSshResponse) {
     println!("Rental Status: {}", status.rental_id);
     println!("  Status: {:?}", status.status);
     println!("  Node: {}", status.node.id);
@@ -1029,20 +1035,26 @@ fn display_rental_status(status: &RentalStatusResponse) {
         status.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
 
-    // println!("\nNode Details:");
-    // println!("  GPUs: {} available", status.node.gpu_specs.len());
-    // for gpu in &status.node.gpu_specs {
-    //     println!("    - {} ({} GB)", gpu.name, gpu.memory_gb);
-    // }
-    // println!(
-    //     "  CPU: {} cores ({})",
-    //     status.node.cpu_specs.cores, status.node.cpu_specs.model
-    // );
-    // println!("  Memory: {} GB", status.node.cpu_specs.memory_gb);
-
-    // if let Some(location) = &status.node.location {
-    //     println!("  Location: {location}");
-    // }
+    // Display port mappings if available
+    if let Some(ref port_mappings) = status.port_mappings {
+        if !port_mappings.is_empty() {
+            println!("\nPort Mappings:");
+            for port_mapping in port_mappings {
+                if port_mapping.container_port == 22 {
+                    // SSH port
+                    println!(
+                        "  SSH: Container Port {} → Host Port {} ({})",
+                        port_mapping.container_port, port_mapping.host_port, port_mapping.protocol
+                    );
+                } else {
+                    println!(
+                        "  Container Port {} → Host Port {} ({})",
+                        port_mapping.container_port, port_mapping.host_port, port_mapping.protocol
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Display quick start commands after ps output

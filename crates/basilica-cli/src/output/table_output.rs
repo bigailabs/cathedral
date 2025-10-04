@@ -124,6 +124,8 @@ pub fn display_rental_items(
             state: String,
             #[tabled(rename = "SSH")]
             ssh: String,
+            #[tabled(rename = "Ports")]
+            ports: String,
             #[tabled(rename = "Image")]
             image: String,
             #[tabled(rename = "CPU")]
@@ -175,12 +177,16 @@ pub fn display_rental_items(
                 // Format SSH availability
                 let ssh = if rental.has_ssh { "✓" } else { "✗" };
 
+                // Format port mappings (show all ports in detailed view)
+                let ports = format_port_mappings(&rental.port_mappings, None);
+
                 DetailedRentalRowWithIds {
                     rental_id: rental.rental_id.clone(),
                     node_id,
                     gpu,
                     state: rental.state.to_string(),
                     ssh: ssh.to_string(),
+                    ports,
                     image: rental.container_image.clone(),
                     cpu,
                     ram,
@@ -203,6 +209,8 @@ pub fn display_rental_items(
             state: String,
             #[tabled(rename = "SSH")]
             ssh: String,
+            #[tabled(rename = "Ports")]
+            ports: String,
             #[tabled(rename = "Image")]
             image: String,
             #[tabled(rename = "CPU")]
@@ -246,10 +254,14 @@ pub fn display_rental_items(
                 // Format SSH availability
                 let ssh = if rental.has_ssh { "✓" } else { "✗" };
 
+                // Format port mappings (show up to 2-3 ports)
+                let ports = format_port_mappings(&rental.port_mappings, Some(2));
+
                 DetailedRentalRow {
                     gpu,
                     state: rental.state.to_string(),
                     ssh: ssh.to_string(),
+                    ports,
                     image: rental.container_image.clone(),
                     cpu,
                     ram,
@@ -300,6 +312,32 @@ pub fn display_rental_items(
     }
 
     Ok(())
+}
+
+/// Helper function to format port mappings
+fn format_port_mappings(
+    port_mappings: &Option<Vec<basilica_validator::rental::PortMapping>>,
+    max_count: Option<usize>,
+) -> String {
+    match port_mappings {
+        None => "-".to_string(),
+        Some(ports) if ports.is_empty() => "-".to_string(),
+        Some(ports) => {
+            let formatted_ports: Vec<String> = ports
+                .iter()
+                .map(|p| format!("{}→{}", p.container_port, p.host_port))
+                .collect();
+
+            match max_count {
+                Some(max) if formatted_ports.len() > max => {
+                    let shown = &formatted_ports[..max];
+                    let remaining = formatted_ports.len() - max;
+                    format!("{}, +{} more", shown.join(", "), remaining)
+                }
+                _ => formatted_ports.join(", "),
+            }
+        }
+    }
 }
 
 /// Helper function to format GPU info
