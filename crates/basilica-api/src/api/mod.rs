@@ -23,11 +23,19 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/jobs", post(routes::jobs::create_job))
         .route("/jobs/:id", get(routes::jobs::get_job_status).delete(routes::jobs::delete_job))
         .route("/jobs/:id/logs", get(routes::jobs::get_job_logs))
-        .route("/k8s/rentals", post(routes::rentals_k8s::create_rental))
+        .route("/v2/rentals", post(routes::rentals_v2::create_rental))
         .route(
-            "/k8s/rentals/:id",
-            get(routes::rentals_k8s::get_rental_status)
-                .delete(routes::rentals_k8s::delete_rental),
+            "/v2/rentals/:id",
+            get(routes::rentals_v2::get_rental_status)
+                .delete(routes::rentals_v2::delete_rental),
+        )
+        .route(
+            "/v2/rentals/:id/logs",
+            get(routes::rentals_v2::stream_rental_logs),
+        )
+        .route(
+            "/v2/rentals/:id/exec",
+            post(routes::rentals_v2::exec_rental),
         )
         .route("/rentals", get(routes::rentals::list_rentals_validator))
         .route("/rentals", post(routes::rentals::start_rental))

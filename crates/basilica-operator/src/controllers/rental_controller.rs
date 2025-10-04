@@ -3,13 +3,15 @@ use k8s_openapi::api::core::v1::{
     PodSpec, ResourceRequirements, SecurityContext, Service, ServicePort, ServiceSpec, Toleration, Volume,
     VolumeMount, PersistentVolumeClaimVolumeSource, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, VolumeResourceRequirements,
 };
-use k8s_openapi::api::networking::v1::{NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec};
+use k8s_openapi::api::networking::v1::{IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::crd::gpu_rental::{AccessType, GpuRental, GpuRentalSpec, GpuRentalStatus, GpuSpec, RentalNetwork};
 use crate::k8s_client::K8sClient;
+use crate::billing::BillingClient;
+use k8s_openapi::chrono::{DateTime, Duration, Utc};
 use anyhow::Result;
 
 fn to_quantity(s: &str) -> Quantity { Quantity(s.to_string()) }
@@ -53,11 +55,12 @@ fn build_node_affinity(gpu: &GpuSpec) -> Option<Affinity> {
 }
 
 fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityContext>) {
-    let pod_sc = Some(PodSecurityContext { run_as_non_root: Some(true), ..Default::default() });
+    let pod_sc = Some(PodSecurityContext { run_as_non_root: Some(true), seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }), ..Default::default() });
     let container_sc = Some(SecurityContext {
         allow_privilege_escalation: Some(false),
         read_only_root_filesystem: Some(true),
         capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), ..Default::default() }),
+        seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }),
         ..Default::default()
     });
     (pod_sc, container_sc)
@@ -122,6 +125,17 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
         .collect(),
     );
 
+    let mut tolerations = build_tolerations();
+    if spec.exclusive {
+        tolerations.push(Toleration {
+            key: Some("basilica.io/rental-exclusive".into()),
+            operator: Some("Equal".into()),
+            value: Some("true".into()),
+            effect: Some("NoSchedule".into()),
+            ..Default::default()
+        });
+    }
+
     Pod {
         metadata: ObjectMeta { name: Some(format!("rental-{}", name)), labels: labels.clone(), ..Default::default() },
         spec: Some(PodSpec {
@@ -129,7 +143,7 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
             volumes,
             restart_policy: Some("Always".into()),
             security_context: pod_sc,
-            tolerations: Some(build_tolerations()),
+            tolerations: Some(tolerations),
             affinity: build_node_affinity(&spec.container.resources.gpus),
             ..Default::default()
         }),
@@ -193,7 +207,40 @@ pub fn render_network_policies(name: &str, spec: &GpuRentalSpec) -> Vec<NetworkP
         }),
     };
 
-    vec![default_deny, allow_ingress]
+    // Egress rules based on policy
+    let mut egress_policies: Vec<NetworkPolicy> = Vec::new();
+    let policy = spec.network.egress_policy.to_lowercase();
+    if policy == "open" || policy == "egress-only" || policy == "restricted" {
+        let egress_rules: Vec<NetworkPolicyEgressRule> = match policy.as_str() {
+            // Allow all egress
+            "open" | "egress-only" => vec![NetworkPolicyEgressRule { to: None, ports: None }],
+            // Restricted: allow only listed CIDRs
+            _ => {
+                let mut rules: Vec<NetworkPolicyEgressRule> = Vec::new();
+                for dest in &spec.network.allowed_egress {
+                    // Only CIDR strings are supported in NetworkPolicy IPBlock
+                    if dest.contains('/') {
+                        let peer = NetworkPolicyPeer { ip_block: Some(IPBlock { cidr: dest.clone(), except: None }), ..Default::default() };
+                        rules.push(NetworkPolicyEgressRule { to: Some(vec![peer]), ports: None });
+                    }
+                }
+                rules
+            }
+        };
+        egress_policies.push(NetworkPolicy {
+            metadata: ObjectMeta { name: Some(format!("rental-np-egress-{}", name)), ..Default::default() },
+            spec: Some(NetworkPolicySpec {
+                pod_selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector { match_labels: Some(vec![("basilica.io/rental".into(), name.into())].into_iter().collect()), ..Default::default() },
+                ingress: None,
+                egress: Some(egress_rules),
+                policy_types: Some(vec!["Egress".into()]),
+            }),
+        });
+    }
+
+    let mut out = vec![default_deny, allow_ingress];
+    out.extend(egress_policies);
+    out
 }
 
 pub fn render_rental_pvc(name: &str, spec: &GpuRentalSpec) -> Option<PersistentVolumeClaim> {
@@ -207,12 +254,13 @@ pub fn render_rental_pvc(name: &str, spec: &GpuRentalSpec) -> Option<PersistentV
     })
 }
 
-pub struct RentalController<C: K8sClient> {
+pub struct RentalController<C: K8sClient, B: BillingClient> {
     pub client: C,
+    pub billing: B,
 }
 
-impl<C: K8sClient> RentalController<C> {
-    pub fn new(client: C) -> Self { Self { client } }
+impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
+    pub fn new(client: C, billing: B) -> Self { Self { client, billing } }
 
     pub async fn reconcile(&self, ns: &str, cr: &GpuRental) -> Result<()> {
         let name = cr.metadata.name.clone().unwrap_or_default();
@@ -241,10 +289,41 @@ impl<C: K8sClient> RentalController<C> {
             let _ = self.client.create_network_policy(ns, &np).await;
         }
 
-        // Derive status
+        // Derive status and expiry
         let pods = self.client.list_pods_with_label(ns, "basilica.io/rental", &name).await?;
         let (state, pod_name) = compute_rental_state_from_pods(&pods);
-        let status = GpuRentalStatus { state: Some(state), pod_name, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None };
+        // Establish or extend expiry
+        let mut expiry_time_str = None;
+        let mut renewal_time_str = None;
+        let mut total_extensions = None;
+        if spec.duration.hours > 0 {
+            // Get current status if exists
+            let mut current = self.client.get_gpu_rental(ns, &name).await?.status.unwrap_or_default();
+            if current.expiry_time.is_none() {
+                let exp = Utc::now() + Duration::hours(spec.duration.hours as i64);
+                expiry_time_str = Some(exp.to_rfc3339());
+            } else if spec.duration.auto_extend {
+                if let Some(expiry_str) = current.expiry_time.clone() {
+                    if let Ok(expiry) = DateTime::parse_from_rfc3339(&expiry_str).map(|dt| dt.with_timezone(&Utc)) {
+                        if Utc::now() >= expiry {
+                            // Attempt renewal
+                            if self.billing.approve_extension(cr, spec.duration.hours).await.unwrap_or(false) {
+                                let new_exp = Utc::now() + Duration::hours(spec.duration.hours as i64);
+                                expiry_time_str = Some(new_exp.to_rfc3339());
+                                renewal_time_str = Some(Utc::now().to_rfc3339());
+                                total_extensions = Some(current.total_extensions.unwrap_or(0) + 1);
+                            } else {
+                                // mark suspended when cannot extend
+                                let suspended = GpuRentalStatus { state: Some("Suspended".into()), pod_name: pod_name.clone(), node_name: None, start_time: None, expiry_time: current.expiry_time.clone(), renewal_time: current.renewal_time.clone(), total_cost: None, total_extensions: current.total_extensions };
+                                self.client.update_gpu_rental_status(ns, &name, suspended).await?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let status = GpuRentalStatus { state: Some(state), pod_name, node_name: None, start_time: None, expiry_time: expiry_time_str, renewal_time: renewal_time_str, total_cost: None, total_extensions };
         self.client.update_gpu_rental_status(ns, &name, status).await?;
         Ok(())
     }
@@ -277,6 +356,7 @@ mod tests {
     use super::*;
     use crate::crd::gpu_rental::{RentalContainer, RentalPort, RentalStorage, Resources as RResources};
     use crate::k8s_client::MockK8sClient;
+    use crate::billing::MockBillingClient;
     use k8s_openapi::api::core::v1::PodStatus;
 
     fn base_spec() -> GpuRentalSpec {
@@ -300,6 +380,7 @@ mod tests {
             billing: None,
             ttl_seconds: 0,
             tenancy: None,
+            exclusive: false,
         }
     }
 
@@ -313,7 +394,10 @@ mod tests {
         let res = c.resources.as_ref().unwrap();
         assert_eq!(res.limits.as_ref().unwrap().get("nvidia.com/gpu").unwrap().0, "1");
         assert_eq!(c.ports.as_ref().unwrap()[0].container_port, 8080);
-        assert!(c.security_context.as_ref().unwrap().read_only_root_filesystem.unwrap());
+        let csc = c.security_context.as_ref().unwrap();
+        assert!(csc.read_only_root_filesystem.unwrap());
+        assert_eq!(csc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+        assert_eq!(p.security_context.as_ref().unwrap().seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
         // Labels present
         assert_eq!(pod.metadata.labels.as_ref().unwrap().get("basilica.io/rental").unwrap(), "r1");
     }
@@ -336,11 +420,40 @@ mod tests {
         let mut spec = base_spec();
         spec.network.ingress = vec![crate::crd::gpu_rental::IngressRule { port: 8080, exposure: "NodePort".into() }];
         let nps = render_network_policies("r1", &spec);
-        assert_eq!(nps.len(), 2);
+        assert_eq!(nps.len(), 3);
         let deny = &nps[0];
         assert!(deny.spec.as_ref().unwrap().ingress.as_ref().unwrap().is_empty());
         let allow = &nps[1];
         assert!(!allow.spec.as_ref().unwrap().ingress.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn network_policies_include_egress_allowlist_restricted() {
+        let mut spec = base_spec();
+        spec.network.egress_policy = "restricted".into();
+        spec.network.allowed_egress = vec!["10.0.0.0/8".into(), "0.0.0.0/0".into()];
+        let nps = render_network_policies("r1", &spec);
+        assert_eq!(nps.len(), 3);
+        let egress_np = &nps[2];
+        let egress = egress_np.spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert_eq!(egress.len(), 2);
+        let first = &egress[0];
+        let peers = first.to.as_ref().unwrap();
+        assert!(peers[0].ip_block.as_ref().is_some());
+        assert_eq!(peers[0].ip_block.as_ref().unwrap().cidr, "10.0.0.0/8");
+    }
+
+    #[test]
+    fn network_policies_open_egress_rule() {
+        let mut spec = base_spec();
+        spec.network.egress_policy = "open".into();
+        let nps = render_network_policies("r1", &spec);
+        assert_eq!(nps.len(), 3);
+        let egress_np = &nps[2];
+        let egress = egress_np.spec.as_ref().unwrap().egress.as_ref().unwrap();
+        assert_eq!(egress.len(), 1);
+        assert!(egress[0].to.is_none());
+        assert!(egress_np.spec.as_ref().unwrap().policy_types.as_ref().unwrap().contains(&"Egress".into()));
     }
 
     #[test]
@@ -353,10 +466,19 @@ mod tests {
         assert_eq!(pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0].name, "data");
     }
 
+    #[test]
+    fn exclusive_rental_adds_toleration() {
+        let mut spec = base_spec();
+        spec.exclusive = true;
+        let pod = render_rental_pod("rX", &spec);
+        let tols = pod.spec.as_ref().unwrap().tolerations.as_ref().unwrap();
+        assert!(tols.iter().any(|t| t.key.as_deref() == Some("basilica.io/rental-exclusive") && t.value.as_deref() == Some("true")));
+    }
+
     #[tokio::test]
     async fn reconcile_creates_resources_and_updates_status() {
         let client = MockK8sClient::default();
-        let controller = RentalController::new(client.clone());
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
 
         let mut spec = base_spec();
         spec.network.ingress = vec![crate::crd::gpu_rental::IngressRule { port: 8080, exposure: "NodePort".into() }];
@@ -378,5 +500,56 @@ mod tests {
         // Service should exist
         let svcs = controller.client.list_services_with_label("ns", "basilica.io/rental", "rent1").await.unwrap();
         assert!(!svcs.is_empty());
+    }
+    #[tokio::test]
+    async fn auto_extend_on_expired_rental_when_approved() {
+        let client = MockK8sClient::default();
+        let billing = MockBillingClient::default();
+        let controller = RentalController::new(client.clone(), billing);
+
+        let mut spec = base_spec();
+        spec.duration.auto_extend = true;
+        spec.duration.max_extensions = 1;
+        let cr = GpuRental::new("rent2", spec);
+        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
+
+        // First reconcile to set expiry
+        controller.reconcile("ns", &cr).await.unwrap();
+        let mut current = controller.client.get_gpu_rental("ns", "rent2").await.unwrap();
+        let mut st = current.status.take().unwrap();
+        // Set expiry to the past to trigger extension
+        st.expiry_time = Some((Utc::now() - Duration::hours(1)).to_rfc3339());
+        controller.client.update_gpu_rental_status("ns", "rent2", st).await.unwrap();
+
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller.client.get_gpu_rental("ns", "rent2").await.unwrap();
+        assert!(updated.status.as_ref().unwrap().expiry_time.is_some());
+        assert!(updated.status.as_ref().unwrap().renewal_time.is_some());
+    }
+
+    #[tokio::test]
+    async fn suspend_on_expired_rental_when_denied() {
+        let client = MockK8sClient::default();
+        let mut billing = MockBillingClient::default();
+        {
+            let mut approvals = billing.approvals.write().await;
+            approvals.insert("rent3".into(), false);
+        }
+        let controller = RentalController::new(client.clone(), billing);
+
+        let mut spec = base_spec();
+        spec.duration.auto_extend = true;
+        let cr = GpuRental::new("rent3", spec);
+        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+        // Force expiry
+        let mut current = controller.client.get_gpu_rental("ns", "rent3").await.unwrap();
+        let mut st = current.status.take().unwrap();
+        st.expiry_time = Some((Utc::now() - Duration::hours(1)).to_rfc3339());
+        controller.client.update_gpu_rental_status("ns", "rent3", st).await.unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+
+        let updated = controller.client.get_gpu_rental("ns", "rent3").await.unwrap();
+        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Suspended"));
     }
 }

@@ -28,6 +28,8 @@ pub struct GpuRentalSpec {
     pub ttl_seconds: u32,
     #[serde(default)]
     pub tenancy: Option<TenancyRef>,
+    #[serde(default)]
+    pub exclusive: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -157,6 +159,8 @@ pub struct GpuRentalStatus {
     pub renewal_time: Option<String>,
     #[serde(default)]
     pub total_cost: Option<f64>,
+    #[serde(default)]
+    pub total_extensions: Option<u32>,
 }
 
 #[cfg(test)]

@@ -255,7 +255,7 @@ mod tests {
         let bj = BasilicaJob::new("job1", crate::crd::basilica_job::BasilicaJobSpec {
             image: "img".into(), command: vec![], args: vec![], env: vec![],
             resources: crate::crd::basilica_job::Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::crd::basilica_job::GpuSpec { count: 0, model: vec![] } },
-            storage: None, ttl_seconds: 0, priority: "normal".into(),
+            storage: None, artifacts: None, ttl_seconds: 0, priority: "normal".into(),
         });
         client.create_basilica_job("ns", &bj).await.unwrap();
         let bj_get = client.get_basilica_job("ns", "job1").await.unwrap();
@@ -271,7 +271,7 @@ mod tests {
             duration: crate::crd::gpu_rental::RentalDuration { hours: 24, auto_extend: false, max_extensions: 0 },
             access_type: crate::crd::gpu_rental::AccessType::Ssh,
             network: Default::default(), storage: None, ssh: None, jupyter_access: None, environment: None, miner_selector: None, billing: None,
-            ttl_seconds: 0, tenancy: None,
+            ttl_seconds: 0, tenancy: None, exclusive: false,
         });
         client.create_gpu_rental("ns", &gr).await.unwrap();
         let gr_get = client.get_gpu_rental("ns", "rent1").await.unwrap();

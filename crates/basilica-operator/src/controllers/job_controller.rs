@@ -1,5 +1,5 @@
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
-use k8s_openapi::api::core::v1::{Affinity, Capabilities, Container, EnvVar, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Toleration};
+use k8s_openapi::api::core::v1::{Affinity, Capabilities, Container, EnvVar, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Toleration, SeccompProfile};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::api::core::v1::{NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm};
@@ -61,11 +61,12 @@ fn build_node_affinity(gpu: &JobGpuSpec) -> Option<Affinity> {
 }
 
 fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityContext>) {
-    let pod_sc = Some(PodSecurityContext { run_as_non_root: Some(true), ..Default::default() });
+    let pod_sc = Some(PodSecurityContext { run_as_non_root: Some(true), seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }), ..Default::default() });
     let container_sc = Some(SecurityContext {
         allow_privilege_escalation: Some(false),
         read_only_root_filesystem: Some(true),
         capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), ..Default::default() }),
+        seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }),
         ..Default::default()
     });
     (pod_sc, container_sc)
@@ -85,8 +86,28 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         ..Default::default()
     };
 
+    let mut containers = vec![container];
+    // Optional artifact sidecar
+    if let Some(art) = &spec.artifacts {
+        if art.enabled {
+            let mut env = Vec::new();
+            env.push(EnvVar { name: "DESTINATION".into(), value: Some(art.destination.clone()), ..Default::default() });
+            env.push(EnvVar { name: "FROM_PATH".into(), value: Some(art.from_path.clone()), ..Default::default() });
+            env.push(EnvVar { name: "PROVIDER".into(), value: Some(if art.provider.is_empty() { "s3".into() } else { art.provider.clone() }), ..Default::default() });
+            let sidecar = Container {
+                name: format!("artifact-uploader-{}", name),
+                image: Some("alpine:3.19".into()),
+                command: Some(vec!["/bin/sh".into(), "-c".into(), "tail -f /dev/null".into()]),
+                env: Some(env),
+                security_context: Some(SecurityContext { allow_privilege_escalation: Some(false), read_only_root_filesystem: Some(true), capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), ..Default::default() }), seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }), ..Default::default() }),
+                ..Default::default()
+            };
+            containers.push(sidecar);
+        }
+    }
+
     let pod_spec = PodSpec {
-        containers: vec![container],
+        containers,
         restart_policy: Some("Never".into()),
         tolerations: Some(build_tolerations()),
         security_context: pod_sc,
@@ -187,6 +208,7 @@ mod tests {
             env: vec![("FOO".into(), "bar".into())],
             resources: crate::crd::basilica_job::Resources { cpu: "4".into(), memory: "16Gi".into(), gpus: JobGpuSpec { count: 1, model: vec!["A100".into()] } },
             storage: None,
+            artifacts: None,
             ttl_seconds: 3600,
             priority: "normal".into(),
         }
@@ -199,7 +221,7 @@ mod tests {
         let tmpl = job.spec.unwrap().template;
         let pod = tmpl.spec.unwrap();
         assert_eq!(pod.restart_policy.unwrap(), "Never");
-        assert!(pod.security_context.unwrap().run_as_non_root.unwrap());
+        assert!(pod.security_context.as_ref().unwrap().run_as_non_root.unwrap());
         let c = &pod.containers[0];
         let res = c.resources.as_ref().unwrap();
         let limits = res.limits.as_ref().unwrap();
@@ -210,6 +232,8 @@ mod tests {
         assert_eq!(sc.allow_privilege_escalation, Some(false));
         assert_eq!(sc.read_only_root_filesystem, Some(true));
         assert!(sc.capabilities.as_ref().unwrap().drop.as_ref().unwrap().contains(&"ALL".into()));
+        assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+        assert_eq!(pod.security_context.as_ref().unwrap().seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
     }
 
     #[test]
@@ -237,6 +261,25 @@ mod tests {
         assert_eq!(req.key, "basilica.io/gpu-model");
         assert_eq!(req.operator, "In");
         assert_eq!(req.values.unwrap()[0], "A100");
+    }
+
+    #[test]
+    fn render_includes_artifact_sidecar_when_enabled() {
+        let mut spec = sample_spec();
+        spec.artifacts = Some(crate::crd::basilica_job::ArtifactUploadSpec {
+            destination: "s3://bucket/prefix".into(),
+            from_path: "/outputs".into(),
+            provider: "s3".into(),
+            credentials_secret: None,
+            enabled: true,
+        });
+        let job = render_job("job-artifacts", &spec);
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        assert!(pod.containers.iter().any(|c| c.name.starts_with("artifact-uploader-")));
+        let sidecar = pod.containers.iter().find(|c| c.name.starts_with("artifact-uploader-")).unwrap();
+        let envs = sidecar.env.as_ref().unwrap();
+        assert!(envs.iter().any(|e| e.name == "DESTINATION"));
+        assert!(envs.iter().any(|e| e.name == "FROM_PATH"));
     }
 
     use crate::k8s_client::MockK8sClient;

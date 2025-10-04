@@ -18,6 +18,8 @@ pub struct BasilicaJobSpec {
     #[serde(default)]
     pub storage: Option<StorageSpec>,
     #[serde(default)]
+    pub artifacts: Option<ArtifactUploadSpec>,
+    #[serde(default)]
     pub ttl_seconds: u32,
     #[serde(default)]
     pub priority: String,
@@ -41,6 +43,24 @@ pub struct GpuSpec {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 pub struct StorageSpec {
     pub ephemeral: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactUploadSpec {
+    /// Destination URI (e.g., s3://bucket/prefix)
+    pub destination: String,
+    /// Path inside the container to upload from
+    pub from_path: String,
+    /// Provider identifier (e.g., s3, gcs). Optional; default s3
+    #[serde(default)]
+    pub provider: String,
+    /// Optional K8s Secret name containing credentials
+    #[serde(default)]
+    pub credentials_secret: Option<String>,
+    /// Whether artifact upload sidecar is enabled
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
