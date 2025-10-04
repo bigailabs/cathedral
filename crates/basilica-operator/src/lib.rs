@@ -3,3 +3,4 @@ pub mod k8s_client;
 pub mod controllers;
 pub mod billing;
 pub mod metrics;
+pub mod runtime;

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{ApiError, Result},
-    k8s_client::{ApiK8sClient, RentalSpecDto, RentalStatusDto, Resources},
+    k8s_client::{ApiK8sClient, RentalListItemDto, RentalSpecDto, RentalStatusDto, Resources},
     server::AppState,
 };
 use crate::metrics as apimetrics;
@@ -27,6 +27,25 @@ pub struct CreateRentalRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateRentalResponse {
     pub rental_id: String,
+}
+
+// List rentals in namespace (v2 K8s backend)
+pub async fn list_rentals(State(state): State<AppState>) -> Result<Json<Vec<RentalStatusResponse>>> {
+    let start = Instant::now();
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("rentals_v2.list", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
+    let items: Vec<RentalListItemDto> = client.list_rentals("default").await?;
+    let out: Vec<RentalStatusResponse> = items
+        .into_iter()
+        .map(|it| RentalStatusResponse { rental_id: it.rental_id, status: it.status })
+        .collect();
+    apimetrics::record_request("rentals_v2.list", "GET", start, true);
+    Ok(Json(out))
 }
 
 pub async fn create_rental(State(state): State<AppState>, Json(req): Json<CreateRentalRequest>) -> Result<Json<CreateRentalResponse>> {
@@ -160,6 +179,22 @@ pub async fn exec_rental(
     Ok(Json(ExecResponse { stdout: out, stderr: String::new(), exit_code: 0 }))
 }
 
+// Extend a rental's duration
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExtendRentalRequest { pub additional_hours: u32 }
+
+pub async fn extend_rental(
+    State(state): State<AppState>,
+    axum::extract::Path(rental_id): axum::extract::Path<String>,
+    Json(req): Json<ExtendRentalRequest>,
+) -> Result<Json<RentalStatusResponse>> {
+    let start = Instant::now();
+    let _ = req; // unused in pay-as-you-go
+    // Under pay-as-you-go, extension is not supported; rentals are terminated when out of credits.
+    apimetrics::record_request("rentals_v2.extend", "POST", start, false);
+    Err(ApiError::BadRequest { message: "Extend is not supported under pay-as-you-go".into() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +237,32 @@ mod tests {
         let exec_req = ExecRequest { command: vec!["echo".into(), "hello".into()], stdin: None };
         let resp = super::exec_rental(State(state.clone()), axum::extract::Path("rent-v2-exec".to_string()), Json(exec_req)).await.unwrap();
         assert!(resp.0.stdout.contains("echo hello"));
+    }
+
+    #[tokio::test]
+    async fn v2_rental_extend() {
+        let state = build_state().await;
+        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-v2-extend".into()), namespace: Some("default".into()) };
+        let _ = super::create_rental(State(state.clone()), Json(req_body)).await.unwrap();
+        let err = super::extend_rental(
+            State(state.clone()),
+            axum::extract::Path("rent-v2-extend".to_string()),
+            Json(ExtendRentalRequest { additional_hours: 2 }),
+        )
+        .await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn v2_rental_list() {
+        let state = build_state().await;
+        let req_body1 = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-a".into()), namespace: Some("default".into()) };
+        let _ = super::create_rental(State(state.clone()), Json(req_body1)).await.unwrap();
+        let req_body2 = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-b".into()), namespace: Some("default".into()) };
+        let _ = super::create_rental(State(state.clone()), Json(req_body2)).await.unwrap();
+        let list = super::list_rentals(State(state.clone())).await.unwrap();
+        let ids: Vec<String> = list.0.into_iter().map(|x| x.rental_id).collect();
+        assert!(ids.contains(&"rent-a".to_string()));
+        assert!(ids.contains(&"rent-b".to_string()));
     }
 }

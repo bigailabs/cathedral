@@ -161,6 +161,8 @@ pub struct GpuRentalStatus {
     pub total_cost: Option<f64>,
     #[serde(default)]
     pub total_extensions: Option<u32>,
+    #[serde(default)]
+    pub endpoints: Option<Vec<String>>, 
 }
 
 #[cfg(test)]

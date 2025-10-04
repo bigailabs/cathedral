@@ -11,6 +11,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use crate::crd::gpu_rental::{AccessType, GpuRental, GpuRentalSpec, GpuRentalStatus, GpuSpec, RentalNetwork};
 use crate::k8s_client::K8sClient;
 use crate::billing::BillingClient;
+use std::sync::Arc;
 use k8s_openapi::chrono::{DateTime, Duration, Utc};
 use anyhow::Result;
 use std::time::Instant;
@@ -256,25 +257,28 @@ pub fn render_rental_pvc(name: &str, spec: &GpuRentalSpec) -> Option<PersistentV
     })
 }
 
-pub struct RentalController<C: K8sClient, B: BillingClient> {
+#[derive(Clone)]
+pub struct RentalController<C: K8sClient> {
     pub client: C,
-    pub billing: B,
+    pub billing: Arc<dyn BillingClient + Send + Sync>,
 }
 
-impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
-    pub fn new(client: C, billing: B) -> Self { Self { client, billing } }
+impl<C: K8sClient> RentalController<C> {
+    pub fn new(client: C, billing: impl BillingClient + Send + Sync + 'static) -> Self { Self { client, billing: Arc::new(billing) } }
+    pub fn new_with_arc(client: C, billing: Arc<dyn BillingClient + Send + Sync>) -> Self { Self { client, billing } }
 
     pub async fn reconcile(&self, ns: &str, cr: &GpuRental) -> Result<()> {
         let start = Instant::now();
         let name = cr.metadata.name.clone().unwrap_or_default();
         let spec = cr.spec.clone();
-        let prev_state = self
+        let prev_status = self
             .client
             .get_gpu_rental(ns, &name)
             .await
             .ok()
-            .and_then(|r| r.status.and_then(|s| s.state))
-            .unwrap_or_else(|| "Unknown".into());
+            .and_then(|r| r.status)
+            .unwrap_or_default();
+        let prev_state = prev_status.state.clone().unwrap_or_else(|| "Unknown".into());
 
         // Ensure PVC if requested
         if spec.storage.is_some() {
@@ -301,49 +305,69 @@ impl<C: K8sClient, B: BillingClient> RentalController<C, B> {
         // Record netpol mode (egress policy label)
         opmetrics::record_rental_netpol(&spec.network.egress_policy, ns);
 
-        // Derive status and expiry
+        // Derive status and enforce pay-as-you-go billing policy
         let pods = self.client.list_pods_with_label(ns, "basilica.io/rental", &name).await?;
         let (state, pod_name) = compute_rental_state_from_pods(&pods);
-        // Establish or extend expiry
-        let mut expiry_time_str = None;
-        let mut renewal_time_str = None;
-        let mut total_extensions = None;
-        if spec.duration.hours > 0 {
-            // Get current status if exists
-            let mut current = self.client.get_gpu_rental(ns, &name).await?.status.unwrap_or_default();
-            if current.expiry_time.is_none() {
-                let exp = Utc::now() + Duration::hours(spec.duration.hours as i64);
-                expiry_time_str = Some(exp.to_rfc3339());
-            } else if spec.duration.auto_extend {
-                if let Some(expiry_str) = current.expiry_time.clone() {
-                    if let Ok(expiry) = DateTime::parse_from_rfc3339(&expiry_str).map(|dt| dt.with_timezone(&Utc)) {
-                        if Utc::now() >= expiry {
-                            // Attempt renewal
-                            if self.billing.approve_extension(cr, spec.duration.hours).await.unwrap_or(false) {
-                                let new_exp = Utc::now() + Duration::hours(spec.duration.hours as i64);
-                                expiry_time_str = Some(new_exp.to_rfc3339());
-                                renewal_time_str = Some(Utc::now().to_rfc3339());
-                                total_extensions = Some(current.total_extensions.unwrap_or(0) + 1);
-                                opmetrics::record_rental_extension(ns, true);
-                            } else {
-                                // mark suspended when cannot extend
-                                let suspended = GpuRentalStatus { state: Some("Suspended".into()), pod_name: pod_name.clone(), node_name: None, start_time: None, expiry_time: current.expiry_time.clone(), renewal_time: current.renewal_time.clone(), total_cost: None, total_extensions: current.total_extensions };
-                                self.client.update_gpu_rental_status(ns, &name, suspended).await?;
-                                opmetrics::record_rental_extension(ns, false);
-                                return Ok(());
-                            }
+        let mut start_time_str = prev_status.start_time.clone();
+        if state == "Active" && start_time_str.is_none() { start_time_str = Some(Utc::now().to_rfc3339()); }
+
+        // Compute endpoints from Services
+        let mut endpoints: Option<Vec<String>> = None;
+        let services = self.client.list_services_with_label(ns, "basilica.io/rental", &name).await.unwrap_or_default();
+        if !services.is_empty() {
+            let mut eps = Vec::new();
+            for svc in services {
+                if let Some(specsvc) = svc.spec.as_ref() {
+                    let ty = specsvc.type_.as_deref().unwrap_or("ClusterIP");
+                    if let Some(ports) = specsvc.ports.as_ref() {
+                        for p in ports {
+                            let port = p.port;
+                            eps.push(format!("{}:{}", ty, port));
                         }
                     }
                 }
             }
+            if !eps.is_empty() { endpoints = Some(eps); }
         }
-        let status = GpuRentalStatus { state: Some(state.clone()), pod_name, node_name: None, start_time: None, expiry_time: expiry_time_str, renewal_time: renewal_time_str, total_cost: None, total_extensions };
-        self.client.update_gpu_rental_status(ns, &name, status).await?;
+
+        let mut status = GpuRentalStatus { state: Some(state.clone()), pod_name: pod_name.clone(), node_name: None, start_time: start_time_str.clone(), expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints };
+
+        // Pay-as-you-go: terminate if out of credits
+        if state == "Active" {
+            if self.billing.should_terminate(cr, &status).await.unwrap_or(false) {
+                // Best-effort delete workload resources
+                if let Some(pn) = pod_name.as_deref() { let _ = self.client.delete_pod(ns, pn).await; }
+                let _ = self.client.delete_service(ns, &format!("rental-svc-{}", name)).await;
+                status.state = Some("Terminated".into());
+                status.expiry_time = Some(Utc::now().to_rfc3339());
+                self.client.update_gpu_rental_status(ns, &name, status.clone()).await?;
+                opmetrics::record_rental_termination(ns, "OutOfCredits");
+                opmetrics::record_rental_active_change(ns, true, false);
+                // Emit usage event
+                let _ = self.billing.emit_usage_event(cr, &status).await;
+                return Ok(());
+            }
+        }
+
+        // Persist status
+        let status_state = status.state.clone().unwrap_or_else(|| "Unknown".into());
+        self.client.update_gpu_rental_status(ns, &name, status.clone()).await?;
+        // Emit usage event (best-effort)
+        let _ = self.billing.emit_usage_event(cr, &status).await;
         let created = true; // Pod and associated resources are ensured; for metrics, treat as created/ensured event
-        opmetrics::record_rental_reconcile(ns, &name, created, &prev_state, &state, start);
+        opmetrics::record_rental_reconcile(ns, &name, created, &prev_state, &status_state, start);
         let prev_active = prev_state == "Active";
-        let new_active = state == "Active";
+        let new_active = status_state == "Active";
         opmetrics::record_rental_active_change(ns, prev_active, new_active);
+        // If terminated from Active, record duration and termination counter
+        if prev_active && !new_active {
+            if let Some(st) = prev_status.start_time.as_ref().and_then(|s| DateTime::parse_from_rfc3339(s).ok()).map(|dt| dt.with_timezone(&Utc)) {
+                let seconds = (Utc::now() - st).num_seconds().max(0) as f64;
+                opmetrics::record_rental_active_duration(ns, seconds);
+            }
+            // reason is the new state (Suspended/Failed/etc.)
+            opmetrics::record_rental_termination(ns, &status_state);
+        }
         Ok(())
     }
 }
@@ -520,60 +544,33 @@ mod tests {
         // Service should exist
         let svcs = controller.client.list_services_with_label("ns", "basilica.io/rental", "rent1").await.unwrap();
         assert!(!svcs.is_empty());
+        // Endpoints should include the service port
+        let eps = updated2.status.as_ref().unwrap().endpoints.as_ref().unwrap();
+        assert!(eps.iter().any(|e| e.contains("8080")));
         // Metrics present
         // Exercise metrics path (no-op if already installed)
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
     }
     #[tokio::test]
-    async fn auto_extend_on_expired_rental_when_approved() {
+    async fn terminate_when_out_of_credits() {
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
-        let client = MockK8sClient::default();
-        let billing = MockBillingClient::default();
-        let controller = RentalController::new(client.clone(), billing);
-
-        let mut spec = base_spec();
-        spec.duration.auto_extend = true;
-        spec.duration.max_extensions = 1;
-        let cr = GpuRental::new("rent2", spec);
-        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
-
-        // First reconcile to set expiry
-        controller.reconcile("ns", &cr).await.unwrap();
-        let mut current = controller.client.get_gpu_rental("ns", "rent2").await.unwrap();
-        let mut st = current.status.take().unwrap();
-        // Set expiry to the past to trigger extension
-        st.expiry_time = Some((Utc::now() - Duration::hours(1)).to_rfc3339());
-        controller.client.update_gpu_rental_status("ns", "rent2", st).await.unwrap();
-
-        controller.reconcile("ns", &cr).await.unwrap();
-        let updated = controller.client.get_gpu_rental("ns", "rent2").await.unwrap();
-        assert!(updated.status.as_ref().unwrap().expiry_time.is_some());
-        assert!(updated.status.as_ref().unwrap().renewal_time.is_some());
-    }
-
-    #[tokio::test]
-    async fn suspend_on_expired_rental_when_denied() {
         let client = MockK8sClient::default();
         let mut billing = MockBillingClient::default();
         {
-            let mut approvals = billing.approvals.write().await;
-            approvals.insert("rent3".into(), false);
+            let mut t = billing.terminate.write().await;
+            t.insert("rent2".into(), true);
         }
         let controller = RentalController::new(client.clone(), billing);
 
-        let mut spec = base_spec();
-        spec.duration.auto_extend = true;
-        let cr = GpuRental::new("rent3", spec);
+        // Active pod
+        let spec = base_spec();
+        let cr = GpuRental::new("rent2", spec);
         controller.client.create_gpu_rental("ns", &cr).await.unwrap();
-        controller.reconcile("ns", &cr).await.unwrap();
-        // Force expiry
-        let mut current = controller.client.get_gpu_rental("ns", "rent3").await.unwrap();
-        let mut st = current.status.take().unwrap();
-        st.expiry_time = Some((Utc::now() - Duration::hours(1)).to_rfc3339());
-        controller.client.update_gpu_rental_status("ns", "rent3", st).await.unwrap();
-        controller.reconcile("ns", &cr).await.unwrap();
+        let pod = Pod { metadata: ObjectMeta { name: Some("p2".into()), labels: Some(vec![("basilica.io/rental".into(), "rent2".into())].into_iter().collect()), ..Default::default() }, status: Some(PodStatus { phase: Some("Running".into()), ..Default::default() }), ..Default::default() };
+        controller.client.create_pod("ns", &pod).await.unwrap();
 
-        let updated = controller.client.get_gpu_rental("ns", "rent3").await.unwrap();
-        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Suspended"));
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller.client.get_gpu_rental("ns", "rent2").await.unwrap();
+        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Terminated"));
     }
 }

@@ -234,6 +234,192 @@ impl K8sClient for MockK8sClient {
     }
 }
 
+/// Real Kubernetes client backed by kube
+#[derive(Clone)]
+pub struct KubeClient {
+    pub client: kube::Client,
+}
+
+impl KubeClient {
+    pub async fn try_default() -> Result<Self> {
+        let client = kube::Client::try_default().await?;
+        Ok(Self { client })
+    }
+
+    fn api<T>(&self, ns: &str) -> kube::Api<T>
+    where
+        T: kube::Resource<DynamicType = (), Scope = kube::core::NamespaceResourceScope>
+            + Clone
+            + serde::de::DeserializeOwned
+            + serde::Serialize
+            + 'static,
+    {
+        kube::Api::namespaced(self.client.clone(), ns)
+    }
+}
+
+#[async_trait]
+impl K8sClient for KubeClient {
+    async fn create_basilica_job(&self, ns: &str, obj: &crate::crd::basilica_job::BasilicaJob) -> Result<crate::crd::basilica_job::BasilicaJob> {
+        use kube::api::PostParams;
+        let api: kube::Api<crate::crd::basilica_job::BasilicaJob> = self.api(ns);
+        match api.create(&PostParams::default(), obj).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(obj.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_basilica_job(&self, ns: &str, name: &str) -> Result<crate::crd::basilica_job::BasilicaJob> {
+        let api: kube::Api<crate::crd::basilica_job::BasilicaJob> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_basilica_job(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+        let api: kube::Api<crate::crd::basilica_job::BasilicaJob> = self.api(ns);
+        api.delete(name, &DeleteParams::default()).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn update_basilica_job_status(&self, ns: &str, name: &str, status: crate::crd::basilica_job::BasilicaJobStatus) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<crate::crd::basilica_job::BasilicaJob> = self.api(ns);
+        let patch = serde_json::json!({"status": status});
+        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn create_gpu_rental(&self, ns: &str, obj: &crate::crd::gpu_rental::GpuRental) -> Result<crate::crd::gpu_rental::GpuRental> {
+        use kube::api::PostParams;
+        let api: kube::Api<crate::crd::gpu_rental::GpuRental> = self.api(ns);
+        match api.create(&PostParams::default(), obj).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(obj.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_gpu_rental(&self, ns: &str, name: &str) -> Result<crate::crd::gpu_rental::GpuRental> {
+        let api: kube::Api<crate::crd::gpu_rental::GpuRental> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_gpu_rental(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+        let api: kube::Api<crate::crd::gpu_rental::GpuRental> = self.api(ns);
+        api.delete(name, &DeleteParams::default()).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn update_gpu_rental_status(&self, ns: &str, name: &str, status: crate::crd::gpu_rental::GpuRentalStatus) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<crate::crd::gpu_rental::GpuRental> = self.api(ns);
+        let patch = serde_json::json!({"status": status});
+        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod> {
+        use kube::api::PostParams;
+        let api: kube::Api<Pod> = self.api(ns);
+        match api.create(&PostParams::default(), pod).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(pod.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_pod(&self, ns: &str, name: &str) -> Result<Pod> {
+        let api: kube::Api<Pod> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_pod(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+        let api: kube::Api<Pod> = self.api(ns);
+        api.delete(name, &DeleteParams::default()).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn list_pods_with_label(&self, ns: &str, key: &str, value: &str) -> Result<Vec<Pod>> {
+        use kube::api::ListParams;
+        let api: kube::Api<Pod> = self.api(ns);
+        let lp = ListParams::default().labels(&format!("{}={}", key, value));
+        let list = api.list(&lp).await?;
+        Ok(list.items)
+    }
+
+    async fn create_service(&self, ns: &str, svc: &Service) -> Result<Service> {
+        use kube::api::PostParams;
+        let api: kube::Api<Service> = self.api(ns);
+        match api.create(&PostParams::default(), svc).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(svc.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_service(&self, ns: &str, name: &str) -> Result<Service> {
+        let api: kube::Api<Service> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_service(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+        let api: kube::Api<Service> = self.api(ns);
+        api.delete(name, &DeleteParams::default()).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn list_services_with_label(&self, ns: &str, key: &str, value: &str) -> Result<Vec<Service>> {
+        use kube::api::ListParams;
+        let api: kube::Api<Service> = self.api(ns);
+        let lp = ListParams::default().labels(&format!("{}={}", key, value));
+        let list = api.list(&lp).await?;
+        Ok(list.items)
+    }
+
+    async fn create_network_policy(&self, ns: &str, np: &NetworkPolicy) -> Result<NetworkPolicy> {
+        use kube::api::PostParams;
+        let api: kube::Api<NetworkPolicy> = self.api(ns);
+        match api.create(&PostParams::default(), np).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(np.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn create_pvc(&self, ns: &str, pvc: &PersistentVolumeClaim) -> Result<PersistentVolumeClaim> {
+        use kube::api::PostParams;
+        let api: kube::Api<PersistentVolumeClaim> = self.api(ns);
+        match api.create(&PostParams::default(), pvc).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(pvc.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn create_secret(&self, ns: &str, secret: &Secret) -> Result<Secret> {
+        use kube::api::PostParams;
+        let api: kube::Api<Secret> = self.api(ns);
+        match api.create(&PostParams::default(), secret).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(secret.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn create_job(&self, ns: &str, job: &Job) -> Result<Job> {
+        use kube::api::PostParams;
+        let api: kube::Api<Job> = self.api(ns);
+        match api.create(&PostParams::default(), job).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(job.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_job(&self, ns: &str, name: &str) -> Result<Job> {
+        let api: kube::Api<Job> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

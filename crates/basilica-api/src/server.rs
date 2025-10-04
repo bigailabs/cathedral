@@ -18,6 +18,7 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::{info, warn};
+use crate::k8s_client::{ApiK8sClient, K8sClient};
 
 /// Main server structure
 pub struct Server {
@@ -208,6 +209,18 @@ impl Server {
                 message: format!("Failed to run migrations: {}", e),
             })?;
 
+        // Initialize Kubernetes client (optional)
+        let k8s: Option<Arc<dyn ApiK8sClient + Send + Sync>> = match K8sClient::try_default().await {
+            Ok(c) => {
+                info!("Initialized Kubernetes client for API integration");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                warn!("K8s client unavailable: {} (continuing without K8s integration)", e);
+                None
+            }
+        };
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -217,7 +230,7 @@ impl Server {
             validator_hotkey: config.bittensor.validator_hotkey.clone(),
             http_client: http_client.clone(),
             db,
-            k8s: None,
+            k8s,
         };
 
         // Start optional health check task using HTTP client

@@ -1,11 +1,12 @@
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
-use k8s_openapi::api::core::v1::{Affinity, Capabilities, Container, EnvVar, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SecurityContext, Toleration, SeccompProfile};
+use k8s_openapi::api::core::v1::{Affinity, Capabilities, Container, EnvFromSource, EnvVar, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SecretEnvSource, SecurityContext, Toleration, SeccompProfile};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::api::core::v1::{NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm};
 
 use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, BasilicaJobStatus, GpuSpec as JobGpuSpec, Resources as JobResources};
 use crate::k8s_client::K8sClient;
+use crate::billing::BillingClient;
 use anyhow::Result;
 use std::time::Instant;
 use crate::metrics as opmetrics;
@@ -96,13 +97,18 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
             env.push(EnvVar { name: "DESTINATION".into(), value: Some(art.destination.clone()), ..Default::default() });
             env.push(EnvVar { name: "FROM_PATH".into(), value: Some(art.from_path.clone()), ..Default::default() });
             env.push(EnvVar { name: "PROVIDER".into(), value: Some(if art.provider.is_empty() { "s3".into() } else { art.provider.clone() }), ..Default::default() });
+            let env_from = art
+                .credentials_secret
+                .as_ref()
+                .map(|name| vec![EnvFromSource { secret_ref: Some(SecretEnvSource { name: Some(name.clone()), optional: Some(false) }), ..Default::default() }]);
             let sidecar = Container {
                 name: format!("artifact-uploader-{}", name),
-                image: Some("alpine:3.19".into()),
-                command: Some(vec!["/bin/sh".into(), "-c".into(), "tail -f /dev/null".into()]),
+                image: Some("basilica/artifact-uploader:latest".into()),
+                command: Some(vec!["/uploader".into()]),
                 env: Some(env),
+                env_from,
                 security_context: Some(SecurityContext { allow_privilege_escalation: Some(false), read_only_root_filesystem: Some(true), capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), ..Default::default() }), seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }), ..Default::default() }),
-                ..Default::default()
+                ..Default::default() 
             };
             containers.push(sidecar);
         }
@@ -136,12 +142,15 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     }
 }
 
+#[derive(Clone)]
 pub struct JobController<C: K8sClient> {
     pub client: C,
+    pub billing: std::sync::Arc<dyn BillingClient + Send + Sync>,
 }
 
 impl<C: K8sClient> JobController<C> {
-    pub fn new(client: C) -> Self { Self { client } }
+    pub fn new(client: C) -> Self { Self { client, billing: std::sync::Arc::new(crate::billing::MockBillingClient::default()) } }
+    pub fn new_with_billing(client: C, billing: std::sync::Arc<dyn BillingClient + Send + Sync>) -> Self { Self { client, billing } }
 
     pub async fn reconcile(&self, ns: &str, cr: &BasilicaJob) -> Result<()> {
         let start = Instant::now();
@@ -170,18 +179,25 @@ impl<C: K8sClient> JobController<C> {
             .await?;
 
         let (phase, pod_name) = compute_phase_from_pods(&pods);
-        let status = BasilicaJobStatus {
-            phase: Some(phase),
-            pod_name,
-            start_time: None,
-            completion_time: None,
-        };
+        let mut status = BasilicaJobStatus { phase: Some(phase.clone()), pod_name, start_time: None, completion_time: None };
+        // Set start_time on first Running and completion_time on terminal states
+        if phase == "Running" && prev != "Running" {
+            status.start_time = Some(k8s_openapi::chrono::Utc::now().to_rfc3339());
+        }
+        if phase == "Succeeded" || phase == "Failed" {
+            status.completion_time = Some(k8s_openapi::chrono::Utc::now().to_rfc3339());
+        }
         let to = status.phase.clone().unwrap_or_else(|| "Unknown".into());
         self.client.update_basilica_job_status(ns, &name, status).await?;
+        // Emit job event (best-effort)
+        let current = self.client.get_basilica_job(ns, &name).await?;
+        let _ = self.billing.emit_job_event(&current, current.status.as_ref().unwrap_or(&BasilicaJobStatus::default())).await;
         opmetrics::record_job_reconcile(ns, &name, created, &prev, &to, start);
         let prev_active = prev == "Running";
         let new_active = to == "Running";
         opmetrics::record_job_active_change(ns, prev_active, new_active);
+        // Outcome counters
+        opmetrics::record_job_outcome(ns, &to);
         Ok(())
     }
 }

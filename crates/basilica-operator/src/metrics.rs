@@ -11,6 +11,8 @@ fn ensure_init() {
         describe_counter!("basilica_operator_jobs_reconciles_total", "Total job reconciles");
         describe_counter!("basilica_operator_jobs_created_total", "Jobs created by controller");
         describe_counter!("basilica_operator_jobs_status_transitions_total", "Job status transitions");
+        describe_counter!("basilica_operator_jobs_succeeded_total", "Jobs succeeded");
+        describe_counter!("basilica_operator_jobs_failed_total", "Jobs failed");
         describe_histogram!(
             "basilica_operator_job_reconcile_duration_seconds",
             "Job reconcile duration in seconds"
@@ -24,11 +26,13 @@ fn ensure_init() {
         describe_counter!("basilica_operator_rentals_extension_approved_total", "Auto-extension approvals");
         describe_counter!("basilica_operator_rentals_extension_denied_total", "Auto-extension denials");
         describe_counter!("basilica_operator_rentals_netpol_applied_total", "NetworkPolicy applied for rental egress mode");
+        describe_counter!("basilica_operator_rentals_terminated_total", "Rentals terminated (by reason)");
         describe_histogram!(
             "basilica_operator_rental_reconcile_duration_seconds",
             "Rental reconcile duration in seconds"
         );
         describe_gauge!("basilica_operator_active_rentals_total", "Active rentals per namespace");
+        describe_histogram!("basilica_operator_rental_active_duration_seconds", "Rental active duration in seconds");
     });
 }
 
@@ -102,4 +106,23 @@ pub fn record_rental_active_change(ns: &str, prev_active: bool, new_active: bool
         (true, false) => gauge!("basilica_operator_active_rentals_total", "namespace" => ns.to_string()).decrement(1.0),
         _ => {}
     }
+}
+
+pub fn record_job_outcome(ns: &str, phase: &str) {
+    ensure_init();
+    match phase {
+        "Succeeded" => counter!("basilica_operator_jobs_succeeded_total", "namespace" => ns.to_string()).increment(1),
+        "Failed" => counter!("basilica_operator_jobs_failed_total", "namespace" => ns.to_string()).increment(1),
+        _ => {}
+    }
+}
+
+pub fn record_rental_termination(ns: &str, reason: &str) {
+    ensure_init();
+    counter!("basilica_operator_rentals_terminated_total", "namespace" => ns.to_string(), "reason" => reason.to_string()).increment(1);
+}
+
+pub fn record_rental_active_duration(ns: &str, seconds: f64) {
+    ensure_init();
+    histogram!("basilica_operator_rental_active_duration_seconds", "namespace" => ns.to_string()).record(seconds);
 }
