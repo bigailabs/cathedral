@@ -27,5 +27,6 @@ pub struct BasilicaNodeProfileStatus {
     pub last_validated: Option<String>,
     #[serde(default)]
     pub kube_node_name: Option<String>,
+    #[serde(default)]
+    pub health: Option<String>,
 }
-

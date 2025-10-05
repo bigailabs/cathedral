@@ -34,6 +34,7 @@ use crate::config::VerificationConfig;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
+use crate::k8s_profile_publisher::K8sNodeProfilePublisher;
 use anyhow::Result;
 use bittensor::Service as BittensorService;
 use std::sync::Arc;
@@ -82,8 +83,15 @@ impl MinerProver {
 
         // Build verification engine with proper SSH key manager
         let verification = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { verification_engine_builder.build().await })
+            tokio::runtime::Handle::current().block_on(async move {
+                // Attempt to inject a real K8s NodeProfile publisher if available
+                let builder = if let Ok(publi) = K8sNodeProfilePublisher::try_default().await {
+                    verification_engine_builder.with_node_profile_publisher(Arc::new(publi))
+                } else {
+                    verification_engine_builder
+                };
+                builder.build().await
+            })
         })
         .map_err(|e| {
             anyhow::anyhow!(

@@ -4,3 +4,4 @@ pub mod controllers;
 pub mod billing;
 pub mod metrics;
 pub mod runtime;
+pub mod metrics_provider;

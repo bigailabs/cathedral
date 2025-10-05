@@ -16,6 +16,12 @@ pub trait NodeProfilePublisher: Send + Sync {
         node_name: &str,
         labels: &BTreeMap<String, String>,
     ) -> anyhow::Result<()>;
+    async fn set_node_profile_health(
+        &self,
+        ns: &str,
+        name: &str,
+        health: &str,
+    ) -> anyhow::Result<()>;
 }
 
 pub struct K8sNodeProfilePublisher {
@@ -40,6 +46,7 @@ impl K8sNodeProfilePublisher {
         spec: &NodeProfileSpec,
         kube_node_name: Option<&str>,
         last_validated: Option<&str>,
+        health: Option<&str>,
     ) -> anyhow::Result<DynamicObject> {
         let val = serde_json::json!({
             "apiVersion": "basilica.io/v1",
@@ -57,6 +64,7 @@ impl K8sNodeProfilePublisher {
             "status": {
                 "kubeNodeName": kube_node_name,
                 "lastValidated": last_validated,
+                "health": health,
             }
         });
         let obj: DynamicObject = serde_json::from_value(val)?;
@@ -95,6 +103,18 @@ impl K8sNodeProfilePublisher {
         Ok(())
     }
 
+    pub async fn set_node_profile_health(
+        &self,
+        ns: &str,
+        name: &str,
+        health: &str,
+    ) -> anyhow::Result<()> {
+        let api = self.cr_api(ns);
+        let patch = serde_json::json!({"status": {"health": health}});
+        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+        Ok(())
+    }
+
     fn build_label_merge_patch(labels: &BTreeMap<String, String>) -> serde_json::Value {
         serde_json::json!({
             "metadata": {
@@ -117,6 +137,15 @@ impl NodeProfilePublisher for K8sNodeProfilePublisher {
     ) -> anyhow::Result<()> {
         Self::apply_node_labels(self, node_name, labels).await
     }
+
+    async fn set_node_profile_health(
+        &self,
+        ns: &str,
+        name: &str,
+        health: &str,
+    ) -> anyhow::Result<()> {
+        Self::set_node_profile_health(self, ns, name, health).await
+    }
 }
 
 #[cfg(test)]
@@ -135,12 +164,13 @@ mod tests {
             storage_gb: 2000,
             network_gbps: 10,
         };
-        let cr = K8sNodeProfilePublisher::build_node_profile_cr("node-123", "ns", &spec, Some("kube-node-1"), Some("2024-10-04T00:00:00Z")).unwrap();
+        let cr = K8sNodeProfilePublisher::build_node_profile_cr("node-123", "ns", &spec, Some("kube-node-1"), Some("2024-10-04T00:00:00Z"), Some("Valid")).unwrap();
         assert_eq!(cr.metadata.name.as_deref(), Some("node-123"));
         let specv = cr.data.get("spec").unwrap();
         assert_eq!(specv.get("provider").and_then(|v| v.as_str()).unwrap(), "onprem");
         let statusv = cr.data.get("status").unwrap();
         assert_eq!(statusv.get("kubeNodeName").and_then(|v| v.as_str()).unwrap(), "kube-node-1");
+        assert_eq!(statusv.get("health").and_then(|v| v.as_str()).unwrap(), "Valid");
     }
 
     #[test]

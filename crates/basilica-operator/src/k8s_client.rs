@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use k8s_openapi::api::batch::v1::Job;
-use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{PersistentVolumeClaim, Pod, Secret, Service, Node};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::ResourceExt;
 use std::collections::HashMap;
@@ -46,6 +46,11 @@ pub trait K8sClient: Send + Sync {
     // Queues
     async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue>;
     async fn list_basilica_queues(&self, ns: &str) -> Result<Vec<BasilicaQueue>>;
+
+    // Node management (cordon/drain/delete)
+    async fn cordon_node(&self, name: &str) -> Result<()>;
+    async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>>;
+    async fn delete_node(&self, name: &str) -> Result<()>;
 }
 
 /// In-memory mock client implementing a subset of the Kubernetes API for tests.
@@ -61,6 +66,7 @@ pub struct MockK8sClient {
     rent_crds: Arc<RwLock<HashMap<String, HashMap<String, GpuRental>>>>,
     job_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaJob>>>>,
     queue_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaQueue>>>>,
+    nodes: Arc<RwLock<HashMap<String, Node>>>,
 }
 
 fn key(ns: &str) -> String { ns.to_string() }
@@ -250,6 +256,52 @@ impl K8sClient for MockK8sClient {
     async fn list_basilica_queues(&self, ns: &str) -> Result<Vec<BasilicaQueue>> {
         let map = self.queue_crds.read().await;
         Ok(map.get(ns).map(|m| m.values().cloned().collect()).unwrap_or_default())
+    }
+
+    async fn cordon_node(&self, name: &str) -> Result<()> {
+        let mut nodes = self.nodes.write().await;
+        if let Some(node) = nodes.get_mut(name) {
+            let mut spec = node.spec.clone().unwrap_or_default();
+            spec.unschedulable = Some(true);
+            node.spec = Some(spec);
+        }
+        Ok(())
+    }
+
+    async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>> {
+        let pods = self.pods.read().await;
+        let mut out = Vec::new();
+        for (_ns, map) in pods.iter() {
+            for p in map.values() {
+                if let Some(spec) = &p.spec {
+                    if spec.node_name.as_deref() == Some(node_name) {
+                        out.push(p.clone());
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete_node(&self, name: &str) -> Result<()> {
+        let mut nodes = self.nodes.write().await;
+        nodes.remove(name);
+        Ok(())
+    }
+}
+
+impl MockK8sClient {
+    /// Test helpers to manipulate Nodes in the mock
+    pub async fn add_node(&self, name: &str) {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        let node = Node { metadata: ObjectMeta { name: Some(name.to_string()), ..Default::default() }, ..Default::default() };
+        let mut nodes = self.nodes.write().await;
+        nodes.insert(name.to_string(), node);
+    }
+
+    pub async fn get_node(&self, name: &str) -> Result<Node> {
+        let nodes = self.nodes.read().await;
+        nodes.get(name).cloned().ok_or_else(|| anyhow!("Node not found: {}", name))
     }
 }
 
@@ -453,6 +505,26 @@ impl K8sClient for KubeClient {
         let api: kube::Api<BasilicaQueue> = self.api(ns);
         let list = api.list(&ListParams::default()).await?;
         Ok(list.items)
+    }
+
+    async fn cordon_node(&self, name: &str) -> Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+        let api: Api<Node> = Api::all(self.client.clone());
+        let patch = serde_json::json!({"spec": {"unschedulable": true}});
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch)).await.map(|_| ()).map_err(|e| anyhow!(e))
+    }
+
+    async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>> {
+        use kube::api::{Api, ListParams};
+        let pods: Api<Pod> = Api::all(self.client.clone());
+        let listed = pods.list(&ListParams::default()).await?;
+        Ok(listed.items.into_iter().filter(|p| p.spec.as_ref().and_then(|s| s.node_name.as_ref()).map(|n| n == node_name).unwrap_or(false)).collect())
+    }
+
+    async fn delete_node(&self, name: &str) -> Result<()> {
+        use kube::api::{Api, DeleteParams};
+        let api: Api<Node> = Api::all(self.client.clone());
+        api.delete(name, &DeleteParams::default()).await.map(|_| ()).map_err(|e| anyhow!(e))
     }
 }
 

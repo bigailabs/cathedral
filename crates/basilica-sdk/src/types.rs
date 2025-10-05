@@ -105,6 +105,8 @@ pub struct RentalStatusQuery {
 pub struct LogStreamQuery {
     pub follow: Option<bool>,
     pub tail: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since_seconds: Option<u32>,
 }
 
 /// Node selection strategy for rental requests

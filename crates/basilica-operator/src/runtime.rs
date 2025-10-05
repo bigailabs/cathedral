@@ -10,9 +10,12 @@ use tracing::{error, info, warn};
 use crate::billing::{BillingClient, MockBillingClient, HttpBillingClient};
 use crate::controllers::job_controller::JobController;
 use crate::controllers::rental_controller::RentalController;
+use crate::controllers::node_removal_controller::NodeRemovalController;
 use crate::crd::basilica_job::BasilicaJob;
+use crate::crd::basilica_node_profile::BasilicaNodeProfile;
 use crate::crd::gpu_rental::GpuRental;
 use crate::k8s_client::{K8sClient, KubeClient};
+use crate::metrics_provider::{RuntimeMetricsProvider, K8sMetricsProvider};
 
 #[derive(Clone)]
 struct JobCtx<C: K8sClient + Clone + 'static> {
@@ -74,12 +77,21 @@ pub async fn run() -> AnyResult<()> {
         _ => std::sync::Arc::new(MockBillingClient::default()),
     };
     // Build controllers
-    let job_ctrl = JobController::new_with_billing(kube_client.clone(), billing_arc.clone());
-    let rent_ctrl = RentalController::new_with_arc(kube_client.clone(), billing_arc);
+    let mut job_ctrl = JobController::new_with_billing(kube_client.clone(), billing_arc.clone());
+    let mut rent_ctrl = RentalController::new_with_arc(kube_client.clone(), billing_arc);
+    let node_ctrl = NodeRemovalController::new(kube_client.clone());
+
+    // Optionally enable K8s metrics provider when BASILICA_ENABLE_K8S_METRICS=true
+    if std::env::var("BASILICA_ENABLE_K8S_METRICS").ok().as_deref() == Some("true") {
+        let provider = std::sync::Arc::new(K8sMetricsProvider::new(client.clone()));
+        job_ctrl = job_ctrl.with_metrics_provider(provider.clone());
+        rent_ctrl = rent_ctrl.with_metrics_provider(provider);
+    }
 
     // Set up APIs
     let bj_api: Api<BasilicaJob> = Api::all(client.clone());
     let gr_api: Api<GpuRental> = Api::all(client.clone());
+    let np_api: Api<BasilicaNodeProfile> = Api::all(client.clone());
 
     // Run controllers as streams
     let jobs = Controller::new(bj_api, Default::default())
@@ -100,7 +112,31 @@ pub async fn run() -> AnyResult<()> {
             }
         });
 
+    let node_removal = Controller::new(np_api, Default::default())
+        .run(
+            |obj, _| {
+                let ctrl = node_ctrl.clone();
+                async move {
+                    if let Err(e) = ctrl.reconcile(&obj).await {
+                        return Err(ReconcileError(e));
+                    }
+                    Ok(Action::requeue(Duration::from_secs(30)))
+                }
+            },
+            |_obj, err, _| {
+                warn!("node removal reconcile error: {}", err);
+                Action::requeue(Duration::from_secs(10))
+            },
+            Arc::new(()),
+        )
+        .for_each(|res| async move {
+            match res {
+                Ok(_o) => {}
+                Err(e) => error!("node removal controller stream error: {}", e),
+            }
+        });
+
     info!("operator controllers started");
-    futures::future::join(jobs, rentals).await;
+    futures::future::join3(jobs, rentals, node_removal).await;
     Ok(())
 }

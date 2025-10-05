@@ -26,6 +26,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/jobs/:id/logs", get(routes::jobs::get_job_logs))
         // v2 rentals namespace is always available when k8s client exists
         .route("/v2/rentals", get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental))
+        .route("/v2/rentals-compat", post(routes::rentals_v2::create_rental_compat))
         .route(
             "/v2/rentals/:id",
             get(routes::rentals_v2::get_rental_status).delete(routes::rentals_v2::delete_rental),
@@ -58,7 +59,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
     };
     if use_k8s_backend {
         protected_routes = protected_routes
-            .route("/rentals", get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental))
+            .route("/rentals", get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental_compat))
             .route(
                 "/rentals/:id",
                 get(routes::rentals_v2::get_rental_status).delete(routes::rentals_v2::delete_rental),

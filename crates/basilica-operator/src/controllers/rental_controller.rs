@@ -1,7 +1,7 @@
 use k8s_openapi::api::core::v1::{
     Affinity, Capabilities, Container, EnvFromSource, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSecurityContext,
     PodSpec, ResourceRequirements, SecurityContext, Service, ServicePort, ServiceSpec, Toleration, Volume,
-    VolumeMount, PersistentVolumeClaimVolumeSource, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, VolumeResourceRequirements, SecretEnvSource,
+    VolumeMount, PersistentVolumeClaimVolumeSource, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, VolumeResourceRequirements, SecretEnvSource, EmptyDirVolumeSource, HostPathVolumeSource,
 };
 use k8s_openapi::api::networking::v1::{IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -10,7 +10,8 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use crate::crd::gpu_rental::{AccessType, GpuRental, GpuRentalSpec, GpuRentalStatus, GpuSpec, RentalNetwork};
 use crate::k8s_client::K8sClient;
-use crate::billing::BillingClient;
+use crate::billing::{BillingClient, RuntimeMetrics};
+use crate::metrics_provider::{RuntimeMetricsProvider, NoopRuntimeMetricsProvider};
 use std::sync::Arc;
 use k8s_openapi::chrono::{DateTime, Duration, Utc};
 use anyhow::Result;
@@ -33,6 +34,54 @@ fn build_resources(gpu: &GpuSpec, cpu: &str, memory: &str) -> ResourceRequiremen
         requests.insert("nvidia.com/gpu".to_string(), q);
     }
     ResourceRequirements { limits: Some(limits), requests: Some(requests), claims: None }
+}
+
+fn sanitize_ns(ns: &str) -> String {
+    ns.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .collect::<String>()
+}
+
+fn compute_backoff_secs(ns: &str) -> i64 {
+    let base = std::env::var("BASILICA_QUEUE_ADMIT_BACKOFF_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(10);
+    let ns_key = format!("BASILICA_QUEUE_BACKOFF_NS_{}", sanitize_ns(ns));
+    let per_ns = std::env::var(&ns_key)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(base);
+    let jitter = std::env::var("BASILICA_QUEUE_JITTER_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(5)
+        .max(0);
+    per_ns + jitter
+}
+
+fn compute_backoff_secs_for_rental(ns: &str, rental_name: &str) -> i64 {
+    let base = std::env::var("BASILICA_QUEUE_ADMIT_BACKOFF_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(10);
+    let ns_key = format!("BASILICA_QUEUE_BACKOFF_NS_{}", sanitize_ns(ns));
+    let per_ns = std::env::var(&ns_key)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(base);
+    let jitter_range = std::env::var("BASILICA_QUEUE_JITTER_SECS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(5)
+        .max(0);
+    if jitter_range == 0 { return per_ns; }
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ns.hash(&mut hasher);
+    rental_name.hash(&mut hasher);
+    let h = (hasher.finish() % ((jitter_range as u64) + 1)) as i64;
+    per_ns + h
 }
 
 fn build_env(env: &[(String, String)]) -> Vec<EnvVar> {
@@ -80,7 +129,7 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
         env: Some(build_env(&spec.container.env)),
         ports: Some(spec.container.ports.iter().map(|p| k8s_openapi::api::core::v1::ContainerPort { container_port: p.container_port as i32, protocol: Some(p.protocol.clone()), ..Default::default() }).collect()),
         resources: Some(build_resources(&spec.container.resources.gpus, &spec.container.resources.cpu, &spec.container.resources.memory)),
-        volume_mounts: if spec.storage.is_some() { Some(vec![VolumeMount { name: "data".into(), mount_path: spec.storage.as_ref().unwrap().mount_path.clone(), read_only: Some(false), ..Default::default() }]) } else { None },
+        volume_mounts: None,
         security_context: container_sc.clone(),
         ..Default::default()
     }];
@@ -133,14 +182,39 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
         }
     }
 
-    // Volumes
-    let volumes = if let Some(st) = &spec.storage {
-        Some(vec![Volume {
+    // Volumes and mounts
+    let mut volumes: Vec<Volume> = Vec::new();
+    let mut mounts: Vec<VolumeMount> = Vec::new();
+    if let Some(st) = &spec.storage {
+        volumes.push(Volume {
             name: "data".into(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource { claim_name: format!("rental-pvc-{}", name), ..Default::default() }),
             ..Default::default()
-        }])
-    } else { None };
+        });
+        mounts.push(VolumeMount { name: "data".into(), mount_path: st.mount_path.clone(), read_only: Some(false), ..Default::default() });
+    }
+
+    // Additional volumes from spec.container.volumes
+    let allow_hostpath = std::env::var("BASILICA_ALLOW_HOSTPATH").ok().map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+    for (idx, v) in spec.container.volumes.iter().enumerate() {
+        let vol_name = format!("vol-{}", idx);
+        if let Some(hp) = v.host_path.as_ref() {
+            if allow_hostpath {
+                volumes.push(Volume { name: vol_name.clone(), host_path: Some(HostPathVolumeSource { path: hp.clone(), type_: None }), ..Default::default() });
+                mounts.push(VolumeMount { name: vol_name, mount_path: v.container_path.clone(), read_only: Some(v.read_only), ..Default::default() });
+            } else {
+                // HostPath not allowed; skip
+            }
+        } else {
+            // Ephemeral emptyDir volume
+            volumes.push(Volume { name: vol_name.clone(), empty_dir: Some(EmptyDirVolumeSource { ..Default::default() }), ..Default::default() });
+            mounts.push(VolumeMount { name: vol_name, mount_path: v.container_path.clone(), read_only: Some(v.read_only), ..Default::default() });
+        }
+    }
+
+    if !mounts.is_empty() {
+        if let Some(vm) = &mut containers[0].volume_mounts { vm.extend(mounts); } else { containers[0].volume_mounts = Some(mounts); }
+    }
 
     let labels = Some(
         vec![
@@ -166,7 +240,7 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
         metadata: ObjectMeta { name: Some(format!("rental-{}", name)), labels: labels.clone(), ..Default::default() },
         spec: Some(PodSpec {
             containers,
-            volumes,
+            volumes: if volumes.is_empty() { None } else { Some(volumes) },
             restart_policy: Some("Always".into()),
             security_context: pod_sc,
             tolerations: Some(tolerations),
@@ -284,11 +358,20 @@ pub fn render_rental_pvc(name: &str, spec: &GpuRentalSpec) -> Option<PersistentV
 pub struct RentalController<C: K8sClient> {
     pub client: C,
     pub billing: Arc<dyn BillingClient + Send + Sync>,
+    pub metrics_provider: Arc<dyn RuntimeMetricsProvider + Send + Sync>,
 }
 
 impl<C: K8sClient> RentalController<C> {
-    pub fn new(client: C, billing: impl BillingClient + Send + Sync + 'static) -> Self { Self { client, billing: Arc::new(billing) } }
-    pub fn new_with_arc(client: C, billing: Arc<dyn BillingClient + Send + Sync>) -> Self { Self { client, billing } }
+    pub fn new(client: C, billing: impl BillingClient + Send + Sync + 'static) -> Self {
+        Self { client, billing: Arc::new(billing), metrics_provider: Arc::new(NoopRuntimeMetricsProvider::default()) }
+    }
+    pub fn new_with_arc(client: C, billing: Arc<dyn BillingClient + Send + Sync>) -> Self {
+        Self { client, billing, metrics_provider: Arc::new(NoopRuntimeMetricsProvider::default()) }
+    }
+    pub fn with_metrics_provider(mut self, provider: Arc<dyn RuntimeMetricsProvider + Send + Sync>) -> Self {
+        self.metrics_provider = provider;
+        self
+    }
 
     pub async fn reconcile(&self, ns: &str, cr: &GpuRental) -> Result<()> {
         let start = Instant::now();
@@ -302,6 +385,24 @@ impl<C: K8sClient> RentalController<C> {
             .and_then(|r| r.status)
             .unwrap_or_default();
         let prev_state = prev_status.state.clone().unwrap_or_else(|| "Unknown".into());
+
+        // Backoff to avoid thrash: if previously Queued, wait a short interval before admitting
+        if prev_state == "Queued" {
+            let backoff_secs = compute_backoff_secs_for_rental(ns, &name);
+            if backoff_secs > 0 {
+                if let Some(ts) = prev_status
+                    .renewal_time
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc))
+                {
+                    if (Utc::now() - ts).num_seconds() < backoff_secs {
+                        // Remain queued; do not update renewal_time to preserve window start
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         // Enforce BasilicaQueue concurrency and GPU model limits (if configured) before creating resources
         if let Ok(queues) = self.client.list_basilica_queues(ns).await {
@@ -323,7 +424,7 @@ impl<C: K8sClient> RentalController<C> {
                     })
                     .count() as u32;
                 if running_or_pending >= q.spec.concurrency {
-                    let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints: None };
+                    let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: Some(Utc::now().to_rfc3339()), total_cost: None, total_extensions: None, endpoints: None };
                     self.client.update_gpu_rental_status(ns, &name, queued).await?;
                     return Ok(());
                 }
@@ -384,7 +485,7 @@ impl<C: K8sClient> RentalController<C> {
 
                     if limits.total > 0 {
                         if total_gpus_in_use.saturating_add(requested_gpu_count) > limits.total {
-                            let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints: None };
+                            let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: Some(Utc::now().to_rfc3339()), total_cost: None, total_extensions: None, endpoints: None };
                             self.client.update_gpu_rental_status(ns, &name, queued).await?;
                             return Ok(());
                         }
@@ -395,7 +496,7 @@ impl<C: K8sClient> RentalController<C> {
                             if let Some(&cap) = per_model.get(&m) {
                                 let current = *model_gpus.get(&m).unwrap_or(&0);
                                 if current.saturating_add(requested_gpu_count) > cap {
-                                    let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: None, total_cost: None, total_extensions: None, endpoints: None };
+                                    let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: Some(Utc::now().to_rfc3339()), total_cost: None, total_extensions: None, endpoints: None };
                                     self.client.update_gpu_rental_status(ns, &name, queued).await?;
                                     return Ok(());
                                 }
@@ -470,7 +571,10 @@ impl<C: K8sClient> RentalController<C> {
                 opmetrics::record_rental_termination(ns, "OutOfCredits");
                 opmetrics::record_rental_active_change(ns, true, false);
                 // Emit usage event
-                let _ = self.billing.emit_usage_event(cr, &status).await;
+                let rm: Option<RuntimeMetrics> = if let Some(pn) = status.pod_name.as_deref() {
+                    self.metrics_provider.fetch_pod_metrics(ns, pn).await
+                } else { None };
+                let _ = self.billing.emit_usage_event(cr, &status, rm.as_ref()).await;
                 return Ok(());
             }
         }
@@ -479,7 +583,10 @@ impl<C: K8sClient> RentalController<C> {
         let status_state = status.state.clone().unwrap_or_else(|| "Unknown".into());
         self.client.update_gpu_rental_status(ns, &name, status.clone()).await?;
         // Emit usage event (best-effort)
-        let _ = self.billing.emit_usage_event(cr, &status).await;
+        let rm: Option<RuntimeMetrics> = if let Some(pn) = status.pod_name.as_deref() {
+            self.metrics_provider.fetch_pod_metrics(ns, pn).await
+        } else { None };
+        let _ = self.billing.emit_usage_event(cr, &status, rm.as_ref()).await;
         let created = true; // Pod and associated resources are ensured; for metrics, treat as created/ensured event
         opmetrics::record_rental_reconcile(ns, &name, created, &prev_state, &status_state, start);
         let prev_active = prev_state == "Active";
@@ -637,6 +744,48 @@ mod tests {
     }
 
     #[test]
+    fn emptydir_volume_from_container_volumes_is_mounted() {
+        let mut spec = base_spec();
+        // Add a non-hostPath volume
+        spec.container.volumes.push(crate::crd::gpu_rental::VolumeMount { host_path: None, container_path: "/work".into(), read_only: false });
+        let pod = render_rental_pod("r2", &spec);
+        let podspec = pod.spec.as_ref().unwrap();
+        let vols = podspec.volumes.as_ref().unwrap();
+        assert!(vols.iter().any(|v| v.name.starts_with("vol-") && v.empty_dir.is_some()));
+        let mounts = podspec.containers[0].volume_mounts.as_ref().unwrap();
+        assert!(mounts.iter().any(|m| m.mount_path == "/work"));
+    }
+
+    #[test]
+    fn hostpath_volume_is_gated_by_env() {
+        let mut spec = base_spec();
+        // hostPath provided
+        spec.container.volumes.push(crate::crd::gpu_rental::VolumeMount { host_path: Some("/var/scratch".into()), container_path: "/scratch".into(), read_only: true });
+
+        // By default, hostPath not allowed => should not appear
+        std::env::remove_var("BASILICA_ALLOW_HOSTPATH");
+        let pod = render_rental_pod("r3", &spec);
+        let podspec = pod.spec.as_ref().unwrap();
+        if let Some(vols) = &podspec.volumes {
+            assert!(!vols.iter().any(|v| v.host_path.is_some()));
+        }
+        if let Some(mounts) = &podspec.containers[0].volume_mounts {
+            // No mount for /scratch if hostPath excluded
+            assert!(!mounts.iter().any(|m| m.mount_path == "/scratch"));
+        }
+
+        // Enable hostPath
+        std::env::set_var("BASILICA_ALLOW_HOSTPATH", "true");
+        let pod2 = render_rental_pod("r3", &spec);
+        let ps2 = pod2.spec.as_ref().unwrap();
+        let vols2 = ps2.volumes.as_ref().unwrap();
+        assert!(vols2.iter().any(|v| v.host_path.as_ref().map(|h| h.path.as_str()) == Some("/var/scratch")));
+        let mounts2 = ps2.containers[0].volume_mounts.as_ref().unwrap();
+        assert!(mounts2.iter().any(|m| m.mount_path == "/scratch" && m.read_only == Some(true)));
+        // Cleanup env
+        std::env::remove_var("BASILICA_ALLOW_HOSTPATH");
+    }
+    #[test]
     fn artifacts_sidecar_renders_when_enabled() {
         let mut spec = base_spec();
         spec.artifacts = Some(crate::crd::gpu_rental::RentalArtifacts {
@@ -699,6 +848,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queued_backoff_respected() {
+        std::env::set_var("BASILICA_QUEUE_ADMIT_BACKOFF_SECS", "30");
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Queue CR with recent renewal_time
+        let cr = GpuRental::new("rent3", base_spec());
+        controller.client.create_gpu_rental("ns", &cr).await.unwrap();
+        let queued = GpuRentalStatus { state: Some("Queued".into()), pod_name: None, node_name: None, start_time: None, expiry_time: None, renewal_time: Some(k8s_openapi::chrono::Utc::now().to_rfc3339()), total_cost: None, total_extensions: None, endpoints: None };
+        controller.client.update_gpu_rental_status("ns", "rent3", queued).await.unwrap();
+
+        // No pods running; without backoff it would proceed; with backoff it should remain queued
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller.client.get_gpu_rental("ns", "rent3").await.unwrap();
+        assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Queued"));
+    }
+
+    #[tokio::test]
     async fn queue_gates_on_running_plus_pending() {
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
         let client = MockK8sClient::default();
@@ -756,6 +924,24 @@ mod tests {
         controller.reconcile("ns", &cr).await.unwrap();
         let updated = controller.client.get_gpu_rental("ns", "rent-a100").await.unwrap();
         assert_eq!(updated.status.as_ref().unwrap().state.as_deref(), Some("Queued"));
+    }
+
+    #[test]
+    fn per_namespace_backoff_override_and_deterministic_jitter() {
+        // Base 10s; per-namespace override to 20s; jitter up to 5s
+        std::env::set_var("BASILICA_QUEUE_ADMIT_BACKOFF_SECS", "10");
+        std::env::set_var("BASILICA_QUEUE_BACKOFF_NS_U_TEST_NS", "20");
+        std::env::set_var("BASILICA_QUEUE_JITTER_SECS", "5");
+
+        let ns = "u-test.ns"; // sanitizes to U_TEST_NS
+        let r1a = super::compute_backoff_secs_for_rental(ns, "rent-a");
+        let r1b = super::compute_backoff_secs_for_rental(ns, "rent-a");
+        assert_eq!(r1a, r1b, "backoff must be deterministic per rental");
+        assert!(r1a >= 20 && r1a <= 25, "backoff within overridden + jitter range");
+
+        let r2 = super::compute_backoff_secs_for_rental(ns, "rent-b");
+        assert!(r2 >= 20 && r2 <= 25);
+        // Different rentals may have different jitter; if equal it's acceptable, but ensure in range
     }
     #[tokio::test]
     async fn terminate_when_out_of_credits() {

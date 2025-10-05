@@ -6,7 +6,8 @@ use k8s_openapi::api::core::v1::{NodeAffinity, NodeSelector, NodeSelectorRequire
 
 use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, BasilicaJobStatus, GpuSpec as JobGpuSpec, Resources as JobResources};
 use crate::k8s_client::K8sClient;
-use crate::billing::BillingClient;
+use crate::billing::{BillingClient, RuntimeMetrics};
+use crate::metrics_provider::{RuntimeMetricsProvider, NoopRuntimeMetricsProvider};
 use anyhow::Result;
 use std::time::Instant;
 use crate::metrics as opmetrics;
@@ -146,11 +147,20 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
 pub struct JobController<C: K8sClient> {
     pub client: C,
     pub billing: std::sync::Arc<dyn BillingClient + Send + Sync>,
+    pub metrics_provider: std::sync::Arc<dyn RuntimeMetricsProvider + Send + Sync>,
 }
 
 impl<C: K8sClient> JobController<C> {
-    pub fn new(client: C) -> Self { Self { client, billing: std::sync::Arc::new(crate::billing::MockBillingClient::default()) } }
-    pub fn new_with_billing(client: C, billing: std::sync::Arc<dyn BillingClient + Send + Sync>) -> Self { Self { client, billing } }
+    pub fn new(client: C) -> Self {
+        Self { client, billing: std::sync::Arc::new(crate::billing::MockBillingClient::default()), metrics_provider: std::sync::Arc::new(NoopRuntimeMetricsProvider::default()) }
+    }
+    pub fn new_with_billing(client: C, billing: std::sync::Arc<dyn BillingClient + Send + Sync>) -> Self {
+        Self { client, billing, metrics_provider: std::sync::Arc::new(NoopRuntimeMetricsProvider::default()) }
+    }
+    pub fn with_metrics_provider(mut self, provider: std::sync::Arc<dyn RuntimeMetricsProvider + Send + Sync>) -> Self {
+        self.metrics_provider = provider;
+        self
+    }
 
     pub async fn reconcile(&self, ns: &str, cr: &BasilicaJob) -> Result<()> {
         let start = Instant::now();
@@ -202,10 +212,13 @@ impl<C: K8sClient> JobController<C> {
             status.completion_time = Some(k8s_openapi::chrono::Utc::now().to_rfc3339());
         }
         let to = status.phase.clone().unwrap_or_else(|| "Unknown".into());
-        self.client.update_basilica_job_status(ns, &name, status).await?;
+        self.client.update_basilica_job_status(ns, &name, status.clone()).await?;
         // Emit job event (best-effort)
         let current = self.client.get_basilica_job(ns, &name).await?;
-        let _ = self.billing.emit_job_event(&current, current.status.as_ref().unwrap_or(&BasilicaJobStatus::default())).await;
+        let rm: Option<RuntimeMetrics> = if let Some(pod) = status.pod_name.as_deref() {
+            self.metrics_provider.fetch_pod_metrics(ns, pod).await
+        } else { None };
+        let _ = self.billing.emit_job_event(&current, current.status.as_ref().unwrap_or(&BasilicaJobStatus::default()), rm.as_ref()).await;
         opmetrics::record_job_reconcile(ns, &name, created, &prev, &to, start);
         let prev_active = prev == "Running";
         let new_active = to == "Running";

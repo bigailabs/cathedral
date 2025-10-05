@@ -15,9 +15,10 @@ use crate::metrics::ValidatorMetrics;
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
-use crate::k8s_profile_publisher::{K8sNodeProfilePublisher, NodeProfilePublisher};
+use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
 use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
+use crate::agent_installer::{K3sAgentConfig, build_install_commands, build_uninstall_commands};
 use anyhow::{Context, Result};
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use chrono::Utc;
@@ -53,6 +54,8 @@ pub struct VerificationEngine {
     validation_node: Arc<tokio::sync::RwLock<ValidationNode>>,
     /// Optional worker queue for decoupled execution
     worker_queue: Option<Arc<ValidationWorkerQueue>>,
+    /// Optional NodeProfile publisher (DI)
+    node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
 }
 
 impl VerificationEngine {
@@ -754,6 +757,14 @@ impl VerificationEngine {
             || node_result.validation_type == ValidationType::Lightweight
                 && node_result.ssh_connection_successful)
         {
+            // Mark NodeProfile health=Invalid (best-effort)
+            if let Some(publisher) = &self.node_profile_publisher {
+                let ns = std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+                let node_name = node_result.node_id.to_string();
+                let _ = publisher.set_node_profile_health(&ns, &node_name, "Invalid").await;
+            }
+            // Best-effort uninstall k3s agent
+            let _ = self.maybe_uninstall_k3s(miner_uid, &node_result.node_id.to_string()).await;
             self.persistence
                 .cleanup_gpu_assignments(&verification_log.node_id, &miner_id, Some(&mut tx))
                 .await?;
@@ -884,6 +895,9 @@ impl VerificationEngine {
                             );
                         }
                     }
+
+                    // Join k3s cluster (optional, gated)
+                    self.maybe_join_k3s(miner_uid, &node_result.node_id.to_string()).await;
                 }
             }
             ValidationType::Lightweight => {
@@ -929,25 +943,72 @@ impl VerificationEngine {
         let (namespace, cr, maybe_labels) =
             self.prepare_node_profile_cr_and_labels(miner_uid, node_id, nr).await?;
 
-        // Use a real K8s publisher if available
-        let publisher = match K8sNodeProfilePublisher::try_default().await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "K8s client unavailable; skipping node profile publish"
-                );
-                return Ok(());
+        if let Some(publisher) = &self.node_profile_publisher {
+            publisher.upsert_node_profile(&namespace, &cr).await?;
+            if let Some((node_name, labels)) = maybe_labels {
+                let _ = publisher.apply_node_labels(&node_name, &labels).await;
             }
-        };
-
-        publisher.upsert_node_profile(&namespace, &cr).await?;
-
-        if let Some((node_name, labels)) = maybe_labels {
-            let _ = publisher.apply_node_labels(&node_name, &labels).await;
         }
 
         Ok(())
+    }
+
+    fn shell_quote_for_bash(s: &str) -> String {
+        // Wrap in single quotes and escape existing single quotes
+        let escaped = s.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    }
+
+    async fn get_node_ssh_details(&self, miner_uid: u16, node_id: &str) -> Result<basilica_common::ssh::SshConnectionDetails> {
+        let miner_id = format!("miner_{}", miner_uid);
+        let endpoint = self
+            .persistence
+            .get_node_ssh_endpoint(&node_id.to_string(), &miner_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("SSH endpoint not found for node {}", node_id))?;
+        let key_manager = self
+            .ssh_key_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SSH key manager not available"))?;
+        key_manager
+            .get_ssh_connection_details(&endpoint)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    async fn maybe_join_k3s(&self, miner_uid: u16, node_id: &str) {
+        if std::env::var("BASILICA_ENABLE_K3S_JOIN").ok().as_deref() != Some("true") {
+            return;
+        }
+        let url = match std::env::var("BASILICA_K3S_URL") { Ok(v) if !v.is_empty() => v, _ => return };
+        let token = match std::env::var("BASILICA_K3S_TOKEN") { Ok(v) if !v.is_empty() => v, _ => return };
+        let channel = std::env::var("BASILICA_K3S_CHANNEL").ok();
+        let exclusive = std::env::var("BASILICA_TAINT_EXCLUSIVE").ok().map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+
+        let mut cfg = K3sAgentConfig::new(url, token);
+        cfg.node_name = Some(node_id.to_string());
+        cfg.extra_args.push("--node-taint basilica.io/workloads-only=true:NoSchedule".into());
+        if exclusive { cfg.extra_args.push("--node-taint basilica.io/rental-exclusive=true:NoSchedule".into()); }
+        cfg.channel = channel;
+
+        let cmds = build_install_commands(&cfg);
+        let ssh = ValidatorSshClient::new();
+        let details = match self.get_node_ssh_details(miner_uid, node_id).await { Ok(d) => d, Err(_) => return };
+        for cmd in cmds {
+            let wrapped = format!("bash -lc {}", Self::shell_quote_for_bash(&cmd));
+            let _ = ssh.execute_command(&details, &wrapped, false).await;
+        }
+    }
+
+    async fn maybe_uninstall_k3s(&self, miner_uid: u16, node_id: &str) {
+        if std::env::var("BASILICA_ENABLE_K3S_JOIN").ok().as_deref() != Some("true") {
+            return;
+        }
+        let ssh = ValidatorSshClient::new();
+        let details = match self.get_node_ssh_details(miner_uid, node_id).await { Ok(d) => d, Err(_) => return };
+        for cmd in build_uninstall_commands() {
+            let wrapped = format!("bash -lc {}", Self::shell_quote_for_bash(&cmd));
+            let _ = ssh.execute_command(&details, &wrapped, false).await;
+        }
     }
 
     async fn prepare_node_profile_cr_and_labels(
@@ -986,12 +1047,13 @@ impl VerificationEngine {
         });
         let kube_node_name = hostname_opt.as_deref();
         let last_validated = Some(chrono::Utc::now().to_rfc3339());
-        let cr = K8sNodeProfilePublisher::build_node_profile_cr(
+        let cr = crate::k8s_profile_publisher::K8sNodeProfilePublisher::build_node_profile_cr(
             node_id,
             &namespace,
             &spec,
             kube_node_name,
             last_validated.as_deref(),
+            Some("Valid"),
         )?;
 
         let maybe_labels = kube_node_name.map(|name| {
@@ -1065,6 +1127,7 @@ impl VerificationEngine {
         ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
         bittensor_service: Option<Arc<bittensor::Service>>,
         metrics: Option<Arc<ValidatorMetrics>>,
+        node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
     ) -> Result<Self> {
         // Validate required components for dynamic discovery
         if use_dynamic_discovery && ssh_key_manager.is_none() {
@@ -1094,6 +1157,7 @@ impl VerificationEngine {
                 persistence.clone(),
             ))),
             worker_queue: None, // Will be set separately if needed
+            node_profile_publisher,
         })
     }
 
