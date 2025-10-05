@@ -20,6 +20,7 @@ mod node_profile;
 mod os_process;
 mod persistence;
 mod k8s_profile_publisher;
+mod agent_installer;
 mod rental;
 mod service;
 mod ssh;
