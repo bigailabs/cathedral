@@ -124,7 +124,7 @@ pub fn display_rental_items(
             state: String,
             #[tabled(rename = "SSH")]
             ssh: String,
-            #[tabled(rename = "Ports")]
+            #[tabled(rename = "Ports (Host → Container)")]
             ports: String,
             #[tabled(rename = "Image")]
             image: String,
@@ -209,7 +209,7 @@ pub fn display_rental_items(
             state: String,
             #[tabled(rename = "SSH")]
             ssh: String,
-            #[tabled(rename = "Ports")]
+            #[tabled(rename = "Ports (Host → Container)")]
             ports: String,
             #[tabled(rename = "Image")]
             image: String,
@@ -325,7 +325,7 @@ fn format_port_mappings(
         Some(ports) => {
             let formatted_ports: Vec<String> = ports
                 .iter()
-                .map(|p| format!("{}→{}", p.container_port, p.host_port))
+                .map(|p| format!("{}→{}", p.host_port, p.container_port))
                 .collect();
 
             match max_count {

@@ -290,21 +290,6 @@ pub async fn handle_up(
         response.rental_id
     ));
 
-    // Display port mappings if available
-    if !response.container_info.mapped_ports.is_empty() {
-        println!("\nPort Mappings:");
-        for port_mapping in &response.container_info.mapped_ports {
-            if port_mapping.container_port == 22 {
-                // SSH port is already shown in SSH connection instructions
-                continue;
-            }
-            println!(
-                "  Container Port {} → Host Port {} ({})",
-                port_mapping.container_port, port_mapping.host_port, port_mapping.protocol
-            );
-        }
-    }
-
     // Handle SSH based on options
     if options.no_ssh {
         // SSH disabled entirely, nothing to do
@@ -451,7 +436,7 @@ pub async fn handle_status(
     if json {
         json_output(&status)?;
     } else {
-        display_rental_status_with_details(&status);
+        display_rental_status_with_details(&status, config);
     }
 
     Ok(())
@@ -1022,7 +1007,10 @@ fn split_remote_path(path: &str) -> (Option<String>, String) {
     }
 }
 
-fn display_rental_status_with_details(status: &basilica_sdk::types::RentalStatusWithSshResponse) {
+fn display_rental_status_with_details(
+    status: &basilica_sdk::types::RentalStatusWithSshResponse,
+    config: &CliConfig,
+) {
     println!("Rental Status: {}", status.rental_id);
     println!("  Status: {:?}", status.status);
     println!("  Node: {}", status.node.id);
@@ -1038,21 +1026,48 @@ fn display_rental_status_with_details(status: &basilica_sdk::types::RentalStatus
     // Display port mappings if available
     if let Some(ref port_mappings) = status.port_mappings {
         if !port_mappings.is_empty() {
-            println!("\nPort Mappings:");
-            for port_mapping in port_mappings {
-                if port_mapping.container_port == 22 {
-                    // SSH port
-                    println!(
-                        "  SSH: Container Port {} → Host Port {} ({})",
-                        port_mapping.container_port, port_mapping.host_port, port_mapping.protocol
-                    );
-                } else {
-                    println!(
-                        "  Container Port {} → Host Port {} ({})",
-                        port_mapping.container_port, port_mapping.host_port, port_mapping.protocol
-                    );
-                }
-            }
+            println!("\nPort Mappings (Host → Container):");
+            let port_strings: Vec<String> = port_mappings
+                .iter()
+                .map(|p| format!("{}→{}", p.host_port, p.container_port))
+                .collect();
+            println!("  {}", port_strings.join(", "));
+        }
+    }
+
+    // Display SSH connection instructions if available
+    if let Some(ref ssh_credentials) = status.ssh_credentials {
+        if let Ok((host, port, username)) = parse_ssh_credentials(ssh_credentials) {
+            let private_key_path = &config.ssh.private_key_path;
+
+            println!();
+            print_info("SSH Connection:");
+            println!();
+
+            // Option 1: Using basilica CLI (simplest)
+            println!("  1. Using Basilica CLI:");
+            println!(
+                "     {}",
+                console::style(format!("basilica ssh {}", status.rental_id))
+                    .cyan()
+                    .bold()
+            );
+            println!();
+
+            // Option 2: Using standard SSH command
+            println!("  2. Using standard SSH:");
+            println!(
+                "     {}",
+                console::style(format!(
+                    "ssh -i {} -p {} {}@{}",
+                    compress_path(private_key_path),
+                    port,
+                    username,
+                    host
+                ))
+                .cyan()
+                .bold()
+            );
         }
     }
 }
