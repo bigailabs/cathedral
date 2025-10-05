@@ -14,10 +14,17 @@ pub struct NodeProfileSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeGpu { pub model: String, pub count: u32, pub memory_gb: u32 }
+pub struct NodeGpu {
+    pub model: String,
+    pub count: u32,
+    pub memory_gb: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NodeCpu { pub model: String, pub cores: u32 }
+pub struct NodeCpu {
+    pub model: String,
+    pub cores: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct NodeProfileInput<'a> {
@@ -40,8 +47,15 @@ pub fn to_node_profile_spec(input: &NodeProfileInput<'_>) -> NodeProfileSpec {
         .map(|g| g.gpu_memory_gb as u32)
         .unwrap_or(0);
     let memory_gb = nr.memory_info.total_gb as u32;
-    let cpu = NodeCpu { model: nr.cpu_info.model.clone(), cores: nr.cpu_info.cores };
-    let gpu = NodeGpu { model: gpu_model, count: gpu_count, memory_gb: gpu_mem };
+    let cpu = NodeCpu {
+        model: nr.cpu_info.model.clone(),
+        cores: nr.cpu_info.cores,
+    };
+    let gpu = NodeGpu {
+        model: gpu_model,
+        count: gpu_count,
+        memory_gb: gpu_mem,
+    };
     NodeProfileSpec {
         provider: input.provider.to_string(),
         region: input.region.to_string(),
@@ -54,7 +68,11 @@ pub fn to_node_profile_spec(input: &NodeProfileInput<'_>) -> NodeProfileSpec {
 }
 
 /// Produce Kubernetes node labels from a validation result and context.
-pub fn labels_from_validation(nr: &NodeResult, provider: &str, region: &str) -> BTreeMap<String, String> {
+pub fn labels_from_validation(
+    nr: &NodeResult,
+    provider: &str,
+    region: &str,
+) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert("basilica.io/validated".into(), "true".into());
     labels.insert("basilica.io/provider".into(), provider.to_string());
@@ -65,8 +83,18 @@ pub fn labels_from_validation(nr: &NodeResult, provider: &str, region: &str) -> 
         .map(|g| g.gpu_name.clone())
         .unwrap_or_else(|| nr.gpu_name.clone());
     labels.insert("basilica.io/gpu-model".into(), model);
-    labels.insert("basilica.io/gpu-count".into(), nr.gpu_infos.len().to_string());
-    labels.insert("basilica.io/gpu-mem".into(), nr.gpu_infos.get(0).map(|g| g.gpu_memory_gb as u32).unwrap_or(0).to_string());
+    labels.insert(
+        "basilica.io/gpu-count".into(),
+        nr.gpu_infos.len().to_string(),
+    );
+    labels.insert(
+        "basilica.io/gpu-mem".into(),
+        nr.gpu_infos
+            .get(0)
+            .map(|g| g.gpu_memory_gb as u32)
+            .unwrap_or(0)
+            .to_string(),
+    );
     labels
 }
 
@@ -78,7 +106,10 @@ pub fn taint_for_non_validated() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::miner_prover::types::{BinaryCpuInfo, BinaryMemoryInfo, GpuInfo, NetworkInterface, BinaryNetworkInfo, NodeResult, SmUtilizationStats, CompressedMatrix};
+    use crate::miner_prover::types::{
+        BinaryCpuInfo, BinaryMemoryInfo, BinaryNetworkInfo, CompressedMatrix, GpuInfo,
+        NetworkInterface, NodeResult, SmUtilizationStats,
+    };
 
     fn sample_node_result() -> NodeResult {
         NodeResult {
@@ -91,18 +122,46 @@ mod tests {
                 gpu_memory_gb: 80.0,
                 computation_time_ns: 0,
                 memory_bandwidth_gbps: 0.0,
-                sm_utilization: SmUtilizationStats { min_utilization: 0.0, max_utilization: 0.0, avg_utilization: 0.0, per_sm_stats: vec![] },
+                sm_utilization: SmUtilizationStats {
+                    min_utilization: 0.0,
+                    max_utilization: 0.0,
+                    avg_utilization: 0.0,
+                    per_sm_stats: vec![],
+                },
                 active_sms: 0,
                 total_sms: 0,
                 anti_debug_passed: true,
             }],
-            cpu_info: BinaryCpuInfo { model: "AMD EPYC".into(), cores: 64, threads: 128, frequency_mhz: 0 },
-            memory_info: BinaryMemoryInfo { total_gb: 256.0, available_gb: 0.0 },
-            network_info: BinaryNetworkInfo { interfaces: vec![NetworkInterface { name: "eth0".into(), mac_address: "aa:bb".into(), ip_addresses: vec!["10.0.0.2".into()] }] },
-            matrix_c: CompressedMatrix { rows: 0, cols: 0, data: vec![] },
+            cpu_info: BinaryCpuInfo {
+                model: "AMD EPYC".into(),
+                cores: 64,
+                threads: 128,
+                frequency_mhz: 0,
+            },
+            memory_info: BinaryMemoryInfo {
+                total_gb: 256.0,
+                available_gb: 0.0,
+            },
+            network_info: BinaryNetworkInfo {
+                interfaces: vec![NetworkInterface {
+                    name: "eth0".into(),
+                    mac_address: "aa:bb".into(),
+                    ip_addresses: vec!["10.0.0.2".into()],
+                }],
+            },
+            matrix_c: CompressedMatrix {
+                rows: 0,
+                cols: 0,
+                data: vec![],
+            },
             computation_time_ns: 0,
             checksum: [0u8; 32],
-            sm_utilization: SmUtilizationStats { min_utilization: 0.0, max_utilization: 0.0, avg_utilization: 0.0, per_sm_stats: vec![] },
+            sm_utilization: SmUtilizationStats {
+                min_utilization: 0.0,
+                max_utilization: 0.0,
+                avg_utilization: 0.0,
+                per_sm_stats: vec![],
+            },
             active_sms: 0,
             total_sms: 0,
             memory_bandwidth_gbps: 0.0,
@@ -114,7 +173,11 @@ mod tests {
     #[test]
     fn maps_to_node_profile_spec() {
         let nr = sample_node_result();
-        let input = NodeProfileInput { provider: "onprem", region: "us-east-1", node_result: &nr };
+        let input = NodeProfileInput {
+            provider: "onprem",
+            region: "us-east-1",
+            node_result: &nr,
+        };
         let spec = to_node_profile_spec(&input);
         assert_eq!(spec.provider, "onprem");
         assert_eq!(spec.region, "us-east-1");

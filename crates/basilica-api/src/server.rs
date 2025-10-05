@@ -1,5 +1,6 @@
 //! Main server implementation for the Basilica API Gateway
 
+use crate::k8s_client::{ApiK8sClient, K8sClient};
 use crate::{
     api,
     api::extractors::ownership::archive_rental_ownership,
@@ -18,7 +19,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::{info, warn};
-use crate::k8s_client::{ApiK8sClient, K8sClient};
 
 /// Main server structure
 pub struct Server {
@@ -51,7 +51,7 @@ pub struct AppState {
     pub db: PgPool,
 
     /// Optional K8s client seam for Jobs/Rentals backed by K3s
-    pub k8s: Option<Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>>, 
+    pub k8s: Option<Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>>,
 }
 
 /// Process health check for a single rental
@@ -210,13 +210,17 @@ impl Server {
             })?;
 
         // Initialize Kubernetes client (optional)
-        let k8s: Option<Arc<dyn ApiK8sClient + Send + Sync>> = match K8sClient::try_default().await {
+        let k8s: Option<Arc<dyn ApiK8sClient + Send + Sync>> = match K8sClient::try_default().await
+        {
             Ok(c) => {
                 info!("Initialized Kubernetes client for API integration");
                 Some(Arc::new(c))
             }
             Err(e) => {
-                warn!("K8s client unavailable: {} (continuing without K8s integration)", e);
+                warn!(
+                    "K8s client unavailable: {} (continuing without K8s integration)",
+                    e
+                );
                 None
             }
         };

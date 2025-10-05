@@ -6,9 +6,9 @@
 use super::miner_client::MinerClientConfig;
 use super::verification::VerificationEngine;
 use crate::config::{AutomaticVerificationConfig, SshSessionConfig, VerificationConfig};
+use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::SimplePersistence;
-use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::ssh::{SshAutomationComponents, ValidatorSshClient};
 use anyhow::{Context, Result};
 use basilica_common::identity::Hotkey;

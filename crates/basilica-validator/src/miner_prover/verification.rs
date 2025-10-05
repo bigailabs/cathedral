@@ -9,16 +9,16 @@ use super::types::{NodeInfoDetailed, NodeVerificationResult, ValidationType};
 use super::validation_states::{StateResult, ValidationState};
 use super::validation_strategy::{ValidationNode, ValidationStrategy, ValidationStrategySelector};
 use super::validation_worker::{ValidationWorkerQueue, WorkerQueueConfig};
+use crate::agent_installer::{build_install_commands, build_uninstall_commands, K3sAgentConfig};
 use crate::config::VerificationConfig;
 use crate::gpu::{categorization::GpuCategory, MinerGpuProfile};
+use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
+use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
-use crate::k8s_profile_publisher::NodeProfilePublisher;
-use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
 use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
-use crate::agent_installer::{K3sAgentConfig, build_install_commands, build_uninstall_commands};
 use anyhow::{Context, Result};
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use chrono::Utc;
@@ -759,12 +759,17 @@ impl VerificationEngine {
         {
             // Mark NodeProfile health=Invalid (best-effort)
             if let Some(publisher) = &self.node_profile_publisher {
-                let ns = std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+                let ns =
+                    std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
                 let node_name = node_result.node_id.to_string();
-                let _ = publisher.set_node_profile_health(&ns, &node_name, "Invalid").await;
+                let _ = publisher
+                    .set_node_profile_health(&ns, &node_name, "Invalid")
+                    .await;
             }
             // Best-effort uninstall k3s agent
-            let _ = self.maybe_uninstall_k3s(miner_uid, &node_result.node_id.to_string()).await;
+            let _ = self
+                .maybe_uninstall_k3s(miner_uid, &node_result.node_id.to_string())
+                .await;
             self.persistence
                 .cleanup_gpu_assignments(&verification_log.node_id, &miner_id, Some(&mut tx))
                 .await?;
@@ -883,7 +888,11 @@ impl VerificationEngine {
                     // Publish BasilicaNodeProfile CR and apply Node labels
                     if let Some(ref nr) = node_result.node_result {
                         if let Err(e) = self
-                            .publish_node_profile_and_labels(miner_uid, &node_result.node_id.to_string(), nr)
+                            .publish_node_profile_and_labels(
+                                miner_uid,
+                                &node_result.node_id.to_string(),
+                                nr,
+                            )
                             .await
                         {
                             warn!(
@@ -897,7 +906,8 @@ impl VerificationEngine {
                     }
 
                     // Join k3s cluster (optional, gated)
-                    self.maybe_join_k3s(miner_uid, &node_result.node_id.to_string()).await;
+                    self.maybe_join_k3s(miner_uid, &node_result.node_id.to_string())
+                        .await;
                 }
             }
             ValidationType::Lightweight => {
@@ -940,8 +950,9 @@ impl VerificationEngine {
         node_id: &str,
         nr: &super::types::NodeResult,
     ) -> Result<()> {
-        let (namespace, cr, maybe_labels) =
-            self.prepare_node_profile_cr_and_labels(miner_uid, node_id, nr).await?;
+        let (namespace, cr, maybe_labels) = self
+            .prepare_node_profile_cr_and_labels(miner_uid, node_id, nr)
+            .await?;
 
         if let Some(publisher) = &self.node_profile_publisher {
             publisher.upsert_node_profile(&namespace, &cr).await?;
@@ -959,7 +970,11 @@ impl VerificationEngine {
         format!("'{}'", escaped)
     }
 
-    async fn get_node_ssh_details(&self, miner_uid: u16, node_id: &str) -> Result<basilica_common::ssh::SshConnectionDetails> {
+    async fn get_node_ssh_details(
+        &self,
+        miner_uid: u16,
+        node_id: &str,
+    ) -> Result<basilica_common::ssh::SshConnectionDetails> {
         let miner_id = format!("miner_{}", miner_uid);
         let endpoint = self
             .persistence
@@ -979,20 +994,36 @@ impl VerificationEngine {
         if std::env::var("BASILICA_ENABLE_K3S_JOIN").ok().as_deref() != Some("true") {
             return;
         }
-        let url = match std::env::var("BASILICA_K3S_URL") { Ok(v) if !v.is_empty() => v, _ => return };
-        let token = match std::env::var("BASILICA_K3S_TOKEN") { Ok(v) if !v.is_empty() => v, _ => return };
+        let url = match std::env::var("BASILICA_K3S_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return,
+        };
+        let token = match std::env::var("BASILICA_K3S_TOKEN") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return,
+        };
         let channel = std::env::var("BASILICA_K3S_CHANNEL").ok();
-        let exclusive = std::env::var("BASILICA_TAINT_EXCLUSIVE").ok().map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let exclusive = std::env::var("BASILICA_TAINT_EXCLUSIVE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         let mut cfg = K3sAgentConfig::new(url, token);
         cfg.node_name = Some(node_id.to_string());
-        cfg.extra_args.push("--node-taint basilica.io/workloads-only=true:NoSchedule".into());
-        if exclusive { cfg.extra_args.push("--node-taint basilica.io/rental-exclusive=true:NoSchedule".into()); }
+        cfg.extra_args
+            .push("--node-taint basilica.io/workloads-only=true:NoSchedule".into());
+        if exclusive {
+            cfg.extra_args
+                .push("--node-taint basilica.io/rental-exclusive=true:NoSchedule".into());
+        }
         cfg.channel = channel;
 
         let cmds = build_install_commands(&cfg);
         let ssh = ValidatorSshClient::new();
-        let details = match self.get_node_ssh_details(miner_uid, node_id).await { Ok(d) => d, Err(_) => return };
+        let details = match self.get_node_ssh_details(miner_uid, node_id).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
         for cmd in cmds {
             let wrapped = format!("bash -lc {}", Self::shell_quote_for_bash(&cmd));
             let _ = ssh.execute_command(&details, &wrapped, false).await;
@@ -1004,7 +1035,10 @@ impl VerificationEngine {
             return;
         }
         let ssh = ValidatorSshClient::new();
-        let details = match self.get_node_ssh_details(miner_uid, node_id).await { Ok(d) => d, Err(_) => return };
+        let details = match self.get_node_ssh_details(miner_uid, node_id).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
         for cmd in build_uninstall_commands() {
             let wrapped = format!("bash -lc {}", Self::shell_quote_for_bash(&cmd));
             let _ = ssh.execute_command(&details, &wrapped, false).await;
@@ -1022,7 +1056,8 @@ impl VerificationEngine {
         Option<(String, std::collections::BTreeMap<String, String>)>,
     )> {
         // Resolve namespace for CR publishing
-        let namespace = std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+        let namespace =
+            std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
 
         // Attempt to derive hostname and region from stored network profile
         let (hostname_opt, region_opt, org_opt) = match self
@@ -1030,9 +1065,19 @@ impl VerificationEngine {
             .get_node_network_profile(miner_uid, node_id)
             .await?
         {
-            Some((_full, _ip, hostname, _city, region, _country, _loc, organization, _postal, _tz, _ts)) => {
-                (hostname, region, organization)
-            }
+            Some((
+                _full,
+                _ip,
+                hostname,
+                _city,
+                region,
+                _country,
+                _loc,
+                organization,
+                _postal,
+                _tz,
+                _ts,
+            )) => (hostname, region, organization),
             None => (None, None, None),
         };
 
@@ -1045,7 +1090,9 @@ impl VerificationEngine {
             region,
             node_result: nr,
         });
-        let kube_node_name = hostname_opt.as_deref();
+        // Prefer hostname from network profile; fallback to node_id which is used
+        // as the k3s node name during join (see maybe_join_k3s).
+        let kube_node_name = hostname_opt.as_deref().or(Some(node_id));
         let last_validated = Some(chrono::Utc::now().to_rfc3339());
         let cr = crate::k8s_profile_publisher::K8sNodeProfilePublisher::build_node_profile_cr(
             node_id,
@@ -1846,7 +1893,6 @@ mod node_profile_wiring_tests {
     use crate::config::{AutomaticVerificationConfig, SshSessionConfig};
     use crate::miner_prover::verification_engine_builder::VerificationEngineBuilder;
     use crate::persistence::SimplePersistence;
-    
 
     fn sample_node_result() -> crate::miner_prover::types::NodeResult {
         use crate::miner_prover::types::*;
@@ -1860,18 +1906,46 @@ mod node_profile_wiring_tests {
                 gpu_memory_gb: 80.0,
                 computation_time_ns: 0,
                 memory_bandwidth_gbps: 0.0,
-                sm_utilization: SmUtilizationStats { min_utilization: 0.0, max_utilization: 0.0, avg_utilization: 0.0, per_sm_stats: vec![] },
+                sm_utilization: SmUtilizationStats {
+                    min_utilization: 0.0,
+                    max_utilization: 0.0,
+                    avg_utilization: 0.0,
+                    per_sm_stats: vec![],
+                },
                 active_sms: 0,
                 total_sms: 0,
                 anti_debug_passed: true,
             }],
-            cpu_info: BinaryCpuInfo { model: "AMD EPYC".into(), cores: 64, threads: 128, frequency_mhz: 0 },
-            memory_info: BinaryMemoryInfo { total_gb: 256.0, available_gb: 0.0 },
-            network_info: BinaryNetworkInfo { interfaces: vec![NetworkInterface { name: "eth0".into(), mac_address: "aa:bb".into(), ip_addresses: vec!["10.0.0.2".into()] }] },
-            matrix_c: CompressedMatrix { rows: 0, cols: 0, data: vec![] },
+            cpu_info: BinaryCpuInfo {
+                model: "AMD EPYC".into(),
+                cores: 64,
+                threads: 128,
+                frequency_mhz: 0,
+            },
+            memory_info: BinaryMemoryInfo {
+                total_gb: 256.0,
+                available_gb: 0.0,
+            },
+            network_info: BinaryNetworkInfo {
+                interfaces: vec![NetworkInterface {
+                    name: "eth0".into(),
+                    mac_address: "aa:bb".into(),
+                    ip_addresses: vec!["10.0.0.2".into()],
+                }],
+            },
+            matrix_c: CompressedMatrix {
+                rows: 0,
+                cols: 0,
+                data: vec![],
+            },
             computation_time_ns: 0,
             checksum: [0u8; 32],
-            sm_utilization: SmUtilizationStats { min_utilization: 0.0, max_utilization: 0.0, avg_utilization: 0.0, per_sm_stats: vec![] },
+            sm_utilization: SmUtilizationStats {
+                min_utilization: 0.0,
+                max_utilization: 0.0,
+                avg_utilization: 0.0,
+                per_sm_stats: vec![],
+            },
             active_sms: 0,
             total_sms: 0,
             memory_bandwidth_gbps: 0.0,
@@ -1931,12 +2005,21 @@ mod node_profile_wiring_tests {
         assert_eq!(cr.metadata.name.as_deref(), Some("node-abc"));
         assert_eq!(cr.metadata.namespace.as_deref(), Some("testns"));
         let spec = cr.data.get("spec").expect("spec present");
-        assert_eq!(spec.get("provider").and_then(|v| v.as_str()).unwrap(), "aws");
-        assert_eq!(spec.get("region").and_then(|v| v.as_str()).unwrap(), "us-east-1");
+        assert_eq!(
+            spec.get("provider").and_then(|v| v.as_str()).unwrap(),
+            "aws"
+        );
+        assert_eq!(
+            spec.get("region").and_then(|v| v.as_str()).unwrap(),
+            "us-east-1"
+        );
 
         // Assert status
         let status = cr.data.get("status").expect("status present");
-        assert_eq!(status.get("kubeNodeName").and_then(|v| v.as_str()).unwrap(), "kube-node-1");
+        assert_eq!(
+            status.get("kubeNodeName").and_then(|v| v.as_str()).unwrap(),
+            "kube-node-1"
+        );
 
         // Assert labels
         let (node_name, labels) = maybe_labels.expect("labels present");

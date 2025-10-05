@@ -31,10 +31,10 @@ pub use scheduler::VerificationScheduler;
 pub use verification::VerificationEngine;
 
 use crate::config::VerificationConfig;
+use crate::k8s_profile_publisher::K8sNodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
-use crate::k8s_profile_publisher::K8sNodeProfilePublisher;
 use anyhow::Result;
 use bittensor::Service as BittensorService;
 use std::sync::Arc;

@@ -5,12 +5,12 @@ pub mod extractors;
 pub mod middleware;
 pub mod routes;
 
+use crate::config::RentalBackend;
 use crate::server::AppState;
 use axum::{
     routing::{delete, get, post},
     Router,
 };
-use crate::config::RentalBackend;
 
 /// Create all API routes
 pub fn routes(state: AppState) -> Router<AppState> {
@@ -22,11 +22,20 @@ pub fn routes(state: AppState) -> Router<AppState> {
     // Protected routes with unified authentication and scope validation
     let mut protected_routes = Router::new()
         .route("/jobs", post(routes::jobs::create_job))
-        .route("/jobs/:id", get(routes::jobs::get_job_status).delete(routes::jobs::delete_job))
+        .route(
+            "/jobs/:id",
+            get(routes::jobs::get_job_status).delete(routes::jobs::delete_job),
+        )
         .route("/jobs/:id/logs", get(routes::jobs::get_job_logs))
         // v2 rentals namespace is always available when k8s client exists
-        .route("/v2/rentals", get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental))
-        .route("/v2/rentals-compat", post(routes::rentals_v2::create_rental_compat))
+        .route(
+            "/v2/rentals",
+            get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental),
+        )
+        .route(
+            "/v2/rentals-compat",
+            post(routes::rentals_v2::create_rental_compat),
+        )
         .route(
             "/v2/rentals/:id",
             get(routes::rentals_v2::get_rental_status).delete(routes::rentals_v2::delete_rental),
@@ -59,19 +68,21 @@ pub fn routes(state: AppState) -> Router<AppState> {
     };
     if use_k8s_backend {
         protected_routes = protected_routes
-            .route("/rentals", get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental_compat))
+            .route(
+                "/rentals",
+                get(routes::rentals_v2::list_rentals)
+                    .post(routes::rentals_v2::create_rental_compat),
+            )
             .route(
                 "/rentals/:id",
-                get(routes::rentals_v2::get_rental_status).delete(routes::rentals_v2::delete_rental),
+                get(routes::rentals_v2::get_rental_status)
+                    .delete(routes::rentals_v2::delete_rental),
             )
             .route(
                 "/rentals/:id/logs",
                 get(routes::rentals_v2::stream_rental_logs),
             )
-            .route(
-                "/rentals/:id/exec",
-                post(routes::rentals_v2::exec_rental),
-            )
+            .route("/rentals/:id/exec", post(routes::rentals_v2::exec_rental))
             .route(
                 "/rentals/:id/extend",
                 post(routes::rentals_v2::extend_rental),

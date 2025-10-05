@@ -9,8 +9,8 @@ pub struct GpuSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Resources {
-    pub cpu: String,     // e.g., "4"
-    pub memory: String,  // e.g., "16Gi"
+    pub cpu: String,    // e.g., "4"
+    pub memory: String, // e.g., "16Gi"
     pub gpus: GpuSpec,
 }
 
@@ -46,7 +46,10 @@ mod tests {
             resources: Resources {
                 cpu: "4".into(),
                 memory: "16Gi".into(),
-                gpus: GpuSpec { count: 1, model: vec!["A100".into()] },
+                gpus: GpuSpec {
+                    count: 1,
+                    model: vec!["A100".into()],
+                },
             },
             storage_ephemeral_gi: 50,
             ttl_seconds: 3600,
@@ -58,4 +61,3 @@ mod tests {
         assert_eq!(de, spec);
     }
 }
-

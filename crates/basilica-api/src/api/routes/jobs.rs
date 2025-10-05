@@ -1,12 +1,12 @@
 use axum::{extract::State, routing::get, Json};
 use serde::{Deserialize, Serialize};
 
+use crate::metrics as apimetrics;
 use crate::{
     error::{ApiError, Result},
     k8s_client::{ApiK8sClient, JobSpecDto, JobStatusDto, Resources},
     server::AppState,
 };
-use crate::metrics as apimetrics;
 use std::time::Instant;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,9 +28,14 @@ pub struct CreateJobRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateJobResponse { pub job_id: String }
+pub struct CreateJobResponse {
+    pub job_id: String,
+}
 
-pub async fn create_job(State(state): State<AppState>, Json(req): Json<CreateJobRequest>) -> Result<Json<CreateJobResponse>> {
+pub async fn create_job(
+    State(state): State<AppState>,
+    Json(req): Json<CreateJobRequest>,
+) -> Result<Json<CreateJobResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -39,9 +44,19 @@ pub async fn create_job(State(state): State<AppState>, Json(req): Json<CreateJob
             return Err(ApiError::ServiceUnavailable);
         }
     };
-    let name = req.name.clone().unwrap_or_else(|| format!("job-{}", rand::random::<u32>()));
+    let name = req
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("job-{}", rand::random::<u32>()));
     let ns = req.namespace.clone().unwrap_or_else(|| "default".into());
-    let spec = JobSpecDto { image: req.image, command: req.command, args: req.args, env: req.env, resources: req.resources, ttl_seconds: req.ttl_seconds };
+    let spec = JobSpecDto {
+        image: req.image,
+        command: req.command,
+        args: req.args,
+        env: req.env,
+        resources: req.resources,
+        ttl_seconds: req.ttl_seconds,
+    };
     let id = client.create_job(&ns, &name, spec).await?;
     apimetrics::record_job_created(&ns);
     apimetrics::record_request("jobs.create", "POST", start, true);
@@ -49,9 +64,15 @@ pub async fn create_job(State(state): State<AppState>, Json(req): Json<CreateJob
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct JobStatusResponse { pub job_id: String, pub status: JobStatusDto }
+pub struct JobStatusResponse {
+    pub job_id: String,
+    pub status: JobStatusDto,
+}
 
-pub async fn get_job_status(State(state): State<AppState>, axum::extract::Path(job_id): axum::extract::Path<String>) -> Result<Json<JobStatusResponse>> {
+pub async fn get_job_status(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<Json<JobStatusResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -67,9 +88,14 @@ pub async fn get_job_status(State(state): State<AppState>, axum::extract::Path(j
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DeleteJobResponse { pub job_id: String }
+pub struct DeleteJobResponse {
+    pub job_id: String,
+}
 
-pub async fn delete_job(State(state): State<AppState>, axum::extract::Path(job_id): axum::extract::Path<String>) -> Result<Json<DeleteJobResponse>> {
+pub async fn delete_job(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<Json<DeleteJobResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -85,9 +111,15 @@ pub async fn delete_job(State(state): State<AppState>, axum::extract::Path(job_i
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct JobLogsResponse { pub job_id: String, pub logs: String }
+pub struct JobLogsResponse {
+    pub job_id: String,
+    pub logs: String,
+}
 
-pub async fn get_job_logs(State(state): State<AppState>, axum::extract::Path(job_id): axum::extract::Path<String>) -> Result<Json<JobLogsResponse>> {
+pub async fn get_job_logs(
+    State(state): State<AppState>,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<Json<JobLogsResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -112,12 +144,19 @@ mod tests {
         let client = crate::k8s_client::MockK8sClient::default();
         AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
-            validator_client: std::sync::Arc::new(basilica_validator::ValidatorClient::new("http://localhost", std::time::Duration::from_secs(1)).unwrap()),
+            validator_client: std::sync::Arc::new(
+                basilica_validator::ValidatorClient::new(
+                    "http://localhost",
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
             validator_endpoint: "http://localhost".into(),
             validator_uid: 0,
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
-            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db").unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
+                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
             k8s: Some(Arc::new(client)),
         }
     }
@@ -133,14 +172,29 @@ mod tests {
             "name": "job-test",
             "namespace": "default"
         });
-        let res = super::create_job(State(state.clone()), Json(serde_json::from_value::<CreateJobRequest>(req_body).unwrap())).await.unwrap();
+        let res = super::create_job(
+            State(state.clone()),
+            Json(serde_json::from_value::<CreateJobRequest>(req_body).unwrap()),
+        )
+        .await
+        .unwrap();
         let body = res.0;
         assert_eq!(body.job_id, "job-test");
 
-        let res2 = super::get_job_status(State(state.clone()), axum::extract::Path("job-test".to_string())).await.unwrap();
+        let res2 = super::get_job_status(
+            State(state.clone()),
+            axum::extract::Path("job-test".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(res2.0.status.phase, "Pending");
 
-        let res3 = super::delete_job(State(state.clone()), axum::extract::Path("job-test".to_string())).await.unwrap();
+        let res3 = super::delete_job(
+            State(state.clone()),
+            axum::extract::Path("job-test".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(res3.0.job_id, "job-test");
     }
 }

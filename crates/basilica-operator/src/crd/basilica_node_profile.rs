@@ -3,7 +3,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
-#[kube(group = "basilica.io", version = "v1", kind = "BasilicaNodeProfile", namespaced)]
+#[kube(
+    group = "basilica.io",
+    version = "v1",
+    kind = "BasilicaNodeProfile",
+    namespaced
+)]
 #[kube(status = "BasilicaNodeProfileStatus")]
 pub struct BasilicaNodeProfileSpec {
     pub provider: String,
@@ -16,10 +21,17 @@ pub struct BasilicaNodeProfileSpec {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-pub struct NodeGpu { pub model: String, pub count: u32, pub memory_gb: u32 }
+pub struct NodeGpu {
+    pub model: String,
+    pub count: u32,
+    pub memory_gb: u32,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-pub struct NodeCpu { pub model: String, pub cores: u32 }
+pub struct NodeCpu {
+    pub model: String,
+    pub cores: u32,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct BasilicaNodeProfileStatus {

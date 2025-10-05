@@ -51,9 +51,27 @@ pub trait ApiK8sClient {
     async fn create_rental(&self, ns: &str, name: &str, spec: RentalSpecDto) -> Result<String>;
     async fn get_rental_status(&self, ns: &str, name: &str) -> Result<RentalStatusDto>;
     async fn delete_rental(&self, ns: &str, name: &str) -> Result<()>;
-    async fn get_rental_logs(&self, ns: &str, name: &str, tail: Option<u32>, since_seconds: Option<u32>) -> Result<String>;
-    async fn exec_rental(&self, ns: &str, name: &str, command: Vec<String>, stdin: Option<String>, tty: bool) -> Result<ExecResultDto>;
-    async fn extend_rental(&self, ns: &str, name: &str, additional_hours: u32) -> Result<RentalStatusDto>;
+    async fn get_rental_logs(
+        &self,
+        ns: &str,
+        name: &str,
+        tail: Option<u32>,
+        since_seconds: Option<u32>,
+    ) -> Result<String>;
+    async fn exec_rental(
+        &self,
+        ns: &str,
+        name: &str,
+        command: Vec<String>,
+        stdin: Option<String>,
+        tty: bool,
+    ) -> Result<ExecResultDto>;
+    async fn extend_rental(
+        &self,
+        ns: &str,
+        name: &str,
+        additional_hours: u32,
+    ) -> Result<RentalStatusDto>;
     async fn list_rentals(&self, ns: &str) -> Result<Vec<RentalListItemDto>>;
 }
 
@@ -70,10 +88,18 @@ pub struct MockK8sClient {
 impl ApiK8sClient for MockK8sClient {
     async fn create_job(&self, ns: &str, name: &str, spec: JobSpecDto) -> Result<String> {
         let mut s = self.specs.write().await;
-        s.entry(ns.to_string()).or_default().insert(name.to_string(), spec);
+        s.entry(ns.to_string())
+            .or_default()
+            .insert(name.to_string(), spec);
         // default status pending
         let mut st = self.statuses.write().await;
-        st.entry(ns.to_string()).or_default().insert(name.to_string(), JobStatusDto { phase: "Pending".into(), pod_name: None });
+        st.entry(ns.to_string()).or_default().insert(
+            name.to_string(),
+            JobStatusDto {
+                phase: "Pending".into(),
+                pod_name: None,
+            },
+        );
         Ok(name.to_string())
     }
 
@@ -82,7 +108,9 @@ impl ApiK8sClient for MockK8sClient {
         st.get(ns)
             .and_then(|m| m.get(name))
             .cloned()
-            .ok_or_else(|| ApiError::NotFound { message: "job not found".into() })
+            .ok_or_else(|| ApiError::NotFound {
+                message: "job not found".into(),
+            })
     }
 
     async fn delete_job(&self, ns: &str, name: &str) -> Result<()> {
@@ -95,56 +123,87 @@ impl ApiK8sClient for MockK8sClient {
 
     async fn get_job_logs(&self, ns: &str, name: &str) -> Result<String> {
         let l = self.logs.read().await;
-        Ok(l.get(ns).and_then(|m| m.get(name)).cloned().unwrap_or_else(|| "".into()))
+        Ok(l.get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .unwrap_or_else(|| "".into()))
     }
 
     async fn create_rental(&self, ns: &str, name: &str, spec: RentalSpecDto) -> Result<String> {
         // Store spec for tests and reuse job stores for simplicity
         {
             let mut rs = self.rental_specs.write().await;
-            rs.entry(ns.to_string()).or_default().insert(name.to_string(), spec.clone());
+            rs.entry(ns.to_string())
+                .or_default()
+                .insert(name.to_string(), spec.clone());
         }
         let mut s = self.specs.write().await;
-        s.entry(ns.to_string()).or_default().insert(name.to_string(), JobSpecDto {
-            image: spec.container_image,
-            command: spec.container_command,
-            args: vec![],
-            env: spec.container_env,
-            resources: spec.resources,
-            ttl_seconds: 0,
-        });
+        s.entry(ns.to_string()).or_default().insert(
+            name.to_string(),
+            JobSpecDto {
+                image: spec.container_image,
+                command: spec.container_command,
+                args: vec![],
+                env: spec.container_env,
+                resources: spec.resources,
+                ttl_seconds: 0,
+            },
+        );
         let mut st = self.statuses.write().await;
-        st.entry(ns.to_string()).or_default().insert(name.to_string(), JobStatusDto { phase: "Provisioning".into(), pod_name: None });
+        st.entry(ns.to_string()).or_default().insert(
+            name.to_string(),
+            JobStatusDto {
+                phase: "Provisioning".into(),
+                pod_name: None,
+            },
+        );
         Ok(name.to_string())
     }
 
     async fn get_rental_status(&self, ns: &str, name: &str) -> Result<RentalStatusDto> {
         let st = self.statuses.read().await;
-        let job_st = st.get(ns).and_then(|m| m.get(name)).cloned().ok_or_else(|| ApiError::NotFound { message: "rental not found".into() })?;
+        let job_st = st
+            .get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound {
+                message: "rental not found".into(),
+            })?;
         let rs = self.rental_specs.read().await;
         let endpoints = rs
             .get(ns)
             .and_then(|m| m.get(name))
             .map(|spec| {
-                spec
-                    .network_ingress
+                spec.network_ingress
                     .iter()
                     .map(|r| format!("{}:{}", r.exposure, r.port))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_else(|| Vec::new());
-        Ok(RentalStatusDto { state: job_st.phase, pod_name: job_st.pod_name, endpoints })
+        Ok(RentalStatusDto {
+            state: job_st.phase,
+            pod_name: job_st.pod_name,
+            endpoints,
+        })
     }
 
     async fn delete_rental(&self, ns: &str, name: &str) -> Result<()> {
         self.delete_job(ns, name).await
     }
 
-    async fn get_rental_logs(&self, ns: &str, name: &str, tail: Option<u32>, _since_seconds: Option<u32>) -> Result<String> {
+    async fn get_rental_logs(
+        &self,
+        ns: &str,
+        name: &str,
+        tail: Option<u32>,
+        _since_seconds: Option<u32>,
+    ) -> Result<String> {
         // Simulate tail by trimming stored logs
         let full = self.get_job_logs(ns, name).await?;
         if let Some(t) = tail {
-            if t == 0 { return Ok(String::new()); }
+            if t == 0 {
+                return Ok(String::new());
+            }
             let lines: Vec<&str> = full.lines().collect();
             let n = lines.len();
             let start = n.saturating_sub(t as usize);
@@ -154,7 +213,14 @@ impl ApiK8sClient for MockK8sClient {
         }
     }
 
-    async fn exec_rental(&self, _ns: &str, _name: &str, command: Vec<String>, stdin: Option<String>, tty: bool) -> Result<ExecResultDto> {
+    async fn exec_rental(
+        &self,
+        _ns: &str,
+        _name: &str,
+        command: Vec<String>,
+        stdin: Option<String>,
+        tty: bool,
+    ) -> Result<ExecResultDto> {
         let cmd = command.join(" ");
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -190,18 +256,31 @@ impl ApiK8sClient for MockK8sClient {
         if let Some(input) = stdin {
             // In many exec scenarios, user input is reflected on stdout when TTY is enabled
             if tty {
-                if !stdout.is_empty() { stdout.push('\n'); }
+                if !stdout.is_empty() {
+                    stdout.push('\n');
+                }
                 stdout.push_str(&format!("{}", input));
             } else {
-                if !stdout.is_empty() { stdout.push('\n'); }
+                if !stdout.is_empty() {
+                    stdout.push('\n');
+                }
                 stdout.push_str(&format!("stdin: {}", input));
             }
         }
 
-        Ok(ExecResultDto { stdout, stderr, exit_code })
+        Ok(ExecResultDto {
+            stdout,
+            stderr,
+            exit_code,
+        })
     }
 
-    async fn extend_rental(&self, ns: &str, name: &str, _additional_hours: u32) -> Result<RentalStatusDto> {
+    async fn extend_rental(
+        &self,
+        ns: &str,
+        name: &str,
+        _additional_hours: u32,
+    ) -> Result<RentalStatusDto> {
         self.get_rental_status(ns, name).await
     }
 
@@ -214,9 +293,21 @@ impl ApiK8sClient for MockK8sClient {
                 let endpoints = rs
                     .get(ns)
                     .and_then(|m| m.get(name))
-                    .map(|spec| spec.network_ingress.iter().map(|r| format!("{}:{}", r.exposure, r.port)).collect::<Vec<_>>())
+                    .map(|spec| {
+                        spec.network_ingress
+                            .iter()
+                            .map(|r| format!("{}:{}", r.exposure, r.port))
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_else(|| Vec::new());
-                out.push(RentalListItemDto { rental_id: name.clone(), status: RentalStatusDto { state: s.phase.clone(), pod_name: s.pod_name.clone(), endpoints } });
+                out.push(RentalListItemDto {
+                    rental_id: name.clone(),
+                    status: RentalStatusDto {
+                        state: s.phase.clone(),
+                        pod_name: s.pod_name.clone(),
+                        endpoints,
+                    },
+                });
             }
         }
         Ok(out)
@@ -231,7 +322,9 @@ impl MockK8sClient {
 
     pub async fn set_logs(&self, ns: &str, name: &str, body: &str) {
         let mut l = self.logs.write().await;
-        l.entry(ns.to_string()).or_default().insert(name.to_string(), body.to_string());
+        l.entry(ns.to_string())
+            .or_default()
+            .insert(name.to_string(), body.to_string());
     }
 }
 
@@ -283,13 +376,22 @@ pub struct RentalListItemDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RentalPortDto { pub container_port: u16, pub protocol: String }
+pub struct RentalPortDto {
+    pub container_port: u16,
+    pub protocol: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IngressRuleDto { pub port: u16, pub exposure: String }
+pub struct IngressRuleDto {
+    pub port: u16,
+    pub exposure: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RentalSshDto { pub enabled: bool, pub public_key: String }
+pub struct RentalSshDto {
+    pub enabled: bool,
+    pub public_key: String,
+}
 
 // K8s client implementation using kube + dynamic CRDs
 #[derive(Clone)]
@@ -299,22 +401,39 @@ pub struct K8sClient {
 
 impl K8sClient {
     pub async fn try_default() -> Result<Self> {
-        let client = kube::Client::try_default().await.map_err(|e| ApiError::Internal { message: format!("k8s client init failed: {e}") })?;
+        let client = kube::Client::try_default()
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("k8s client init failed: {e}"),
+            })?;
         Ok(Self { client })
     }
 
-    fn cr_api(&self, ns: &str, group: &str, version: &str, kind: &str) -> kube::Api<kube::core::DynamicObject> {
+    fn cr_api(
+        &self,
+        ns: &str,
+        group: &str,
+        version: &str,
+        kind: &str,
+    ) -> kube::Api<kube::core::DynamicObject> {
         use kube::core::{ApiResource, GroupVersionKind};
         let gvk = GroupVersionKind::gvk(group, version, kind);
         let ar = ApiResource::from_gvk(&gvk);
         kube::Api::namespaced_with(self.client.clone(), ns, &ar)
     }
 
-    async fn get_pod_by_label(&self, ns: &str, key: &str, value: &str) -> Result<Option<k8s_openapi::api::core::v1::Pod>> {
-        use kube::api::{ListParams, Api};
+    async fn get_pod_by_label(
+        &self,
+        ns: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Option<k8s_openapi::api::core::v1::Pod>> {
+        use kube::api::{Api, ListParams};
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
         let lp = ListParams::default().labels(&format!("{}={}", key, value));
-        let list = pods.list(&lp).await.map_err(|e| ApiError::Internal { message: format!("list pods failed: {e}") })?;
+        let list = pods.list(&lp).await.map_err(|e| ApiError::Internal {
+            message: format!("list pods failed: {e}"),
+        })?;
         Ok(list.items.into_iter().next())
     }
 
@@ -351,38 +470,76 @@ impl ApiK8sClient for K8sClient {
                 "priority": "normal"
             }
         });
-        let dynobj: kube::core::DynamicObject = serde_json::from_value(obj).map_err(|e| ApiError::Internal { message: format!("serde dynobj: {e}") })?;
-        let _ = api.create(&PostParams::default(), &dynobj).await.map_err(|e| ApiError::Internal { message: format!("create BasilicaJob failed: {e}") })?;
+        let dynobj: kube::core::DynamicObject =
+            serde_json::from_value(obj).map_err(|e| ApiError::Internal {
+                message: format!("serde dynobj: {e}"),
+            })?;
+        let _ = api
+            .create(&PostParams::default(), &dynobj)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("create BasilicaJob failed: {e}"),
+            })?;
         Ok(name.to_string())
     }
 
     async fn get_job_status(&self, ns: &str, name: &str) -> Result<JobStatusDto> {
         use serde_json::Value;
         let api = self.cr_api(ns, "basilica.io", "v1", "BasilicaJob");
-        let obj = api.get(name).await.map_err(|e| ApiError::NotFound { message: format!("job not found: {e}") })?;
-        let val: Value = serde_json::to_value(&obj).map_err(|e| ApiError::Internal { message: format!("to_value: {e}") })?;
-        let phase = val.get("status").and_then(|s| s.get("phase")).and_then(|v| v.as_str()).unwrap_or("Pending").to_string();
-        let pod_name = val.get("status").and_then(|s| s.get("podName")).and_then(|v| v.as_str()).map(|s| s.to_string());
+        let obj = api.get(name).await.map_err(|e| ApiError::NotFound {
+            message: format!("job not found: {e}"),
+        })?;
+        let val: Value = serde_json::to_value(&obj).map_err(|e| ApiError::Internal {
+            message: format!("to_value: {e}"),
+        })?;
+        let phase = val
+            .get("status")
+            .and_then(|s| s.get("phase"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Pending")
+            .to_string();
+        let pod_name = val
+            .get("status")
+            .and_then(|s| s.get("podName"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         Ok(JobStatusDto { phase, pod_name })
     }
 
     async fn delete_job(&self, ns: &str, name: &str) -> Result<()> {
-        use kube::api::{DeleteParams};
+        use kube::api::DeleteParams;
         let api = self.cr_api(ns, "basilica.io", "v1", "BasilicaJob");
-        let _ = api.delete(name, &DeleteParams::default()).await.map_err(|e| ApiError::Internal { message: format!("delete job failed: {e}") })?;
+        let _ = api
+            .delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("delete job failed: {e}"),
+            })?;
         Ok(())
     }
 
     async fn get_job_logs(&self, ns: &str, name: &str) -> Result<String> {
         use kube::api::{Api, LogParams};
         if let Some(pod) = self.get_pod_by_label(ns, "basilica.io/job", name).await? {
-            let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
-            let lp = LogParams { container: None, follow: false, ..Default::default() };
+            let pods: Api<k8s_openapi::api::core::v1::Pod> =
+                Api::namespaced(self.client.clone(), ns);
+            let lp = LogParams {
+                container: None,
+                follow: false,
+                ..Default::default()
+            };
             let pod_name = pod.metadata.name.unwrap_or_default();
-            let logs = pods.logs(&pod_name, &lp).await.map_err(|e| ApiError::Internal { message: format!("get logs failed: {e}") })?;
+            let logs = pods
+                .logs(&pod_name, &lp)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("get logs failed: {e}"),
+                })?;
             Ok(logs)
         } else {
-            Err(ApiError::NotFound { message: "pod not found".into() })
+            Err(ApiError::NotFound {
+                message: "pod not found".into(),
+            })
         }
     }
 
@@ -415,33 +572,73 @@ impl ApiK8sClient for K8sClient {
                 "ttlSeconds": 0
             }
         });
-        let dynobj: kube::core::DynamicObject = serde_json::from_value(obj).map_err(|e| ApiError::Internal { message: format!("serde dynobj: {e}") })?;
-        let _ = api.create(&PostParams::default(), &dynobj).await.map_err(|e| ApiError::Internal { message: format!("create GpuRental failed: {e}") })?;
+        let dynobj: kube::core::DynamicObject =
+            serde_json::from_value(obj).map_err(|e| ApiError::Internal {
+                message: format!("serde dynobj: {e}"),
+            })?;
+        let _ = api
+            .create(&PostParams::default(), &dynobj)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("create GpuRental failed: {e}"),
+            })?;
         Ok(name.to_string())
     }
 
     async fn get_rental_status(&self, ns: &str, name: &str) -> Result<RentalStatusDto> {
         use serde_json::Value;
         let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
-        let obj = api.get(name).await.map_err(|e| ApiError::NotFound { message: format!("rental not found: {e}") })?;
-        let val: Value = serde_json::to_value(&obj).map_err(|e| ApiError::Internal { message: format!("to_value: {e}") })?;
-        let state = val.get("status").and_then(|s| s.get("state")).and_then(|v| v.as_str()).unwrap_or("Provisioning").to_string();
-        let pod_name = val.get("status").and_then(|s| s.get("podName")).and_then(|v| v.as_str()).map(|s| s.to_string());
+        let obj = api.get(name).await.map_err(|e| ApiError::NotFound {
+            message: format!("rental not found: {e}"),
+        })?;
+        let val: Value = serde_json::to_value(&obj).map_err(|e| ApiError::Internal {
+            message: format!("to_value: {e}"),
+        })?;
+        let state = val
+            .get("status")
+            .and_then(|s| s.get("state"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Provisioning")
+            .to_string();
+        let pod_name = val
+            .get("status")
+            .and_then(|s| s.get("podName"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let endpoints = Self::parse_status_endpoints(&val);
-        Ok(RentalStatusDto { state, pod_name, endpoints })
+        Ok(RentalStatusDto {
+            state,
+            pod_name,
+            endpoints,
+        })
     }
 
     async fn delete_rental(&self, ns: &str, name: &str) -> Result<()> {
         use kube::api::DeleteParams;
         let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
-        let _ = api.delete(name, &DeleteParams::default()).await.map_err(|e| ApiError::Internal { message: format!("delete rental failed: {e}") })?;
+        let _ = api
+            .delete(name, &DeleteParams::default())
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("delete rental failed: {e}"),
+            })?;
         Ok(())
     }
 
-    async fn get_rental_logs(&self, ns: &str, name: &str, tail: Option<u32>, since_seconds: Option<u32>) -> Result<String> {
+    async fn get_rental_logs(
+        &self,
+        ns: &str,
+        name: &str,
+        tail: Option<u32>,
+        since_seconds: Option<u32>,
+    ) -> Result<String> {
         use kube::api::{Api, LogParams};
-        if let Some(pod) = self.get_pod_by_label(ns, "basilica.io/rental", name).await? {
-            let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
+        if let Some(pod) = self
+            .get_pod_by_label(ns, "basilica.io/rental", name)
+            .await?
+        {
+            let pods: Api<k8s_openapi::api::core::v1::Pod> =
+                Api::namespaced(self.client.clone(), ns);
             let lp = LogParams {
                 container: None,
                 follow: false,
@@ -450,21 +647,37 @@ impl ApiK8sClient for K8sClient {
                 ..Default::default()
             };
             let pod_name = pod.metadata.name.unwrap_or_default();
-            let logs = pods.logs(&pod_name, &lp).await.map_err(|e| ApiError::Internal { message: format!("get logs failed: {e}") })?;
+            let logs = pods
+                .logs(&pod_name, &lp)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("get logs failed: {e}"),
+                })?;
             Ok(logs)
         } else {
-            Err(ApiError::NotFound { message: "pod not found".into() })
+            Err(ApiError::NotFound {
+                message: "pod not found".into(),
+            })
         }
     }
 
-    async fn exec_rental(&self, ns: &str, name: &str, command: Vec<String>, stdin: Option<String>, tty: bool) -> Result<ExecResultDto> {
+    async fn exec_rental(
+        &self,
+        ns: &str,
+        name: &str,
+        command: Vec<String>,
+        stdin: Option<String>,
+        tty: bool,
+    ) -> Result<ExecResultDto> {
         use kube::api::{Api, AttachParams};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // Find the first pod for the rental
         let pod = self
             .get_pod_by_label(ns, "basilica.io/rental", name)
             .await?
-            .ok_or_else(|| ApiError::NotFound { message: "pod not found".into() })?;
+            .ok_or_else(|| ApiError::NotFound {
+                message: "pod not found".into(),
+            })?;
         let pod_name = pod.metadata.name.clone().unwrap_or_default();
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
         let mut params = AttachParams::default();
@@ -482,10 +695,12 @@ impl ApiK8sClient for K8sClient {
         }
         // kube expects &str slice for args
         let args: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
-        let mut attached = pods
-            .exec(&pod_name, args, &params)
-            .await
-            .map_err(|e| ApiError::Internal { message: format!("exec failed: {e}") })?;
+        let mut attached =
+            pods.exec(&pod_name, args, &params)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("exec failed: {e}"),
+                })?;
 
         // Send stdin if provided
         if let (Some(input), Some(mut sin)) = (stdin, attached.stdin().take()) {
@@ -497,13 +712,17 @@ impl ApiK8sClient for K8sClient {
         if let Some(mut out) = attached.stdout().take() {
             out.read_to_end(&mut stdout_buf)
                 .await
-                .map_err(|e| ApiError::Internal { message: format!("read stdout failed: {e}") })?;
+                .map_err(|e| ApiError::Internal {
+                    message: format!("read stdout failed: {e}"),
+                })?;
         }
         let mut stderr_buf = Vec::new();
         if let Some(mut err) = attached.stderr().take() {
             err.read_to_end(&mut stderr_buf)
                 .await
-                .map_err(|e| ApiError::Internal { message: format!("read stderr failed: {e}") })?;
+                .map_err(|e| ApiError::Internal {
+                    message: format!("read stderr failed: {e}"),
+                })?;
         }
         // Best-effort wait for remote to complete
         let joined = attached.join().await;
@@ -520,9 +739,12 @@ impl ApiK8sClient for K8sClient {
                         let prefer = params.container.clone();
                         let iter = cstatuses.iter();
                         let chosen = if let Some(pref_name) = prefer {
-                            iter.clone().find(|cs| cs.name == pref_name)
+                            iter.clone()
+                                .find(|cs| cs.name == pref_name)
                                 .or_else(|| cstatuses.first())
-                        } else { cstatuses.first() };
+                        } else {
+                            cstatuses.first()
+                        };
                         if let Some(cs) = chosen {
                             if let Some(state) = &cs.state {
                                 if let Some(term) = &state.terminated {
@@ -549,24 +771,52 @@ impl ApiK8sClient for K8sClient {
         })
     }
 
-    async fn extend_rental(&self, ns: &str, name: &str, _additional_hours: u32) -> Result<RentalStatusDto> {
+    async fn extend_rental(
+        &self,
+        ns: &str,
+        name: &str,
+        _additional_hours: u32,
+    ) -> Result<RentalStatusDto> {
         // For now, return current status (operator handles auto-extend)
         self.get_rental_status(ns, name).await
     }
 
     async fn list_rentals(&self, ns: &str) -> Result<Vec<RentalListItemDto>> {
-        use serde_json::Value;
         use kube::api::ListParams;
+        use serde_json::Value;
         let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
-        let list = api.list(&ListParams::default()).await.map_err(|e| ApiError::Internal { message: format!("list rentals failed: {e}") })?;
+        let list = api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("list rentals failed: {e}"),
+            })?;
         let mut out = Vec::new();
         for item in list.items {
             let name = item.metadata.name.clone().unwrap_or_default();
-            let val: Value = serde_json::to_value(&item).map_err(|e| ApiError::Internal { message: format!("to_value: {e}") })?;
-            let state = val.get("status").and_then(|s| s.get("state")).and_then(|v| v.as_str()).unwrap_or("Provisioning").to_string();
-            let pod_name = val.get("status").and_then(|s| s.get("podName")).and_then(|v| v.as_str()).map(|s| s.to_string());
+            let val: Value = serde_json::to_value(&item).map_err(|e| ApiError::Internal {
+                message: format!("to_value: {e}"),
+            })?;
+            let state = val
+                .get("status")
+                .and_then(|s| s.get("state"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Provisioning")
+                .to_string();
+            let pod_name = val
+                .get("status")
+                .and_then(|s| s.get("podName"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let endpoints = Self::parse_status_endpoints(&val);
-            out.push(RentalListItemDto { rental_id: name, status: RentalStatusDto { state, pod_name, endpoints } });
+            out.push(RentalListItemDto {
+                rental_id: name,
+                status: RentalStatusDto {
+                    state,
+                    pod_name,
+                    endpoints,
+                },
+            });
         }
         Ok(out)
     }
@@ -608,7 +858,14 @@ mod tests {
                     command: vec![],
                     args: vec![],
                     env: vec![],
-                    resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: GpuSpec { count: 0, model: vec![] } },
+                    resources: Resources {
+                        cpu: "1".into(),
+                        memory: "512Mi".into(),
+                        gpus: GpuSpec {
+                            count: 0,
+                            model: vec![],
+                        },
+                    },
                     ttl_seconds: 0,
                 },
             )
@@ -618,6 +875,9 @@ mod tests {
         let st = c.get_job_status("ns", "job1").await.unwrap();
         assert_eq!(st.phase, "Pending");
         c.delete_job("ns", "job1").await.unwrap();
-        assert!(matches!(c.get_job_status("ns", "job1").await, Err(ApiError::NotFound { message: _ })));
+        assert!(matches!(
+            c.get_job_status("ns", "job1").await,
+            Err(ApiError::NotFound { message: _ })
+        ));
     }
 }

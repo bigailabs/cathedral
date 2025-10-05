@@ -3,7 +3,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
-#[kube(group = "basilica.io", version = "v1", kind = "BasilicaJob", namespaced)]
+#[kube(
+    group = "basilica.io",
+    version = "v1",
+    kind = "BasilicaJob",
+    namespaced
+)]
 #[kube(status = "BasilicaJobStatus")]
 #[serde(rename_all = "camelCase")]
 pub struct BasilicaJobSpec {

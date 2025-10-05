@@ -9,12 +9,19 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
         .container
         .ports
         .iter()
-        .map(|p| json!({
-            "containerPort": p.container_port,
-            "protocol": p.protocol,
-        }))
+        .map(|p| {
+            json!({
+                "containerPort": p.container_port,
+                "protocol": p.protocol,
+            })
+        })
         .collect();
-    let env: Vec<Value> = spec.container.env.iter().map(|(k, v)| json!({"name": k, "value": v})).collect();
+    let env: Vec<Value> = spec
+        .container
+        .env
+        .iter()
+        .map(|(k, v)| json!({"name": k, "value": v}))
+        .collect();
 
     let mut network = json!({
         "ingress": spec.network.ingress.iter().map(|i| json!({"port": i.port, "exposure": i.exposure})).collect::<Vec<_>>(),
@@ -28,11 +35,13 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
         .container
         .volumes
         .iter()
-        .map(|v| json!({
-            "hostPath": v.host_path,
-            "containerPath": v.container_path,
-            "readOnly": v.read_only,
-        }))
+        .map(|v| {
+            json!({
+                "hostPath": v.host_path,
+                "containerPath": v.container_path,
+                "readOnly": v.read_only,
+            })
+        })
         .collect();
 
     let container = json!({
@@ -58,7 +67,7 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
         "spec": {
             "container": container,
             "duration": { "hours": spec.duration.hours, "autoExtend": spec.duration.auto_extend, "maxExtensions": spec.duration.max_extensions },
-            "accessType": match spec.access_type { 
+            "accessType": match spec.access_type {
                 basilica_common::rental::AccessType::Ssh => "Ssh",
                 basilica_common::rental::AccessType::Jupyter => "Jupyter",
                 basilica_common::rental::AccessType::Vscode => "Vscode",
@@ -88,9 +97,16 @@ pub struct RentalAdapter<W: K8sWriter> {
 }
 
 impl<W: K8sWriter> RentalAdapter<W> {
-    pub fn new(writer: W) -> Self { Self { writer } }
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
 
-    pub async fn create_gpu_rental(&self, name: &str, namespace: &str, spec: &RentalSpec) -> Result<()> {
+    pub async fn create_gpu_rental(
+        &self,
+        name: &str,
+        namespace: &str,
+        spec: &RentalSpec,
+    ) -> Result<()> {
         let cr = rental_spec_to_gpurental_cr(name, namespace, spec);
         self.writer.create_cr(cr).await
     }
@@ -100,7 +116,10 @@ impl<W: K8sWriter> RentalAdapter<W> {
 mod tests {
     use super::*;
     use basilica_common::compute::{GpuSpec, Resources};
-    use basilica_common::rental::{AccessType, IngressRule, RentalContainer, RentalDuration, RentalNetwork, RentalSpec, VolumeMount};
+    use basilica_common::rental::{
+        AccessType, IngressRule, RentalContainer, RentalDuration, RentalNetwork, RentalSpec,
+        VolumeMount,
+    };
     use std::sync::{Arc, Mutex};
 
     struct MockWriter(Arc<Mutex<Vec<Value>>>);
@@ -120,12 +139,36 @@ mod tests {
                 env: vec![("A".into(), "1".into())],
                 command: vec!["bash".into(), "-lc".into(), "echo hi".into()],
                 ports: vec![],
-                volumes: vec![VolumeMount { host_path: None, container_path: "/data".into(), read_only: false }],
-                resources: Resources { cpu: "4".into(), memory: "16Gi".into(), gpus: GpuSpec { count: 1, model: vec!["A100".into()] } },
+                volumes: vec![VolumeMount {
+                    host_path: None,
+                    container_path: "/data".into(),
+                    read_only: false,
+                }],
+                resources: Resources {
+                    cpu: "4".into(),
+                    memory: "16Gi".into(),
+                    gpus: GpuSpec {
+                        count: 1,
+                        model: vec!["A100".into()],
+                    },
+                },
             },
-            duration: RentalDuration { hours: 24, auto_extend: true, max_extensions: 2 },
+            duration: RentalDuration {
+                hours: 24,
+                auto_extend: true,
+                max_extensions: 2,
+            },
             access_type: AccessType::Ssh,
-            network: RentalNetwork { ingress: vec![IngressRule { port: 8080, exposure: "NodePort".into() }], egress_policy: "restricted".into(), allowed_egress: vec!["10.0.0.0/8".into()], public_ip_required: false, bandwidth_mbps: Some(100) },
+            network: RentalNetwork {
+                ingress: vec![IngressRule {
+                    port: 8080,
+                    exposure: "NodePort".into(),
+                }],
+                egress_policy: "restricted".into(),
+                allowed_egress: vec!["10.0.0.0/8".into()],
+                public_ip_required: false,
+                bandwidth_mbps: Some(100),
+            },
             storage: None,
             ssh: None,
             jupyter: None,
@@ -158,4 +201,3 @@ mod tests {
         assert_eq!(cr["spec"]["tenancy"]["projectId"], "proj1");
     }
 }
-

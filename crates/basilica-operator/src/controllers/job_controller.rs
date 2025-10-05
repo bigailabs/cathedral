@@ -1,19 +1,30 @@
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
-use k8s_openapi::api::core::v1::{Affinity, Capabilities, Container, EnvFromSource, EnvVar, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SecretEnvSource, SecurityContext, Toleration, SeccompProfile};
+use k8s_openapi::api::core::v1::{
+    Affinity, Capabilities, Container, EnvFromSource, EnvVar, PodSecurityContext, PodSpec,
+    PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext,
+    Toleration,
+};
+use k8s_openapi::api::core::v1::{
+    NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
+};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::api::core::v1::{NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm};
 
-use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, BasilicaJobStatus, GpuSpec as JobGpuSpec, Resources as JobResources};
-use crate::k8s_client::K8sClient;
 use crate::billing::{BillingClient, RuntimeMetrics};
-use crate::metrics_provider::{RuntimeMetricsProvider, NoopRuntimeMetricsProvider};
-use anyhow::Result;
-use std::time::Instant;
+use crate::crd::basilica_job::{
+    BasilicaJob, BasilicaJobSpec, BasilicaJobStatus, GpuSpec as JobGpuSpec,
+    Resources as JobResources,
+};
+use crate::k8s_client::K8sClient;
 use crate::metrics as opmetrics;
+use crate::metrics_provider::{NoopRuntimeMetricsProvider, RuntimeMetricsProvider};
+use anyhow::Result;
 use k8s_openapi::api::core::v1::PodStatus;
+use std::time::Instant;
 
-fn to_quantity(s: &str) -> Quantity { Quantity(s.to_string()) }
+fn to_quantity(s: &str) -> Quantity {
+    Quantity(s.to_string())
+}
 
 fn build_resources(res: &JobResources) -> ResourceRequirements {
     use std::collections::BTreeMap;
@@ -31,12 +42,20 @@ fn build_resources(res: &JobResources) -> ResourceRequirements {
         requests.insert("nvidia.com/gpu".to_string(), gpuq);
     }
 
-    ResourceRequirements { limits: Some(limits), requests: Some(requests), claims: None }
+    ResourceRequirements {
+        limits: Some(limits),
+        requests: Some(requests),
+        claims: None,
+    }
 }
 
 fn build_env(env: &[(String, String)]) -> Vec<EnvVar> {
     env.iter()
-        .map(|(k, v)| EnvVar { name: k.clone(), value: Some(v.clone()), ..Default::default() })
+        .map(|(k, v)| EnvVar {
+            name: k.clone(),
+            value: Some(v.clone()),
+            ..Default::default()
+        })
         .collect()
 }
 
@@ -59,18 +78,42 @@ fn build_node_affinity(gpu: &JobGpuSpec) -> Option<Affinity> {
         operator: "In".into(),
         values: Some(gpu.model.clone()),
     };
-    let term = NodeSelectorTerm { match_expressions: Some(vec![expr]), match_fields: None };
-    let ns = NodeSelector { node_selector_terms: vec![term] };
-    Some(Affinity { node_affinity: Some(NodeAffinity { required_during_scheduling_ignored_during_execution: Some(ns), ..Default::default() }), ..Default::default() })
+    let term = NodeSelectorTerm {
+        match_expressions: Some(vec![expr]),
+        match_fields: None,
+    };
+    let ns = NodeSelector {
+        node_selector_terms: vec![term],
+    };
+    Some(Affinity {
+        node_affinity: Some(NodeAffinity {
+            required_during_scheduling_ignored_during_execution: Some(ns),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
 }
 
 fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityContext>) {
-    let pod_sc = Some(PodSecurityContext { run_as_non_root: Some(true), seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }), ..Default::default() });
+    let pod_sc = Some(PodSecurityContext {
+        run_as_non_root: Some(true),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".into(),
+            localhost_profile: None,
+        }),
+        ..Default::default()
+    });
     let container_sc = Some(SecurityContext {
         allow_privilege_escalation: Some(false),
         read_only_root_filesystem: Some(true),
-        capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), ..Default::default() }),
-        seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".into()]),
+            ..Default::default()
+        }),
+        seccomp_profile: Some(SeccompProfile {
+            type_: "RuntimeDefault".into(),
+            localhost_profile: None,
+        }),
         ..Default::default()
     });
     (pod_sc, container_sc)
@@ -82,8 +125,16 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     let container = Container {
         name: name.to_string(),
         image: Some(spec.image.clone()),
-        command: if spec.command.is_empty() { None } else { Some(spec.command.clone()) },
-        args: if spec.args.is_empty() { None } else { Some(spec.args.clone()) },
+        command: if spec.command.is_empty() {
+            None
+        } else {
+            Some(spec.command.clone())
+        },
+        args: if spec.args.is_empty() {
+            None
+        } else {
+            Some(spec.args.clone())
+        },
         env: Some(build_env(&spec.env)),
         resources: Some(build_resources(&spec.resources)),
         security_context: container_sc,
@@ -95,21 +146,54 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     if let Some(art) = &spec.artifacts {
         if art.enabled {
             let mut env = Vec::new();
-            env.push(EnvVar { name: "DESTINATION".into(), value: Some(art.destination.clone()), ..Default::default() });
-            env.push(EnvVar { name: "FROM_PATH".into(), value: Some(art.from_path.clone()), ..Default::default() });
-            env.push(EnvVar { name: "PROVIDER".into(), value: Some(if art.provider.is_empty() { "s3".into() } else { art.provider.clone() }), ..Default::default() });
-            let env_from = art
-                .credentials_secret
-                .as_ref()
-                .map(|name| vec![EnvFromSource { secret_ref: Some(SecretEnvSource { name: Some(name.clone()), optional: Some(false) }), ..Default::default() }]);
+            env.push(EnvVar {
+                name: "DESTINATION".into(),
+                value: Some(art.destination.clone()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "FROM_PATH".into(),
+                value: Some(art.from_path.clone()),
+                ..Default::default()
+            });
+            env.push(EnvVar {
+                name: "PROVIDER".into(),
+                value: Some(if art.provider.is_empty() {
+                    "s3".into()
+                } else {
+                    art.provider.clone()
+                }),
+                ..Default::default()
+            });
+            let env_from = art.credentials_secret.as_ref().map(|name| {
+                vec![EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
+                        name: Some(name.clone()),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }]
+            });
             let sidecar = Container {
                 name: format!("artifact-uploader-{}", name),
                 image: Some("basilica/artifact-uploader:latest".into()),
                 command: Some(vec!["/uploader".into()]),
                 env: Some(env),
                 env_from,
-                security_context: Some(SecurityContext { allow_privilege_escalation: Some(false), read_only_root_filesystem: Some(true), capabilities: Some(Capabilities { drop: Some(vec!["ALL".into()]), ..Default::default() }), seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".into(), localhost_profile: None }), ..Default::default() }),
-                ..Default::default() 
+                security_context: Some(SecurityContext {
+                    allow_privilege_escalation: Some(false),
+                    read_only_root_filesystem: Some(true),
+                    capabilities: Some(Capabilities {
+                        drop: Some(vec!["ALL".into()]),
+                        ..Default::default()
+                    }),
+                    seccomp_profile: Some(SeccompProfile {
+                        type_: "RuntimeDefault".into(),
+                        localhost_profile: None,
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
             };
             containers.push(sidecar);
         }
@@ -132,13 +216,32 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         .into_iter()
         .collect(),
     );
-    let template = PodTemplateSpec { metadata: Some(ObjectMeta { labels: labels.clone(), ..Default::default() }), spec: Some(pod_spec) };
+    let template = PodTemplateSpec {
+        metadata: Some(ObjectMeta {
+            labels: labels.clone(),
+            ..Default::default()
+        }),
+        spec: Some(pod_spec),
+    };
 
-    let active_deadline_seconds = if spec.ttl_seconds > 0 { Some(spec.ttl_seconds as i64) } else { None };
+    let active_deadline_seconds = if spec.ttl_seconds > 0 {
+        Some(spec.ttl_seconds as i64)
+    } else {
+        None
+    };
 
     Job {
-        metadata: ObjectMeta { name: Some(name.to_string()), labels, ..Default::default() },
-        spec: Some(JobSpec { template, backoff_limit: Some(0), active_deadline_seconds, ..Default::default() }),
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            labels,
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            template,
+            backoff_limit: Some(0),
+            active_deadline_seconds,
+            ..Default::default()
+        }),
         status: None,
     }
 }
@@ -152,12 +255,26 @@ pub struct JobController<C: K8sClient> {
 
 impl<C: K8sClient> JobController<C> {
     pub fn new(client: C) -> Self {
-        Self { client, billing: std::sync::Arc::new(crate::billing::MockBillingClient::default()), metrics_provider: std::sync::Arc::new(NoopRuntimeMetricsProvider::default()) }
+        Self {
+            client,
+            billing: std::sync::Arc::new(crate::billing::MockBillingClient::default()),
+            metrics_provider: std::sync::Arc::new(NoopRuntimeMetricsProvider),
+        }
     }
-    pub fn new_with_billing(client: C, billing: std::sync::Arc<dyn BillingClient + Send + Sync>) -> Self {
-        Self { client, billing, metrics_provider: std::sync::Arc::new(NoopRuntimeMetricsProvider::default()) }
+    pub fn new_with_billing(
+        client: C,
+        billing: std::sync::Arc<dyn BillingClient + Send + Sync>,
+    ) -> Self {
+        Self {
+            client,
+            billing,
+            metrics_provider: std::sync::Arc::new(NoopRuntimeMetricsProvider),
+        }
     }
-    pub fn with_metrics_provider(mut self, provider: std::sync::Arc<dyn RuntimeMetricsProvider + Send + Sync>) -> Self {
+    pub fn with_metrics_provider(
+        mut self,
+        provider: std::sync::Arc<dyn RuntimeMetricsProvider + Send + Sync>,
+    ) -> Self {
         self.metrics_provider = provider;
         self
     }
@@ -170,12 +287,27 @@ impl<C: K8sClient> JobController<C> {
         if let Ok(queues) = self.client.list_basilica_queues(ns).await {
             if let Some(q) = queues.first() {
                 // Count running job pods in namespace
-                let pods = self.client.list_pods_with_label(ns, "basilica.io/type", "job").await?;
-                let running = pods.iter().filter(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")).count() as u32;
+                let pods = self
+                    .client
+                    .list_pods_with_label(ns, "basilica.io/type", "job")
+                    .await?;
+                let running = pods
+                    .iter()
+                    .filter(|p| {
+                        p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running")
+                    })
+                    .count() as u32;
                 if running >= q.spec.concurrency {
                     // Mark queued and exit
-                    let status = crate::crd::basilica_job::BasilicaJobStatus { phase: Some("Queued".into()), pod_name: None, start_time: None, completion_time: None };
-                    self.client.update_basilica_job_status(ns, &name, status).await?;
+                    let status = crate::crd::basilica_job::BasilicaJobStatus {
+                        phase: Some("Queued".into()),
+                        pod_name: None,
+                        start_time: None,
+                        completion_time: None,
+                    };
+                    self.client
+                        .update_basilica_job_status(ns, &name, status)
+                        .await?;
                     return Ok(());
                 }
             }
@@ -194,7 +326,9 @@ impl<C: K8sClient> JobController<C> {
             let job = render_job(&name, &spec);
             self.client.create_job(ns, &job).await?;
             true
-        } else { false };
+        } else {
+            false
+        };
 
         // Derive status from Pods with our label
         let pods = self
@@ -203,7 +337,12 @@ impl<C: K8sClient> JobController<C> {
             .await?;
 
         let (phase, pod_name) = compute_phase_from_pods(&pods);
-        let mut status = BasilicaJobStatus { phase: Some(phase.clone()), pod_name, start_time: None, completion_time: None };
+        let mut status = BasilicaJobStatus {
+            phase: Some(phase.clone()),
+            pod_name,
+            start_time: None,
+            completion_time: None,
+        };
         // Set start_time on first Running and completion_time on terminal states
         if phase == "Running" && prev != "Running" {
             status.start_time = Some(k8s_openapi::chrono::Utc::now().to_rfc3339());
@@ -212,13 +351,27 @@ impl<C: K8sClient> JobController<C> {
             status.completion_time = Some(k8s_openapi::chrono::Utc::now().to_rfc3339());
         }
         let to = status.phase.clone().unwrap_or_else(|| "Unknown".into());
-        self.client.update_basilica_job_status(ns, &name, status.clone()).await?;
+        self.client
+            .update_basilica_job_status(ns, &name, status.clone())
+            .await?;
         // Emit job event (best-effort)
         let current = self.client.get_basilica_job(ns, &name).await?;
         let rm: Option<RuntimeMetrics> = if let Some(pod) = status.pod_name.as_deref() {
             self.metrics_provider.fetch_pod_metrics(ns, pod).await
-        } else { None };
-        let _ = self.billing.emit_job_event(&current, current.status.as_ref().unwrap_or(&BasilicaJobStatus::default()), rm.as_ref()).await;
+        } else {
+            None
+        };
+        let _ = self
+            .billing
+            .emit_job_event(
+                &current,
+                current
+                    .status
+                    .as_ref()
+                    .unwrap_or(&BasilicaJobStatus::default()),
+                rm.as_ref(),
+            )
+            .await;
         opmetrics::record_job_reconcile(ns, &name, created, &prev, &to, start);
         let prev_active = prev == "Running";
         let new_active = to == "Running";
@@ -238,7 +391,10 @@ fn compute_phase_from_pods(pods: &[k8s_openapi::api::core::v1::Pod]) -> (String,
 
     for p in pods {
         let name = p.metadata.name.clone();
-        if let Some(PodStatus { phase: Some(ph), .. }) = &p.status {
+        if let Some(PodStatus {
+            phase: Some(ph), ..
+        }) = &p.status
+        {
             match ph.as_str() {
                 "Running" => running = name,
                 "Succeeded" => succeeded = name,
@@ -249,10 +405,18 @@ fn compute_phase_from_pods(pods: &[k8s_openapi::api::core::v1::Pod]) -> (String,
         }
     }
 
-    if let Some(n) = running { return ("Running".into(), Some(n)); }
-    if let Some(n) = succeeded { return ("Succeeded".into(), Some(n)); }
-    if let Some(n) = failed { return ("Failed".into(), Some(n)); }
-    if let Some(n) = pending { return ("Pending".into(), Some(n)); }
+    if let Some(n) = running {
+        return ("Running".into(), Some(n));
+    }
+    if let Some(n) = succeeded {
+        return ("Succeeded".into(), Some(n));
+    }
+    if let Some(n) = failed {
+        return ("Failed".into(), Some(n));
+    }
+    if let Some(n) = pending {
+        return ("Pending".into(), Some(n));
+    }
     ("Pending".into(), None)
 }
 
@@ -266,7 +430,14 @@ mod tests {
             command: vec!["python".into()],
             args: vec!["main.py".into()],
             env: vec![("FOO".into(), "bar".into())],
-            resources: crate::crd::basilica_job::Resources { cpu: "4".into(), memory: "16Gi".into(), gpus: JobGpuSpec { count: 1, model: vec!["A100".into()] } },
+            resources: crate::crd::basilica_job::Resources {
+                cpu: "4".into(),
+                memory: "16Gi".into(),
+                gpus: JobGpuSpec {
+                    count: 1,
+                    model: vec!["A100".into()],
+                },
+            },
             storage: None,
             artifacts: None,
             ttl_seconds: 3600,
@@ -281,7 +452,12 @@ mod tests {
         let tmpl = job.spec.unwrap().template;
         let pod = tmpl.spec.unwrap();
         assert_eq!(pod.restart_policy.unwrap(), "Never");
-        assert!(pod.security_context.as_ref().unwrap().run_as_non_root.unwrap());
+        assert!(pod
+            .security_context
+            .as_ref()
+            .unwrap()
+            .run_as_non_root
+            .unwrap());
         let c = &pod.containers[0];
         let res = c.resources.as_ref().unwrap();
         let limits = res.limits.as_ref().unwrap();
@@ -291,9 +467,25 @@ mod tests {
         let sc = c.security_context.as_ref().unwrap();
         assert_eq!(sc.allow_privilege_escalation, Some(false));
         assert_eq!(sc.read_only_root_filesystem, Some(true));
-        assert!(sc.capabilities.as_ref().unwrap().drop.as_ref().unwrap().contains(&"ALL".into()));
+        assert!(sc
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .drop
+            .as_ref()
+            .unwrap()
+            .contains(&"ALL".into()));
         assert_eq!(sc.seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
-        assert_eq!(pod.security_context.as_ref().unwrap().seccomp_profile.as_ref().unwrap().type_, "RuntimeDefault");
+        assert_eq!(
+            pod.security_context
+                .as_ref()
+                .unwrap()
+                .seccomp_profile
+                .as_ref()
+                .unwrap()
+                .type_,
+            "RuntimeDefault"
+        );
     }
 
     #[test]
@@ -305,7 +497,9 @@ mod tests {
         let pod = jobspec.template.spec.as_ref().unwrap();
         // Tolerations
         let t = pod.tolerations.as_ref().unwrap();
-        assert!(t.iter().any(|x| x.key.as_deref() == Some("basilica.io/workloads-only")));
+        assert!(t
+            .iter()
+            .any(|x| x.key.as_deref() == Some("basilica.io/workloads-only")));
         // Affinity
         let aff = pod.affinity.as_ref().unwrap();
         let node_aff = aff.node_affinity.as_ref().unwrap();
@@ -335,8 +529,15 @@ mod tests {
         });
         let job = render_job("job-artifacts", &spec);
         let pod = job.spec.unwrap().template.spec.unwrap();
-        assert!(pod.containers.iter().any(|c| c.name.starts_with("artifact-uploader-")));
-        let sidecar = pod.containers.iter().find(|c| c.name.starts_with("artifact-uploader-")).unwrap();
+        assert!(pod
+            .containers
+            .iter()
+            .any(|c| c.name.starts_with("artifact-uploader-")));
+        let sidecar = pod
+            .containers
+            .iter()
+            .find(|c| c.name.starts_with("artifact-uploader-"))
+            .unwrap();
         let envs = sidecar.env.as_ref().unwrap();
         assert!(envs.iter().any(|e| e.name == "DESTINATION"));
         assert!(envs.iter().any(|e| e.name == "FROM_PATH"));
@@ -355,19 +556,38 @@ mod tests {
         let bj = BasilicaJob::new("bj1", spec);
 
         // First register CR in mock and reconcile: creates Job, status pending
-        controller.client.create_basilica_job("ns", &bj).await.unwrap();
+        controller
+            .client
+            .create_basilica_job("ns", &bj)
+            .await
+            .unwrap();
         controller.reconcile("ns", &bj).await.unwrap();
         // Create a running pod labeled for this job
         let mut pod = k8s_openapi::api::core::v1::Pod {
-            metadata: ObjectMeta { name: Some("pod1".into()), labels: Some(vec![("basilica.io/job".into(), "bj1".into())].into_iter().collect()), ..Default::default() },
-            status: Some(PodStatus { phase: Some("Running".into()), ..Default::default() }),
+            metadata: ObjectMeta {
+                name: Some("pod1".into()),
+                labels: Some(
+                    vec![("basilica.io/job".into(), "bj1".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         controller.client.create_pod("ns", &pod).await.unwrap();
 
         // Second reconcile: sees running pod, updates status
         controller.reconcile("ns", &bj).await.unwrap();
-        let updated = controller.client.get_basilica_job("ns", "bj1").await.unwrap();
+        let updated = controller
+            .client
+            .get_basilica_job("ns", "bj1")
+            .await
+            .unwrap();
         assert_eq!(updated.status.unwrap().phase.unwrap(), "Running");
         // Exercise metrics path (no-op if already installed)
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();

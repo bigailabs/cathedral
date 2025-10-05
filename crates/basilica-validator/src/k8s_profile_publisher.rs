@@ -71,11 +71,7 @@ impl K8sNodeProfilePublisher {
         Ok(obj)
     }
 
-    pub async fn upsert_node_profile(
-        &self,
-        ns: &str,
-        obj: &DynamicObject,
-    ) -> anyhow::Result<()> {
+    pub async fn upsert_node_profile(&self, ns: &str, obj: &DynamicObject) -> anyhow::Result<()> {
         let api = self.cr_api(ns);
         let name = obj.metadata.name.clone().unwrap_or_default();
         // Try create; if exists, patch status
@@ -83,9 +79,15 @@ impl K8sNodeProfilePublisher {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(ae)) if ae.code == 409 => {
                 // Patch status only
-                let status = obj.data.get("status").cloned().unwrap_or(serde_json::json!({}));
+                let status = obj
+                    .data
+                    .get("status")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
                 let patch = serde_json::json!({"status": status});
-                let _ = api.patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+                let _ = api
+                    .patch_status(&name, &PatchParams::default(), &Patch::Merge(&patch))
+                    .await?;
                 Ok(())
             }
             Err(e) => Err(e.into()),
@@ -99,7 +101,9 @@ impl K8sNodeProfilePublisher {
     ) -> anyhow::Result<()> {
         let nodes: Api<k8s_openapi::api::core::v1::Node> = Api::all(self.client.clone());
         let patch = Self::build_label_merge_patch(labels);
-        let _ = nodes.patch(node_name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+        let _ = nodes
+            .patch(node_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
         Ok(())
     }
 
@@ -111,7 +115,8 @@ impl K8sNodeProfilePublisher {
     ) -> anyhow::Result<()> {
         let api = self.cr_api(ns);
         let patch = serde_json::json!({"status": {"health": health}});
-        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch)).await?;
+        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
         Ok(())
     }
 
@@ -158,19 +163,46 @@ mod tests {
         let spec = NodeProfileSpec {
             provider: "onprem".into(),
             region: "us-east-1".into(),
-            gpu: NodeGpu { model: "A100".into(), count: 4, memory_gb: 80 },
-            cpu: NodeCpu { model: "AMD EPYC".into(), cores: 64 },
+            gpu: NodeGpu {
+                model: "A100".into(),
+                count: 4,
+                memory_gb: 80,
+            },
+            cpu: NodeCpu {
+                model: "AMD EPYC".into(),
+                cores: 64,
+            },
             memory_gb: 512,
             storage_gb: 2000,
             network_gbps: 10,
         };
-        let cr = K8sNodeProfilePublisher::build_node_profile_cr("node-123", "ns", &spec, Some("kube-node-1"), Some("2024-10-04T00:00:00Z"), Some("Valid")).unwrap();
+        let cr = K8sNodeProfilePublisher::build_node_profile_cr(
+            "node-123",
+            "ns",
+            &spec,
+            Some("kube-node-1"),
+            Some("2024-10-04T00:00:00Z"),
+            Some("Valid"),
+        )
+        .unwrap();
         assert_eq!(cr.metadata.name.as_deref(), Some("node-123"));
         let specv = cr.data.get("spec").unwrap();
-        assert_eq!(specv.get("provider").and_then(|v| v.as_str()).unwrap(), "onprem");
+        assert_eq!(
+            specv.get("provider").and_then(|v| v.as_str()).unwrap(),
+            "onprem"
+        );
         let statusv = cr.data.get("status").unwrap();
-        assert_eq!(statusv.get("kubeNodeName").and_then(|v| v.as_str()).unwrap(), "kube-node-1");
-        assert_eq!(statusv.get("health").and_then(|v| v.as_str()).unwrap(), "Valid");
+        assert_eq!(
+            statusv
+                .get("kubeNodeName")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            "kube-node-1"
+        );
+        assert_eq!(
+            statusv.get("health").and_then(|v| v.as_str()).unwrap(),
+            "Valid"
+        );
     }
 
     #[test]
@@ -180,6 +212,16 @@ mod tests {
             ("basilica.io/gpu-model".into(), "A100".into()),
         ]);
         let patch = K8sNodeProfilePublisher::build_label_merge_patch(&labels);
-        assert_eq!(patch.get("metadata").unwrap().get("labels").unwrap().get("basilica.io/validated").and_then(|v| v.as_str()).unwrap(), "true");
+        assert_eq!(
+            patch
+                .get("metadata")
+                .unwrap()
+                .get("labels")
+                .unwrap()
+                .get("basilica.io/validated")
+                .and_then(|v| v.as_str())
+                .unwrap(),
+            "true"
+        );
     }
 }

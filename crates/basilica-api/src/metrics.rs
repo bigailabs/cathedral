@@ -7,10 +7,19 @@ static INIT: Once = Once::new();
 
 fn ensure_init() {
     INIT.call_once(|| {
-        describe_counter!("basilica_api_http_requests_total", "HTTP requests processed by API routes");
-        describe_histogram!("basilica_api_http_request_duration_seconds", "Duration of API requests");
+        describe_counter!(
+            "basilica_api_http_requests_total",
+            "HTTP requests processed by API routes"
+        );
+        describe_histogram!(
+            "basilica_api_http_request_duration_seconds",
+            "Duration of API requests"
+        );
         describe_counter!("basilica_api_jobs_created_total", "Jobs created via API");
-        describe_counter!("basilica_api_rentals_created_total", "Rentals created via API");
+        describe_counter!(
+            "basilica_api_rentals_created_total",
+            "Rentals created via API"
+        );
     });
 }
 
@@ -28,6 +37,6 @@ pub fn record_job_created(namespace: &str) {
 
 pub fn record_rental_created(namespace: &str) {
     ensure_init();
-    counter!("basilica_api_rentals_created_total", "namespace" => namespace.to_string()).increment(1);
+    counter!("basilica_api_rentals_created_total", "namespace" => namespace.to_string())
+        .increment(1);
 }
-

@@ -1,9 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::crd::basilica_job::{BasilicaJob, BasilicaJobStatus};
 use crate::crd::gpu_rental::{GpuRental, GpuRentalStatus};
 use kube::ResourceExt;
-use crate::crd::basilica_job::{BasilicaJob, BasilicaJobStatus};
 
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeMetrics {
@@ -16,7 +16,11 @@ pub struct RuntimeMetrics {
 #[async_trait]
 pub trait BillingClient: Send + Sync {
     /// Returns true if the rental should be terminated due to insufficient credits/balance.
-    async fn should_terminate(&self, _rental: &GpuRental, _status: &GpuRentalStatus) -> Result<bool>;
+    async fn should_terminate(
+        &self,
+        _rental: &GpuRental,
+        _status: &GpuRentalStatus,
+    ) -> Result<bool>;
 
     /// Emit a usage/lifecycle event (best-effort)
     async fn emit_usage_event(
@@ -48,17 +52,31 @@ pub struct MockBillingClient {
 
 #[async_trait]
 impl BillingClient for MockBillingClient {
-    async fn should_terminate(&self, rental: &GpuRental, _status: &GpuRentalStatus) -> Result<bool> {
+    async fn should_terminate(
+        &self,
+        rental: &GpuRental,
+        _status: &GpuRentalStatus,
+    ) -> Result<bool> {
         let t = self.terminate.read().await;
         Ok(t.get(&rental.name_any()).cloned().unwrap_or(false))
     }
-    async fn emit_usage_event(&self, rental: &GpuRental, status: &GpuRentalStatus, _metrics: Option<&RuntimeMetrics>) -> Result<()> {
+    async fn emit_usage_event(
+        &self,
+        rental: &GpuRental,
+        status: &GpuRentalStatus,
+        _metrics: Option<&RuntimeMetrics>,
+    ) -> Result<()> {
         let mut ev = self.events.write().await;
         ev.push((rental.name_any(), status.state.clone().unwrap_or_default()));
         Ok(())
     }
 
-    async fn emit_job_event(&self, job: &BasilicaJob, status: &BasilicaJobStatus, _metrics: Option<&RuntimeMetrics>) -> Result<()> {
+    async fn emit_job_event(
+        &self,
+        job: &BasilicaJob,
+        status: &BasilicaJobStatus,
+        _metrics: Option<&RuntimeMetrics>,
+    ) -> Result<()> {
         let mut ev = self.events.write().await;
         ev.push((job.name_any(), status.phase.clone().unwrap_or_default()));
         Ok(())
@@ -74,13 +92,20 @@ pub struct HttpBillingClient {
 impl HttpBillingClient {
     pub fn new<S: Into<String>>(base_url: S) -> Self {
         let http = reqwest::Client::builder().build().expect("http client");
-        Self { base_url: base_url.into(), http }
+        Self {
+            base_url: base_url.into(),
+            http,
+        }
     }
 }
 
 #[async_trait]
 impl BillingClient for HttpBillingClient {
-    async fn should_terminate(&self, rental: &GpuRental, _status: &GpuRentalStatus) -> Result<bool> {
+    async fn should_terminate(
+        &self,
+        rental: &GpuRental,
+        _status: &GpuRentalStatus,
+    ) -> Result<bool> {
         // Require tenancy.user_id; without it, do not terminate.
         let user_id = rental
             .spec
@@ -91,21 +116,27 @@ impl BillingClient for HttpBillingClient {
         if user_id.is_empty() {
             return Ok(false);
         }
-        let url = format!("{}/credits/{}/balance", self.base_url.trim_end_matches('/'), user_id);
+        let url = format!(
+            "{}/credits/{}/balance",
+            self.base_url.trim_end_matches('/'),
+            user_id
+        );
         let resp = self.http.get(url).send().await?;
         if !resp.status().is_success() {
             return Ok(false);
         }
         let v: serde_json::Value = resp.json().await?;
         // Expect shape: { "balance": <number> }
-        let bal = v
-            .get("balance")
-            .and_then(|b| b.as_f64())
-            .unwrap_or(0.0);
+        let bal = v.get("balance").and_then(|b| b.as_f64()).unwrap_or(0.0);
         Ok(bal <= 0.0)
     }
 
-    async fn emit_usage_event(&self, rental: &GpuRental, status: &GpuRentalStatus, metrics: Option<&RuntimeMetrics>) -> Result<()> {
+    async fn emit_usage_event(
+        &self,
+        rental: &GpuRental,
+        status: &GpuRentalStatus,
+        metrics: Option<&RuntimeMetrics>,
+    ) -> Result<()> {
         #[derive(serde::Serialize)]
         struct UsagePayload<'a> {
             event_type: &'static str,
@@ -126,12 +157,26 @@ impl BillingClient for HttpBillingClient {
             bandwidth_gbps: Option<f64>,
         }
         let name = rental.name_any();
-        let gpu_model = rental.spec.container.resources.gpus.model.get(0).map(|s| s.as_str());
+        let gpu_model = rental
+            .spec
+            .container
+            .resources
+            .gpus
+            .model
+            .first()
+            .map(|s| s.as_str());
         let duration_seconds = match (&status.start_time, &status.expiry_time) {
             (Some(s), Some(e)) => {
-                let s = k8s_openapi::chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&k8s_openapi::chrono::Utc));
-                let e = k8s_openapi::chrono::DateTime::parse_from_rfc3339(e).ok().map(|dt| dt.with_timezone(&k8s_openapi::chrono::Utc));
-                match (s, e) { (Some(s), Some(e)) => Some((e - s).num_seconds()), _ => None }
+                let s = k8s_openapi::chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&k8s_openapi::chrono::Utc));
+                let e = k8s_openapi::chrono::DateTime::parse_from_rfc3339(e)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&k8s_openapi::chrono::Utc));
+                match (s, e) {
+                    (Some(s), Some(e)) => Some((e - s).num_seconds()),
+                    _ => None,
+                }
             }
             _ => None,
         };
@@ -158,7 +203,12 @@ impl BillingClient for HttpBillingClient {
         Ok(())
     }
 
-    async fn emit_job_event(&self, job: &BasilicaJob, status: &BasilicaJobStatus, metrics: Option<&RuntimeMetrics>) -> Result<()> {
+    async fn emit_job_event(
+        &self,
+        job: &BasilicaJob,
+        status: &BasilicaJobStatus,
+        metrics: Option<&RuntimeMetrics>,
+    ) -> Result<()> {
         #[derive(serde::Serialize)]
         struct JobPayload<'a> {
             event_type: &'static str,
@@ -175,7 +225,7 @@ impl BillingClient for HttpBillingClient {
             memory_peak_gb: Option<f64>,
             bandwidth_gbps: Option<f64>,
         }
-        let gpu_model = job.spec.resources.gpus.model.get(0).map(|s| s.as_str());
+        let gpu_model = job.spec.resources.gpus.model.first().map(|s| s.as_str());
         let payload = JobPayload {
             event_type: "job",
             job_id: &job.name_any(),
@@ -200,27 +250,42 @@ impl BillingClient for HttpBillingClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{routing::{get, post}, Router, Json};
+    use axum::{
+        routing::{get, post},
+        Json, Router,
+    };
     use std::net::SocketAddr;
     use tokio::task::JoinHandle;
 
-    async fn spawn_test_server() -> (String, JoinHandle<()>, std::sync::Arc<tokio::sync::RwLock<Vec<serde_json::Value>>>) {
+    async fn spawn_test_server() -> (
+        String,
+        JoinHandle<()>,
+        std::sync::Arc<tokio::sync::RwLock<Vec<serde_json::Value>>>,
+    ) {
         let events = std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let events_clone = events.clone();
         let app = Router::new()
-            .route("/credits/:user/balance", get(|axum::extract::Path(user): axum::extract::Path<String>| async move {
-                let bal = if user == "zero" { 0.0 } else { 12.34 };
-                Json(serde_json::json!({"balance": bal}))
-            }))
-            .route("/events/usage", post({
-                move |body: axum::Json<serde_json::Value>| {
-                    let events = events_clone.clone();
-                    async move {
-                        events.write().await.push(body.0);
-                        Json(serde_json::json!({"ok": true}))
+            .route(
+                "/credits/:user/balance",
+                get(
+                    |axum::extract::Path(user): axum::extract::Path<String>| async move {
+                        let bal = if user == "zero" { 0.0 } else { 12.34 };
+                        Json(serde_json::json!({"balance": bal}))
+                    },
+                ),
+            )
+            .route(
+                "/events/usage",
+                post({
+                    move |body: axum::Json<serde_json::Value>| {
+                        let events = events_clone.clone();
+                        async move {
+                            events.write().await.push(body.0);
+                            Json(serde_json::json!({"ok": true}))
+                        }
                     }
-                }
-            }));
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
@@ -230,23 +295,50 @@ mod tests {
     }
 
     fn sample_rental(user_id: &str) -> GpuRental {
-        use crate::crd::gpu_rental::{AccessType, GpuRentalSpec, RentalContainer, RentalDuration, RentalNetwork, Resources, GpuSpec, TenancyRef};
-        GpuRental::new("r1", GpuRentalSpec {
-            container: RentalContainer { image: "img".into(), env: vec![], command: vec![], ports: vec![], volumes: vec![], resources: Resources { cpu: "1".into(), memory: "1Gi".into(), gpus: GpuSpec { count: 0, model: vec![] } } },
-            duration: RentalDuration { hours: 1, auto_extend: false, max_extensions: 0 },
-            access_type: AccessType::Ssh,
-            network: RentalNetwork::default(),
-            storage: None,
-            artifacts: None,
-            ssh: None,
-            jupyter_access: None,
-            environment: None,
-            miner_selector: None,
-            billing: None,
-            ttl_seconds: 0,
-            tenancy: Some(TenancyRef { user_id: user_id.into(), project_id: "p1".into() }),
-            exclusive: false,
-        })
+        use crate::crd::gpu_rental::{
+            AccessType, GpuRentalSpec, GpuSpec, RentalContainer, RentalDuration, RentalNetwork,
+            Resources, TenancyRef,
+        };
+        GpuRental::new(
+            "r1",
+            GpuRentalSpec {
+                container: RentalContainer {
+                    image: "img".into(),
+                    env: vec![],
+                    command: vec![],
+                    ports: vec![],
+                    volumes: vec![],
+                    resources: Resources {
+                        cpu: "1".into(),
+                        memory: "1Gi".into(),
+                        gpus: GpuSpec {
+                            count: 0,
+                            model: vec![],
+                        },
+                    },
+                },
+                duration: RentalDuration {
+                    hours: 1,
+                    auto_extend: false,
+                    max_extensions: 0,
+                },
+                access_type: AccessType::Ssh,
+                network: RentalNetwork::default(),
+                storage: None,
+                artifacts: None,
+                ssh: None,
+                jupyter_access: None,
+                environment: None,
+                miner_selector: None,
+                billing: None,
+                ttl_seconds: 0,
+                tenancy: Some(TenancyRef {
+                    user_id: user_id.into(),
+                    project_id: "p1".into(),
+                }),
+                exclusive: false,
+            },
+        )
     }
 
     #[tokio::test]
@@ -266,40 +358,96 @@ mod tests {
         let rental = sample_rental("u1");
         let mut st = GpuRentalStatus::default();
         st.state = Some("Active".into());
-        let metrics = RuntimeMetrics { gpu_peak_utilization: Some(0.82), memory_peak_gb: Some(12.5), bandwidth_gbps: Some(0.4) };
-        client.emit_usage_event(&rental, &st, Some(&metrics)).await.unwrap();
+        let metrics = RuntimeMetrics {
+            gpu_peak_utilization: Some(0.82),
+            memory_peak_gb: Some(12.5),
+            bandwidth_gbps: Some(0.4),
+        };
+        client
+            .emit_usage_event(&rental, &st, Some(&metrics))
+            .await
+            .unwrap();
         let stored = events.read().await;
         assert!(!stored.is_empty());
         let first = &stored[0];
-        assert_eq!(first.get("rental_id").and_then(|v| v.as_str()).unwrap(), "r1");
+        assert_eq!(
+            first.get("rental_id").and_then(|v| v.as_str()).unwrap(),
+            "r1"
+        );
         assert_eq!(first.get("user_id").and_then(|v| v.as_str()).unwrap(), "u1");
         assert_eq!(first.get("cpu").and_then(|v| v.as_str()).unwrap(), "1");
         assert_eq!(first.get("memory").and_then(|v| v.as_str()).unwrap(), "1Gi");
         assert_eq!(first.get("gpu_count").and_then(|v| v.as_u64()).unwrap(), 0);
-        assert_eq!(first.get("gpu_peak_utilization").and_then(|v| v.as_f64()).unwrap(), 0.82);
-        assert_eq!(first.get("memory_peak_gb").and_then(|v| v.as_f64()).unwrap(), 12.5);
-        assert_eq!(first.get("bandwidth_gbps").and_then(|v| v.as_f64()).unwrap(), 0.4);
+        assert_eq!(
+            first
+                .get("gpu_peak_utilization")
+                .and_then(|v| v.as_f64())
+                .unwrap(),
+            0.82
+        );
+        assert_eq!(
+            first
+                .get("memory_peak_gb")
+                .and_then(|v| v.as_f64())
+                .unwrap(),
+            12.5
+        );
+        assert_eq!(
+            first
+                .get("bandwidth_gbps")
+                .and_then(|v| v.as_f64())
+                .unwrap(),
+            0.4
+        );
     }
 
     #[tokio::test]
     async fn http_billing_emit_job_event() {
         let (base, _h, events) = spawn_test_server().await;
         let client = HttpBillingClient::new(base);
-        use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, Resources, GpuSpec};
-        let job = BasilicaJob::new("job1", BasilicaJobSpec {
-            image: "img".into(), command: vec![], args: vec![], env: vec![],
-            resources: Resources { cpu: "2".into(), memory: "2Gi".into(), gpus: GpuSpec { count: 1, model: vec!["A100".into()] } },
-            storage: None, artifacts: None, ttl_seconds: 0, priority: "normal".into(),
-        });
+        use crate::crd::basilica_job::{BasilicaJob, BasilicaJobSpec, GpuSpec, Resources};
+        let job = BasilicaJob::new(
+            "job1",
+            BasilicaJobSpec {
+                image: "img".into(),
+                command: vec![],
+                args: vec![],
+                env: vec![],
+                resources: Resources {
+                    cpu: "2".into(),
+                    memory: "2Gi".into(),
+                    gpus: GpuSpec {
+                        count: 1,
+                        model: vec!["A100".into()],
+                    },
+                },
+                storage: None,
+                artifacts: None,
+                ttl_seconds: 0,
+                priority: "normal".into(),
+            },
+        );
         let mut st = BasilicaJobStatus::default();
         st.phase = Some("Running".into());
-        let metrics = RuntimeMetrics { gpu_peak_utilization: Some(0.65), memory_peak_gb: Some(8.0), bandwidth_gbps: Some(0.2) };
-        client.emit_job_event(&job, &st, Some(&metrics)).await.unwrap();
+        let metrics = RuntimeMetrics {
+            gpu_peak_utilization: Some(0.65),
+            memory_peak_gb: Some(8.0),
+            bandwidth_gbps: Some(0.2),
+        };
+        client
+            .emit_job_event(&job, &st, Some(&metrics))
+            .await
+            .unwrap();
         let stored = events.read().await;
         assert!(!stored.is_empty());
         let last = stored.last().unwrap();
         assert_eq!(last.get("job_id").and_then(|v| v.as_str()).unwrap(), "job1");
         assert_eq!(last.get("gpu_count").and_then(|v| v.as_u64()).unwrap(), 1);
-        assert_eq!(last.get("gpu_peak_utilization").and_then(|v| v.as_f64()).unwrap(), 0.65);
+        assert_eq!(
+            last.get("gpu_peak_utilization")
+                .and_then(|v| v.as_f64())
+                .unwrap(),
+            0.65
+        );
     }
 }

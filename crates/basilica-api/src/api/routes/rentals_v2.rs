@@ -1,22 +1,22 @@
 use axum::{
     extract::State,
     response::{sse::Event, Sse},
-    Json, Extension,
+    Extension, Json,
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use crate::api::middleware::AuthContext;
+use crate::metrics as apimetrics;
 use crate::{
     error::{ApiError, Result},
     k8s_client::{ApiK8sClient, RentalListItemDto, RentalSpecDto, RentalStatusDto, Resources},
     server::AppState,
 };
-use crate::metrics as apimetrics;
-use std::time::Instant;
-use basilica_sdk::types::{StartRentalApiRequest, NodeSelection};
-use crate::api::middleware::AuthContext;
-use std::pin::Pin;
+use basilica_sdk::types::{NodeSelection, StartRentalApiRequest};
 use futures::Stream as FuturesStream;
+use std::pin::Pin;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateRentalRequest {
@@ -43,14 +43,21 @@ fn user_namespace(user_id: &str) -> String {
         } else {
             out.push('-');
         }
-        if out.len() >= 60 { break; }
+        if out.len() >= 60 {
+            break;
+        }
     }
-    if out.ends_with('-') { out.pop(); }
+    if out.ends_with('-') {
+        out.pop();
+    }
     out
 }
 
 // List rentals in namespace (v2 K8s backend)
-pub async fn list_rentals(State(state): State<AppState>, Extension(auth): Extension<crate::api::middleware::AuthContext>) -> Result<Json<Vec<RentalStatusResponse>>> {
+pub async fn list_rentals(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::api::middleware::AuthContext>,
+) -> Result<Json<Vec<RentalStatusResponse>>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -63,13 +70,20 @@ pub async fn list_rentals(State(state): State<AppState>, Extension(auth): Extens
     let items: Vec<RentalListItemDto> = client.list_rentals(&ns).await?;
     let out: Vec<RentalStatusResponse> = items
         .into_iter()
-        .map(|it| RentalStatusResponse { rental_id: it.rental_id, status: it.status })
+        .map(|it| RentalStatusResponse {
+            rental_id: it.rental_id,
+            status: it.status,
+        })
         .collect();
     apimetrics::record_request("rentals_v2.list", "GET", start, true);
     Ok(Json(out))
 }
 
-pub async fn create_rental(State(state): State<AppState>, Extension(auth): Extension<crate::api::middleware::AuthContext>, Json(req): Json<CreateRentalRequest>) -> Result<Json<CreateRentalResponse>> {
+pub async fn create_rental(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::api::middleware::AuthContext>,
+    Json(req): Json<CreateRentalRequest>,
+) -> Result<Json<CreateRentalResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -78,7 +92,10 @@ pub async fn create_rental(State(state): State<AppState>, Extension(auth): Exten
             return Err(ApiError::ServiceUnavailable);
         }
     };
-    let name = req.name.clone().unwrap_or_else(|| format!("rent-{}", rand::random::<u32>()));
+    let name = req
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("rent-{}", rand::random::<u32>()));
     let ns = user_namespace(&auth.user_id);
     let spec = RentalSpecDto {
         container_image: req.container_image,
@@ -104,7 +121,7 @@ pub async fn create_rental_compat(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<StartRentalApiRequest>,
-)-> Result<Json<CreateRentalResponse>> {
+) -> Result<Json<CreateRentalResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -130,7 +147,14 @@ pub async fn create_rental_compat(
     } else {
         "1024Mi".into()
     };
-    let resources = Resources { cpu, memory, gpus: crate::k8s_client::GpuSpec { count: req.resources.gpu_count, model: req.resources.gpu_types.clone() } };
+    let resources = Resources {
+        cpu,
+        memory,
+        gpus: crate::k8s_client::GpuSpec {
+            count: req.resources.gpu_count,
+            model: req.resources.gpu_types.clone(),
+        },
+    };
 
     // Generate name and create spec
     let name = format!("rent-{}", rand::random::<u32>());
@@ -140,7 +164,10 @@ pub async fn create_rental_compat(
     // Encode preferred node if specified
     if let NodeSelection::NodeId { node_id } = &req.node_selection {
         annotations.insert("basilica.io/preferred-node".to_string(), node_id.clone());
-        labels.insert("basilica.io/has-preferred-node".to_string(), "true".to_string());
+        labels.insert(
+            "basilica.io/has-preferred-node".to_string(),
+            "true".to_string(),
+        );
     }
     // Encode GPU model preferences (also already passed via resources.gpus.model)
     if !req.resources.gpu_types.is_empty() {
@@ -150,19 +177,40 @@ pub async fn create_rental_compat(
         );
     }
     // Map environment and command
-    let container_env: Vec<(String, String)> = req.environment.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let container_env: Vec<(String, String)> = req
+        .environment
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let container_command: Vec<String> = req.command.clone();
     // Map ports to container ports and network ingress (default exposure NodePort)
     let mut container_ports: Vec<crate::k8s_client::RentalPortDto> = Vec::new();
     let mut network_ingress: Vec<crate::k8s_client::IngressRuleDto> = Vec::new();
     for p in &req.ports {
-        let proto = if p.protocol.eq_ignore_ascii_case("udp") { "UDP".to_string() } else { "TCP".to_string() };
+        let proto = if p.protocol.eq_ignore_ascii_case("udp") {
+            "UDP".to_string()
+        } else {
+            "TCP".to_string()
+        };
         let cp = (p.container_port as u16).max(1);
-        container_ports.push(crate::k8s_client::RentalPortDto { container_port: cp, protocol: proto });
-        network_ingress.push(crate::k8s_client::IngressRuleDto { port: cp, exposure: "NodePort".to_string() });
+        container_ports.push(crate::k8s_client::RentalPortDto {
+            container_port: cp,
+            protocol: proto,
+        });
+        network_ingress.push(crate::k8s_client::IngressRuleDto {
+            port: cp,
+            exposure: "NodePort".to_string(),
+        });
     }
     // SSH mapping
-    let ssh = if req.no_ssh { None } else { Some(crate::k8s_client::RentalSshDto { enabled: true, public_key: req.ssh_public_key.clone() }) };
+    let ssh = if req.no_ssh {
+        None
+    } else {
+        Some(crate::k8s_client::RentalSshDto {
+            enabled: true,
+            public_key: req.ssh_public_key.clone(),
+        })
+    };
     let spec = crate::k8s_client::RentalSpecDto {
         container_image: req.container_image.clone(),
         resources,
@@ -189,7 +237,11 @@ pub struct RentalStatusResponse {
     pub status: RentalStatusDto,
 }
 
-pub async fn get_rental_status(State(state): State<AppState>, Extension(auth): Extension<crate::api::middleware::AuthContext>, axum::extract::Path(rental_id): axum::extract::Path<String>) -> Result<Json<RentalStatusResponse>> {
+pub async fn get_rental_status(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::api::middleware::AuthContext>,
+    axum::extract::Path(rental_id): axum::extract::Path<String>,
+) -> Result<Json<RentalStatusResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -201,7 +253,10 @@ pub async fn get_rental_status(State(state): State<AppState>, Extension(auth): E
     let ns = user_namespace(&auth.user_id);
     let st = client.get_rental_status(&ns, &rental_id).await?;
     apimetrics::record_request("rentals_v2.status", "GET", start, true);
-    Ok(Json(RentalStatusResponse { rental_id, status: st }))
+    Ok(Json(RentalStatusResponse {
+        rental_id,
+        status: st,
+    }))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -209,7 +264,11 @@ pub struct DeleteRentalResponse {
     pub rental_id: String,
 }
 
-pub async fn delete_rental(State(state): State<AppState>, Extension(auth): Extension<crate::api::middleware::AuthContext>, axum::extract::Path(rental_id): axum::extract::Path<String>) -> Result<Json<DeleteRentalResponse>> {
+pub async fn delete_rental(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::api::middleware::AuthContext>,
+    axum::extract::Path(rental_id): axum::extract::Path<String>,
+) -> Result<Json<DeleteRentalResponse>> {
     let start = Instant::now();
     let client = match state.k8s.as_ref() {
         Some(c) => c,
@@ -233,9 +292,15 @@ fn build_follow_log_stream(
     since_seconds: Option<u32>,
 ) -> Pin<Box<dyn FuturesStream<Item = std::result::Result<Event, std::io::Error>> + Send>> {
     Box::pin(async_stream::stream! {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{sleep, Duration, Instant as TokioInstant};
         let mut last_marker: Option<String> = None;
+        let start_at = TokioInstant::now();
+        let max_duration = Duration::from_secs(300); // 5 minutes cap to avoid resource leaks
+        let mut last_heartbeat = TokioInstant::now();
         loop {
+            if start_at.elapsed() >= max_duration {
+                break;
+            }
             match client.get_rental_logs(&ns, &rental_id, tail.or(Some(100)), since_seconds).await {
                 Ok(body) => {
                     let lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
@@ -255,6 +320,12 @@ fn build_follow_log_stream(
                     }
                 }
                 Err(_) => { /* ignore transient errors */ }
+            }
+            // Heartbeat every 15 seconds to keep connections alive
+            if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+                let hb = serde_json::json!({"heartbeat": true, "timestamp": chrono::Utc::now()});
+                yield Ok(Event::default().data(hb.to_string()));
+                last_heartbeat = TokioInstant::now();
             }
             sleep(Duration::from_millis(1000)).await;
         }
@@ -280,8 +351,12 @@ pub async fn stream_rental_logs(
     let tail = query.tail;
     let since_seconds = query.since_seconds;
 
-    let stream: Pin<Box<dyn futures::Stream<Item = std::result::Result<Event, std::io::Error>> + Send>> = if !follow {
-        let logs = client.get_rental_logs(&ns, &rental_id, tail, since_seconds).await?;
+    let stream: Pin<
+        Box<dyn futures::Stream<Item = std::result::Result<Event, std::io::Error>> + Send>,
+    > = if !follow {
+        let logs = client
+            .get_rental_logs(&ns, &rental_id, tail, since_seconds)
+            .await?;
         let lines: Vec<String> = logs.lines().map(|s| s.to_string()).collect();
         Box::pin(async_stream::stream! {
             for line in &lines {
@@ -295,7 +370,13 @@ pub async fn stream_rental_logs(
         })
     } else {
         let client_clone = state.k8s.as_ref().unwrap().clone();
-        build_follow_log_stream(client_clone, ns.clone(), rental_id.clone(), tail, since_seconds)
+        build_follow_log_stream(
+            client_clone,
+            ns.clone(),
+            rental_id.clone(),
+            tail,
+            since_seconds,
+        )
     };
 
     apimetrics::record_request("rentals_v2.logs", "GET", start, true);
@@ -336,14 +417,28 @@ pub async fn exec_rental(
         }
     };
     let ns = user_namespace(&auth.user_id);
-    let res = client.exec_rental(&ns, &rental_id, req.command, req.stdin, req.tty.unwrap_or(false)).await?;
+    let res = client
+        .exec_rental(
+            &ns,
+            &rental_id,
+            req.command,
+            req.stdin,
+            req.tty.unwrap_or(false),
+        )
+        .await?;
     apimetrics::record_request("rentals_v2.exec", "POST", start, true);
-    Ok(Json(ExecResponse { stdout: res.stdout, stderr: res.stderr, exit_code: res.exit_code }))
+    Ok(Json(ExecResponse {
+        stdout: res.stdout,
+        stderr: res.stderr,
+        exit_code: res.exit_code,
+    }))
 }
 
 // Extend a rental's duration
 #[derive(Debug, Clone, Deserialize)]
-pub struct ExtendRentalRequest { pub additional_hours: u32 }
+pub struct ExtendRentalRequest {
+    pub additional_hours: u32,
+}
 
 pub async fn extend_rental(
     State(state): State<AppState>,
@@ -352,28 +447,37 @@ pub async fn extend_rental(
 ) -> Result<Json<RentalStatusResponse>> {
     let start = Instant::now();
     let _ = req; // unused in pay-as-you-go
-    // Under pay-as-you-go, extension is not supported; rentals are terminated when out of credits.
+                 // Under pay-as-you-go, extension is not supported; rentals are terminated when out of credits.
     apimetrics::record_request("rentals_v2.extend", "POST", start, false);
-    Err(ApiError::BadRequest { message: "Extend is not supported under pay-as-you-go".into() })
+    Err(ApiError::BadRequest {
+        message: "Extend is not supported under pay-as-you-go".into(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::middleware::{AuthContext, AuthDetails};
     use axum::http::StatusCode;
     use std::sync::Arc;
-    use crate::api::middleware::{AuthContext, AuthDetails};
 
     async fn build_state() -> AppState {
         let client = crate::k8s_client::MockK8sClient::default();
         AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
-            validator_client: std::sync::Arc::new(basilica_validator::ValidatorClient::new("http://localhost", std::time::Duration::from_secs(1)).unwrap()),
+            validator_client: std::sync::Arc::new(
+                basilica_validator::ValidatorClient::new(
+                    "http://localhost",
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
             validator_endpoint: "http://localhost".into(),
             validator_uid: 0,
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
-            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db").unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
+                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
             k8s: Some(Arc::new(client)),
         }
     }
@@ -384,31 +488,62 @@ mod tests {
         let client = crate::k8s_client::MockK8sClient::default();
         let state = AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
-            validator_client: std::sync::Arc::new(basilica_validator::ValidatorClient::new("http://localhost", std::time::Duration::from_secs(1)).unwrap()),
+            validator_client: std::sync::Arc::new(
+                basilica_validator::ValidatorClient::new(
+                    "http://localhost",
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
             validator_endpoint: "http://localhost".into(),
             validator_uid: 0,
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
-            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db").unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
+                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
             k8s: Some(std::sync::Arc::new(client.clone())),
         };
-        let auth = AuthContext { user_id: "alice".into(), scopes: vec![], details: AuthDetails::ApiKey };
-        let mut env = std::collections::HashMap::new(); env.insert("K".to_string(), "V".to_string());
+        let auth = AuthContext {
+            user_id: "alice".into(),
+            scopes: vec![],
+            details: AuthDetails::ApiKey,
+        };
+        let mut env = std::collections::HashMap::new();
+        env.insert("K".to_string(), "V".to_string());
         let req = StartRentalApiRequest {
-            node_selection: NodeSelection::NodeId { node_id: "node1".into() },
+            node_selection: NodeSelection::NodeId {
+                node_id: "node1".into(),
+            },
             container_image: "img".into(),
             ssh_public_key: "ssh-ed25519 AAA".into(),
             environment: env,
-            ports: vec![basilica_validator::api::routes::rentals::PortMappingRequest { container_port: 8080, host_port: 0, protocol: "tcp".into() }],
-            resources: basilica_validator::api::routes::rentals::ResourceRequirementsRequest { cpu_cores: 2.0, memory_mb: 2048, storage_mb: 0, gpu_count: 1, gpu_types: vec!["A100".into()] },
+            ports: vec![
+                basilica_validator::api::routes::rentals::PortMappingRequest {
+                    container_port: 8080,
+                    host_port: 0,
+                    protocol: "tcp".into(),
+                },
+            ],
+            resources: basilica_validator::api::routes::rentals::ResourceRequirementsRequest {
+                cpu_cores: 2.0,
+                memory_mb: 2048,
+                storage_mb: 0,
+                gpu_count: 1,
+                gpu_types: vec!["A100".into()],
+            },
             command: vec!["bash".into(), "-lc".into(), "echo".into(), "hi".into()],
             volumes: vec![],
             no_ssh: false,
         };
-        let res = create_rental_compat(State(state.clone()), Extension(auth), Json(req)).await.unwrap();
+        let res = create_rental_compat(State(state.clone()), Extension(auth), Json(req))
+            .await
+            .unwrap();
         assert!(!res.0.rental_id.is_empty());
         // Validate captured spec
-        let spec = client.get_rental_spec(&format!("{}", "u-alice"), &res.0.rental_id).await.unwrap();
+        let spec = client
+            .get_rental_spec(&format!("{}", "u-alice"), &res.0.rental_id)
+            .await
+            .unwrap();
         assert_eq!(spec.container_image, "img");
         assert_eq!(spec.container_env, vec![("K".into(), "V".into())]);
         assert_eq!(spec.container_command, vec!["bash", "-lc", "echo", "hi"]);
@@ -417,7 +552,11 @@ mod tests {
         assert!(spec.ssh.as_ref().unwrap().enabled);
 
         // Verify status includes endpoints derived from network_ingress (NodePort:<port>)
-        let auth2 = AuthContext { user_id: "alice".into(), scopes: vec![], details: AuthDetails::ApiKey };
+        let auth2 = AuthContext {
+            user_id: "alice".into(),
+            scopes: vec![],
+            details: AuthDetails::ApiKey,
+        };
         let status = get_rental_status(
             State(state.clone()),
             Extension(auth2),
@@ -425,7 +564,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(status.0.status.endpoints.iter().any(|e| e.starts_with("NodePort:")));
+        assert!(status
+            .0
+            .status
+            .endpoints
+            .iter()
+            .any(|e| e.starts_with("NodePort:")));
     }
 
     #[tokio::test]
@@ -434,26 +578,61 @@ mod tests {
         let client = crate::k8s_client::MockK8sClient::default();
         let state = AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
-            validator_client: std::sync::Arc::new(basilica_validator::ValidatorClient::new("http://localhost", std::time::Duration::from_secs(1)).unwrap()),
+            validator_client: std::sync::Arc::new(
+                basilica_validator::ValidatorClient::new(
+                    "http://localhost",
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
             validator_endpoint: "http://localhost".into(),
             validator_uid: 0,
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
-            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db").unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
+                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
             k8s: Some(std::sync::Arc::new(client.clone())),
         };
-        let auth = AuthContext { user_id: "bob".into(), scopes: vec![], details: AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-logs".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = AuthContext {
+            user_id: "bob".into(),
+            scopes: vec![],
+            details: AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-logs".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
         // Inject logs into mock
-        client.set_logs("u-bob", "rent-logs", "line1\nline2\nline3").await;
+        client
+            .set_logs("u-bob", "rent-logs", "line1\nline2\nline3")
+            .await;
 
         // Act: fetch tail=2 (non-follow)
         let sse = super::stream_rental_logs(
             State(state.clone()),
             Extension(auth.clone()),
             axum::extract::Path("rent-logs".to_string()),
-            axum::extract::Query(basilica_sdk::types::LogStreamQuery { follow: Some(false), tail: Some(2), since_seconds: None }),
+            axum::extract::Query(basilica_sdk::types::LogStreamQuery {
+                follow: Some(false),
+                tail: Some(2),
+                since_seconds: None,
+            }),
         )
         .await
         .unwrap();
@@ -464,29 +643,64 @@ mod tests {
 
     #[tokio::test]
     async fn v2_rental_logs_follow_smoke() {
-        use tokio::time::{Duration, timeout};
         use futures::StreamExt;
+        use tokio::time::{timeout, Duration};
 
         // Arrange state and create a rental
         let client = crate::k8s_client::MockK8sClient::default();
         let state = AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
-            validator_client: std::sync::Arc::new(basilica_validator::ValidatorClient::new("http://localhost", std::time::Duration::from_secs(1)).unwrap()),
+            validator_client: std::sync::Arc::new(
+                basilica_validator::ValidatorClient::new(
+                    "http://localhost",
+                    std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+            ),
             validator_endpoint: "http://localhost".into(),
             validator_uid: 0,
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
-            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db").unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+            db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
+                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
             k8s: Some(std::sync::Arc::new(client.clone())),
         };
-        let auth = AuthContext { user_id: "bob".into(), scopes: vec![], details: AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-follow".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = AuthContext {
+            user_id: "bob".into(),
+            scopes: vec![],
+            details: AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-follow".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
         client.set_logs("u-bob", "rent-follow", "first").await;
 
         // Act: request follow stream
         // Build follow stream directly and poll a few events
-        let stream = super::build_follow_log_stream(state.k8s.as_ref().unwrap().clone(), "u-bob".to_string(), "rent-follow".to_string(), Some(10), None);
+        let stream = super::build_follow_log_stream(
+            state.k8s.as_ref().unwrap().clone(),
+            "u-bob".to_string(),
+            "rent-follow".to_string(),
+            Some(10),
+            None,
+        );
 
         // Wait for at least one event
         let got = timeout(Duration::from_millis(1500), async {
@@ -498,28 +712,73 @@ mod tests {
         assert!(got, "expected at least one follow event");
 
         // Update logs and expect more chunks (best-effort)
-        client.set_logs("u-bob", "rent-follow", "first\nsecond").await;
+        client
+            .set_logs("u-bob", "rent-follow", "first\nsecond")
+            .await;
         // Rebuild a new follow stream and ensure it produces at least one event after update
-        let stream2 = super::build_follow_log_stream(state.k8s.as_ref().unwrap().clone(), "u-bob".to_string(), "rent-follow".to_string(), Some(10), None);
+        let stream2 = super::build_follow_log_stream(
+            state.k8s.as_ref().unwrap().clone(),
+            "u-bob".to_string(),
+            "rent-follow".to_string(),
+            Some(10),
+            None,
+        );
         let got_more = timeout(Duration::from_millis(1500), async {
             futures::pin_mut!(stream2);
             stream2.next().await.is_some()
         })
         .await
         .unwrap_or(false);
-        assert!(got_more, "expected additional follow event after log update");
+        assert!(
+            got_more,
+            "expected additional follow event after log update"
+        );
     }
 
     #[tokio::test]
     async fn v2_rental_create_get_delete() {
         let state = build_state().await;
-        let auth = crate::api::middleware::AuthContext { user_id: "user1".into(), scopes: vec![], details: crate::api::middleware::AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-v2".into()), namespace: Some("default".into()) };
-        let create = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = crate::api::middleware::AuthContext {
+            user_id: "user1".into(),
+            scopes: vec![],
+            details: crate::api::middleware::AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-v2".into()),
+            namespace: Some("default".into()),
+        };
+        let create = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
         assert_eq!(create.0.rental_id, "rent-v2");
-        let status = super::get_rental_status(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2".to_string())).await.unwrap();
+        let status = super::get_rental_status(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2".to_string()),
+        )
+        .await
+        .unwrap();
         assert!(!status.0.status.state.is_empty());
-        let del = super::delete_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2".to_string())).await.unwrap();
+        let del = super::delete_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2".to_string()),
+        )
+        .await
+        .unwrap();
         assert_eq!(del.0.rental_id, "rent-v2");
     }
 
@@ -527,16 +786,60 @@ mod tests {
     async fn v2_rental_exec() {
         let state = build_state().await;
         // Create first
-        let auth = crate::api::middleware::AuthContext { user_id: "user1".into(), scopes: vec![], details: crate::api::middleware::AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-v2-exec".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = crate::api::middleware::AuthContext {
+            user_id: "user1".into(),
+            scopes: vec![],
+            details: crate::api::middleware::AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-v2-exec".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
         // Exec
-        let exec_req = ExecRequest { command: vec!["echo".into(), "hello".into()], stdin: None, tty: None };
-        let resp = super::exec_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2-exec".to_string()), Json(exec_req)).await.unwrap();
+        let exec_req = ExecRequest {
+            command: vec!["echo".into(), "hello".into()],
+            stdin: None,
+            tty: None,
+        };
+        let resp = super::exec_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2-exec".to_string()),
+            Json(exec_req),
+        )
+        .await
+        .unwrap();
         assert!(resp.0.stdout.contains("exec: echo hello"));
         // Simulate non-zero exit via mock (command contains 'fail')
-        let exec_req2 = ExecRequest { command: vec!["fail".into()], stdin: None, tty: None };
-        let resp2 = super::exec_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2-exec".to_string()), Json(exec_req2)).await.unwrap();
+        let exec_req2 = ExecRequest {
+            command: vec!["fail".into()],
+            stdin: None,
+            tty: None,
+        };
+        let resp2 = super::exec_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2-exec".to_string()),
+            Json(exec_req2),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp2.0.exit_code, 1);
         assert!(resp2.0.stderr.contains("simulated error"));
     }
@@ -544,53 +847,171 @@ mod tests {
     #[tokio::test]
     async fn v2_rental_exec_tty_and_stdin_behaviors() {
         let state = build_state().await;
-        let auth = crate::api::middleware::AuthContext { user_id: "user1".into(), scopes: vec![], details: crate::api::middleware::AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-v2-exec-tty".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = crate::api::middleware::AuthContext {
+            user_id: "user1".into(),
+            scopes: vec![],
+            details: crate::api::middleware::AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-v2-exec-tty".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
 
         // When TTY is true and command fails, stderr should be merged into stdout
-        let req_tty_fail = ExecRequest { command: vec!["fail".into()], stdin: None, tty: Some(true) };
-        let res_tty_fail = super::exec_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2-exec-tty".to_string()), Json(req_tty_fail)).await.unwrap();
+        let req_tty_fail = ExecRequest {
+            command: vec!["fail".into()],
+            stdin: None,
+            tty: Some(true),
+        };
+        let res_tty_fail = super::exec_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2-exec-tty".to_string()),
+            Json(req_tty_fail),
+        )
+        .await
+        .unwrap();
         assert_eq!(res_tty_fail.0.exit_code, 1);
-        assert!(res_tty_fail.0.stderr.is_empty(), "stderr should be empty when TTY merges streams");
+        assert!(
+            res_tty_fail.0.stderr.is_empty(),
+            "stderr should be empty when TTY merges streams"
+        );
         assert!(res_tty_fail.0.stdout.contains("simulated error"));
 
         // When stdin is provided, ensure it is reflected in stdout
-        let req_stdin = ExecRequest { command: vec!["cat".into()], stdin: Some("hello input".into()), tty: Some(false) };
-        let res_stdin = super::exec_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2-exec-tty".to_string()), Json(req_stdin)).await.unwrap();
+        let req_stdin = ExecRequest {
+            command: vec!["cat".into()],
+            stdin: Some("hello input".into()),
+            tty: Some(false),
+        };
+        let res_stdin = super::exec_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2-exec-tty".to_string()),
+            Json(req_stdin),
+        )
+        .await
+        .unwrap();
         assert!(res_stdin.0.stdout.contains("stdin: hello input"));
     }
 
     #[tokio::test]
     async fn v2_rental_exec_stderr_only_edge_case() {
         let state = build_state().await;
-        let auth = crate::api::middleware::AuthContext { user_id: "user1".into(), scopes: vec![], details: crate::api::middleware::AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-v2-exec-stderr".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = crate::api::middleware::AuthContext {
+            user_id: "user1".into(),
+            scopes: vec![],
+            details: crate::api::middleware::AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-v2-exec-stderr".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
 
         // Non-TTY: expect only stderr populated
-        let req_stderr = ExecRequest { command: vec!["stderr-only".into()], stdin: None, tty: Some(false) };
-        let res_stderr = super::exec_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2-exec-stderr".to_string()), Json(req_stderr)).await.unwrap();
+        let req_stderr = ExecRequest {
+            command: vec!["stderr-only".into()],
+            stdin: None,
+            tty: Some(false),
+        };
+        let res_stderr = super::exec_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2-exec-stderr".to_string()),
+            Json(req_stderr),
+        )
+        .await
+        .unwrap();
         assert!(res_stderr.0.stderr.contains("simulated stderr-only output"));
         assert!(res_stderr.0.stdout.is_empty());
 
         // TTY merges stderr into stdout
-        let req_stderr_tty = ExecRequest { command: vec!["stderr-only".into()], stdin: None, tty: Some(true) };
-        let res_stderr_tty = super::exec_rental(State(state.clone()), Extension(auth.clone()), axum::extract::Path("rent-v2-exec-stderr".to_string()), Json(req_stderr_tty)).await.unwrap();
-        assert!(res_stderr_tty.0.stdout.contains("simulated stderr-only output"));
+        let req_stderr_tty = ExecRequest {
+            command: vec!["stderr-only".into()],
+            stdin: None,
+            tty: Some(true),
+        };
+        let res_stderr_tty = super::exec_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            axum::extract::Path("rent-v2-exec-stderr".to_string()),
+            Json(req_stderr_tty),
+        )
+        .await
+        .unwrap();
+        assert!(res_stderr_tty
+            .0
+            .stdout
+            .contains("simulated stderr-only output"));
         assert!(res_stderr_tty.0.stderr.is_empty());
     }
 
     #[tokio::test]
     async fn v2_rental_extend() {
         let state = build_state().await;
-        let auth = crate::api::middleware::AuthContext { user_id: "user1".into(), scopes: vec![], details: crate::api::middleware::AuthDetails::ApiKey };
-        let req_body = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-v2-extend".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body)).await.unwrap();
+        let auth = crate::api::middleware::AuthContext {
+            user_id: "user1".into(),
+            scopes: vec![],
+            details: crate::api::middleware::AuthDetails::ApiKey,
+        };
+        let req_body = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-v2-extend".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body),
+        )
+        .await
+        .unwrap();
         let err = super::extend_rental(
             State(state.clone()),
             axum::extract::Path("rent-v2-extend".to_string()),
-            Json(ExtendRentalRequest { additional_hours: 2 }),
+            Json(ExtendRentalRequest {
+                additional_hours: 2,
+            }),
         )
         .await;
         assert!(err.is_err());
@@ -599,12 +1020,54 @@ mod tests {
     #[tokio::test]
     async fn v2_rental_list() {
         let state = build_state().await;
-        let auth = crate::api::middleware::AuthContext { user_id: "user1".into(), scopes: vec![], details: crate::api::middleware::AuthDetails::ApiKey };
-        let req_body1 = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-a".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body1)).await.unwrap();
-        let req_body2 = CreateRentalRequest { container_image: "img".into(), resources: Resources { cpu: "1".into(), memory: "512Mi".into(), gpus: crate::k8s_client::GpuSpec { count: 0, model: vec![] } }, name: Some("rent-b".into()), namespace: Some("default".into()) };
-        let _ = super::create_rental(State(state.clone()), Extension(auth.clone()), Json(req_body2)).await.unwrap();
-        let list = super::list_rentals(State(state.clone()), Extension(auth.clone())).await.unwrap();
+        let auth = crate::api::middleware::AuthContext {
+            user_id: "user1".into(),
+            scopes: vec![],
+            details: crate::api::middleware::AuthDetails::ApiKey,
+        };
+        let req_body1 = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-a".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body1),
+        )
+        .await
+        .unwrap();
+        let req_body2 = CreateRentalRequest {
+            container_image: "img".into(),
+            resources: Resources {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+                gpus: crate::k8s_client::GpuSpec {
+                    count: 0,
+                    model: vec![],
+                },
+            },
+            name: Some("rent-b".into()),
+            namespace: Some("default".into()),
+        };
+        let _ = super::create_rental(
+            State(state.clone()),
+            Extension(auth.clone()),
+            Json(req_body2),
+        )
+        .await
+        .unwrap();
+        let list = super::list_rentals(State(state.clone()), Extension(auth.clone()))
+            .await
+            .unwrap();
         let ids: Vec<String> = list.0.into_iter().map(|x| x.rental_id).collect();
         assert!(ids.contains(&"rent-a".to_string()));
         assert!(ids.contains(&"rent-b".to_string()));

@@ -28,7 +28,12 @@ impl K3sAgentConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ServiceState { Active, Inactive, Failed, Unknown }
+pub enum ServiceState {
+    Active,
+    Inactive,
+    Failed,
+    Unknown,
+}
 
 /// Build shell commands to install/start the k3s agent.
 /// Commands assume systemd is present and `curl` is available on the remote host.
@@ -41,15 +46,25 @@ pub fn build_install_commands(cfg: &K3sAgentConfig) -> Vec<String> {
         format!("K3S_URL={}", cfg.server_url),
         format!("K3S_TOKEN={}", cfg.token),
     ];
-    if let Some(ch) = &cfg.channel { envs.push(format!("INSTALL_K3S_CHANNEL={}", ch)); }
+    if let Some(ch) = &cfg.channel {
+        envs.push(format!("INSTALL_K3S_CHANNEL={}", ch));
+    }
 
     // Additional agent args
     let mut agent_args: Vec<String> = Vec::new();
-    if let Some(n) = &cfg.node_name { agent_args.push(format!("--node-name {}", shell_quote(n))); }
-    if !cfg.extra_args.is_empty() { agent_args.extend(cfg.extra_args.iter().map(|a| a.clone())); }
+    if let Some(n) = &cfg.node_name {
+        agent_args.push(format!("--node-name {}", shell_quote(n)));
+    }
+    if !cfg.extra_args.is_empty() {
+        agent_args.extend(cfg.extra_args.iter().map(|a| a.clone()));
+    }
 
     // Use upstream installer with agent subcommand
-    let arg_tail = if agent_args.is_empty() { "".into() } else { format!(" -- {}", agent_args.join(" ")) };
+    let arg_tail = if agent_args.is_empty() {
+        "".into()
+    } else {
+        format!(" -- {}", agent_args.join(" "))
+    };
     cmds.push(format!(
         "{} sh -s - agent{} <(true)",
         format!("curl -sfL https://get.k3s.io | {}", envs.join(" ")),
@@ -65,8 +80,14 @@ pub fn build_install_commands(cfg: &K3sAgentConfig) -> Vec<String> {
 /// Build shell commands to upgrade the k3s agent.
 pub fn build_upgrade_commands(channel: Option<&str>) -> Vec<String> {
     let mut cmds = Vec::new();
-    if let Some(ch) = channel { cmds.push(format!("INSTALL_K3S_CHANNEL={} sh -c 'curl -sfL https://get.k3s.io | sh -'", ch)); }
-    else { cmds.push("sh -c 'curl -sfL https://get.k3s.io | sh -'".into()); }
+    if let Some(ch) = channel {
+        cmds.push(format!(
+            "INSTALL_K3S_CHANNEL={} sh -c 'curl -sfL https://get.k3s.io | sh -'",
+            ch
+        ));
+    } else {
+        cmds.push("sh -c 'curl -sfL https://get.k3s.io | sh -'".into());
+    }
     cmds.push("sudo systemctl restart k3s-agent".into());
     cmds
 }
@@ -81,10 +102,15 @@ pub fn build_uninstall_commands() -> Vec<String> {
 /// Parse `systemctl status k3s-agent` output to a simplified state.
 pub fn parse_systemctl_status(output: &str) -> ServiceState {
     let lower = output.to_lowercase();
-    if lower.contains("active: active (running)") { ServiceState::Active }
-    else if lower.contains("active: inactive") { ServiceState::Inactive }
-    else if lower.contains("active: failed") || lower.contains("failed; ") { ServiceState::Failed }
-    else { ServiceState::Unknown }
+    if lower.contains("active: active (running)") {
+        ServiceState::Active
+    } else if lower.contains("active: inactive") {
+        ServiceState::Inactive
+    } else if lower.contains("active: failed") || lower.contains("failed; ") {
+        ServiceState::Failed
+    } else {
+        ServiceState::Unknown
+    }
 }
 
 /// Parse `k3s -v` (or `k3s --version`) output to extract the version string.
@@ -94,14 +120,18 @@ pub fn parse_systemctl_status(output: &str) -> ServiceState {
 pub fn parse_k3s_version(output: &str) -> Option<String> {
     // Look for token starting with 'v' and containing '+'
     for tok in output.split_whitespace() {
-        if tok.starts_with('v') && tok.contains("+k3s") { return Some(tok.trim().to_string()); }
+        if tok.starts_with('v') && tok.contains("+k3s") {
+            return Some(tok.trim().to_string());
+        }
     }
     None
 }
 
 /// Shell-escape a simple argument by quoting if needed.
 fn shell_quote(s: &str) -> String {
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' ) {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
         s.to_string()
     } else {
         // Replace single quotes with the shell-safe pattern: ' -> '\''
@@ -133,11 +163,15 @@ mod tests {
     fn parse_systemctl_status_variants() {
         let active = "\n   Active: active (running) since Thu 2024-10-03 12:00:00 UTC; 1h ago\n";
         let inactive = "\n   Active: inactive (dead) since Thu 2024-10-03 12:00:00 UTC; 1h ago\n";
-        let failed = "\n   Active: failed (Result: exit-code) since Thu 2024-10-03 12:00:00 UTC; 1h ago\n";
+        let failed =
+            "\n   Active: failed (Result: exit-code) since Thu 2024-10-03 12:00:00 UTC; 1h ago\n";
         assert_eq!(parse_systemctl_status(active), ServiceState::Active);
         assert_eq!(parse_systemctl_status(inactive), ServiceState::Inactive);
         assert_eq!(parse_systemctl_status(failed), ServiceState::Failed);
-        assert_eq!(parse_systemctl_status("something else"), ServiceState::Unknown);
+        assert_eq!(
+            parse_systemctl_status("something else"),
+            ServiceState::Unknown
+        );
     }
 
     #[test]

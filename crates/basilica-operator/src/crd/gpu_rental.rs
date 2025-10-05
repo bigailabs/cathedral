@@ -60,11 +60,13 @@ pub struct RentalContainer {
 #[serde(rename_all = "camelCase")]
 pub struct RentalPort {
     pub container_port: u16,
-    #[serde(default = "default_protocol")] 
+    #[serde(default = "default_protocol")]
     pub protocol: String, // TCP | UDP
 }
 
-fn default_protocol() -> String { "TCP".into() }
+fn default_protocol() -> String {
+    "TCP".into()
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -103,7 +105,12 @@ pub struct RentalDuration {
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum AccessType { Ssh, Jupyter, Vscode, Custom }
+pub enum AccessType {
+    Ssh,
+    Jupyter,
+    Vscode,
+    Custom,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
 #[serde(rename_all = "camelCase")]
@@ -121,21 +128,39 @@ pub struct RentalNetwork {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-pub struct IngressRule { pub port: u16, pub exposure: String }
+pub struct IngressRule {
+    pub port: u16,
+    pub exposure: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-pub struct RentalSsh { pub enabled: bool, pub public_key: String }
+pub struct RentalSsh {
+    pub enabled: bool,
+    pub public_key: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
-pub struct RentalJupyter { pub password: Option<String>, pub token: Option<String>, pub base_image: Option<String> }
+pub struct RentalJupyter {
+    pub password: Option<String>,
+    pub token: Option<String>,
+    pub base_image: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RentalEnvironment { pub base_image: Option<String>, pub pre_install_script: Option<String>, pub environment_variables: Vec<(String, String)> }
+pub struct RentalEnvironment {
+    pub base_image: Option<String>,
+    pub pre_install_script: Option<String>,
+    pub environment_variables: Vec<(String, String)>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RentalStorage { pub persistent_volume_gb: u32, pub storage_class: Option<String>, pub mount_path: String }
+pub struct RentalStorage {
+    pub persistent_volume_gb: u32,
+    pub storage_class: Option<String>,
+    pub mount_path: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -157,11 +182,20 @@ pub struct RentalArtifacts {
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct MinerSelector { pub id: Option<String>, pub region: Option<String>, pub tier: Option<String> }
+pub struct MinerSelector {
+    pub id: Option<String>,
+    pub region: Option<String>,
+    pub tier: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RentalBilling { pub max_hourly_rate: f64, pub payment_method: String, pub account_id: Option<String>, pub deposit_amount: Option<f64> }
+pub struct RentalBilling {
+    pub max_hourly_rate: f64,
+    pub payment_method: String,
+    pub account_id: Option<String>,
+    pub deposit_amount: Option<f64>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, JsonSchema)]
 pub struct GpuRentalStatus {
@@ -182,7 +216,7 @@ pub struct GpuRentalStatus {
     #[serde(default)]
     pub total_extensions: Option<u32>,
     #[serde(default)]
-    pub endpoints: Option<Vec<String>>, 
+    pub endpoints: Option<Vec<String>>,
 }
 
 #[cfg(test)]

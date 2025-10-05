@@ -4,13 +4,13 @@ use crate::compute::Resources;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AccessType {
-    #[serde(rename = "ssh")] 
+    #[serde(rename = "ssh")]
     Ssh,
-    #[serde(rename = "jupyter")] 
+    #[serde(rename = "jupyter")]
     Jupyter,
-    #[serde(rename = "vscode")] 
+    #[serde(rename = "vscode")]
     Vscode,
-    #[serde(rename = "custom")] 
+    #[serde(rename = "custom")]
     Custom,
 }
 
@@ -48,11 +48,13 @@ pub struct RentalContainer {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RentalPort {
     pub container_port: u16,
-    #[serde(default = "default_protocol")] 
+    #[serde(default = "default_protocol")]
     pub protocol: String, // TCP | UDP
 }
 
-fn default_protocol() -> String { "TCP".into() }
+fn default_protocol() -> String {
+    "TCP".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngressRule {
@@ -147,19 +149,66 @@ mod tests {
                 image: "image".into(),
                 env: vec![("A".into(), "1".into())],
                 command: vec!["bash".into()],
-                ports: vec![RentalPort { container_port: 8080, protocol: "TCP".into() }],
-                volumes: vec![VolumeMount { host_path: None, container_path: "/data".into(), read_only: false }],
-                resources: Resources { cpu: "4".into(), memory: "16Gi".into(), gpus: GpuSpec { count: 1, model: vec!["A100".into()] } },
+                ports: vec![RentalPort {
+                    container_port: 8080,
+                    protocol: "TCP".into(),
+                }],
+                volumes: vec![VolumeMount {
+                    host_path: None,
+                    container_path: "/data".into(),
+                    read_only: false,
+                }],
+                resources: Resources {
+                    cpu: "4".into(),
+                    memory: "16Gi".into(),
+                    gpus: GpuSpec {
+                        count: 1,
+                        model: vec!["A100".into()],
+                    },
+                },
             },
-            duration: RentalDuration { hours: 24, auto_extend: false, max_extensions: 0 },
+            duration: RentalDuration {
+                hours: 24,
+                auto_extend: false,
+                max_extensions: 0,
+            },
             access_type: AccessType::Ssh,
-            network: RentalNetwork { ingress: vec![IngressRule { port: 8080, exposure: "NodePort".into() }], egress_policy: "restricted".into(), allowed_egress: vec!["https://s3.amazonaws.com".into()], public_ip_required: false, bandwidth_mbps: Some(100) },
-            storage: Some(RentalStorage { persistent_volume_gb: 200, storage_class: Some("fast-ssd".into()), mount_path: "/data".into() }),
-            ssh: Some(RentalSsh { enabled: true, public_key: "ssh-ed25519 AAAA...".into() }),
+            network: RentalNetwork {
+                ingress: vec![IngressRule {
+                    port: 8080,
+                    exposure: "NodePort".into(),
+                }],
+                egress_policy: "restricted".into(),
+                allowed_egress: vec!["https://s3.amazonaws.com".into()],
+                public_ip_required: false,
+                bandwidth_mbps: Some(100),
+            },
+            storage: Some(RentalStorage {
+                persistent_volume_gb: 200,
+                storage_class: Some("fast-ssd".into()),
+                mount_path: "/data".into(),
+            }),
+            ssh: Some(RentalSsh {
+                enabled: true,
+                public_key: "ssh-ed25519 AAAA...".into(),
+            }),
             jupyter: None,
-            environment: Some(RentalEnvironment { base_image: Some("nvidia/cuda:12.0-base".into()), pre_install_script: None, environment_variables: vec![] }),
-            miner_selector: Some(MinerSelector { id: None, region: Some("us-east-1".into()), tier: Some("premium".into()) }),
-            billing: Some(RentalBilling { max_hourly_rate: 3.5, payment_method: "postpaid".into(), account_id: Some("acct_1".into()), deposit_amount: None }),
+            environment: Some(RentalEnvironment {
+                base_image: Some("nvidia/cuda:12.0-base".into()),
+                pre_install_script: None,
+                environment_variables: vec![],
+            }),
+            miner_selector: Some(MinerSelector {
+                id: None,
+                region: Some("us-east-1".into()),
+                tier: Some("premium".into()),
+            }),
+            billing: Some(RentalBilling {
+                max_hourly_rate: 3.5,
+                payment_method: "postpaid".into(),
+                account_id: Some("acct_1".into()),
+                deposit_amount: None,
+            }),
             ttl_seconds: 0,
             tenancy: Some(("user-1".into(), "proj-1".into())),
         };

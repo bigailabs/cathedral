@@ -394,7 +394,8 @@ mod tests {
         assert!(result.is_err());
 
         match result {
-            Err(BittensorError::RpcTimeoutError { .. }) | Err(BittensorError::RpcConnectionError { .. }) => {
+            Err(BittensorError::RpcTimeoutError { .. })
+            | Err(BittensorError::RpcConnectionError { .. }) => {
                 // Either a timeout or a connection error is acceptable in CI environments
             }
             _ => panic!("Expected timeout or connection error"),

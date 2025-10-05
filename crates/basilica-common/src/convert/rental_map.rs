@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     compute::{GpuSpec, Resources},
-    rental::{AccessType, RentalContainer, RentalDuration, RentalEnvironment, RentalNetwork, RentalPort, RentalSpec, VolumeMount},
+    rental::{
+        AccessType, RentalContainer, RentalDuration, RentalEnvironment, RentalNetwork, RentalPort,
+        RentalSpec, VolumeMount,
+    },
 };
 
 /// A DTO that mirrors the validator's ContainerSpec without creating a crate dependency.
@@ -88,7 +91,10 @@ pub fn map_validator_container_to_rental(
         ports: dto
             .ports
             .iter()
-            .map(|p| RentalPort { container_port: p.container_port as u16, protocol: p.protocol.clone() })
+            .map(|p| RentalPort {
+                container_port: p.container_port as u16,
+                protocol: p.protocol.clone(),
+            })
             .collect(),
         volumes: dto
             .volumes
@@ -102,7 +108,10 @@ pub fn map_validator_container_to_rental(
         resources: Resources {
             cpu,
             memory,
-            gpus: GpuSpec { count: dto.resources.gpu_count, model: dto.resources.gpu_types.clone() },
+            gpus: GpuSpec {
+                count: dto.resources.gpu_count,
+                model: dto.resources.gpu_types.clone(),
+            },
         },
     };
 
@@ -118,14 +127,26 @@ pub fn map_validator_container_to_rental(
 
     RentalSpec {
         container,
-        duration: RentalDuration { hours: 24, auto_extend: false, max_extensions: 0 },
+        duration: RentalDuration {
+            hours: 24,
+            auto_extend: false,
+            max_extensions: 0,
+        },
         access_type: AccessType::Ssh,
         network,
         storage: None,
         ssh: None,
         jupyter: None,
-        environment: Some(RentalEnvironment { base_image: None, pre_install_script: None, environment_variables: vec![] }),
-        miner_selector: node_region_hint.map(|region| crate::rental::MinerSelector { id: None, region: Some(region), tier: None }),
+        environment: Some(RentalEnvironment {
+            base_image: None,
+            pre_install_script: None,
+            environment_variables: vec![],
+        }),
+        miner_selector: node_region_hint.map(|region| crate::rental::MinerSelector {
+            id: None,
+            region: Some(region),
+            tier: None,
+        }),
         billing: None,
         ttl_seconds: 0,
         tenancy: None,
@@ -141,26 +162,55 @@ mod tests {
         let dto = ValidatorContainerSpecDto {
             image: "image:tag".into(),
             environment: vec![("K".into(), "V".into())],
-            ports: vec![ValidatorPortMappingDto { container_port: 7860, host_port: 17860, protocol: "TCP".into() }],
-            resources: ValidatorResourceRequirementsDto { cpu_cores: 4.0, memory_mb: 16384, storage_mb: 0, gpu_count: 1, gpu_types: vec!["A100".into()] },
+            ports: vec![ValidatorPortMappingDto {
+                container_port: 7860,
+                host_port: 17860,
+                protocol: "TCP".into(),
+            }],
+            resources: ValidatorResourceRequirementsDto {
+                cpu_cores: 4.0,
+                memory_mb: 16384,
+                storage_mb: 0,
+                gpu_count: 1,
+                gpu_types: vec!["A100".into()],
+            },
             entrypoint: vec!["bash".into(), "-lc".into()],
             command: vec!["python".into(), "main.py".into()],
-            volumes: vec![ValidatorVolumeMountDto { host_path: "/var/scratch".into(), container_path: "/data".into(), read_only: false }],
+            volumes: vec![ValidatorVolumeMountDto {
+                host_path: "/var/scratch".into(),
+                container_path: "/data".into(),
+                read_only: false,
+            }],
             labels: vec![("a".into(), "b".into())],
             capabilities: vec!["SYS_PTRACE".into()],
-            network: ValidatorNetworkConfigDto { mode: "bridge".into(), dns: vec![], extra_hosts: vec![] },
+            network: ValidatorNetworkConfigDto {
+                mode: "bridge".into(),
+                dns: vec![],
+                extra_hosts: vec![],
+            },
         };
 
         let spec = map_validator_container_to_rental(Some("us-east-1".into()), &dto);
         assert_eq!(spec.container.image, "image:tag");
         assert_eq!(spec.container.env.len(), 1);
-        assert_eq!(spec.container.command, vec!["bash", "-lc", "python", "main.py"]);
+        assert_eq!(
+            spec.container.command,
+            vec!["bash", "-lc", "python", "main.py"]
+        );
         assert_eq!(spec.container.ports.len(), 1);
         assert_eq!(spec.container.resources.cpu, "4");
         assert_eq!(spec.container.resources.memory, "16384Mi");
         assert_eq!(spec.container.resources.gpus.count, 1);
         assert_eq!(spec.container.resources.gpus.model, vec!["A100"]);
-        assert!(spec.miner_selector.as_ref().unwrap().region.as_ref().unwrap() == "us-east-1");
+        assert!(
+            spec.miner_selector
+                .as_ref()
+                .unwrap()
+                .region
+                .as_ref()
+                .unwrap()
+                == "us-east-1"
+        );
         // No default SSH unless requested
         assert!(spec.ssh.is_none());
     }
@@ -171,13 +221,23 @@ mod tests {
             image: "image".into(),
             environment: vec![],
             ports: vec![],
-            resources: ValidatorResourceRequirementsDto { cpu_cores: 1.5, memory_mb: 2048, storage_mb: 0, gpu_count: 0, gpu_types: vec![] },
+            resources: ValidatorResourceRequirementsDto {
+                cpu_cores: 1.5,
+                memory_mb: 2048,
+                storage_mb: 0,
+                gpu_count: 0,
+                gpu_types: vec![],
+            },
             entrypoint: vec![],
             command: vec![],
             volumes: vec![],
             labels: vec![],
             capabilities: vec![],
-            network: ValidatorNetworkConfigDto { mode: "bridge".into(), dns: vec![], extra_hosts: vec![] },
+            network: ValidatorNetworkConfigDto {
+                mode: "bridge".into(),
+                dns: vec![],
+                extra_hosts: vec![],
+            },
         };
         let spec = map_validator_container_to_rental(None, &dto);
         assert_eq!(spec.container.resources.cpu, "1.500");

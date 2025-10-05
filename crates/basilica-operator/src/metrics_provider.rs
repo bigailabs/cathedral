@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use kube::{Api, Client};
 use k8s_openapi::api::core::v1::Pod;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
+use kube::{Api, Client};
 use tracing::debug;
 
 use crate::billing::RuntimeMetrics;
@@ -44,11 +44,15 @@ impl K8sMetricsProvider {
         // Support Ki, Mi, Gi and raw bytes
         let s = bytes_str.trim();
         if let Some(num) = s.strip_suffix("Ki") {
-            num.parse::<f64>().ok().map(|v| v * 1024.0 / 1024.0_f64.powi(3))
+            num.parse::<f64>()
+                .ok()
+                .map(|v| v * 1024.0 / 1024.0_f64.powi(3))
         } else if let Some(num) = s.strip_suffix("Mi") {
-            num.parse::<f64>().ok().map(|v| v * 1024.0_f64.powi(2) / 1024.0_f64.powi(3))
+            num.parse::<f64>()
+                .ok()
+                .map(|v| v * 1024.0_f64.powi(2) / 1024.0_f64.powi(3))
         } else if let Some(num) = s.strip_suffix("Gi") {
-            num.parse::<f64>().ok().map(|v| v)
+            num.parse::<f64>().ok()
         } else if let Some(num) = s.strip_suffix("Ti") {
             num.parse::<f64>().ok().map(|v| v * 1024.0)
         } else {
@@ -64,19 +68,27 @@ impl K8sMetricsProvider {
             if let Some(usage) = c.get("usage") {
                 if let Some(mem_str) = usage.get("memory").and_then(|v| v.as_str()) {
                     if let Some(mem_gb) = Self::parse_memory_quantity(mem_str) {
-                        if mem_gb > max_mem_gb { max_mem_gb = mem_gb; }
+                        if mem_gb > max_mem_gb {
+                            max_mem_gb = mem_gb;
+                        }
                     }
                 }
             }
         }
         Some(RuntimeMetrics {
             gpu_peak_utilization: None,
-            memory_peak_gb: if max_mem_gb > 0.0 { Some(max_mem_gb) } else { None },
+            memory_peak_gb: if max_mem_gb > 0.0 {
+                Some(max_mem_gb)
+            } else {
+                None
+            },
             bandwidth_gbps: None,
         })
     }
 
-    fn parse_annotation_metrics(ann: &std::collections::BTreeMap<String, String>) -> (Option<f64>, Option<f64>) {
+    fn parse_annotation_metrics(
+        ann: &std::collections::BTreeMap<String, String>,
+    ) -> (Option<f64>, Option<f64>) {
         let gpu = ann
             .get("basilica.io/gpu-peak-utilization")
             .and_then(|s| s.parse::<f64>().ok());
@@ -97,17 +109,27 @@ impl K8sMetricsProvider {
         let mut bw_gbps: Option<f64> = None;
         for line in body.lines() {
             let l = line.trim();
-            if l.is_empty() || l.starts_with('#') { continue; }
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
             // split on whitespace: metric value
             let mut parts = l.split_whitespace();
             if let (Some(name), Some(val)) = (parts.next(), parts.next()) {
                 if gpu.is_none() {
                     match name {
                         "basilica_gpu_peak_utilization" => {
-                            if let Ok(v) = val.parse::<f64>() { if v.is_finite() { gpu = Some(v); } }
+                            if let Ok(v) = val.parse::<f64>() {
+                                if v.is_finite() {
+                                    gpu = Some(v);
+                                }
+                            }
                         }
                         "basilica_gpu_utilization_percent" => {
-                            if let Ok(v) = val.parse::<f64>() { if v.is_finite() { gpu = Some((v / 100.0).clamp(0.0, 1.0)); } }
+                            if let Ok(v) = val.parse::<f64>() {
+                                if v.is_finite() {
+                                    gpu = Some((v / 100.0).clamp(0.0, 1.0));
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -115,10 +137,18 @@ impl K8sMetricsProvider {
                 if bw_gbps.is_none() {
                     match name {
                         "basilica_bandwidth_gbps" => {
-                            if let Ok(v) = val.parse::<f64>() { if v.is_finite() { bw_gbps = Some(v.max(0.0)); } }
+                            if let Ok(v) = val.parse::<f64>() {
+                                if v.is_finite() {
+                                    bw_gbps = Some(v.max(0.0));
+                                }
+                            }
                         }
                         "basilica_network_bandwidth_mbps" => {
-                            if let Ok(v) = val.parse::<f64>() { if v.is_finite() { bw_gbps = Some((v / 1000.0).max(0.0)); } }
+                            if let Ok(v) = val.parse::<f64>() {
+                                if v.is_finite() {
+                                    bw_gbps = Some((v / 1000.0).max(0.0));
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -141,9 +171,24 @@ impl K8sMetricsProvider {
         let mut port = 2112_u16; // common metrics port
         let mut path = "/metrics".to_string();
         if let Some(ann) = &pod.metadata.annotations {
-            if let Some(v) = ann.get("basilica.io/metrics-scheme").filter(|s| !s.is_empty()) { scheme = v.clone(); }
-            if let Some(v) = ann.get("basilica.io/metrics-port").and_then(|s| s.parse::<u16>().ok()) { port = v; }
-            if let Some(v) = ann.get("basilica.io/metrics-path").filter(|s| !s.is_empty()) { path = v.clone(); }
+            if let Some(v) = ann
+                .get("basilica.io/metrics-scheme")
+                .filter(|s| !s.is_empty())
+            {
+                scheme = v.clone();
+            }
+            if let Some(v) = ann
+                .get("basilica.io/metrics-port")
+                .and_then(|s| s.parse::<u16>().ok())
+            {
+                port = v;
+            }
+            if let Some(v) = ann
+                .get("basilica.io/metrics-path")
+                .filter(|s| !s.is_empty())
+            {
+                path = v.clone();
+            }
         }
         Some(format!("{}://{}:{}{}", scheme, ip, port, path))
     }
@@ -163,32 +208,48 @@ impl RuntimeMetricsProvider for K8sMetricsProvider {
         };
 
         // Fetch Pod once for annotations and potential sidecar scrape
-        let pod_opt = match self.pod_api(namespace).get(pod_name).await { Ok(p) => Some(p), Err(_) => None };
+        let pod_opt = (self.pod_api(namespace).get(pod_name).await).ok();
 
         // Try scraping sidecar metrics if configured
         let (scrape_gpu, scrape_bw) = if let Some(p) = &pod_opt {
             if let Some(url) = Self::build_sidecar_metrics_url(p) {
                 match reqwest::get(&url).await {
                     Ok(resp) => {
-                        if let Ok(text) = resp.text().await { Self::parse_prom_text_metrics(&text) } else { (None, None) }
+                        if let Ok(text) = resp.text().await {
+                            Self::parse_prom_text_metrics(&text)
+                        } else {
+                            (None, None)
+                        }
                     }
                     Err(e) => {
                         debug!("sidecar metrics scrape failed: {}", e);
                         (None, None)
                     }
                 }
-            } else { (None, None) }
-        } else { (None, None) };
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
 
         // Fallback to Pod annotations for GPU/bandwidth if available
         let (ann_gpu, ann_bw_gbps) = if let Some(pod) = &pod_opt {
-            if let Some(ann) = &pod.metadata.annotations { Self::parse_annotation_metrics(ann) } else { (None, None) }
-        } else { (None, None) };
+            if let Some(ann) = &pod.metadata.annotations {
+                Self::parse_annotation_metrics(ann)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
 
         // Combine
         let gpu_u = scrape_gpu.or(ann_gpu);
         let bw_gbps = scrape_bw.or(ann_bw_gbps);
-        if mem_metrics.is_none() && gpu_u.is_none() && bw_gbps.is_none() { return None; }
+        if mem_metrics.is_none() && gpu_u.is_none() && bw_gbps.is_none() {
+            return None;
+        }
         let mut out = mem_metrics.unwrap_or_default();
         out.gpu_peak_utilization = out.gpu_peak_utilization.or(gpu_u);
         out.bandwidth_gbps = out.bandwidth_gbps.or(bw_gbps);
