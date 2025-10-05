@@ -221,11 +221,13 @@ pub async fn get_user_rentals_with_details(
 
     Ok(records
         .into_iter()
-        .map(|(rental_id, ssh_credentials, port_mappings)| RentalWithDetails {
-            rental_id,
-            has_ssh: ssh_credentials.is_some(),
-            port_mappings,
-        })
+        .map(
+            |(rental_id, ssh_credentials, port_mappings)| RentalWithDetails {
+                rental_id,
+                has_ssh: ssh_credentials.is_some(),
+                port_mappings,
+            },
+        )
         .collect())
 }
 
