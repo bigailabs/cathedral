@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Port mappings display in rental listings (`ps` command)
+  - New "Ports (Host → Container)" column showing mapped ports (e.g., "8080→80")
+  - Full port list displayed when using `--detailed` flag
+- Port mappings in `status` command output with clear "Host → Container" format
+- Enhanced SSH connection instructions in `status` output with both CLI and standard SSH command examples
+
+### Fixed
+- Removed duplicate port entries in rental display
+
 ## [0.4.0]
 
 ### Changed
