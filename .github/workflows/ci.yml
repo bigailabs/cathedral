@@ -92,9 +92,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -117,11 +117,9 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Quick check builds
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo check -p basilica-common -p basilica-protocol -p bittensor
       - name: Run clippy on core packages
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo clippy -p basilica-common -p basilica-protocol -p bittensor --all-targets -- -D warnings
 
   # Lint complex packages
@@ -133,9 +131,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -185,9 +183,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Cache and install system dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -240,9 +238,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -299,9 +297,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -358,9 +356,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -414,9 +412,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -519,9 +517,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
