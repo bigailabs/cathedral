@@ -19,7 +19,7 @@ spec:
       containers:
         - name: api
           # Replace with your published image reference
-          image: ghcr.io/REPLACE_ORG/basilica-api:REPLACE_TAG
+          image: ghcr.io/one-covenant/basilica//basilica-api:k3_test
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

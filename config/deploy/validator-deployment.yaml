@@ -108,7 +108,7 @@ spec:
       containers:
         - name: validator
           # Replace with your published image reference
-          image: ghcr.io/REPLACE_ORG/basilica-validator:REPLACE_TAG
+          image: ghcr.io/one-covenant/basilica//basilica-validator:k3_test
           imagePullPolicy: IfNotPresent
           command: ["basilica-validator"]
           args: ["start", "--config", "/config/validator.toml", "--local_test"]
