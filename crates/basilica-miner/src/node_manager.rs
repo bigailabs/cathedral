@@ -388,11 +388,6 @@ impl NodeManager {
         validator_hotkey: &str,
         normalized_key: &str,
     ) -> Result<()> {
-        debug!(
-            "Setting exclusive access for validator {} on node {}",
-            validator_hotkey, node_id
-        );
-
         // Atomic operation: remove all validator keys and add the new one
         let ssh_command = format!(
             "mkdir -p ~/.ssh && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || echo -n '') > ~/.ssh/authorized_keys.tmp && printf '%s\\n' '{}' >> ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys",
