@@ -1,0 +1,15 @@
+[Unit]
+Description=Basilica Postgres kubectl port-forward
+After=network-online.target k3s.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kubectl -n {{ postgres_forward.namespace }} port-forward {{ postgres_forward.resource_kind }}/{{ postgres_forward.resource_name }} {{ postgres_forward.local_port }}:{{ postgres_forward.remote_port }} --address {{ postgres_forward.bind_address }}
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

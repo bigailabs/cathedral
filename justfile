@@ -218,6 +218,24 @@ docker-dev-down:
 docker-dev-postgres-down:
     docker compose -f docker/docker-compose.dev.yml down
 
+# =============================================================================
+# CI SHORTCUTS
+# =============================================================================
+
+# Trigger the manual workflow to build and push all images with a tag,
+# then print the Ansible one-liner to deploy Operator + API using that tag.
+ci-build-images TAG="k3_test":
+    #!/usr/bin/env bash
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "GitHub CLI (gh) is not installed. Install from https://cli.github.com/" >&2
+        exit 1
+    fi
+    echo "Triggering GitHub Actions workflow: Build k3_test Images (tag={{TAG}})"
+    gh workflow run "Build k3_test Images" -f tag={{TAG}}
+    echo
+    echo "When the workflow finishes, deploy with Ansible:"
+    echo "  cd scripts/ansible && ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \"-e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}}\" \"-e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}\""
+
 # View logs for all services
 docker-logs:
     docker compose -f docker/docker-compose.yml logs -f

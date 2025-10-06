@@ -1,0 +1,29 @@
+- name: Ensure dependencies present
+  ansible.builtin.package:
+    name:
+      - curl
+      - ca-certificates
+    state: present
+  become: true
+
+- name: Check if K3s agent is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s-agent-uninstall.sh
+  register: k3s_agent_uninstall
+
+- name: Install K3s agent
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -sfL https://get.k3s.io | K3S_URL=https://{{ k3s_server_address }}:6443 K3S_TOKEN={{ k3s_server_token | quote }} INSTALL_K3S_CHANNEL={{ k3s_channel | quote }} INSTALL_K3S_EXEC="agent {{ k3s_agent_exec_args }}" sh -
+  args:
+    executable: /bin/bash
+  become: true
+  when: not k3s_agent_uninstall.stat.exists
+
+- name: Ensure k3s-agent service is enabled and running
+  ansible.builtin.systemd:
+    name: k3s-agent
+    enabled: true
+    state: started
+  become: true
+

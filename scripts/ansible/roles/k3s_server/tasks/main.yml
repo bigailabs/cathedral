@@ -1,0 +1,60 @@
+- name: Ensure dependencies present
+  ansible.builtin.package:
+    name:
+      - curl
+      - ca-certificates
+    state: present
+  become: true
+
+- name: Check if K3s is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/k3s
+  register: k3s_bin
+
+- name: Install K3s server
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL={{ k3s_channel | quote }} INSTALL_K3S_EXEC="server {{ k3s_server_exec_args }}" sh -
+  args:
+    executable: /bin/bash
+  become: true
+  when: not k3s_bin.stat.exists
+
+- name: Ensure k3s service is enabled and running
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+  become: true
+
+- name: Read K3s node token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token_file
+  become: true
+
+- name: Set fact with K3s token
+  ansible.builtin.set_fact:
+    k3s_server_token: "{{ k3s_token_file['content'] | b64decode | trim }}"
+
+- name: Ensure kubeconfig is readable by remote user
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/k3s.yaml
+    mode: '0644'
+  become: true
+
+- name: Create ~/.kube for remote user
+  ansible.builtin.file:
+    path: "/home/{{ ansible_user | default(ansible_ssh_user) }}/.kube"
+    state: directory
+    mode: '0755'
+  become: true
+
+- name: Copy kubeconfig to remote user home
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "/home/{{ ansible_user | default(ansible_ssh_user) }}/.kube/config"
+    remote_src: true
+    mode: '0644'
+  become: true
+

@@ -1,0 +1,234 @@
+- hosts: k3s_server
+  gather_facts: false
+  become: true
+  vars:
+    # Autodetect repo root on control host if not provided
+    _detected_repo_root: "{{ (playbook_dir + '/..') | realpath | dirname }}"
+    repo_root_final: "{{ repo_root | default(_detected_repo_root, true) }}"
+  tasks:
+    - name: Ensure base directory on server
+      ansible.builtin.file:
+        path: /opt/basilica
+        state: directory
+        mode: '0755'
+
+    - name: Optionally generate CRDs locally
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd {{ repo_root_final | quote }}
+        {{ crdgen_cmd }} > {{ crds_output }}
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: generate_crds | bool
+
+    - name: Copy CRDs to server
+      ansible.builtin.copy:
+        src: "{{ (repo_root_final + '/' + crds_output) if generate_crds else (repo_root_final + '/basilica-crds.yaml') }}"
+        dest: /opt/basilica/basilica-crds.yaml
+        mode: '0644'
+
+    - name: Copy config directory to server
+      ansible.builtin.copy:
+        src: "{{ repo_root_final }}/config"
+        dest: /opt/basilica/
+        mode: '0644'
+
+    - name: Apply namespaces and RBAC
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/namespaces.yaml
+        kubectl apply -f /opt/basilica/config/rbac/operator-rbac.yaml
+        kubectl apply -f /opt/basilica/config/rbac/api-rbac.yaml
+        kubectl apply -f /opt/basilica/config/rbac/validator-rbac.yaml
+        sed "s/TENANT_NAMESPACE/{{ tenant_namespace }}/g" /opt/basilica/config/rbac/operator-tenant-role.yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+
+    - name: Apply CRDs
+      ansible.builtin.command: kubectl apply -f /opt/basilica/basilica-crds.yaml
+
+    - name: Deploy Postgres for API
+      ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/postgres.yaml
+
+    - name: Use templated operator manifest
+      ansible.builtin.template:
+        src: ../templates/operator-deployment.yaml.j2
+        dest: /opt/basilica/config/deploy/operator-deployment.yaml
+        mode: '0644'
+      when: use_templates | bool
+
+    - name: Use templated API manifest
+      ansible.builtin.template:
+        src: ../templates/api-deployment.yaml.j2
+        dest: /opt/basilica/config/deploy/api-deployment.yaml
+        mode: '0644'
+      when: use_templates | bool
+
+    - name: Update operator image in deployment manifest (fallback when not templating)
+      ansible.builtin.replace:
+        path: /opt/basilica/config/deploy/operator-deployment.yaml
+        regexp: '^(\s*)image:\s.*$'
+        replace: "\1image: {{ operator_image }}"
+      when: not use_templates | bool
+
+    - name: Update API image in deployment manifest (fallback when not templating)
+      ansible.builtin.replace:
+        path: /opt/basilica/config/deploy/api-deployment.yaml
+        regexp: '^(\s*)image:\s.*$'
+        replace: "\1image: {{ api_image }}"
+      when: not use_templates | bool
+
+    - name: Ensure API database URL is set (fallback when not templating)
+      ansible.builtin.replace:
+        path: /opt/basilica/config/deploy/api-deployment.yaml
+        regexp: 'name:\s*BASILICA_API_DATABASE__URL\n\s*value:.*$'
+        replace: |-
+          name: BASILICA_API_DATABASE__URL
+          value: {{ api_database_url | quote }}
+      when: not use_templates | bool
+
+    - name: Optionally set API validator hotkey (fallback when not templating)
+      ansible.builtin.replace:
+        path: /opt/basilica/config/deploy/api-deployment.yaml
+        regexp: 'name:\s*BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY\n\s*value:.*$'
+        replace: |-
+          name: BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY
+          value: {{ api_hotkey | quote }}
+      when: (not use_templates | bool) and (api_hotkey | length > 0)
+
+    - name: Deploy Operator and API
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/operator-deployment.yaml
+        kubectl apply -f /opt/basilica/config/deploy/api-deployment.yaml
+      args:
+        executable: /bin/bash
+
+    - name: Wait for operator rollout
+      ansible.builtin.command: kubectl -n basilica-system rollout status deploy/basilica-operator --timeout=180s
+
+    - name: Wait for API rollout
+      ansible.builtin.command: kubectl -n basilica-system rollout status deploy/basilica-api --timeout=300s
+
+    - name: Port-forward API and probe /health (ephemeral)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system port-forward deploy/basilica-api 8000:8000 >/tmp/basilica_api_pf.log 2>&1 & echo $! > /tmp/basilica_api_pf.pid
+        for i in $(seq 1 15); do
+          if curl -sf http://127.0.0.1:8000/health >/tmp/basilica_api_health.json 2>/dev/null; then
+            echo "API health OK"; break; fi; sleep 2; done
+        kill $(cat /tmp/basilica_api_pf.pid) || true
+        rm -f /tmp/basilica_api_pf.pid
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: run_smoke_probe | bool
+
+    - name: Install long-lived API port-forward systemd service
+      ansible.builtin.template:
+        src: ../templates/basilica-api-portforward.service.j2
+        dest: /etc/systemd/system/basilica-api-portforward.service
+        mode: '0644'
+      when: port_forward.enabled | bool
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: port_forward.enabled | bool
+
+    - name: Enable and start port-forward service
+      ansible.builtin.systemd:
+        name: basilica-api-portforward.service
+        enabled: true
+        state: started
+      when: port_forward.enabled | bool
+
+    - name: Install long-lived Postgres port-forward service
+      ansible.builtin.template:
+        src: ../templates/basilica-postgres-portforward.service.j2
+        dest: /etc/systemd/system/basilica-postgres-portforward.service
+        mode: '0644'
+      when: postgres_forward.enabled | bool
+
+    - name: Reload systemd for Postgres service
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: postgres_forward.enabled | bool
+
+    - name: Enable and start Postgres port-forward service
+      ansible.builtin.systemd:
+        name: basilica-postgres-portforward.service
+        enabled: true
+        state: started
+      when: postgres_forward.enabled | bool
+
+    - name: Install long-lived Envoy HTTP port-forward service
+      ansible.builtin.template:
+        src: ../templates/basilica-envoy-portforward.service.j2
+        dest: /etc/systemd/system/basilica-envoy-portforward.service
+        mode: '0644'
+      when: envoy_forward.enabled | bool
+
+    - name: Reload systemd for Envoy service
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: envoy_forward.enabled | bool
+
+    - name: Enable and start Envoy port-forward service
+      ansible.builtin.systemd:
+        name: basilica-envoy-portforward.service
+        enabled: true
+        state: started
+      when: envoy_forward.enabled | bool
+
+    - name: Install long-lived Envoy Admin port-forward service
+      ansible.builtin.template:
+        src: ../templates/basilica-envoy-admin-portforward.service.j2
+        dest: /etc/systemd/system/basilica-envoy-admin-portforward.service
+        mode: '0644'
+      when: envoy_admin_forward.enabled | bool
+
+    - name: Reload systemd for Envoy Admin service
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: envoy_admin_forward.enabled | bool
+
+    - name: Enable and start Envoy Admin port-forward service
+      ansible.builtin.systemd:
+        name: basilica-envoy-admin-portforward.service
+        enabled: true
+        state: started
+      when: envoy_admin_forward.enabled | bool
+
+    - name: Optional — install Envoy forward proxy
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/ingress/envoy-configmap.yaml || true
+        kubectl apply -f /opt/basilica/config/deploy/ingress/envoy-deployment.yaml || true
+        kubectl apply -f /opt/basilica/config/deploy/ingress/envoy-service.yaml || true
+      args:
+        executable: /bin/bash
+      when: install_envoy_forward_proxy | bool
+
+    - name: Optional — install Gateway API manifests
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/gateway/gatewayclass.yaml || true
+        kubectl apply -f /opt/basilica/config/deploy/gateway/gateway-u-test.yaml || true
+        kubectl apply -f /opt/basilica/config/deploy/gateway/httproute-example.yaml || true
+      args:
+        executable: /bin/bash
+      when: install_gateway_api | bool
+
+    - name: Optional — install monitoring stack
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/monitoring/prometheus.yaml || true
+        kubectl apply -f /opt/basilica/config/deploy/monitoring/grafana.yaml || true
+      args:
+        executable: /bin/bash
+      when: install_monitoring_stack | bool
+

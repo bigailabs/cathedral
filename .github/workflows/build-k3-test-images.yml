@@ -1,0 +1,132 @@
+name: Build k3_test Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to apply to images"
+        required: true
+        default: "k3_test"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build operator image
+        run: |
+          ./scripts/operator/build.sh \
+            --image-name ghcr.io/one-covenant/basilica-operator \
+            --image-tag "${{ github.event.inputs.tag }}"
+
+      - name: Push operator image
+        run: |
+          ./scripts/operator/push.sh \
+            --source-image ghcr.io/one-covenant/basilica-operator \
+            --target-image ghcr.io/one-covenant/basilica-operator \
+            --tag "${{ github.event.inputs.tag }}"
+
+      - name: Build validator image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/validator/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/validator \
+            --image-tag "${{ github.event.inputs.tag }}"
+
+      - name: Push validator image
+        run: |
+          ./scripts/validator/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/validator \
+            --target-image ghcr.io/one-covenant/basilica/validator \
+            --tag "${{ github.event.inputs.tag }}"
+
+      - name: Build miner image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/miner/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/miner \
+            --image-tag "${{ github.event.inputs.tag }}"
+
+      - name: Push miner image
+        run: |
+          ./scripts/miner/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/miner \
+            --target-image ghcr.io/one-covenant/basilica/miner \
+            --tag "${{ github.event.inputs.tag }}"
+
+      - name: Build API image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/api/build.sh \
+            --image-name ghcr.io/one-covenant/basilica-api \
+            --image-tag "${{ github.event.inputs.tag }}" \
+            --no-extract
+
+      - name: Push API image
+        run: |
+          ./scripts/api/push.sh \
+            --source-image ghcr.io/one-covenant/basilica-api \
+            --target-image ghcr.io/one-covenant/basilica-api \
+            --tag "${{ github.event.inputs.tag }}"
+
+      - name: Build billing image
+        run: |
+          ./scripts/billing/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/billing \
+            --image-tag "${{ github.event.inputs.tag }}" \
+            --no-extract
+
+      - name: Push billing image
+        run: |
+          ./scripts/billing/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/billing \
+            --target-image ghcr.io/one-covenant/basilica/billing \
+            --tag "${{ github.event.inputs.tag }}"
+
+      - name: Build payments image
+        run: |
+          ./scripts/payments/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/payments \
+            --image-tag "${{ github.event.inputs.tag }}" \
+            --no-extract
+
+      - name: Push payments image
+        run: |
+          ./scripts/payments/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/payments \
+            --target-image ghcr.io/one-covenant/basilica/payments \
+            --tag "${{ github.event.inputs.tag }}"
+
+      - name: Build CLI image (single-arch)
+        run: |
+          ./scripts/cli/build.sh \
+            --single-arch \
+            --image-name ghcr.io/one-covenant/basilica/cli \
+            --image-tag "${{ github.event.inputs.tag }}" \
+            --no-extract
+
+      - name: Push CLI image
+        run: |
+          docker push ghcr.io/one-covenant/basilica/cli:"${{ github.event.inputs.tag }}"
