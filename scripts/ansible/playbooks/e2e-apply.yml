@@ -31,10 +31,14 @@
       run_once: true
       ansible.builtin.shell: |
         set -euo pipefail
-        export PATH="$HOME/.cargo/bin:$PATH"
         cd {{ repo_root_final | quote }}
-        cargo --version >/dev/null
-        cargo run -p basilica-operator --bin crdgen
+        if command -v cargo >/dev/null 2>&1; then
+          CARGO_BIN="$(command -v cargo)"
+        else
+          CARGO_BIN="$HOME/.cargo/bin/cargo"
+        fi
+        "$CARGO_BIN" --version >/dev/null
+        "$CARGO_BIN" run -p basilica-operator --bin crdgen
       args:
         executable: /bin/bash
       register: crdgen_cargo
@@ -127,6 +131,11 @@
     - name: Deploy Postgres for API
       ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/postgres.yaml
 
+    - name: Sanitize image variables (strip accidental TAG= prefixes)
+      ansible.builtin.set_fact:
+        operator_image_effective: "{{ (operator_image | default('')) | regex_replace('TAG=','') }}"
+        api_image_effective: "{{ (api_image | default('')) | regex_replace('TAG=','') }}"
+
     - name: Use templated operator manifest
       ansible.builtin.template:
         src: ../templates/operator-deployment.yaml.j2
@@ -209,21 +218,54 @@
       run_once: true
       ansible.builtin.shell: |
         set -euo pipefail
-        export PATH="$HOME/.cargo/bin:$PATH"
         cd {{ repo_root_final | quote }}
-        cargo run -p basilica-api --bin gen-api-key -- --user {{ api_key_user | quote }} --name {{ api_key_name | quote }} {% for s in api_key_scopes %} --scopes {{ s | quote }} {% endfor %}
+        if command -v cargo >/dev/null 2>&1; then
+          CARGO_BIN="$(command -v cargo)"
+        else
+          CARGO_BIN="$HOME/.cargo/bin/cargo"
+        fi
+        "$CARGO_BIN" run -p basilica-api --bin gen-api-key -- --user {{ api_key_user | quote }} --name {{ api_key_name | quote }} {% for s in api_key_scopes %} --scopes {{ s | quote }} {% endfor %}
       args:
         executable: /bin/bash
-      register: genkey_out
-      changed_when: true
+      register: genkey_cargo
+      changed_when: genkey_cargo.rc == 0
+      failed_when: false
       when: generate_api_key | bool
+
+    - name: Generate API key via Docker (fallback)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd {{ repo_root_final | quote }}
+        docker run --rm \
+          -e CARGO_HOME=/usr/local/cargo \
+          -e RUSTUP_HOME=/usr/local/rustup \
+          -e PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+          -v "$(pwd)":/workspace \
+          -w /workspace \
+          rust:1.87-bookworm bash -lc \
+          '/usr/local/cargo/bin/cargo fetch && /usr/local/cargo/bin/cargo run -p basilica-api --bin gen-api-key -- --user {{ api_key_user | quote }} --name {{ api_key_name | quote }} {% for s in api_key_scopes %} --scopes {{ s | quote }} {% endfor %}'
+      args:
+        executable: /bin/bash
+      register: genkey_docker
+      changed_when: genkey_docker.rc == 0
+      failed_when: false
+      when: generate_api_key | bool and (genkey_cargo.rc | default(1)) != 0
 
     - name: Extract API key token and SQL from generator output
       delegate_to: localhost
       run_once: true
       ansible.builtin.set_fact:
-        api_key_token: "{{ (genkey_out.stdout | regex_search('Token \(Authorization\): Bearer (.*)', '\\1')) | default('') }}"
-        api_key_sql: "{{ (genkey_out.stdout | regex_search('(?ms)(INSERT INTO api_keys.*?;)', '\\1')) | default('') }}"
+        api_key_source_out: >-
+          {{
+            (genkey_cargo is defined and (genkey_cargo.rc | default(1)) == 0)
+            | ternary(genkey_cargo.stdout | default(''),
+              (genkey_docker is defined and (genkey_docker.rc | default(1)) == 0)
+              | ternary(genkey_docker.stdout | default(''), ''))
+          }}
+        api_key_token: '{{ (api_key_source_out | default("") | regex_findall("Authorization\): Bearer\s+(.+)") | first | default("") ) }}'
+        api_key_sql: '{{ (api_key_source_out | default("") | regex_findall("INSERT INTO api_keys[\\s\\S]*?;") | first | default("") ) }}'
       when: generate_api_key | bool
 
     - name: Show generated API token
@@ -371,3 +413,103 @@
       args:
         executable: /bin/bash
       when: install_monitoring_stack | bool
+
+    # ----------------------------------------------------------------------------
+    # Local kubectl setup + fetch kubeconfig from server
+    # ----------------------------------------------------------------------------
+    - name: Gather localhost facts
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.setup:
+      when: true
+
+    - name: Check for local kubectl
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.command: bash -lc "command -v kubectl"
+      register: kubectl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Determine OS/arch for kubectl download
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.set_fact:
+        _kubectl_os: "{{ 'darwin' if ansible_facts['system'] == 'Darwin' else 'linux' }}"
+        _kubectl_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64','arm64'] else 'amd64' }}"
+      when: kubectl_check.rc != 0
+
+    - name: Get latest stable kubectl version
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -L -s https://dl.k8s.io/release/stable.txt
+      args:
+        executable: /bin/bash
+      register: kubectl_ver
+      changed_when: false
+      failed_when: false
+      when: kubectl_check.rc != 0
+
+    - name: Set kubectl version fact (fallback)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.set_fact:
+        _kubectl_version: "{{ (kubectl_ver.stdout | trim) if (kubectl_ver.stdout | default('')) | length > 0 else 'v1.29.7' }}"
+      when: kubectl_check.rc != 0
+
+    - name: Ensure local bin directory exists
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.local/bin"
+        state: directory
+        mode: '0755'
+      when: kubectl_check.rc != 0
+
+    - name: Download kubectl to local bin
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.get_url:
+        url: "https://dl.k8s.io/release/{{ _kubectl_version }}/bin/{{ _kubectl_os }}/{{ _kubectl_arch }}/kubectl"
+        dest: "{{ ansible_env.HOME }}/.local/bin/kubectl"
+        mode: '0755'
+      when: kubectl_check.rc != 0
+
+    - name: Create local kubeconfig directory
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.file:
+        path: "{{ repo_root_final }}/build"
+        state: directory
+        mode: '0755'
+
+    - name: Read kubeconfig from server
+      ansible.builtin.slurp:
+        src: /etc/rancher/k3s/k3s.yaml
+      register: kubeconfig_raw
+
+    - name: Write kubeconfig locally with public server URL
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.copy:
+        dest: "{{ repo_root_final }}/build/k3s.yaml"
+        content: >-
+          {{
+            (kubeconfig_raw.content | b64decode)
+            | regex_replace('(?m)^\s*server:\s*https://.*:6443\s*$', 'server: https://' ~ (hostvars[groups['k3s_server'][0]]['ansible_host'] | default(hostvars[groups['k3s_server'][0]]['inventory_hostname'])) ~ ':6443')
+          }}
+        mode: '0644'
+
+
+
+    - name: Show local kubectl usage
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.debug:
+        msg: |
+          kubectl is installed at {{ ansible_env.HOME }}/.local/bin/kubectl (if it was missing).
+          Use it with your kubeconfig:
+            export KUBECONFIG={{ repo_root_final }}/build/k3s.yaml
+            {{ ansible_env.HOME }}/.local/bin/kubectl get nodes -o wide

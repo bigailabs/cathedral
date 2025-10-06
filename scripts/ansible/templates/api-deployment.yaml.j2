@@ -18,8 +18,8 @@ spec:
       serviceAccountName: basilica-api
       containers:
         - name: api
-          image: {{ api_image | quote }}
-          imagePullPolicy: IfNotPresent
+          image: {{ (api_image_effective | default(api_image)) | quote }}
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8000
@@ -65,4 +65,3 @@ spec:
     - name: metrics
       port: 9401
       targetPort: 9401
-

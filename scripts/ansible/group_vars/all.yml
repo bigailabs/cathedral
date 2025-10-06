@@ -24,7 +24,7 @@ api_image: ghcr.io/one-covenant/basilica-api:latest
 
 # API config overrides
 api_hotkey: ""                    # set to your validator hotkey if required
-api_database_url: postgres://api:api_dev_password@basilica-postgres.basilica-system.svc.cluster.local:5432/basilica_api
+api_database_url: postgres://basilica:devpassword@basilica-postgres.basilica-system.svc.cluster.local:5432/basilica
 
 # Toggles
 install_envoy_forward_proxy: true   # apply forward proxy (config/deploy/ingress/*)

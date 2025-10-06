@@ -18,8 +18,8 @@ spec:
       serviceAccountName: basilica-operator
       containers:
         - name: operator
-          image: {{ operator_image | quote }}
-          imagePullPolicy: IfNotPresent
+          image: {{ (operator_image_effective | default(operator_image)) | quote }}
+          imagePullPolicy: Always
           env:
             - name: RUST_LOG
               value: info
@@ -50,4 +50,3 @@ spec:
     - name: metrics
       port: 9400
       targetPort: 9400
-

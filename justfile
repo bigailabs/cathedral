@@ -5,16 +5,6 @@
 install-dev-tools:
     cargo install cargo-audit cargo-deny cargo-license
 
-# Generate key for gpu-attestor (required for builds)
-gen-key:
-    #!/usr/bin/env bash
-    if [ ! -f "public_key.hex" ]; then
-        echo "Generating key for gpu-attestor..."
-        chmod +x scripts/gen-key.sh
-        ./scripts/gen-key.sh
-    else
-        echo "Key already exists"
-    fi
 
 # =============================================================================
 # FORMATTING & LINTING
@@ -322,8 +312,10 @@ e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basili
 e2e-reinstall TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica" TENANT_NS="u-test":
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "Teardown local kube resources (namespaces + CRDs)..."
-    ./scripts/e2e/teardown.sh || true
+    echo "Teardown remote cluster resources via Ansible..."
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml -e tenant_namespace={{TENANT_NS}} || true
+    cd - >/dev/null
     just e2e-apply TAG={{TAG}} DB_USER={{DB_USER}} DB_PASS={{DB_PASS}} DB_NAME={{DB_NAME}}
 
 # =============================================================================
