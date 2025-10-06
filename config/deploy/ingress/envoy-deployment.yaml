@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: basilica-envoy
+  namespace: basilica-system
+  labels:
+    app: basilica-envoy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: basilica-envoy
+  template:
+    metadata:
+      labels:
+        app: basilica-envoy
+    spec:
+      containers:
+        - name: envoy
+          image: envoyproxy/envoy:v1.30-latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
+            - --log-level
+            - info
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9901
+          volumeMounts:
+            - name: config
+              mountPath: /etc/envoy
+      volumes:
+        - name: config
+          configMap:
+            name: basilica-envoy-config
+

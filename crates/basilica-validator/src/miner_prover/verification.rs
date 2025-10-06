@@ -1103,10 +1103,30 @@ impl VerificationEngine {
             Some("Valid"),
         )?;
 
-        let maybe_labels = kube_node_name.map(|name| {
-            let labels = labels_from_validation(nr, provider, region);
-            (name.to_string(), labels)
-        });
+        // Base labels from validation
+        let mut labels = labels_from_validation(nr, provider, region);
+        // Enrich labels with Docker profile if available
+        if let Ok(Some((_full_json, service_active, docker_version, _images, dind_supported, validation_error))) = self
+            .persistence
+            .get_node_docker_profile(miner_uid, node_id)
+            .await
+        {
+            labels.insert(
+                "basilica.io/docker-active".into(),
+                service_active.to_string(),
+            );
+            if let Some(ver) = docker_version {
+                labels.insert("basilica.io/docker-version".into(), ver);
+            }
+            labels.insert("basilica.io/dind".into(), dind_supported.to_string());
+            if let Some(err) = validation_error {
+                if !err.is_empty() {
+                    labels.insert("basilica.io/docker-error".into(), err);
+                }
+            }
+        }
+
+        let maybe_labels = kube_node_name.map(|name| (name.to_string(), labels));
 
         Ok((namespace, cr, maybe_labels))
     }
@@ -2027,6 +2047,30 @@ mod node_profile_wiring_tests {
         assert_eq!(labels.get("basilica.io/region").unwrap(), "us-east-1");
         assert_eq!(labels.get("basilica.io/provider").unwrap(), "aws");
         assert_eq!(labels.get("basilica.io/gpu-model").unwrap(), "NVIDIA A100");
+
+        // Seed docker profile then re-run to assert docker labels
+        persistence
+            .store_node_docker_profile(
+                100u16,
+                "node-abc",
+                true,
+                Some("24.0.7".into()),
+                vec![],
+                true,
+                None,
+                "{}",
+            )
+            .await?;
+        let (_ns2, _cr2, maybe_labels2) = engine
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .await?;
+        let (_node2, labels2) = maybe_labels2.expect("labels present");
+        assert_eq!(labels2.get("basilica.io/docker-active").unwrap(), "true");
+        assert_eq!(
+            labels2.get("basilica.io/docker-version").unwrap(),
+            "24.0.7"
+        );
+        assert_eq!(labels2.get("basilica.io/dind").unwrap(), "true");
 
         Ok(())
     }

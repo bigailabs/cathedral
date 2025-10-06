@@ -20,6 +20,7 @@ use crate::metrics as opmetrics;
 use crate::metrics_provider::{NoopRuntimeMetricsProvider, RuntimeMetricsProvider};
 use anyhow::Result;
 use k8s_openapi::chrono::{DateTime, Utc};
+use kube::core::DynamicObject;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -173,7 +174,25 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
     (pod_sc, container_sc)
 }
 
-pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
+fn merge_labels(
+    base: Vec<(String, String)>,
+    extra: Option<Vec<(String, String)>>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut map: std::collections::BTreeMap<String, String> =
+        base.into_iter().collect();
+    if let Some(extra) = extra {
+        for (k, v) in extra {
+            map.insert(k, v);
+        }
+    }
+    map
+}
+
+pub fn render_rental_pod(
+    name: &str,
+    spec: &GpuRentalSpec,
+    extra_labels: Option<Vec<(String, String)>>,
+) -> Pod {
     let (pod_sc, container_sc) = build_security_contexts();
 
     // Main container
@@ -360,14 +379,18 @@ pub fn render_rental_pod(name: &str, spec: &GpuRentalSpec) -> Pod {
         }
     }
 
-    let labels = Some(
-        vec![
-            ("basilica.io/type".to_string(), "rental".to_string()),
-            ("basilica.io/rental".to_string(), name.to_string()),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let mut base_labels: std::collections::BTreeMap<String, String> = vec![
+        ("basilica.io/type".to_string(), "rental".to_string()),
+        ("basilica.io/rental".to_string(), name.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let gpu_bound = (spec.container.resources.gpus.count > 0).to_string();
+    base_labels.insert("basilica.io/gpu-bound".to_string(), gpu_bound);
+    let labels = Some(merge_labels(
+        base_labels.into_iter().collect(),
+        extra_labels.clone(),
+    ));
 
     let mut tolerations = build_tolerations();
     if spec.exclusive {
@@ -453,6 +476,94 @@ pub fn render_rental_service(name: &str, spec: &GpuRentalSpec) -> Option<Service
         }),
         ..Default::default()
     })
+}
+
+fn sanitize_name_part(s: &str) -> String {
+    let mut out = String::new();
+    for ch in s.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' {
+            out.push(ch);
+        } else if ch.is_ascii_uppercase() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('-');
+        }
+        if out.len() >= 40 {
+            break;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() { "grp".into() } else { out }
+}
+
+pub fn render_discovery_headless_service(group: &str, ports: &[(u16, &str)]) -> Service {
+    let name = format!("rental-disc-{}", sanitize_name_part(group));
+    let svc_ports: Vec<ServicePort> = ports
+        .iter()
+        .map(|(p, proto)| ServicePort {
+            port: *p as i32,
+            target_port: Some(IntOrString::Int(*p as i32)),
+            protocol: Some(proto.to_string()),
+            ..Default::default()
+        })
+        .collect();
+    let labels = vec![
+        ("basilica.io/type".to_string(), "rental-discovery".to_string()),
+        (
+            "basilica.io/discovery-group".to_string(),
+            group.to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    Service {
+        metadata: ObjectMeta {
+            name: Some(name),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            cluster_ip: Some("None".into()),
+            selector: Some(
+                vec![("basilica.io/discovery-group".to_string(), group.to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ports: if svc_ports.is_empty() { None } else { Some(svc_ports) },
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn render_http_route(
+    name: &str,
+    ns: &str,
+    gateway_name: &str,
+    hostnames: &[String],
+    backend_service: &str,
+    port: u16,
+) -> anyhow::Result<DynamicObject> {
+    let route_name = format!("rental-route-{}", name);
+    let val = serde_json::json!({
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "HTTPRoute",
+        "metadata": {"name": route_name, "namespace": ns},
+        "spec": {
+            "parentRefs": [{"name": gateway_name}],
+            "hostnames": hostnames,
+            "rules": [
+                {
+                    "matches": [{"path": {"type": "PathPrefix", "value": "/"}}],
+                    "backendRefs": [{"name": backend_service, "port": port}]
+                }
+            ]
+        }
+    });
+    let obj: DynamicObject = serde_json::from_value(val)?;
+    Ok(obj)
 }
 
 pub fn render_network_policies(name: &str, spec: &GpuRentalSpec) -> Vec<NetworkPolicy> {
@@ -732,11 +843,12 @@ impl<C: K8sClient> RentalController<C> {
                                                 for expr in exprs {
                                                     if expr.key == "basilica.io/gpu-model" {
                                                         if let Some(values) = &expr.values {
-                                                            for m in values {
-                                                                *model_gpus
-                                                                    .entry(m.clone())
-                                                                    .or_insert(0) +=
-                                                                    pod_gpu_count.max(1);
+                                                            if pod_gpu_count > 0 {
+                                                                for m in values {
+                                                                    *model_gpus
+                                                                        .entry(m.clone())
+                                                                        .or_insert(0) += pod_gpu_count;
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -747,57 +859,61 @@ impl<C: K8sClient> RentalController<C> {
                                 }
                             }
                         }
-                        total_gpus_in_use += pod_gpu_count.max(1);
+                        if pod_gpu_count > 0 {
+                            total_gpus_in_use += pod_gpu_count;
+                        }
                     }
 
                     // Include the current request
-                    let requested_gpu_count = spec.container.resources.gpus.count.max(1);
+                    let requested_gpu_count = spec.container.resources.gpus.count;
                     let requested_models = if spec.container.resources.gpus.model.is_empty() {
                         vec!["any".to_string()]
                     } else {
                         spec.container.resources.gpus.model.clone()
                     };
 
-                    if limits.total > 0
-                        && total_gpus_in_use.saturating_add(requested_gpu_count) > limits.total
-                    {
-                        let queued = GpuRentalStatus {
-                            state: Some("Queued".into()),
-                            pod_name: None,
-                            node_name: None,
-                            start_time: None,
-                            expiry_time: None,
-                            renewal_time: Some(Utc::now().to_rfc3339()),
-                            total_cost: None,
-                            total_extensions: None,
-                            endpoints: None,
-                        };
-                        self.client
-                            .update_gpu_rental_status(ns, &name, queued)
-                            .await?;
-                        return Ok(());
-                    }
+                    if requested_gpu_count > 0 {
+                        if limits.total > 0
+                            && total_gpus_in_use.saturating_add(requested_gpu_count) > limits.total
+                        {
+                            let queued = GpuRentalStatus {
+                                state: Some("Queued".into()),
+                                pod_name: None,
+                                node_name: None,
+                                start_time: None,
+                                expiry_time: None,
+                                renewal_time: Some(Utc::now().to_rfc3339()),
+                                total_cost: None,
+                                total_extensions: None,
+                                endpoints: None,
+                            };
+                            self.client
+                                .update_gpu_rental_status(ns, &name, queued)
+                                .await?;
+                            return Ok(());
+                        }
 
-                    if let Some(ref per_model) = limits.models {
-                        for m in requested_models {
-                            if let Some(&cap) = per_model.get(&m) {
-                                let current = *model_gpus.get(&m).unwrap_or(&0);
-                                if current.saturating_add(requested_gpu_count) > cap {
-                                    let queued = GpuRentalStatus {
-                                        state: Some("Queued".into()),
-                                        pod_name: None,
-                                        node_name: None,
-                                        start_time: None,
-                                        expiry_time: None,
-                                        renewal_time: Some(Utc::now().to_rfc3339()),
-                                        total_cost: None,
-                                        total_extensions: None,
-                                        endpoints: None,
-                                    };
-                                    self.client
-                                        .update_gpu_rental_status(ns, &name, queued)
-                                        .await?;
-                                    return Ok(());
+                        if let Some(ref per_model) = limits.models {
+                            for m in requested_models {
+                                if let Some(&cap) = per_model.get(&m) {
+                                    let current = *model_gpus.get(&m).unwrap_or(&0);
+                                    if current.saturating_add(requested_gpu_count) > cap {
+                                        let queued = GpuRentalStatus {
+                                            state: Some("Queued".into()),
+                                            pod_name: None,
+                                            node_name: None,
+                                            start_time: None,
+                                            expiry_time: None,
+                                            renewal_time: Some(Utc::now().to_rfc3339()),
+                                            total_cost: None,
+                                            total_extensions: None,
+                                            endpoints: None,
+                                        };
+                                        self.client
+                                            .update_gpu_rental_status(ns, &name, queued)
+                                            .await?;
+                                        return Ok(());
+                                    }
                                 }
                             }
                         }
@@ -815,13 +931,63 @@ impl<C: K8sClient> RentalController<C> {
         }
 
         // Ensure Pod exists
-        let pod = render_rental_pod(&name, &spec);
+        // Optional discovery group for peer DNS: use CR metadata label
+        let discovery_label = cr
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|m| m.get("basilica.io/discovery-group").cloned());
+        let extra_labels = discovery_label
+            .as_ref()
+            .map(|g| vec![("basilica.io/discovery-group".to_string(), g.clone())]);
+
+        let pod = render_rental_pod(&name, &spec, extra_labels.clone());
         // Create or replace
         let _ = self.client.create_pod(ns, &pod).await;
 
         // Ensure Service if ingress requested
         if let Some(svc) = render_rental_service(&name, &spec) {
             let _ = self.client.create_service(ns, &svc).await;
+        }
+        // Create headless discovery Service when group label is present and ports exist
+        if let Some(group) = discovery_label.as_deref() {
+            if !spec.container.ports.is_empty() {
+                let ports: Vec<(u16, &str)> = spec
+                    .container
+                    .ports
+                    .iter()
+                    .map(|p| (p.container_port, p.protocol.as_str()))
+                    .collect();
+                let disc = render_discovery_headless_service(group, &ports);
+                let _ = self.client.create_service(ns, &disc).await;
+            }
+        }
+
+        // Auto-generate HTTPRoute when annotation is present
+        if let Some(ann) = cr.metadata.annotations.as_ref() {
+            if let Some(hosts_str) = ann.get("basilica.io/route-host") {
+                let hostnames: Vec<String> = hosts_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !hostnames.is_empty() {
+                    let gw_name = ann
+                        .get("basilica.io/route-gateway")
+                        .cloned()
+                        .unwrap_or_else(|| "basilica-gw".to_string());
+                    let port: u16 = ann
+                        .get("basilica.io/route-port")
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .or_else(|| spec.network.ingress.first().map(|r| r.port))
+                        .or_else(|| spec.container.ports.first().map(|p| p.container_port))
+                        .unwrap_or(80);
+                    let backend = format!("rental-svc-{}", name);
+                    if let Ok(route) = render_http_route(&name, ns, &gw_name, &hostnames, &backend, port) {
+                        let _ = self.client.create_http_route(ns, &route).await;
+                    }
+                }
+            }
         }
 
         // Ensure NetworkPolicies
@@ -1042,7 +1208,7 @@ mod tests {
     #[test]
     fn pod_renders_with_resources_security_and_ports() {
         let spec = base_spec();
-        let pod = render_rental_pod("r1", &spec);
+        let pod = render_rental_pod("r1", &spec, None);
         let p = pod.spec.unwrap();
         let c = &p.containers[0];
         assert_eq!(c.image.as_deref(), Some("img"));
@@ -1185,7 +1351,7 @@ mod tests {
         });
         let pvc = render_rental_pvc("r1", &spec).unwrap();
         assert_eq!(pvc.metadata.name.as_deref(), Some("rental-pvc-r1"));
-        let pod = render_rental_pod("r1", &spec);
+        let pod = render_rental_pod("r1", &spec, None);
         assert_eq!(
             pod.spec.as_ref().unwrap().volumes.as_ref().unwrap()[0].name,
             "data"
@@ -1203,7 +1369,7 @@ mod tests {
                 container_path: "/work".into(),
                 read_only: false,
             });
-        let pod = render_rental_pod("r2", &spec);
+        let pod = render_rental_pod("r2", &spec, None);
         let podspec = pod.spec.as_ref().unwrap();
         let vols = podspec.volumes.as_ref().unwrap();
         assert!(vols
@@ -1227,7 +1393,7 @@ mod tests {
 
         // By default, hostPath not allowed => should not appear
         std::env::remove_var("BASILICA_ALLOW_HOSTPATH");
-        let pod = render_rental_pod("r3", &spec);
+        let pod = render_rental_pod("r3", &spec, None);
         let podspec = pod.spec.as_ref().unwrap();
         if let Some(vols) = &podspec.volumes {
             assert!(!vols.iter().any(|v| v.host_path.is_some()));
@@ -1239,7 +1405,7 @@ mod tests {
 
         // Enable hostPath
         std::env::set_var("BASILICA_ALLOW_HOSTPATH", "true");
-        let pod2 = render_rental_pod("r3", &spec);
+        let pod2 = render_rental_pod("r3", &spec, None);
         let ps2 = pod2.spec.as_ref().unwrap();
         let vols2 = ps2.volumes.as_ref().unwrap();
         assert!(vols2
@@ -1262,7 +1428,7 @@ mod tests {
             credentials_secret: None,
             enabled: true,
         });
-        let pod = render_rental_pod("artifacts", &spec);
+        let pod = render_rental_pod("artifacts", &spec, None);
         let containers = &pod.spec.as_ref().unwrap().containers;
         assert!(containers
             .iter()
@@ -1280,7 +1446,7 @@ mod tests {
     fn exclusive_rental_adds_toleration() {
         let mut spec = base_spec();
         spec.exclusive = true;
-        let pod = render_rental_pod("rX", &spec);
+        let pod = render_rental_pod("rX", &spec, None);
         let tols = pod.spec.as_ref().unwrap().tolerations.as_ref().unwrap();
         assert!(tols
             .iter()
@@ -1562,6 +1728,263 @@ mod tests {
         assert_eq!(
             updated.status.as_ref().unwrap().state.as_deref(),
             Some("Queued")
+        );
+    }
+
+    #[tokio::test]
+    async fn autogenerate_http_route_on_annotation() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Rental with network ingress and route host annotation
+        let mut spec = base_spec();
+        spec.network.ingress = vec![crate::crd::gpu_rental::IngressRule {
+            port: 8888,
+            exposure: "NodePort".into(),
+        }];
+        let mut cr = GpuRental::new("rent-route", spec);
+        let mut annotations = std::collections::BTreeMap::new();
+        annotations.insert(
+            "basilica.io/route-host".to_string(),
+            "demo.u-test.local".to_string(),
+        );
+        cr.metadata.annotations = Some(annotations);
+
+        controller
+            .client
+            .create_gpu_rental("ns", &cr)
+            .await
+            .unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+
+        // Ensure HTTPRoute exists in mock
+        let routes = controller.client.list_http_routes("ns").await;
+        assert!(
+            routes
+                .iter()
+                .any(|r| r.metadata.name.as_deref() == Some("rental-route-rent-route")),
+            "Expected an HTTPRoute for the rental"
+        );
+        let route = routes
+            .into_iter()
+            .find(|r| r.metadata.name.as_deref() == Some("rental-route-rent-route"))
+            .unwrap();
+        let spec = route.data.get("spec").unwrap();
+        let hostnames = spec.get("hostnames").unwrap().as_array().unwrap();
+        assert_eq!(hostnames[0].as_str().unwrap(), "demo.u-test.local");
+    }
+
+    #[tokio::test]
+    async fn cpu_only_rental_bypasses_gpu_caps() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Queue with total GPU limit 1 and high concurrency
+        let limits = crate::crd::basilica_queue::GpuLimits {
+            total: 1,
+            models: None,
+        };
+        let q = crate::crd::basilica_queue::BasilicaQueue::new(
+            "q-total",
+            crate::crd::basilica_queue::BasilicaQueueSpec {
+                concurrency: 10,
+                gpu_limits: Some(limits),
+            },
+        );
+        controller
+            .client
+            .create_basilica_queue("ns", &q)
+            .await
+            .unwrap();
+
+        // Existing Pod consuming 1 GPU
+        let c = k8s_openapi::api::core::v1::Container {
+            name: "main".into(),
+            resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+                limits: None,
+                requests: Some(
+                    vec![("nvidia.com/gpu".into(), Quantity("1".into()))]
+                        .into_iter()
+                        .collect(),
+                ),
+                claims: None,
+            }),
+            ..Default::default()
+        };
+        let p = Pod {
+            metadata: ObjectMeta {
+                name: Some("p-gpu".into()),
+                labels: Some(
+                    vec![("basilica.io/type".into(), "rental".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![c],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        controller.client.create_pod("ns", &p).await.unwrap();
+
+        // New rental requests 0 GPUs (CPU-only) and should NOT be queued by GPU cap
+        let mut spec = base_spec();
+        spec.container.resources.gpus = GpuSpec {
+            count: 0,
+            model: vec![],
+        };
+        let cr = GpuRental::new("rent-cpu", spec);
+        controller
+            .client
+            .create_gpu_rental("ns", &cr)
+            .await
+            .unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller
+            .client
+            .get_gpu_rental("ns", "rent-cpu")
+            .await
+            .unwrap();
+        assert_ne!(
+            updated.status.as_ref().unwrap().state.as_deref(),
+            Some("Queued"),
+            "CPU-only rental should bypass GPU caps"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_gpu_pod_not_counted_towards_model_or_total() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Queue with per-model A100 cap=1
+        let mut models = std::collections::BTreeMap::new();
+        models.insert("A100".to_string(), 1);
+        let limits = crate::crd::basilica_queue::GpuLimits {
+            total: 0,
+            models: Some(models),
+        };
+        let q = crate::crd::basilica_queue::BasilicaQueue::new(
+            "q-model",
+            crate::crd::basilica_queue::BasilicaQueueSpec {
+                concurrency: 10,
+                gpu_limits: Some(limits),
+            },
+        );
+        controller
+            .client
+            .create_basilica_queue("ns", &q)
+            .await
+            .unwrap();
+
+        // Existing Pod with A100 affinity but 0 GPU requested
+        let aff = super::build_node_affinity(&GpuSpec {
+            count: 0,
+            model: vec!["A100".into()],
+        });
+        let c = k8s_openapi::api::core::v1::Container {
+            name: "main".into(),
+            resources: Some(k8s_openapi::api::core::v1::ResourceRequirements {
+                limits: None,
+                requests: Some(std::collections::BTreeMap::new()),
+                claims: None,
+            }),
+            ..Default::default()
+        };
+        let p = Pod {
+            metadata: ObjectMeta {
+                name: Some("p-a100-0gpu".into()),
+                labels: Some(
+                    vec![("basilica.io/type".into(), "rental".into())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![c],
+                affinity: aff,
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Running".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        controller.client.create_pod("ns", &p).await.unwrap();
+
+        // New rental requests 1x A100; should NOT be queued because the 0-GPU pod shouldn't count
+        let mut spec = base_spec();
+        spec.container.resources.gpus = GpuSpec {
+            count: 1,
+            model: vec!["A100".into()],
+        };
+        let cr = GpuRental::new("rent-a100-allow", spec);
+        controller
+            .client
+            .create_gpu_rental("ns", &cr)
+            .await
+            .unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+        let updated = controller
+            .client
+            .get_gpu_rental("ns", "rent-a100-allow")
+            .await
+            .unwrap();
+        assert_ne!(
+            updated.status.as_ref().unwrap().state.as_deref(),
+            Some("Queued"),
+            "Zero-GPU pods must not consume model capacity"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_headless_service_created_with_group_label() {
+        let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+        let client = MockK8sClient::default();
+        let controller = RentalController::new(client.clone(), MockBillingClient::default());
+
+        // Rental with a discovery group label
+        let spec = base_spec();
+        let mut cr = GpuRental::new("rent-disc", spec);
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("basilica.io/discovery-group".to_string(), "team-1".to_string());
+        cr.metadata.labels = Some(labels);
+
+        controller
+            .client
+            .create_gpu_rental("ns", &cr)
+            .await
+            .unwrap();
+        controller.reconcile("ns", &cr).await.unwrap();
+
+        // Pod should have discovery label
+        let pod = controller.client.get_pod("ns", "rental-rent-disc").await.unwrap();
+        let pod_labels = pod.metadata.labels.unwrap_or_default();
+        assert_eq!(
+            pod_labels.get("basilica.io/discovery-group").map(|s| s.as_str()),
+            Some("team-1")
+        );
+
+        // A headless discovery service should exist for the group
+        let svcs = controller
+            .client
+            .list_services_with_label("ns", "basilica.io/discovery-group", "team-1")
+            .await
+            .unwrap();
+        assert!(
+            !svcs.is_empty(),
+            "expected a headless discovery service for the group"
         );
     }
 

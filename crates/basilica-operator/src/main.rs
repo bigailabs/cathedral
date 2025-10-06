@@ -34,14 +34,13 @@ async fn main() {
 
     // Bind address from env or default
     let bind = std::env::var("OPERATOR_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9400".into());
-    let listener = tokio::net::TcpListener::bind(&bind)
-    let bind = std::env::var("OPERATOR_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9400".into());
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .map_err(|e| {
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) => {
             tracing::error!("Failed to bind metrics server to {}: {}", bind, e);
-            e
-        })?;
+            return;
+        }
+    };
 
     info!("Metrics server listening on {}", bind);
     let metrics_handle = tokio::spawn(async move {

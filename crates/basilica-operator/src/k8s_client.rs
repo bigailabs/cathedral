@@ -73,6 +73,13 @@ pub trait K8sClient: Send + Sync {
     /// Attempt to evict a pod using the Eviction subresource. Returns Ok(true)
     /// when accepted, Ok(false) when blocked (e.g., by PDB), or Err on errors.
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool>;
+
+    /// Create a Gateway API HTTPRoute (dynamic object)
+    async fn create_http_route(
+        &self,
+        ns: &str,
+        obj: &kube::core::DynamicObject,
+    ) -> Result<kube::core::DynamicObject>;
 }
 
 /// In-memory mock client implementing a subset of the Kubernetes API for tests.
@@ -90,6 +97,7 @@ pub struct MockK8sClient {
     queue_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaQueue>>>>,
     nodes: Arc<RwLock<HashMap<String, Node>>>,
     evict_block: Arc<RwLock<std::collections::HashSet<String>>>,
+    http_routes: Arc<RwLock<HashMap<String, HashMap<String, kube::core::DynamicObject>>>>,
 }
 
 fn key(ns: &str) -> String {
@@ -403,6 +411,22 @@ impl K8sClient for MockK8sClient {
         }
         Ok(true)
     }
+
+    async fn create_http_route(
+        &self,
+        ns: &str,
+        obj: &kube::core::DynamicObject,
+    ) -> Result<kube::core::DynamicObject> {
+        let name = obj.metadata.name.clone().unwrap_or_default();
+        if name.is_empty() {
+            return Err(anyhow!("HTTPRoute missing metadata.name"));
+        }
+        let mut map = self.http_routes.write().await;
+        map.entry(key(ns))
+            .or_default()
+            .insert(name.clone(), obj.clone());
+        Ok(obj.clone())
+    }
 }
 
 impl MockK8sClient {
@@ -437,6 +461,14 @@ impl MockK8sClient {
         } else {
             blk.remove(&key);
         }
+    }
+
+    /// List stored HTTPRoutes in the mock (test helper)
+    pub async fn list_http_routes(&self, ns: &str) -> Vec<kube::core::DynamicObject> {
+        let map = self.http_routes.read().await;
+        map.get(ns)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -703,6 +735,27 @@ impl K8sClient for KubeClient {
             .await
             .map(|_| ())
             .map_err(|e| anyhow!(e))
+    }
+
+    async fn create_http_route(
+        &self,
+        ns: &str,
+        obj: &kube::core::DynamicObject,
+    ) -> Result<kube::core::DynamicObject> {
+        use kube::api::PostParams;
+        let gvk = kube::core::GroupVersionKind::gvk(
+            "gateway.networking.k8s.io",
+            "v1",
+            "HTTPRoute",
+        );
+        let ar = kube::core::ApiResource::from_gvk(&gvk);
+        let api: kube::Api<kube::core::DynamicObject> =
+            kube::Api::namespaced_with(self.client.clone(), ns, &ar);
+        match api.create(&PostParams::default(), obj).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(obj.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
     }
 
     async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>> {

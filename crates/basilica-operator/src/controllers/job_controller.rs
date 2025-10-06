@@ -208,17 +208,18 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         ..Default::default()
     };
 
-    let labels = Some(
-        vec![
-            ("basilica.io/type".to_string(), "job".to_string()),
-            ("basilica.io/job".to_string(), name.to_string()),
-        ]
-        .into_iter()
-        .collect(),
-    );
+    let mut labels_map: std::collections::BTreeMap<String, String> = vec![
+        ("basilica.io/type".to_string(), "job".to_string()),
+        ("basilica.io/job".to_string(), name.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    let gpu_bound = (spec.resources.gpus.count > 0).to_string();
+    labels_map.insert("basilica.io/gpu-bound".to_string(), gpu_bound);
+    let labels = Some(labels_map.clone());
     let template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
-            labels: labels.clone(),
+            labels: Some(labels_map.clone()),
             ..Default::default()
         }),
         spec: Some(pod_spec),
@@ -233,7 +234,7 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     Job {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
-            labels,
+            labels: Some(labels_map),
             ..Default::default()
         },
         spec: Some(JobSpec {

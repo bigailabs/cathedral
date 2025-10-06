@@ -40,6 +40,18 @@ kubectl delete -f config/deploy/operator-deployment.yaml --ignore-not-found || t
 kubectl delete -f config/deploy/validator-deployment.yaml --ignore-not-found || true
 kubectl delete -f config/deploy/postgres.yaml --ignore-not-found || true
 
+echo "[teardown] Deleting Envoy forward proxy (if applied)"
+kubectl delete -f config/deploy/ingress/envoy-service.yaml --ignore-not-found || true
+kubectl delete -f config/deploy/ingress/envoy-deployment.yaml --ignore-not-found || true
+kubectl delete -f config/deploy/ingress/envoy-configmap.yaml --ignore-not-found || true
+
+echo "[teardown] Deleting Gateway API routes and Gateways (if applied)"
+kubectl delete -f config/deploy/gateway/httproute-example.yaml --ignore-not-found || true
+kubectl delete -f config/deploy/gateway/gateway-u-test.yaml --ignore-not-found || true
+kubectl delete -f config/deploy/gateway/gatewayclass.yaml --ignore-not-found || true
+
+echo "[teardown] Note: Envoy Gateway controller/CRDs (if installed) must be uninstalled separately per upstream instructions."
+
 echo "[teardown] Deleting tenant Role/RoleBinding"
 sed "s/TENANT_NAMESPACE/${TENANT_NS}/g" config/rbac/operator-tenant-role.yaml | kubectl delete -f - --ignore-not-found || true
 
@@ -71,4 +83,3 @@ if [ "$KEEP_NS" = false ]; then
 fi
 
 echo "[teardown] Complete"
-

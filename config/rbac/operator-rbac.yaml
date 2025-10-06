@@ -40,6 +40,9 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
 
   # Basilica CRDs
   - apiGroups: ["basilica.io"]

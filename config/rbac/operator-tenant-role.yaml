@@ -26,6 +26,9 @@ rules:
   - apiGroups: ["basilica.io"]
     resources: ["basilicajobs", "gpurentals"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
