@@ -29,6 +29,8 @@ jobs:
         shell: bash
         run: |
           TAG="${{ github.event.inputs.tag }}"
+          # Sanitize accidental "TAG=..." input
+          if [[ "$TAG" == TAG=* ]]; then TAG="${TAG#TAG=}"; fi
           if [[ -z "$TAG" ]]; then
             MSG=$(git log -1 --pretty=%B)
             TAG=$(echo "$MSG" | sed -n 's/.*TAG=\([^[:space:]]*\).*/\1/p')

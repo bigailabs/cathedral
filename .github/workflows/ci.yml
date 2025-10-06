@@ -32,7 +32,7 @@ permissions:
 jobs:
   # Detect changes to determine which services need building
   changes:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     outputs:
       validator: ${{ steps.changes.outputs.validator }}
       miner: ${{ steps.changes.outputs.miner }}
@@ -103,7 +103,7 @@ jobs:
               - '.github/workflows/**'
 
   quick-checks:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -137,7 +137,7 @@ jobs:
 
   # Lint complex packages
   lint-complex:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: quick-checks
     steps:
       - uses: actions/checkout@v4
@@ -179,7 +179,7 @@ jobs:
 
   # Build and test validator
   build-validator:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.validator == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -226,7 +226,7 @@ jobs:
 
   # Build and test miner
   build-miner:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.miner == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -285,7 +285,7 @@ jobs:
 
   # Build and test basilica-api
   build-api:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.basilica-api == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -344,7 +344,7 @@ jobs:
 
   # Build and test basilica-operator
   build-operator:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.basilica-operator == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -356,9 +356,19 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
         with:
-          shared-key: "shared-cache"
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Cache and install system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: pkg-config libssl-dev xxd mold clang protobuf-compiler
+          version: 1.0
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -382,7 +392,7 @@ jobs:
 
   # Build and test basilica-cli
   build-cli:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -424,7 +434,7 @@ jobs:
 
   # Build and test billing
   build-billing:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.billing == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -529,7 +539,7 @@ jobs:
 
   # Build and test payments
   build-payments:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.payments == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -689,6 +699,15 @@ jobs:
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
 
+      - name: Resolve image tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          # Sanitize accidental "TAG=..." input
+          if [[ "$TAG" == TAG=* ]]; then TAG="${TAG#TAG=}"; fi
+          if [[ -z "$TAG" ]]; then TAG="k3_test"; fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -700,14 +719,14 @@ jobs:
         run: |
           ./scripts/operator/build.sh \
             --image-name ghcr.io/one-covenant/basilica-operator \
-            --image-tag "${{ github.event.inputs.image_tag }}"
+            --image-tag "$TAG"
 
       - name: Push operator image
         run: |
           ./scripts/operator/push.sh \
             --source-image ghcr.io/one-covenant/basilica-operator \
             --target-image ghcr.io/one-covenant/basilica-operator \
-            --tag "${{ github.event.inputs.image_tag }}"
+            --tag "$TAG"
 
       - name: Build validator image
         env:
@@ -715,7 +734,7 @@ jobs:
         run: |
           ./scripts/validator/build.sh \
             --image-name ghcr.io/one-covenant/basilica/validator \
-            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push validator image
@@ -723,7 +742,7 @@ jobs:
           ./scripts/validator/push.sh \
             --source-image ghcr.io/one-covenant/basilica/validator \
             --target-image ghcr.io/one-covenant/basilica/validator \
-            --tag "${{ github.event.inputs.image_tag }}"
+            --tag "$TAG"
 
       - name: Build miner image
         env:
@@ -731,7 +750,7 @@ jobs:
         run: |
           ./scripts/miner/build.sh \
             --image-name ghcr.io/one-covenant/basilica/miner \
-            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push miner image
@@ -739,7 +758,7 @@ jobs:
           ./scripts/miner/push.sh \
             --source-image ghcr.io/one-covenant/basilica/miner \
             --target-image ghcr.io/one-covenant/basilica/miner \
-            --tag "${{ github.event.inputs.image_tag }}"
+            --tag "$TAG"
 
       - name: Build API image
         env:
@@ -747,7 +766,7 @@ jobs:
         run: |
           ./scripts/api/build.sh \
             --image-name ghcr.io/one-covenant/basilica-api \
-            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push API image
@@ -755,13 +774,13 @@ jobs:
           ./scripts/api/push.sh \
             --source-image ghcr.io/one-covenant/basilica-api \
             --target-image ghcr.io/one-covenant/basilica-api \
-            --tag "${{ github.event.inputs.image_tag }}"
+            --tag "$TAG"
 
       - name: Build billing image
         run: |
           ./scripts/billing/build.sh \
             --image-name ghcr.io/one-covenant/basilica/billing \
-            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push billing image
@@ -769,13 +788,13 @@ jobs:
           ./scripts/billing/push.sh \
             --source-image ghcr.io/one-covenant/basilica/billing \
             --target-image ghcr.io/one-covenant/basilica/billing \
-            --tag "${{ github.event.inputs.image_tag }}"
+            --tag "$TAG"
 
       - name: Build payments image
         run: |
           ./scripts/payments/build.sh \
             --image-name ghcr.io/one-covenant/basilica/payments \
-            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push payments image
@@ -783,16 +802,16 @@ jobs:
           ./scripts/payments/push.sh \
             --source-image ghcr.io/one-covenant/basilica/payments \
             --target-image ghcr.io/one-covenant/basilica/payments \
-            --tag "${{ github.event.inputs.image_tag }}"
+            --tag "$TAG"
 
       - name: Build CLI image (single-arch)
         run: |
           ./scripts/cli/build.sh \
             --single-arch \
             --image-name ghcr.io/one-covenant/basilica/cli \
-            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push CLI image
         run: |
-          docker push ghcr.io/one-covenant/basilica/cli:"${{ github.event.inputs.image_tag }}"
+          docker push ghcr.io/one-covenant/basilica/cli:"$TAG"
