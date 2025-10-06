@@ -1,10 +1,10 @@
-use axum::{extract::State, routing::get, Json};
+use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
 use crate::metrics as apimetrics;
 use crate::{
     error::{ApiError, Result},
-    k8s_client::{ApiK8sClient, JobSpecDto, JobStatusDto, Resources},
+    k8s_client::{JobSpecDto, JobStatusDto, Resources},
     server::AppState,
 };
 use std::time::Instant;
@@ -137,7 +137,7 @@ pub async fn get_job_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
+
     use std::sync::Arc;
 
     async fn build_state() -> AppState {
@@ -156,7 +156,7 @@ mod tests {
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
-                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+                .expect("lazy PG pool dsn should be valid"),
             k8s: Some(Arc::new(client)),
         }
     }

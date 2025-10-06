@@ -216,7 +216,6 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     .collect();
     let gpu_bound = (spec.resources.gpus.count > 0).to_string();
     labels_map.insert("basilica.io/gpu-bound".to_string(), gpu_bound);
-    let labels = Some(labels_map.clone());
     let template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
             labels: Some(labels_map.clone()),
@@ -564,7 +563,7 @@ mod tests {
             .unwrap();
         controller.reconcile("ns", &bj).await.unwrap();
         // Create a running pod labeled for this job
-        let mut pod = k8s_openapi::api::core::v1::Pod {
+        let pod = k8s_openapi::api::core::v1::Pod {
             metadata: ObjectMeta {
                 name: Some("pod1".into()),
                 labels: Some(

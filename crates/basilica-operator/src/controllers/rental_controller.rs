@@ -60,23 +60,7 @@ fn sanitize_ns(ns: &str) -> String {
         .collect::<String>()
 }
 
-fn compute_backoff_secs(ns: &str) -> i64 {
-    let base = std::env::var("BASILICA_QUEUE_ADMIT_BACKOFF_SECS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(10);
-    let ns_key = format!("BASILICA_QUEUE_BACKOFF_NS_{}", sanitize_ns(ns));
-    let per_ns = std::env::var(&ns_key)
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(base);
-    let jitter = std::env::var("BASILICA_QUEUE_JITTER_SECS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(5)
-        .max(0);
-    per_ns + jitter
-}
+// compute_backoff_secs_for_rental provides deterministic per-rental jittered backoff.
 
 fn compute_backoff_secs_for_rental(ns: &str, rental_name: &str) -> i64 {
     let base = std::env::var("BASILICA_QUEUE_ADMIT_BACKOFF_SECS")
@@ -178,8 +162,7 @@ fn merge_labels(
     base: Vec<(String, String)>,
     extra: Option<Vec<(String, String)>>,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut map: std::collections::BTreeMap<String, String> =
-        base.into_iter().collect();
+    let mut map: std::collections::BTreeMap<String, String> = base.into_iter().collect();
     if let Some(extra) = extra {
         for (k, v) in extra {
             map.insert(k, v);
@@ -495,7 +478,11 @@ fn sanitize_name_part(s: &str) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    if out.is_empty() { "grp".into() } else { out }
+    if out.is_empty() {
+        "grp".into()
+    } else {
+        out
+    }
 }
 
 pub fn render_discovery_headless_service(group: &str, ports: &[(u16, &str)]) -> Service {
@@ -510,11 +497,11 @@ pub fn render_discovery_headless_service(group: &str, ports: &[(u16, &str)]) -> 
         })
         .collect();
     let labels = vec![
-        ("basilica.io/type".to_string(), "rental-discovery".to_string()),
         (
-            "basilica.io/discovery-group".to_string(),
-            group.to_string(),
+            "basilica.io/type".to_string(),
+            "rental-discovery".to_string(),
         ),
+        ("basilica.io/discovery-group".to_string(), group.to_string()),
     ]
     .into_iter()
     .collect();
@@ -531,7 +518,11 @@ pub fn render_discovery_headless_service(group: &str, ports: &[(u16, &str)]) -> 
                     .into_iter()
                     .collect(),
             ),
-            ports: if svc_ports.is_empty() { None } else { Some(svc_ports) },
+            ports: if svc_ports.is_empty() {
+                None
+            } else {
+                Some(svc_ports)
+            },
             ..Default::default()
         }),
         ..Default::default()
@@ -847,7 +838,8 @@ impl<C: K8sClient> RentalController<C> {
                                                                 for m in values {
                                                                     *model_gpus
                                                                         .entry(m.clone())
-                                                                        .or_insert(0) += pod_gpu_count;
+                                                                        .or_insert(0) +=
+                                                                        pod_gpu_count;
                                                                 }
                                                             }
                                                         }
@@ -983,7 +975,9 @@ impl<C: K8sClient> RentalController<C> {
                         .or_else(|| spec.container.ports.first().map(|p| p.container_port))
                         .unwrap_or(80);
                     let backend = format!("rental-svc-{}", name);
-                    if let Ok(route) = render_http_route(&name, ns, &gw_name, &hostnames, &backend, port) {
+                    if let Ok(route) =
+                        render_http_route(&name, ns, &gw_name, &hostnames, &backend, port)
+                    {
                         let _ = self.client.create_http_route(ns, &route).await;
                     }
                 }
@@ -1703,7 +1697,6 @@ mod tests {
                 phase: Some("Running".into()),
                 ..Default::default()
             }),
-            ..Default::default()
         };
         controller.client.create_pod("ns", &p).await.unwrap();
 
@@ -1831,7 +1824,6 @@ mod tests {
                 phase: Some("Running".into()),
                 ..Default::default()
             }),
-            ..Default::default()
         };
         controller.client.create_pod("ns", &p).await.unwrap();
 
@@ -1919,7 +1911,6 @@ mod tests {
                 phase: Some("Running".into()),
                 ..Default::default()
             }),
-            ..Default::default()
         };
         controller.client.create_pod("ns", &p).await.unwrap();
 
@@ -1958,7 +1949,10 @@ mod tests {
         let spec = base_spec();
         let mut cr = GpuRental::new("rent-disc", spec);
         let mut labels = std::collections::BTreeMap::new();
-        labels.insert("basilica.io/discovery-group".to_string(), "team-1".to_string());
+        labels.insert(
+            "basilica.io/discovery-group".to_string(),
+            "team-1".to_string(),
+        );
         cr.metadata.labels = Some(labels);
 
         controller
@@ -1969,10 +1963,16 @@ mod tests {
         controller.reconcile("ns", &cr).await.unwrap();
 
         // Pod should have discovery label
-        let pod = controller.client.get_pod("ns", "rental-rent-disc").await.unwrap();
+        let pod = controller
+            .client
+            .get_pod("ns", "rental-rent-disc")
+            .await
+            .unwrap();
         let pod_labels = pod.metadata.labels.unwrap_or_default();
         assert_eq!(
-            pod_labels.get("basilica.io/discovery-group").map(|s| s.as_str()),
+            pod_labels
+                .get("basilica.io/discovery-group")
+                .map(|s| s.as_str()),
             Some("team-1")
         );
 
@@ -2000,19 +2000,19 @@ mod tests {
         let r1b = super::compute_backoff_secs_for_rental(ns, "rent-a");
         assert_eq!(r1a, r1b, "backoff must be deterministic per rental");
         assert!(
-            r1a >= 20 && r1a <= 25,
+            (20..=25).contains(&r1a),
             "backoff within overridden + jitter range"
         );
 
         let r2 = super::compute_backoff_secs_for_rental(ns, "rent-b");
-        assert!(r2 >= 20 && r2 <= 25);
+        assert!((20..=25).contains(&r2));
         // Different rentals may have different jitter; if equal it's acceptable, but ensure in range
     }
     #[tokio::test]
     async fn terminate_when_out_of_credits() {
         let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
         let client = MockK8sClient::default();
-        let mut billing = MockBillingClient::default();
+        let billing = MockBillingClient::default();
         {
             let mut t = billing.terminate.write().await;
             t.insert("rent2".into(), true);

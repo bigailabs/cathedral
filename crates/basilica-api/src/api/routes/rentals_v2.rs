@@ -10,7 +10,7 @@ use crate::api::middleware::AuthContext;
 use crate::metrics as apimetrics;
 use crate::{
     error::{ApiError, Result},
-    k8s_client::{ApiK8sClient, RentalListItemDto, RentalSpecDto, RentalStatusDto, Resources},
+    k8s_client::{RentalListItemDto, RentalSpecDto, RentalStatusDto, Resources},
     server::AppState,
 };
 use basilica_sdk::types::{NodeSelection, StartRentalApiRequest};
@@ -441,8 +441,8 @@ pub struct ExtendRentalRequest {
 }
 
 pub async fn extend_rental(
-    State(state): State<AppState>,
-    axum::extract::Path(rental_id): axum::extract::Path<String>,
+    State(_state): State<AppState>,
+    axum::extract::Path(_rental_id): axum::extract::Path<String>,
     Json(req): Json<ExtendRentalRequest>,
 ) -> Result<Json<RentalStatusResponse>> {
     let start = Instant::now();
@@ -458,7 +458,7 @@ pub async fn extend_rental(
 mod tests {
     use super::*;
     use crate::api::middleware::{AuthContext, AuthDetails};
-    use axum::http::StatusCode;
+
     use std::sync::Arc;
 
     async fn build_state() -> AppState {
@@ -477,7 +477,7 @@ mod tests {
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
-                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+                .expect("lazy PG pool dsn should be valid"),
             k8s: Some(Arc::new(client)),
         }
     }
@@ -500,7 +500,7 @@ mod tests {
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
-                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+                .expect("lazy PG pool dsn should be valid"),
             k8s: Some(std::sync::Arc::new(client.clone())),
         };
         let auth = AuthContext {
@@ -541,7 +541,7 @@ mod tests {
         assert!(!res.0.rental_id.is_empty());
         // Validate captured spec
         let spec = client
-            .get_rental_spec(&format!("{}", "u-alice"), &res.0.rental_id)
+            .get_rental_spec("u-alice", &res.0.rental_id)
             .await
             .unwrap();
         assert_eq!(spec.container_image, "img");
@@ -590,7 +590,7 @@ mod tests {
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
-                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+                .expect("lazy PG pool dsn should be valid"),
             k8s: Some(std::sync::Arc::new(client.clone())),
         };
         let auth = AuthContext {
@@ -662,7 +662,7 @@ mod tests {
             validator_hotkey: "".into(),
             http_client: reqwest::Client::builder().build().unwrap(),
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
-                .unwrap_or_else(|_| unsafe { std::mem::zeroed() }),
+                .expect("lazy PG pool dsn should be valid"),
             k8s: Some(std::sync::Arc::new(client.clone())),
         };
         let auth = AuthContext {

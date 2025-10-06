@@ -1,11 +1,11 @@
 //! Main entry point for the Basilica API Gateway
 
+use axum::{routing::get, Router};
 use basilica_api::{config::Config, server::Server, Result};
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use std::path::PathBuf;
 use tracing::{error, info};
-use axum::{routing::get, Router};
 
 #[derive(Parser)]
 #[command(name = "basilica-api", about = "Basilica API Gateway", version, author)]
@@ -54,8 +54,8 @@ async fn main() -> Result<()> {
             }
         }),
     );
-    let metrics_bind = std::env::var("BASILICA_API_METRICS_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:9401".into());
+    let metrics_bind =
+        std::env::var("BASILICA_API_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9401".into());
     let metrics_listener = tokio::net::TcpListener::bind(&metrics_bind)
         .await
         .expect("bind API metrics addr");

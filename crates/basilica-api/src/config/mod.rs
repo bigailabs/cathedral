@@ -203,18 +203,13 @@ mod tests {
     }
 }
 /// Rental backend selector
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum RentalBackend {
     #[serde(rename = "auto")]
+    #[default]
     Auto,
     #[serde(rename = "legacy")]
     Legacy,
     #[serde(rename = "k8s")]
     K8s,
-}
-
-impl Default for RentalBackend {
-    fn default() -> Self {
-        RentalBackend::Auto
-    }
 }

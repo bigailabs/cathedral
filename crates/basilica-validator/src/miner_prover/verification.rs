@@ -978,7 +978,7 @@ impl VerificationEngine {
         let miner_id = format!("miner_{}", miner_uid);
         let endpoint = self
             .persistence
-            .get_node_ssh_endpoint(&node_id.to_string(), &miner_id)
+            .get_node_ssh_endpoint(node_id, &miner_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("SSH endpoint not found for node {}", node_id))?;
         let key_manager = self
@@ -1106,7 +1106,14 @@ impl VerificationEngine {
         // Base labels from validation
         let mut labels = labels_from_validation(nr, provider, region);
         // Enrich labels with Docker profile if available
-        if let Ok(Some((_full_json, service_active, docker_version, _images, dind_supported, validation_error))) = self
+        if let Ok(Some((
+            _full_json,
+            service_active,
+            docker_version,
+            _images,
+            dind_supported,
+            validation_error,
+        ))) = self
             .persistence
             .get_node_docker_profile(miner_uid, node_id)
             .await
@@ -2066,10 +2073,7 @@ mod node_profile_wiring_tests {
             .await?;
         let (_node2, labels2) = maybe_labels2.expect("labels present");
         assert_eq!(labels2.get("basilica.io/docker-active").unwrap(), "true");
-        assert_eq!(
-            labels2.get("basilica.io/docker-version").unwrap(),
-            "24.0.7"
-        );
+        assert_eq!(labels2.get("basilica.io/docker-version").unwrap(), "24.0.7");
         assert_eq!(labels2.get("basilica.io/dind").unwrap(), "true");
 
         Ok(())

@@ -56,7 +56,7 @@ pub fn build_install_commands(cfg: &K3sAgentConfig) -> Vec<String> {
         agent_args.push(format!("--node-name {}", shell_quote(n)));
     }
     if !cfg.extra_args.is_empty() {
-        agent_args.extend(cfg.extra_args.iter().map(|a| a.clone()));
+        agent_args.extend(cfg.extra_args.iter().cloned());
     }
 
     // Use upstream installer with agent subcommand
@@ -66,8 +66,8 @@ pub fn build_install_commands(cfg: &K3sAgentConfig) -> Vec<String> {
         format!(" -- {}", agent_args.join(" "))
     };
     cmds.push(format!(
-        "{} sh -s - agent{} <(true)",
-        format!("curl -sfL https://get.k3s.io | {}", envs.join(" ")),
+        "curl -sfL https://get.k3s.io | {} sh -s - agent{} <(true)",
+        envs.join(" "),
         arg_tail
     ));
 

@@ -38,12 +38,12 @@ pub fn to_node_profile_spec(input: &NodeProfileInput<'_>) -> NodeProfileSpec {
     let gpu_count = nr.gpu_infos.len() as u32;
     let gpu_model = nr
         .gpu_infos
-        .get(0)
+        .first()
         .map(|g| g.gpu_name.clone())
         .unwrap_or_else(|| nr.gpu_name.clone());
     let gpu_mem = nr
         .gpu_infos
-        .get(0)
+        .first()
         .map(|g| g.gpu_memory_gb as u32)
         .unwrap_or(0);
     let memory_gb = nr.memory_info.total_gb as u32;
@@ -79,7 +79,7 @@ pub fn labels_from_validation(
     labels.insert("basilica.io/region".into(), region.to_string());
     let model = nr
         .gpu_infos
-        .get(0)
+        .first()
         .map(|g| g.gpu_name.clone())
         .unwrap_or_else(|| nr.gpu_name.clone());
     labels.insert("basilica.io/gpu-model".into(), model);
@@ -90,7 +90,7 @@ pub fn labels_from_validation(
     labels.insert(
         "basilica.io/gpu-mem".into(),
         nr.gpu_infos
-            .get(0)
+            .first()
             .map(|g| g.gpu_memory_gb as u32)
             .unwrap_or(0)
             .to_string(),

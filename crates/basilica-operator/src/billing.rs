@@ -356,8 +356,10 @@ mod tests {
         let (base, _h, events) = spawn_test_server().await;
         let client = HttpBillingClient::new(base);
         let rental = sample_rental("u1");
-        let mut st = GpuRentalStatus::default();
-        st.state = Some("Active".into());
+        let st = GpuRentalStatus {
+            state: Some("Active".into()),
+            ..Default::default()
+        };
         let metrics = RuntimeMetrics {
             gpu_peak_utilization: Some(0.82),
             memory_peak_gb: Some(12.5),
@@ -427,8 +429,10 @@ mod tests {
                 priority: "normal".into(),
             },
         );
-        let mut st = BasilicaJobStatus::default();
-        st.phase = Some("Running".into());
+        let st = BasilicaJobStatus {
+            phase: Some("Running".into()),
+            ..Default::default()
+        };
         let metrics = RuntimeMetrics {
             gpu_peak_utilization: Some(0.65),
             memory_peak_gb: Some(8.0),

@@ -179,7 +179,7 @@ impl ApiK8sClient for MockK8sClient {
                     .map(|r| format!("{}:{}", r.exposure, r.port))
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_else(|| Vec::new());
+            .unwrap_or_else(Vec::new);
         Ok(RentalStatusDto {
             state: job_st.phase,
             pod_name: job_st.pod_name,
@@ -244,12 +244,10 @@ impl ApiK8sClient for MockK8sClient {
             } else {
                 stderr.push_str("simulated stderr-only output");
             }
+        } else if tty {
+            stdout = format!("exec(tty): {}", cmd);
         } else {
-            if tty {
-                stdout = format!("exec(tty): {}", cmd);
-            } else {
-                stdout = format!("exec: {}", cmd);
-            }
+            stdout = format!("exec: {}", cmd);
         }
 
         // If stdin is provided, simulate echo/consumption of input by the remote process
@@ -259,7 +257,7 @@ impl ApiK8sClient for MockK8sClient {
                 if !stdout.is_empty() {
                     stdout.push('\n');
                 }
-                stdout.push_str(&format!("{}", input));
+                stdout.push_str(&input.to_string());
             } else {
                 if !stdout.is_empty() {
                     stdout.push('\n');
@@ -299,7 +297,7 @@ impl ApiK8sClient for MockK8sClient {
                             .map(|r| format!("{}:{}", r.exposure, r.port))
                             .collect::<Vec<_>>()
                     })
-                    .unwrap_or_else(|| Vec::new());
+                    .unwrap_or_else(Vec::new);
                 out.push(RentalListItemDto {
                     rental_id: name.clone(),
                     status: RentalStatusDto {
@@ -446,7 +444,7 @@ impl K8sClient {
                     .filter_map(|x| x.as_str().map(|s| s.to_string()))
                     .collect::<Vec<_>>()
             })
-            .unwrap_or_else(|| Vec::new())
+            .unwrap_or_default()
     }
 }
 
@@ -680,19 +678,19 @@ impl ApiK8sClient for K8sClient {
             })?;
         let pod_name = pod.metadata.name.clone().unwrap_or_default();
         let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
-        let mut params = AttachParams::default();
-        params.stdout = true;
-        params.stderr = true;
-        params.stdin = stdin.is_some();
-        params.tty = tty;
-        // Best-effort: set the container explicitly to the first container in the Pod spec
-        if let Some(spec) = &pod.spec {
-            let containers = &spec.containers;
-            if let Some(first) = containers.first() {
-                let name = &first.name;
-                params.container = Some(name.clone());
-            }
-        }
+        // Determine container name (first container in spec, if any)
+        let container_name = pod
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.containers.first().map(|c| c.name.clone()));
+        let params = AttachParams {
+            stdout: true,
+            stderr: true,
+            stdin: stdin.is_some(),
+            tty,
+            container: container_name,
+            ..Default::default()
+        };
         // kube expects &str slice for args
         let args: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
         let mut attached =
@@ -703,13 +701,13 @@ impl ApiK8sClient for K8sClient {
                 })?;
 
         // Send stdin if provided
-        if let (Some(input), Some(mut sin)) = (stdin, attached.stdin().take()) {
+        if let (Some(input), Some(mut sin)) = (stdin, attached.stdin()) {
             let _ = sin.write_all(input.as_bytes()).await;
             let _ = sin.shutdown().await;
         }
 
         let mut stdout_buf = Vec::new();
-        if let Some(mut out) = attached.stdout().take() {
+        if let Some(mut out) = attached.stdout() {
             out.read_to_end(&mut stdout_buf)
                 .await
                 .map_err(|e| ApiError::Internal {
@@ -717,7 +715,7 @@ impl ApiK8sClient for K8sClient {
                 })?;
         }
         let mut stderr_buf = Vec::new();
-        if let Some(mut err) = attached.stderr().take() {
+        if let Some(mut err) = attached.stderr() {
             err.read_to_end(&mut stderr_buf)
                 .await
                 .map_err(|e| ApiError::Internal {

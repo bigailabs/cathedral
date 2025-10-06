@@ -16,14 +16,7 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
             })
         })
         .collect();
-    let env: Vec<Value> = spec
-        .container
-        .env
-        .iter()
-        .map(|(k, v)| json!({"name": k, "value": v}))
-        .collect();
-
-    let mut network = json!({
+    let network = json!({
         "ingress": spec.network.ingress.iter().map(|i| json!({"port": i.port, "exposure": i.exposure})).collect::<Vec<_>>(),
         "egressPolicy": spec.network.egress_policy,
         "allowedEgress": spec.network.allowed_egress,

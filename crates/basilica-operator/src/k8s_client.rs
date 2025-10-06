@@ -743,11 +743,7 @@ impl K8sClient for KubeClient {
         obj: &kube::core::DynamicObject,
     ) -> Result<kube::core::DynamicObject> {
         use kube::api::PostParams;
-        let gvk = kube::core::GroupVersionKind::gvk(
-            "gateway.networking.k8s.io",
-            "v1",
-            "HTTPRoute",
-        );
+        let gvk = kube::core::GroupVersionKind::gvk("gateway.networking.k8s.io", "v1", "HTTPRoute");
         let ar = kube::core::ApiResource::from_gvk(&gvk);
         let api: kube::Api<kube::core::DynamicObject> =
             kube::Api::namespaced_with(self.client.clone(), ns, &ar);

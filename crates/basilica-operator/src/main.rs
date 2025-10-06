@@ -43,7 +43,7 @@ async fn main() {
     };
 
     info!("Metrics server listening on {}", bind);
-    let metrics_handle = tokio::spawn(async move {
+    let _metrics_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             tracing::error!("Metrics server failed: {}", e);
         }

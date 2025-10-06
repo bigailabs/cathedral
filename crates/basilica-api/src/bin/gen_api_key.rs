@@ -6,7 +6,10 @@ use clap::Parser;
 ///   cargo run -p basilica-api --bin gen-api-key -- --user test --name dev \
 ///     --scopes rentals:* --scopes jobs:*
 #[derive(Parser, Debug)]
-#[command(name = "gen-api-key", about = "Generate a dev API key + SQL INSERT for Postgres")]
+#[command(
+    name = "gen-api-key",
+    about = "Generate a dev API key + SQL INSERT for Postgres"
+)]
 struct Args {
     /// User ID the key belongs to (maps to namespace via u-<user>)
     #[arg(short = 'u', long = "user", default_value = "test")]
@@ -63,5 +66,8 @@ fn main() {
     println!("Kid (hex):            {}", kid);
     println!("Token (Authorization): Bearer {}", display_token);
     println!();
-    println!("-- Run this against Postgres (compose: postgres service)\n{}", sql);
+    println!(
+        "-- Run this against Postgres (compose: postgres service)\n{}",
+        sql
+    );
 }
