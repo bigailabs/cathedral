@@ -506,7 +506,7 @@ pub async fn handle_logs(
 
     // Parse and display SSE stream
     use eventsource_stream::Eventsource;
-    use futures::StreamExt;
+    use futures_util::StreamExt;
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -525,7 +525,7 @@ pub async fn handle_logs(
         println!("Following log output - press Ctrl+C to stop");
     }
 
-    futures::pin_mut!(stream);
+    futures_util::pin_mut!(stream);
 
     while let Some(event) = stream.next().await {
         match event {
