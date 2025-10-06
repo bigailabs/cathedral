@@ -4,6 +4,17 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+    types: [opened, synchronize, edited, labeled, reopened]
+  workflow_dispatch:
+    inputs:
+      build_images:
+        description: Build and push all Docker images
+        required: false
+        default: "false"
+      image_tag:
+        description: Tag to apply to images when building via workflow_dispatch
+        required: false
+        default: "k3_test"
 
 env:
   CARGO_TERM_COLOR: always
@@ -627,7 +638,7 @@ jobs:
 
   # Final status check
   ci-success:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs:
       - quick-checks
       - lint-complex
@@ -657,3 +668,131 @@ jobs:
             echo "Some CI checks failed!"
             exit 1
           fi
+  
+  # Manual: Build and push all images (workflow_dispatch only)
+  build-images:
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.build_images == 'true') ||
+      (github.event_name == 'pull_request' && (
+        contains(github.event.pull_request.title, 'build-images') ||
+        contains(github.event.pull_request.body, 'build-images') ||
+        contains(join(github.event.pull_request.labels.*.name, ' '), 'build-images')
+      ))
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build operator image
+        run: |
+          ./scripts/operator/build.sh \
+            --image-name ghcr.io/one-covenant/basilica-operator \
+            --image-tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Push operator image
+        run: |
+          ./scripts/operator/push.sh \
+            --source-image ghcr.io/one-covenant/basilica-operator \
+            --target-image ghcr.io/one-covenant/basilica-operator \
+            --tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Build validator image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/validator/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/validator \
+            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --no-extract
+
+      - name: Push validator image
+        run: |
+          ./scripts/validator/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/validator \
+            --target-image ghcr.io/one-covenant/basilica/validator \
+            --tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Build miner image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/miner/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/miner \
+            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --no-extract
+
+      - name: Push miner image
+        run: |
+          ./scripts/miner/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/miner \
+            --target-image ghcr.io/one-covenant/basilica/miner \
+            --tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Build API image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/api/build.sh \
+            --image-name ghcr.io/one-covenant/basilica-api \
+            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --no-extract
+
+      - name: Push API image
+        run: |
+          ./scripts/api/push.sh \
+            --source-image ghcr.io/one-covenant/basilica-api \
+            --target-image ghcr.io/one-covenant/basilica-api \
+            --tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Build billing image
+        run: |
+          ./scripts/billing/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/billing \
+            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --no-extract
+
+      - name: Push billing image
+        run: |
+          ./scripts/billing/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/billing \
+            --target-image ghcr.io/one-covenant/basilica/billing \
+            --tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Build payments image
+        run: |
+          ./scripts/payments/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/payments \
+            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --no-extract
+
+      - name: Push payments image
+        run: |
+          ./scripts/payments/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/payments \
+            --target-image ghcr.io/one-covenant/basilica/payments \
+            --tag "${{ github.event.inputs.image_tag }}"
+
+      - name: Build CLI image (single-arch)
+        run: |
+          ./scripts/cli/build.sh \
+            --single-arch \
+            --image-name ghcr.io/one-covenant/basilica/cli \
+            --image-tag "${{ github.event.inputs.image_tag }}" \
+            --no-extract
+
+      - name: Push CLI image
+        run: |
+          docker push ghcr.io/one-covenant/basilica/cli:"${{ github.event.inputs.image_tag }}"

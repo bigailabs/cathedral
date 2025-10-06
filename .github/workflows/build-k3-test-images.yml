@@ -7,6 +7,9 @@ on:
         description: "Tag to apply to images"
         required: true
         default: "k3_test"
+  push:
+    paths:
+      - ".github/triggers/build-k3-test-images"
 
 permissions:
   contents: read
@@ -17,10 +20,21 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [[ -z "$TAG" ]]; then
+            MSG=$(git log -1 --pretty=%B)
+            TAG=$(echo "$MSG" | sed -n 's/.*TAG=\([^[:space:]]*\).*/\1/p')
+            if [[ -z "$TAG" ]]; then TAG="k3_test"; fi
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
 
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
@@ -36,14 +50,14 @@ jobs:
         run: |
           ./scripts/operator/build.sh \
             --image-name ghcr.io/one-covenant/basilica-operator \
-            --image-tag "${{ github.event.inputs.tag }}"
+            --image-tag "$TAG"
 
       - name: Push operator image
         run: |
           ./scripts/operator/push.sh \
             --source-image ghcr.io/one-covenant/basilica-operator \
             --target-image ghcr.io/one-covenant/basilica-operator \
-            --tag "${{ github.event.inputs.tag }}"
+            --tag "$TAG"
 
       - name: Build validator image
         env:
@@ -51,7 +65,7 @@ jobs:
         run: |
           ./scripts/validator/build.sh \
             --image-name ghcr.io/one-covenant/basilica/validator \
-            --image-tag "${{ github.event.inputs.tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push validator image
@@ -59,7 +73,7 @@ jobs:
           ./scripts/validator/push.sh \
             --source-image ghcr.io/one-covenant/basilica/validator \
             --target-image ghcr.io/one-covenant/basilica/validator \
-            --tag "${{ github.event.inputs.tag }}"
+            --tag "$TAG"
 
       - name: Build miner image
         env:
@@ -67,7 +81,7 @@ jobs:
         run: |
           ./scripts/miner/build.sh \
             --image-name ghcr.io/one-covenant/basilica/miner \
-            --image-tag "${{ github.event.inputs.tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push miner image
@@ -75,7 +89,7 @@ jobs:
           ./scripts/miner/push.sh \
             --source-image ghcr.io/one-covenant/basilica/miner \
             --target-image ghcr.io/one-covenant/basilica/miner \
-            --tag "${{ github.event.inputs.tag }}"
+            --tag "$TAG"
 
       - name: Build API image
         env:
@@ -83,7 +97,7 @@ jobs:
         run: |
           ./scripts/api/build.sh \
             --image-name ghcr.io/one-covenant/basilica-api \
-            --image-tag "${{ github.event.inputs.tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push API image
@@ -91,13 +105,13 @@ jobs:
           ./scripts/api/push.sh \
             --source-image ghcr.io/one-covenant/basilica-api \
             --target-image ghcr.io/one-covenant/basilica-api \
-            --tag "${{ github.event.inputs.tag }}"
+            --tag "$TAG"
 
       - name: Build billing image
         run: |
           ./scripts/billing/build.sh \
             --image-name ghcr.io/one-covenant/basilica/billing \
-            --image-tag "${{ github.event.inputs.tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push billing image
@@ -105,13 +119,13 @@ jobs:
           ./scripts/billing/push.sh \
             --source-image ghcr.io/one-covenant/basilica/billing \
             --target-image ghcr.io/one-covenant/basilica/billing \
-            --tag "${{ github.event.inputs.tag }}"
+            --tag "$TAG"
 
       - name: Build payments image
         run: |
           ./scripts/payments/build.sh \
             --image-name ghcr.io/one-covenant/basilica/payments \
-            --image-tag "${{ github.event.inputs.tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push payments image
@@ -119,18 +133,18 @@ jobs:
           ./scripts/payments/push.sh \
             --source-image ghcr.io/one-covenant/basilica/payments \
             --target-image ghcr.io/one-covenant/basilica/payments \
-            --tag "${{ github.event.inputs.tag }}"
+            --tag "$TAG"
 
       - name: Build CLI image (single-arch)
         run: |
           ./scripts/cli/build.sh \
             --single-arch \
             --image-name ghcr.io/one-covenant/basilica/cli \
-            --image-tag "${{ github.event.inputs.tag }}" \
+            --image-tag "$TAG" \
             --no-extract
 
       - name: Push CLI image
         run: |
-          docker push ghcr.io/one-covenant/basilica/cli:"${{ github.event.inputs.tag }}"
+          docker push ghcr.io/one-covenant/basilica/cli:"$TAG"
 
       
