@@ -545,6 +545,11 @@ impl ApiK8sClient for K8sClient {
         use kube::api::PostParams;
         use serde_json::json;
         let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
+        let env_objs: Vec<serde_json::Value> = spec
+            .container_env
+            .iter()
+            .map(|(k,v)| json!({"name": k, "value": v}))
+            .collect();
         let obj = json!({
             "apiVersion": "basilica.io/v1",
             "kind": "GpuRental",
@@ -557,7 +562,7 @@ impl ApiK8sClient for K8sClient {
             "spec": {
                 "container": {
                     "image": spec.container_image,
-                    "env": spec.container_env,
+                    "env": env_objs,
                     "command": spec.container_command,
                     "ports": spec.container_ports,
                     "volumes": [],

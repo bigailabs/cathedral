@@ -6,6 +6,45 @@
     state: present
   become: true
 
+- name: Install build dependencies for Rust (optional)
+  ansible.builtin.package:
+    name:
+      - build-essential
+      - pkg-config
+      - libssl-dev
+      - clang
+      - mold
+      - protobuf-compiler
+    state: present
+  become: true
+  when: install_rust | default(false) | bool
+
+- name: Check if cargo is already installed for the remote user
+  become: true
+  become_user: "{{ ansible_user | default(ansible_ssh_user) }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if command -v cargo >/dev/null 2>&1; then echo present; else echo absent; fi
+  args:
+    executable: /bin/bash
+  register: cargo_check
+  changed_when: false
+  failed_when: false
+  when: install_rust | default(false) | bool
+
+- name: Install Rust toolchain via rustup (remote user)
+  become: true
+  become_user: "{{ ansible_user | default(ansible_ssh_user) }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+  args:
+    executable: /bin/bash
+  environment:
+    HOME: "/home/{{ ansible_user | default(ansible_ssh_user) }}"
+    USER: "{{ ansible_user | default(ansible_ssh_user) }}"
+  when: install_rust | default(false) | bool and (cargo_check.stdout | default('absent')) != 'present'
+
 - name: Check if K3s is already installed
   ansible.builtin.stat:
     path: /usr/local/bin/k3s
@@ -57,4 +96,3 @@
     remote_src: true
     mode: '0644'
   become: true
-

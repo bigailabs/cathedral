@@ -10,6 +10,27 @@ Quick start
 - Apply E2E readiness (RBAC, CRDs, Postgres, Operator, API, optional Envoy/Gateway):
   - `ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml`
 
+Use CI-built k3_test images
+
+- Build and push images from your branch (tags all services with k3_test):
+  - `just ci-build-images TAG=k3_test`
+- Deploy using the k3_test images (override defaults):
+  - `ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+     -e operator_image=ghcr.io/one-covenant/basilica-operator:k3_test \
+     -e api_image=ghcr.io/one-covenant/basilica-api:k3_test`
+- Optional toggles in `group_vars/all.yml` you may want to review before running:
+  - `tenant_namespace` (default: `u-test`)
+  - `use_templates: true` (injects image refs/env via templates)
+  - `generate_crds: true` (requires Rust locally to run `cargo run -p basilica-operator --bin crdgen`)
+    - If Rust isn’t available on your control machine, set `generate_crds: false` and provide a pre-generated `basilica-crds.yaml` at repo root.
+
+Tie-in with docs/e2e-readiness-checklist.md
+
+- The `playbooks/e2e-apply.yml` automates the checklist steps: namespaces/RBAC → CRDs → Postgres → Operator/API → optional Envoy/Gateway → smoke probe.
+- After the run completes, verify:
+  - Operator: `kubectl -n basilica-system logs deploy/basilica-operator | head`
+  - API health (ephemeral probe runs during the play): `curl http://127.0.0.1:8000/health` (use the long-lived port-forward options if desired).
+
 Contents
 
 - `playbooks/k3s-setup.yml` — installs a central K3s server and joins agents.
@@ -35,4 +56,3 @@ Notes
   - Enable `postgres_forward.enabled: true` to keep `kubectl port-forward svc/basilica-postgres 5432:5432` running as a systemd service.
   - Enable `envoy_forward.enabled: true` to keep `kubectl port-forward svc/basilica-envoy 8080:8080` running. For the admin port, enable `envoy_admin_forward.enabled: true` (9901).
   - As with the API, forwards bind to `127.0.0.1` by default; use SSH tunnels or change `bind_address` if necessary.
-

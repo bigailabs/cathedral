@@ -429,7 +429,7 @@ mod tests {
             image: "nvidia/cuda:12.0-base".into(),
             command: vec!["python".into()],
             args: vec!["main.py".into()],
-            env: vec![("FOO".into(), "bar".into())],
+            env: vec![crate::crd::basilica_job::EnvVar { name: "FOO".into(), value: "bar".into() }],
             resources: crate::crd::basilica_job::Resources {
                 cpu: "4".into(),
                 memory: "16Gi".into(),

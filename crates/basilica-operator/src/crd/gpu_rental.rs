@@ -46,7 +46,7 @@ pub struct TenancyRef {
 pub struct RentalContainer {
     pub image: String,
     #[serde(default)]
-    pub env: Vec<(String, String)>,
+    pub env: Vec<EnvVar>,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -151,7 +151,14 @@ pub struct RentalJupyter {
 pub struct RentalEnvironment {
     pub base_image: Option<String>,
     pub pre_install_script: Option<String>,
-    pub environment_variables: Vec<(String, String)>,
+    pub environment_variables: Vec<EnvVar>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]

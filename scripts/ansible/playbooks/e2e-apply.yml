@@ -1,9 +1,13 @@
 - hosts: k3s_server
   gather_facts: false
   become: true
+  vars_files:
+    - ../group_vars/all.yml
   vars:
     # Autodetect repo root on control host if not provided
-    _detected_repo_root: "{{ (playbook_dir + '/..') | realpath | dirname }}"
+    # playbook_dir = <repo>/scripts/ansible/playbooks
+    # We want <repo>, so go up two levels then dirname
+    _detected_repo_root: "{{ (playbook_dir + '/../..') | realpath | dirname }}"
     repo_root_final: "{{ repo_root | default(_detected_repo_root, true) }}"
   tasks:
     - name: Ensure base directory on server
@@ -12,17 +16,62 @@
         state: directory
         mode: '0755'
 
-    - name: Optionally generate CRDs locally
+    - name: Ensure CRDs output directory exists (local)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.file:
+        path: "{{ (repo_root_final + '/' + crds_output) | dirname }}"
+        state: directory
+        mode: '0755'
+      when: generate_crds | bool
+
+    # Try to generate CRDs with local cargo first (PATH includes ~/.cargo/bin)
+    - name: Generate CRDs locally via cargo
       delegate_to: localhost
       run_once: true
       ansible.builtin.shell: |
         set -euo pipefail
         cd {{ repo_root_final | quote }}
-        {{ crdgen_cmd }} > {{ crds_output }}
+        export PATH="$HOME/.cargo/bin:$PATH"
+        mkdir -p $(dirname {{ crds_output | quote }})
+        cargo --version
+        cargo run -p basilica-operator --bin crdgen > {{ crds_output | quote }}
       args:
         executable: /bin/bash
-      changed_when: true
+      register: crdgen_cargo
+      changed_when: crdgen_cargo.rc == 0
+      failed_when: false
       when: generate_crds | bool
+
+    - name: Generate CRDs locally via Docker (no local Rust)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cd {{ repo_root_final | quote }}
+        docker run --rm \
+          -e CARGO_HOME=/usr/local/cargo \
+          -e RUSTUP_HOME=/usr/local/rustup \
+          -e PATH=/usr/local/cargo/bin:/usr/local/rustup/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+          -v "$(pwd)":/workspace \
+          -w /workspace \
+          rust:1.87-bookworm bash -lc \
+          'mkdir -p $(dirname {{ crds_output | quote }}) && /usr/local/cargo/bin/cargo --version && /usr/local/cargo/bin/cargo fetch && /usr/local/cargo/bin/cargo run -p basilica-operator --bin crdgen > {{ crds_output | quote }}'
+      args:
+        executable: /bin/bash
+      register: crdgen_docker
+      changed_when: crdgen_docker.rc == 0
+      failed_when: false
+      when: generate_crds | bool and (crdgen_cargo.rc | default(1)) != 0
+
+    - name: Fail if unable to generate CRDs (no cargo or docker)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.fail:
+        msg: >-
+          Cannot generate CRDs automatically. Tried cargo (PATH including ~/.cargo/bin) and Dockerized cargo.
+          Install Rust (cargo) locally, or install Docker, or set generate_crds=false and provide basilica-crds.yaml at the repository root.
+      when: generate_crds | bool and (crdgen_cargo.rc | default(1)) != 0 and (crdgen_docker.rc | default(1)) != 0
 
     - name: Copy CRDs to server
       ansible.builtin.copy:
@@ -70,15 +119,15 @@
     - name: Update operator image in deployment manifest (fallback when not templating)
       ansible.builtin.replace:
         path: /opt/basilica/config/deploy/operator-deployment.yaml
-        regexp: '^(\s*)image:\s.*$'
-        replace: "\1image: {{ operator_image }}"
+        regexp: '^(\\s*)image:\s.*$'
+        replace: '\\1image: {{ operator_image }}'
       when: not use_templates | bool
 
     - name: Update API image in deployment manifest (fallback when not templating)
       ansible.builtin.replace:
         path: /opt/basilica/config/deploy/api-deployment.yaml
-        regexp: '^(\s*)image:\s.*$'
-        replace: "\1image: {{ api_image }}"
+        regexp: '^(\\s*)image:\s.*$'
+        replace: '\\1image: {{ api_image }}'
       when: not use_templates | bool
 
     - name: Ensure API database URL is set (fallback when not templating)
@@ -231,4 +280,3 @@
       args:
         executable: /bin/bash
       when: install_monitoring_stack | bool
-

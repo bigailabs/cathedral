@@ -1,16 +1,19 @@
 - hosts: k3s_server
   gather_facts: true
   become: true
+  vars_files:
+    - ../group_vars/all.yml
   roles:
     - role: k3s_server
 
 - hosts: k3s_agents
   gather_facts: false
   become: true
+  vars_files:
+    - ../group_vars/all.yml
   vars:
     # Use the first server in inventory as the API endpoint
     k3s_server_address: "{{ hostvars[groups['k3s_server'][0]]['ansible_host'] | default(hostvars[groups['k3s_server'][0]]['inventory_hostname']) }}"
     k3s_server_token: "{{ hostvars[groups['k3s_server'][0]]['k3s_server_token'] }}"
   roles:
     - role: k3s_agent
-

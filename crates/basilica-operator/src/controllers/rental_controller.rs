@@ -1157,7 +1157,7 @@ mod tests {
         GpuRentalSpec {
             container: RentalContainer {
                 image: "img".into(),
-                env: vec![("K".into(), "V".into())],
+                env: vec![crate::crd::gpu_rental::EnvVar { name: "K".into(), value: "V".into() }],
                 command: vec!["bash".into()],
                 ports: vec![RentalPort {
                     container_port: 8080,

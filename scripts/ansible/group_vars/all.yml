@@ -12,6 +12,9 @@ k3s_server_exec_args: >-
 k3s_agent_exec_args: >-
   --node-label basilica.io/workloads-only=true
 
+# Install Rust toolchain on the K3s server host (for generating CRDs or building tools)
+install_rust: true
+
 # E2E readiness
 tenant_namespace: u-test
 
@@ -82,4 +85,3 @@ envoy_admin_forward:
   local_port: 9901
   remote_port: 9901
   bind_address: 127.0.0.1
-

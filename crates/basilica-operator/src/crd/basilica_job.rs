@@ -18,7 +18,7 @@ pub struct BasilicaJobSpec {
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
-    pub env: Vec<(String, String)>,
+    pub env: Vec<EnvVar>,
     pub resources: Resources,
     #[serde(default)]
     pub storage: Option<StorageSpec>,
@@ -28,6 +28,13 @@ pub struct BasilicaJobSpec {
     pub ttl_seconds: u32,
     #[serde(default)]
     pub priority: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
