@@ -175,7 +175,6 @@ impl NodeManager {
 
         // Normalize the key with our identifier
         let normalized_key = Self::normalize_ssh_key(ssh_public_key, validator_hotkey);
-        let key_core = Self::extract_key_core(ssh_public_key);
 
         // Get all enabled nodes
         let nodes = self.list_nodes().await?;
@@ -183,10 +182,10 @@ impl NodeManager {
         // Get the miner's SSH private key path from config
         let private_key_path = self.get_ssh_key_path();
 
-        // Deploy the SSH key to each node
+        // Deploy the SSH key to each node, ensuring exclusive access
         for registered_node in &nodes {
             info!(
-                "Deploying SSH key for validator {} to node {}",
+                "Setting exclusive SSH access for validator {} on node {}",
                 validator_hotkey, registered_node.node_id
             );
 
@@ -195,76 +194,14 @@ impl NodeManager {
                 .config
                 .to_ssh_connection_details(private_key_path.clone());
 
-            // Check if this exact key already exists
-            let check_command =
-                format!("grep -qF '{}' ~/.ssh/authorized_keys 2>/dev/null", key_core);
-
-            match self
-                .ssh_client
-                .execute_command(&connection_details, &check_command, false)
-                .await
-            {
-                Ok(_) => {
-                    // Key already exists, nothing to do
-                    debug!(
-                        "SSH key already exists for validator {} on node {}",
-                        validator_hotkey, registered_node.node_id
-                    );
-                    continue;
-                }
-                Err(_) => {
-                    // Key doesn't exist, need to add it
-
-                    // First, remove any old keys for this validator
-                    let remove_old_command = format!(
-                        "grep -v 'validator-{}' ~/.ssh/authorized_keys 2>/dev/null > ~/.ssh/authorized_keys.tmp || touch ~/.ssh/authorized_keys.tmp && \
-                         mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys",
-                        validator_hotkey
-                    );
-
-                    if let Err(e) = self
-                        .ssh_client
-                        .execute_command(&connection_details, &remove_old_command, false)
-                        .await
-                    {
-                        warn!(
-                            "Failed to remove old keys for validator {} on node {}: {}",
-                            validator_hotkey, registered_node.node_id, e
-                        );
-                    }
-
-                    // Add the new key using printf for portability across all shells
-                    let add_key_command = format!(
-                        "mkdir -p ~/.ssh && \
-                         printf '%s\\n' '{}' >> ~/.ssh/authorized_keys",
-                        normalized_key
-                    );
-
-                    match self
-                        .ssh_client
-                        .execute_command(&connection_details, &add_key_command, false)
-                        .await
-                    {
-                        Ok(_) => {
-                            debug!(
-                                "Successfully deployed SSH key for validator {} to node {}",
-                                validator_hotkey, registered_node.node_id
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to add SSH key to node {}: {}",
-                                registered_node.node_id, e
-                            );
-                            return Err(anyhow::anyhow!(
-                                "Failed to add SSH key to node {}: {}",
-                                registered_node.node_id,
-                                e
-                            ));
-                        }
-                    }
-                }
-            }
+            // Set exclusive validator key (removes all other validators, adds current one)
+            self.set_exclusive_validator_key_on_node(
+                &connection_details,
+                &registered_node.node_id,
+                validator_hotkey,
+                &normalized_key,
+            )
+            .await?;
         }
 
         // Store in memory for tracking
@@ -290,11 +227,11 @@ impl NodeManager {
         // Get the miner's SSH private key path from config
         let private_key_path = self.get_ssh_key_path();
 
-        // Remove the SSH key from each node
+        // Remove all validator keys from each node
         for registered_node in &nodes {
             info!(
-                "Removing SSH key for validator {} from node {}",
-                validator_hotkey, registered_node.node_id
+                "Removing all validator keys from node {} (revoking validator {})",
+                registered_node.node_id, validator_hotkey
             );
 
             // Build SSH connection details
@@ -302,29 +239,15 @@ impl NodeManager {
                 .config
                 .to_ssh_connection_details(private_key_path.clone());
 
-            // Remove lines containing the validator identifier from authorized_keys
-            let ssh_command = format!(
-                "grep -v 'validator-{}' ~/.ssh/authorized_keys > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys || true",
-                validator_hotkey
-            );
-
-            match self
-                .ssh_client
-                .execute_command(&connection_details, &ssh_command, false)
+            // Remove all validator keys from the node
+            if let Err(e) = self
+                .remove_all_validator_keys_on_node(&connection_details, &registered_node.node_id)
                 .await
             {
-                Ok(_) => {
-                    debug!(
-                        "Successfully removed SSH key for validator {} from node {}",
-                        validator_hotkey, registered_node.node_id
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to remove SSH key from node {}: {}",
-                        registered_node.node_id, e
-                    );
-                }
+                warn!(
+                    "Failed to remove validator keys from node {}: {}",
+                    registered_node.node_id, e
+                );
             }
         }
 
@@ -427,6 +350,71 @@ impl NodeManager {
         } else {
             PathBuf::from("/root/.ssh/id_rsa")
         }
+    }
+
+    /// Remove all validator keys from a node's authorized_keys file
+    async fn remove_all_validator_keys_on_node(
+        &self,
+        connection_details: &SshConnectionDetails,
+        node_id: &str,
+    ) -> Result<()> {
+        debug!("Removing all validator keys from node {}", node_id);
+
+        let ssh_command = "mkdir -p ~/.ssh && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || echo -n '') > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys";
+
+        self.ssh_client
+            .execute_command(connection_details, ssh_command, false)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to remove validator keys from node {}: {}",
+                    node_id,
+                    e
+                )
+            })?;
+
+        debug!(
+            "Successfully removed all validator keys from node {}",
+            node_id
+        );
+        Ok(())
+    }
+
+    /// Set exclusive validator key on a node (removes all other validators, adds current one)
+    async fn set_exclusive_validator_key_on_node(
+        &self,
+        connection_details: &SshConnectionDetails,
+        node_id: &str,
+        validator_hotkey: &str,
+        normalized_key: &str,
+    ) -> Result<()> {
+        debug!(
+            "Setting exclusive access for validator {} on node {}",
+            validator_hotkey, node_id
+        );
+
+        // Atomic operation: remove all validator keys and add the new one
+        let ssh_command = format!(
+            "mkdir -p ~/.ssh && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || echo -n '') > ~/.ssh/authorized_keys.tmp && printf '%s\\n' '{}' >> ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys",
+            normalized_key
+        );
+
+        self.ssh_client
+            .execute_command(connection_details, &ssh_command, false)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to set exclusive validator key on node {}: {}",
+                    node_id,
+                    e
+                )
+            })?;
+
+        info!(
+            "Successfully set exclusive access for validator {} on node {}",
+            validator_hotkey, node_id
+        );
+        Ok(())
     }
 }
 
