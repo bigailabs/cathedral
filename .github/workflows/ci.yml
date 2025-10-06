@@ -21,11 +21,12 @@ permissions:
 jobs:
   # Detect changes to determine which services need building
   changes:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     outputs:
       validator: ${{ steps.changes.outputs.validator }}
       miner: ${{ steps.changes.outputs.miner }}
       basilica-api: ${{ steps.changes.outputs.basilica-api }}
+      basilica-operator: ${{ steps.changes.outputs.basilica-operator }}
       billing: ${{ steps.changes.outputs.billing }}
       payments: ${{ steps.changes.outputs.payments }}
       basilica-cli: ${{ steps.changes.outputs.basilica-cli }}
@@ -58,6 +59,11 @@ jobs:
               - 'scripts/api/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+            basilica-operator:
+              - 'crates/basilica-operator/**'
+              - 'scripts/operator/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
             basilica-cli:
               - 'crates/basilica-cli/**'
               - 'crates/basilica-api/**'
@@ -86,15 +92,15 @@ jobs:
               - '.github/workflows/**'
 
   quick-checks:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -109,33 +115,27 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Generate test key
-        run: |
-          chmod +x scripts/gen-key.sh
-          ./scripts/gen-key.sh
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Quick check builds
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo check -p basilica-common -p basilica-protocol -p bittensor
       - name: Run clippy on core packages
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo clippy -p basilica-common -p basilica-protocol -p bittensor --all-targets -- -D warnings
 
   # Lint complex packages
   lint-complex:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: quick-checks
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -150,13 +150,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Generate test key
-        run: |
-          chmod +x scripts/gen-key.sh
-          ./scripts/gen-key.sh
       - name: Run clippy on complex packages
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           # Run clippy without vulkan feature to avoid shaderc-sys CMake requirement
           # Run clippy on miner
           cargo clippy -p basilica-miner --all-targets --all-features -- -D warnings
@@ -173,7 +168,7 @@ jobs:
 
   # Build and test validator
   build-validator:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.validator == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -185,9 +180,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Cache and install system dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -197,23 +192,16 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
-      - name: Generate test key
-        run: |
-          chmod +x scripts/gen-key.sh
-          ./scripts/gen-key.sh
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Check validator builds
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo check -p basilica-validator
       - name: Test validator crate (unit tests only)
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo nextest run -p basilica-validator --all-features
       - name: Test validator CLI functionality
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo build -p basilica-validator
           ./target/debug/basilica-validator --help
       - name: Clean up space before Docker build
@@ -223,12 +211,11 @@ jobs:
       - name: Test Docker build script
         run: |
           chmod +x scripts/validator/build.sh
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
-          BITTENSOR_NETWORK=finney VALIDATOR_PUBLIC_KEY=$VALIDATOR_PUBLIC_KEY ./scripts/validator/build.sh --no-extract
+          BITTENSOR_NETWORK=finney ./scripts/validator/build.sh --no-extract
 
   # Build and test miner
   build-miner:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.miner == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -240,9 +227,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -257,23 +244,23 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
           ./scripts/gen-key.sh
       - name: Check miner builds
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
+
           cargo check -p basilica-miner
       - name: Test miner crate (unit tests only)
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
+
           cargo nextest run -p basilica-miner --lib
       - name: Test miner CLI functionality
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
+
           cargo build -p basilica-miner
           ./target/debug/basilica-miner --help
       - name: Clean up space before Docker build
@@ -287,7 +274,7 @@ jobs:
 
   # Build and test basilica-api
   build-api:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.basilica-api == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -299,9 +286,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -316,23 +303,23 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
           ./scripts/gen-key.sh
       - name: Check basilica-api builds
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
+
           cargo check -p basilica-api
       - name: Test basilica-api crate (unit tests only)
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
+
           cargo nextest run -p basilica-api --all-features
       - name: Test basilica-api CLI functionality
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
+
           cargo build -p basilica-api
           ./target/debug/basilica-api --help
       - name: Clean up space before Docker build
@@ -344,11 +331,11 @@ jobs:
           chmod +x scripts/api/build.sh
           BITTENSOR_NETWORK=finney ./scripts/api/build.sh --no-extract
 
-  # Build and test basilica-cli
-  build-cli:
-    runs-on: ubuntu-latest
+  # Build and test basilica-operator
+  build-operator:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
-    if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
+    if: needs.changes.outputs.basilica-operator == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
       matrix:
         rust-version: [stable]
@@ -361,6 +348,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "shared-cache"
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+      - name: Check basilica-operator builds
+        run: |
+          cargo check -p basilica-operator
+      - name: Test basilica-operator crate (unit tests only)
+        run: |
+          cargo nextest run -p basilica-operator --lib
+      - name: Clean up space before Docker build
+        run: |
+          docker system prune -af
+          df -h
+      - name: Test Docker build script
+        run: |
+          chmod +x scripts/operator/build.sh
+          ./scripts/operator/build.sh --image-tag ci-test
+
+  # Build and test basilica-cli
+  build-cli:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
+    strategy:
+      matrix:
+        rust-version: [stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          components: rustfmt
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -388,7 +413,7 @@ jobs:
 
   # Build and test billing
   build-billing:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.billing == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -414,9 +439,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -431,8 +456,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Wait for Postgres (billing)
         run: |
           : "${BILLING_DB_PASSWORD:=billing_dev_password}"
@@ -493,7 +518,7 @@ jobs:
 
   # Build and test payments
   build-payments:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.payments == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -519,9 +544,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -536,8 +561,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Wait for Postgres (payments)
         run: |
           : "${PAYMENTS_DB_PASSWORD:=payments_dev_password}"
@@ -602,13 +627,14 @@ jobs:
 
   # Final status check
   ci-success:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs:
       - quick-checks
       - lint-complex
       - build-validator
       - build-miner
       - build-api
+      - build-operator
       - build-billing
       - build-payments
       - build-cli
@@ -621,6 +647,7 @@ jobs:
                 ("${{ needs.build-validator.result }}" == "success" || "${{ needs.build-validator.result }}" == "skipped") && \
                 ("${{ needs.build-miner.result }}" == "success" || "${{ needs.build-miner.result }}" == "skipped") && \
                 ("${{ needs.build-api.result }}" == "success" || "${{ needs.build-api.result }}" == "skipped") && \
+                ("${{ needs.build-operator.result }}" == "success" || "${{ needs.build-operator.result }}" == "skipped") && \
                 ("${{ needs.build-billing.result }}" == "success" || "${{ needs.build-billing.result }}" == "skipped") && \
                 ("${{ needs.build-payments.result }}" == "success" || "${{ needs.build-payments.result }}" == "skipped") && \
                 ("${{ needs.build-cli.result }}" == "success" || "${{ needs.build-cli.result }}" == "skipped") ]]; then
