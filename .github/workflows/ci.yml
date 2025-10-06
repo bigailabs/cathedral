@@ -21,7 +21,7 @@ permissions:
 jobs:
   # Detect changes to determine which services need building
   changes:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     outputs:
       validator: ${{ steps.changes.outputs.validator }}
       miner: ${{ steps.changes.outputs.miner }}
@@ -86,15 +86,15 @@ jobs:
               - '.github/workflows/**'
 
   quick-checks:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -117,25 +117,23 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Quick check builds
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo check -p basilica-common -p basilica-protocol -p bittensor
       - name: Run clippy on core packages
         run: |
-          export VALIDATOR_PUBLIC_KEY=$(cat public_key.hex)
           cargo clippy -p basilica-common -p basilica-protocol -p bittensor --all-targets -- -D warnings
 
   # Lint complex packages
   lint-complex:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2204
     needs: quick-checks
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -173,7 +171,7 @@ jobs:
 
   # Build and test validator
   build-validator:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.validator == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -185,9 +183,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Cache and install system dependencies
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
@@ -197,8 +195,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
@@ -228,7 +226,7 @@ jobs:
 
   # Build and test miner
   build-miner:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2204
     needs: changes
     if: needs.changes.outputs.miner == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -240,9 +238,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -257,8 +255,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
@@ -287,7 +285,7 @@ jobs:
 
   # Build and test basilica-api
   build-api:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2204
     needs: changes
     if: needs.changes.outputs.basilica-api == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -299,9 +297,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -316,8 +314,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
@@ -346,7 +344,7 @@ jobs:
 
   # Build and test basilica-cli
   build-cli:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2204
     needs: changes
     if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -358,9 +356,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -388,7 +386,7 @@ jobs:
 
   # Build and test billing
   build-billing:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.billing == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -414,9 +412,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -431,8 +429,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Wait for Postgres (billing)
         run: |
           : "${BILLING_DB_PASSWORD:=billing_dev_password}"
@@ -493,7 +491,7 @@ jobs:
 
   # Build and test payments
   build-payments:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.payments == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -519,9 +517,9 @@ jobs:
         with:
           toolchain: ${{ matrix.rust-version }}
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "shared-cache"
+      # - uses: Swatinem/rust-cache@v2
+      #   with:
+      #     shared-key: "shared-cache"
       - name: Install protoc
         uses: arduino/setup-protoc@v3
         with:
@@ -536,8 +534,8 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Set up Docker
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Wait for Postgres (payments)
         run: |
           : "${PAYMENTS_DB_PASSWORD:=payments_dev_password}"
@@ -602,7 +600,7 @@ jobs:
 
   # Final status check
   ci-success:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs:
       - quick-checks
       - lint-complex
