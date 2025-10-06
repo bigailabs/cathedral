@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    types: [opened, synchronize, edited, labeled, reopened]
+    # types: [opened, synchronize, edited, labeled, reopened]
   workflow_dispatch:
     inputs:
       build_images:

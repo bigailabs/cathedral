@@ -88,11 +88,11 @@ fn compute_backoff_secs_for_rental(ns: &str, rental_name: &str) -> i64 {
     per_ns + h
 }
 
-fn build_env(env: &[(String, String)]) -> Vec<EnvVar> {
+fn build_env(env: &[crate::crd::gpu_rental::EnvVar]) -> Vec<EnvVar> {
     env.iter()
-        .map(|(k, v)| EnvVar {
-            name: k.clone(),
-            value: Some(v.clone()),
+        .map(|e| EnvVar {
+            name: e.name.clone(),
+            value: Some(e.value.clone()),
             ..Default::default()
         })
         .collect()
