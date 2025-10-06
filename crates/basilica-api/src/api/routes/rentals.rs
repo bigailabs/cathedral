@@ -20,13 +20,13 @@ use axum::{
 };
 use basilica_common::utils::validate_docker_image;
 use basilica_sdk::types::{
-    ApiListRentalsResponse, ApiRentalListItem, ExecutorSelection, ListRentalsQuery, LogStreamQuery,
+    ApiListRentalsResponse, ApiRentalListItem, ListRentalsQuery, LogStreamQuery, NodeSelection,
     RentalStatusWithSshResponse, StartRentalApiRequest, TerminateRentalRequest,
 };
 use basilica_validator::{
     api::{
-        rental_routes::StartRentalRequest,
-        types::{AvailableExecutor, ListAvailableExecutorsQuery, ListAvailableExecutorsResponse},
+        routes::rentals::StartRentalRequest,
+        types::{AvailableNode, ListAvailableNodesQuery, ListAvailableNodesResponse},
     },
     RentalResponse,
 };
@@ -80,20 +80,20 @@ pub async fn start_rental(
         });
     }
 
-    // Determine executor_id based on the selection strategy
-    let executor_id = match &request.executor_selection {
-        ExecutorSelection::ExecutorId { executor_id } => {
-            info!("Starting rental with specified executor: {}", executor_id);
-            executor_id.clone()
+    // Determine node_id based on the selection strategy
+    let node_id = match &request.node_selection {
+        NodeSelection::NodeId { node_id } => {
+            info!("Starting rental with specified node: {}", node_id);
+            node_id.clone()
         }
-        ExecutorSelection::ExactGpuConfiguration { gpu_requirements } => {
+        NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
             info!(
-                "Selecting executor based on GPU requirements (exact): {:?}",
+                "Selecting node based on GPU requirements (exact): {:?}",
                 gpu_requirements
             );
 
-            // Query available executors with filters based on requirements
-            let query = ListAvailableExecutorsQuery {
+            // Query available nodes with filters based on requirements
+            let query = ListAvailableNodesQuery {
                 available: Some(true),
                 min_gpu_memory: Some(gpu_requirements.min_memory_gb),
                 gpu_type: gpu_requirements.gpu_type.clone(),
@@ -101,41 +101,40 @@ pub async fn start_rental(
                 location: None,
             };
 
-            let executors_response = state
+            let nodes_response = state
                 .validator_client
-                .list_available_executors(Some(query))
+                .list_available_nodes(Some(query))
                 .await
                 .map_err(|e| crate::error::ApiError::Internal {
-                    message: format!("Failed to query available executors: {}", e),
+                    message: format!("Failed to query available nodes: {}", e),
                 })?;
 
             // Filter for exact GPU count
             let exact_count = gpu_requirements.gpu_count as usize;
-            let executors: Vec<_> = executors_response
-                .available_executors
+            let nodes: Vec<_> = nodes_response
+                .available_nodes
                 .into_iter()
-                .filter(|exec| exec.executor.gpu_specs.len() == exact_count)
+                .filter(|exec| exec.node.gpu_specs.len() == exact_count)
                 .collect();
 
-            if executors.is_empty() {
-                error!("No executors with exactly {} GPU(s) available", exact_count);
+            if nodes.is_empty() {
+                error!("No nodes with exactly {} GPU(s) available", exact_count);
                 return Err(crate::error::ApiError::NotFound {
                     message: format!(
-                        "No executors with exactly {} GPU(s) matching requirements",
+                        "No nodes with exactly {} GPU(s) matching requirements",
                         exact_count
                     ),
                 });
             }
 
-            // Randomly select an executor from the filtered list
-            let selected_id = select_best_executor(executors).ok_or_else(|| {
-                crate::error::ApiError::Internal {
-                    message: "Failed to select executor".into(),
-                }
-            })?;
+            // Randomly select an node from the filtered list
+            let selected_id =
+                select_best_node(nodes).ok_or_else(|| crate::error::ApiError::Internal {
+                    message: "Failed to select node".into(),
+                })?;
 
             info!(
-                "Selected executor {} with exactly {} GPU(s)",
+                "Selected node {} with exactly {} GPU(s)",
                 selected_id, exact_count
             );
             selected_id
@@ -144,7 +143,7 @@ pub async fn start_rental(
 
     // Convert to validator's StartRentalRequest format
     let validator_request = StartRentalRequest {
-        executor_id,
+        node_id,
         container_image: request.container_image,
         ssh_public_key: request.ssh_public_key,
         environment: request.environment,
@@ -346,7 +345,7 @@ pub async fn list_rentals_validator(
             message: format!("Failed to list rentals: {e}"),
         })?;
 
-    // Filter to only include user's rentals and use executor details from validator response
+    // Filter to only include user's rentals and use node details from validator response
     let mut api_rentals = Vec::new();
 
     for rental in all_rentals.rentals {
@@ -356,10 +355,10 @@ pub async fn list_rentals_validator(
             None => continue, // User doesn't own this rental
         };
 
-        // Create API rental item with executor details from validator response
+        // Create API rental item with node details from validator response
         api_rentals.push(ApiRentalListItem {
             rental_id: rental.rental_id,
-            executor_id: rental.executor_id,
+            node_id: rental.node_id,
             container_id: rental.container_id,
             state: rental.state,
             created_at: rental.created_at,
@@ -409,14 +408,14 @@ fn is_valid_ssh_public_key(key: &str) -> bool {
     true
 }
 
-/// List available executors for rentals
-pub async fn list_available_executors(
+/// List available nodes for rentals
+pub async fn list_available_nodes(
     State(state): State<AppState>,
-    Query(mut query): Query<ListAvailableExecutorsQuery>,
+    Query(mut query): Query<ListAvailableNodesQuery>,
     uri: Uri,
-) -> Result<Json<ListAvailableExecutorsResponse>> {
-    // Default to available=true for /executors endpoint
-    if query.available.is_none() && uri.path() == "/executors" {
+) -> Result<Json<ListAvailableNodesResponse>> {
+    // Default to available=true for /nodes endpoint
+    if query.available.is_none() && uri.path() == "/nodes" {
         query.available = Some(true);
     }
 
@@ -427,24 +426,24 @@ pub async fn list_available_executors(
         }
     }
 
-    info!("Listing executors with filters: {:?}", query);
+    info!("Listing nodes with filters: {:?}", query);
 
     let response = state
         .validator_client
-        .list_available_executors(Some(query))
+        .list_available_nodes(Some(query))
         .await?;
 
     Ok(Json(response))
 }
 
-/// Select a random executor from a list of available executors to distribute
-/// load and allow users to retry with different executors if issues occur
-fn select_best_executor(executors: Vec<AvailableExecutor>) -> Option<String> {
-    if executors.is_empty() {
+/// Select a random node from a list of available nodes to distribute
+/// load and allow users to retry with different nodes if issues occur
+fn select_best_node(nodes: Vec<AvailableNode>) -> Option<String> {
+    if nodes.is_empty() {
         return None;
     }
 
-    // Randomly select an executor from the available list
+    // Randomly select an node from the available list
     let mut rng = rand::thread_rng();
-    executors.choose(&mut rng).map(|e| e.executor.id.clone())
+    nodes.choose(&mut rng).map(|e| e.node.id.clone())
 }

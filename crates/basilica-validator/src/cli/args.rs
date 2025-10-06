@@ -1,5 +1,5 @@
 use crate::cli::{
-    handlers::{database, rental, service},
+    handlers::{rental, service},
     Command,
 };
 use clap::Parser;
@@ -49,8 +49,6 @@ impl Args {
             Command::VerifyLegacy { .. } => {
                 Err(anyhow::anyhow!("Legacy validation commands have been removed. Use the verification engine API instead."))
             }
-
-            Command::Database { action } => database::handle_database(action).await,
 
             Command::Rental { action, api_url } => {
                 // Load configuration

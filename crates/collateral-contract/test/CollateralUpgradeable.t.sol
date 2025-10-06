@@ -72,18 +72,18 @@ contract CollateralUpgradeableTest is Test {
     function testBasicDeposit() public {
         vm.deal(alice, 10 ether);
         bytes32 hotkey = bytes32(uint256(1));
-        bytes16 executorId = bytes16(uint128(1));
+        bytes16 nodeId = bytes16(uint128(1));
 
         // Test event emission
         vm.expectEmit(true, true, true, true, address(collateral));
-        emit Deposit(hotkey, executorId, alice, 5 ether);
+        emit Deposit(hotkey, nodeId, alice, 5 ether);
 
         vm.prank(alice);
-        collateral.deposit{value: 5 ether}(hotkey, executorId);
+        collateral.deposit{value: 5 ether}(hotkey, nodeId);
 
         // Verify state
-        assertEq(collateral.collaterals(hotkey, executorId), 5 ether);
-        assertEq(collateral.executorToMiner(hotkey, executorId), alice);
+        assertEq(collateral.collaterals(hotkey, nodeId), 5 ether);
+        assertEq(collateral.nodeToMiner(hotkey, nodeId), alice);
         assertEq(address(collateral).balance, 5 ether);
     }
 
@@ -139,14 +139,14 @@ contract CollateralUpgradeableTest is Test {
 
     event Deposit(
         bytes32 indexed hotkey,
-        bytes16 indexed executorId,
+        bytes16 indexed nodeId,
         address indexed miner,
         uint256 amount
     );
     event ReclaimProcessStarted(
         uint256 indexed reclaimRequestId,
         bytes32 indexed hotkey,
-        bytes16 indexed executorId,
+        bytes16 indexed nodeId,
         address miner,
         uint256 amount,
         uint64 expirationTime,
@@ -156,7 +156,7 @@ contract CollateralUpgradeableTest is Test {
     event Reclaimed(
         uint256 indexed reclaimRequestId,
         bytes32 indexed hotkey,
-        bytes16 indexed executorId,
+        bytes16 indexed nodeId,
         address miner,
         uint256 amount
     );
@@ -167,7 +167,7 @@ contract CollateralUpgradeableTest is Test {
     );
     event Slashed(
         bytes32 indexed hotkey,
-        bytes16 indexed executorId,
+        bytes16 indexed nodeId,
         address indexed miner,
         uint256 amount,
         string url,

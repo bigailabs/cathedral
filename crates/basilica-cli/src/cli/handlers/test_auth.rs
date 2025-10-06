@@ -398,9 +398,9 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
             .build()
             .map_err(|e| eyre!(format!("Failed to build API key client: {}", e)))?;
 
-        // Test with list_available_executors endpoint
-        println!("Testing API key with list_available_executors endpoint...");
-        match api_key_client.list_available_executors(None).await {
+        // Test with list_available_nodes endpoint
+        println!("Testing API key with list_available_nodes endpoint...");
+        match api_key_client.list_available_nodes(None).await {
             Ok(_) => {
                 println!("✅ API key authentication successful!");
             }

@@ -412,6 +412,7 @@ check_existing_installation() {
             # Check if versions match
             if [ "$current_version_clean" = "$latest_version_clean" ]; then
                 print_info "You already have the latest version!"
+                exit 0
             elif [ "$current_version_clean" != "unknown" ]; then
                 print_warning "Update available!"
             fi
@@ -430,12 +431,8 @@ check_existing_installation() {
             return 0
         fi
 
-        # Adjust prompt based on version comparison
-        if [ "$current_version_clean" = "$latest_version_clean" ] && [ "$latest_version_clean" != "unable to fetch" ]; then
-            printf "Do you want to reinstall? [y/N]: "
-        else
-            printf "Do you want to update? [y/N]: "
-        fi
+        # Prompt for update
+        printf "Do you want to update? [y/N]: "
 
         if read -r response < /dev/tty 2>/dev/null; then
             case "$response" in
