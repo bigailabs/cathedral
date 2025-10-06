@@ -208,6 +208,7 @@ pub async fn handle_up(
             &response.available_executors,
             use_detailed,
             options.detailed,
+            options.gpu_count,
         )?
     };
 

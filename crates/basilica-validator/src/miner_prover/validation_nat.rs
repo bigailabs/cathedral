@@ -391,6 +391,7 @@ impl NatCollector {
         {
             Ok(profile) => {
                 info!(
+                    miner_uid = miner_uid,
                     executor_id = executor_id,
                     is_accessible = profile.is_accessible,
                     "[NAT] NAT validation completed successfully"
@@ -399,6 +400,7 @@ impl NatCollector {
             }
             Err(e) => {
                 error!(
+                    miner_uid = miner_uid,
                     executor_id = executor_id,
                     error = %e,
                     "[NAT] NAT validation failed: {}",

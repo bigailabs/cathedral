@@ -44,6 +44,27 @@ executor_binary_path = "/opt/basilica/bin/executor-binary"
 execution_timeout_secs = 1200
 output_format = "json"
 
+[verification.docker_validation]
+docker_image = "nvidia/cuda:12.8.0-runtime-ubuntu22.04"
+pull_timeout_secs = 2400
+
+[verification.storage_validation]
+min_required_storage_bytes = 1099511627776 # 1TB in bytes
+
+[ssh_validation]
+enabled = true
+timeout = { secs = 60 }
+max_file_size = "10MB"
+allowed_commands = ["gpu-attestor", "nvidia-smi"]
+temp_dir = "/tmp/basilica-validation"
+
+[scoring]
+gpu_weight = 0.4
+cpu_weight = 0.2
+memory_weight = 0.2
+network_weight = 0.1
+reliability_weight = 0.1
+
 [metrics]
 enabled = true
 retention_period = { secs = 604800 }
@@ -57,7 +78,7 @@ path = "/metrics"
 [logging]
 level = "debug"
 format = "json"
-output = "./validator.log"
+output = "/opt/basilica/data/validator.log"
 max_file_size = 104857600
 max_files = 10
 

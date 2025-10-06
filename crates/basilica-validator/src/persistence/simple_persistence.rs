@@ -125,9 +125,6 @@ impl SimplePersistence {
                 executor_id TEXT NOT NULL,
                 grpc_address TEXT NOT NULL,
                 gpu_count INTEGER NOT NULL,
-                gpu_specs TEXT NOT NULL,
-                cpu_specs TEXT NOT NULL,
-                location TEXT,
                 status TEXT DEFAULT 'unknown',
                 last_health_check TEXT,
                 created_at TEXT NOT NULL,
@@ -304,6 +301,20 @@ impl SimplePersistence {
                 test_timestamp TEXT NOT NULL,
                 full_json TEXT NOT NULL,
                 error_message TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (miner_uid, executor_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS executor_storage_profile (
+                miner_uid INTEGER NOT NULL,
+                executor_id TEXT NOT NULL,
+                total_bytes INTEGER NOT NULL,
+                available_bytes INTEGER NOT NULL,
+                required_bytes INTEGER NOT NULL,
+                filesystem_details TEXT NOT NULL,
+                collection_timestamp TEXT NOT NULL,
+                full_json TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (miner_uid, executor_id)
@@ -520,6 +531,64 @@ impl SimplePersistence {
 
         self.create_collateral_scanned_blocks_table().await?;
         self.add_binary_validation_columns().await?;
+
+        // Migration to remove deprecated columns from miner_executors table
+        // Check if gpu_specs column exists
+        let gpu_specs_exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) > 0
+            FROM pragma_table_info('miner_executors')
+            WHERE name = 'gpu_specs'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false);
+
+        if gpu_specs_exists {
+            sqlx::query("ALTER TABLE miner_executors DROP COLUMN gpu_specs")
+                .execute(&self.pool)
+                .await?;
+            info!("Dropped gpu_specs column from miner_executors table");
+        }
+
+        // Check if cpu_specs column exists
+        let cpu_specs_exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) > 0
+            FROM pragma_table_info('miner_executors')
+            WHERE name = 'cpu_specs'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false);
+
+        if cpu_specs_exists {
+            sqlx::query("ALTER TABLE miner_executors DROP COLUMN cpu_specs")
+                .execute(&self.pool)
+                .await?;
+            info!("Dropped cpu_specs column from miner_executors table");
+        }
+
+        // Check if location column exists
+        let location_exists: bool = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) > 0
+            FROM pragma_table_info('miner_executors')
+            WHERE name = 'location'
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false);
+
+        if location_exists {
+            sqlx::query("ALTER TABLE miner_executors DROP COLUMN location")
+                .execute(&self.pool)
+                .await?;
+            info!("Dropped location column from miner_executors table");
+        }
 
         Ok(())
     }
@@ -739,7 +808,6 @@ impl SimplePersistence {
             "SELECT
                 me.executor_id,
                 me.miner_id,
-                me.location,
                 me.status,
                 me.gpu_count,
                 m.verification_score,
@@ -1321,20 +1389,16 @@ impl SimplePersistence {
 
         for executor in executors {
             let executor_id = Uuid::new_v4().to_string();
-            let gpu_specs_json = serde_json::to_string(&executor.gpu_specs)?;
-            let cpu_specs_json = serde_json::to_string(&executor.cpu_specs)?;
 
             sqlx::query(
-                "INSERT INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, gpu_specs, cpu_specs, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&executor_id)
             .bind(miner_id)
             .bind(&executor.executor_id)
             .bind(&executor.grpc_address)
             .bind(executor.gpu_count as i64)
-            .bind(&gpu_specs_json)
-            .bind(&cpu_specs_json)
             .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
@@ -1454,20 +1518,16 @@ impl SimplePersistence {
             // Insert new executors
             for executor in executors {
                 let executor_id = Uuid::new_v4().to_string();
-                let gpu_specs_json = serde_json::to_string(&executor.gpu_specs)?;
-                let cpu_specs_json = serde_json::to_string(&executor.cpu_specs)?;
 
                 sqlx::query(
-                    "INSERT INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, gpu_specs, cpu_specs, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO miner_executors (id, miner_id, executor_id, grpc_address, gpu_count, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&executor_id)
                 .bind(miner_id)
                 .bind(&executor.executor_id)
                 .bind(&executor.grpc_address)
                 .bind(executor.gpu_count as i64)
-                .bind(&gpu_specs_json)
-                .bind(&cpu_specs_json)
                 .bind(&now)
                 .bind(&now)
                 .execute(&mut *tx)
@@ -1593,9 +1653,7 @@ impl SimplePersistence {
         let rows = sqlx::query(
             "SELECT
                 me.executor_id,
-                me.gpu_specs,
-                me.cpu_specs,
-                me.location,
+                GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
                 ehp.ram_gb,
@@ -1603,9 +1661,13 @@ impl SimplePersistence {
                 enp.region,
                 enp.country
              FROM miner_executors me
+             LEFT JOIN gpu_uuid_assignments gua ON me.executor_id = gua.executor_id AND gua.miner_id = me.miner_id
              LEFT JOIN executor_hardware_profile ehp ON me.executor_id = ehp.executor_id AND me.miner_id = 'miner_' || ehp.miner_uid
              LEFT JOIN executor_network_profile enp ON me.executor_id = enp.executor_id AND me.miner_id = 'miner_' || enp.miner_uid
-             WHERE me.miner_id = ?",
+             WHERE me.miner_id = ?
+             GROUP BY me.executor_id,
+                      ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
+                      enp.city, enp.region, enp.country",
         )
         .bind(miner_id)
         .fetch_all(&self.pool)
@@ -1613,26 +1675,37 @@ impl SimplePersistence {
 
         let mut executors = Vec::new();
         for row in rows {
-            let gpu_specs_str: String = row.get("gpu_specs");
-            let cpu_specs_str: String = row.get("cpu_specs");
+            // Get GPU data from gpu_uuid_assignments join
+            let gpu_names: Option<String> = row.get("gpu_names");
 
-            let gpu_specs: Vec<crate::api::types::GpuSpec> = serde_json::from_str(&gpu_specs_str)?;
+            // Parse GPU specs from gpu_uuid_assignments data
+            let mut gpu_specs: Vec<crate::api::types::GpuSpec> = vec![];
 
-            // Try to get hardware profile data first, fall back to stored cpu_specs if not available
+            if let Some(names) = gpu_names {
+                if !names.is_empty() {
+                    // Parse GPU names from GROUP_CONCAT result
+                    for gpu_name in names.split(',') {
+                        // Extract memory from GPU name
+                        let memory_gb = extract_gpu_memory_gb(gpu_name);
+
+                        gpu_specs.push(crate::api::types::GpuSpec {
+                            name: gpu_name.to_string(),
+                            memory_gb,
+                            compute_capability: "8.0".to_string(),
+                        });
+                    }
+                }
+            }
+
+            // Get hardware profile data from executor_hardware_profile table
             let cpu_model: Option<String> = row.get("cpu_model");
             let cpu_cores: Option<i32> = row.get("cpu_cores");
             let ram_gb: Option<i32> = row.get("ram_gb");
 
-            let cpu_specs = if cpu_model.is_some() || cpu_cores.is_some() || ram_gb.is_some() {
-                // Use hardware profile data if available
-                crate::api::types::CpuSpec {
-                    cores: cpu_cores.unwrap_or(0) as u32,
-                    model: cpu_model.unwrap_or_else(|| "Unknown".to_string()),
-                    memory_gb: ram_gb.unwrap_or(0) as u32,
-                }
-            } else {
-                // Fall back to existing cpu_specs JSON
-                serde_json::from_str(&cpu_specs_str)?
+            let cpu_specs = crate::api::types::CpuSpec {
+                cores: cpu_cores.unwrap_or(0) as u32,
+                model: cpu_model.unwrap_or_else(|| "Unknown".to_string()),
+                memory_gb: ram_gb.unwrap_or(0) as u32,
             };
 
             // Get network profile data for location
@@ -1683,7 +1756,6 @@ impl SimplePersistence {
         let row = sqlx::query(
             "SELECT
                 me.executor_id,
-                me.location,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
@@ -1700,7 +1772,7 @@ impl SimplePersistence {
              LEFT JOIN executor_network_profile enp ON me.executor_id = enp.executor_id AND me.miner_id = 'miner_' || enp.miner_uid
              LEFT JOIN executor_speedtest_profile esp ON me.executor_id = esp.executor_id AND me.miner_id = 'miner_' || esp.miner_uid
              WHERE me.executor_id = ? AND me.miner_id = ?
-             GROUP BY me.executor_id, me.location,
+             GROUP BY me.executor_id,
                       ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
                       enp.city, enp.region, enp.country,
                       esp.download_mbps, esp.upload_mbps, esp.test_timestamp
@@ -1713,7 +1785,6 @@ impl SimplePersistence {
 
         if let Some(row) = row {
             let executor_id: String = row.get("executor_id");
-            let location: Option<String> = row.get("location");
 
             // Get GPU data from gpu_uuid_assignments join
             let gpu_names: Option<String> = row.get("gpu_names");
@@ -1769,7 +1840,7 @@ impl SimplePersistence {
                     };
                     Some(loc_profile.to_string())
                 } else {
-                    location
+                    None
                 };
 
             // Build network speed info if speed test data is available
@@ -2634,6 +2705,93 @@ impl SimplePersistence {
                 full_json,
                 error_message,
             }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Store executor storage validation profile information
+    pub async fn store_executor_storage_profile(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        profile: &crate::miner_prover::validation_storage::StorageProfile,
+    ) -> Result<(), anyhow::Error> {
+        let filesystem_details_json = serde_json::to_string(&profile.filesystem_details)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO executor_storage_profile
+            (miner_uid, executor_id, total_bytes, available_bytes,
+             required_bytes, filesystem_details, collection_timestamp, full_json, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(miner_uid, executor_id) DO UPDATE SET
+                total_bytes = excluded.total_bytes,
+                available_bytes = excluded.available_bytes,
+                required_bytes = excluded.required_bytes,
+                filesystem_details = excluded.filesystem_details,
+                collection_timestamp = excluded.collection_timestamp,
+                full_json = excluded.full_json,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(miner_uid as i32)
+        .bind(executor_id)
+        .bind(profile.total_bytes as i64)
+        .bind(profile.available_bytes as i64)
+        .bind(profile.required_bytes as i64)
+        .bind(&filesystem_details_json)
+        .bind(profile.collection_timestamp.to_rfc3339())
+        .bind(&profile.full_json)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get executor storage validation profile
+    pub async fn get_executor_storage_profile(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+    ) -> Result<Option<crate::miner_prover::validation_storage::StorageProfile>, anyhow::Error>
+    {
+        let row = sqlx::query(
+            r#"
+            SELECT total_bytes, available_bytes, required_bytes,
+                   filesystem_details, collection_timestamp, full_json
+            FROM executor_storage_profile
+            WHERE miner_uid = ? AND executor_id = ?
+            "#,
+        )
+        .bind(miner_uid as i32)
+        .bind(executor_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            let total_bytes: i64 = row.get("total_bytes");
+            let available_bytes: i64 = row.get("available_bytes");
+            let required_bytes: i64 = row.get("required_bytes");
+            let filesystem_details_json: String = row.get("filesystem_details");
+            let collection_timestamp_str: String = row.get("collection_timestamp");
+            let full_json: String = row.get("full_json");
+
+            let filesystem_details = serde_json::from_str(&filesystem_details_json)?;
+            let collection_timestamp =
+                chrono::DateTime::parse_from_rfc3339(&collection_timestamp_str)?
+                    .with_timezone(&chrono::Utc);
+
+            Ok(Some(
+                crate::miner_prover::validation_storage::StorageProfile {
+                    total_bytes: total_bytes as u64,
+                    available_bytes: available_bytes as u64,
+                    required_bytes: required_bytes as u64,
+                    filesystem_details,
+                    collection_timestamp,
+                    full_json,
+                },
+            ))
         } else {
             Ok(None)
         }

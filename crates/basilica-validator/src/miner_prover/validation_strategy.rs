@@ -14,6 +14,7 @@ use super::validation_hardware::HardwareCollector;
 use super::validation_nat::NatCollector;
 use super::validation_network::NetworkProfileCollector;
 use super::validation_speedtest::NetworkSpeedCollector;
+use super::validation_storage::StorageCollector;
 use crate::config::VerificationConfig;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::SimplePersistence;
@@ -56,6 +57,7 @@ pub struct ValidationExecutor {
     speedtest_collector: NetworkSpeedCollector,
     docker_collector: DockerCollector,
     nat_collector: NatCollector,
+    storage_collector: StorageCollector,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
 
@@ -347,7 +349,12 @@ impl ValidationExecutor {
             config.docker_validation.docker_image.clone(),
             config.docker_validation.pull_timeout_secs,
         );
-        let nat_collector = NatCollector::new(ssh_client.clone(), persistence);
+        let nat_collector = NatCollector::new(ssh_client.clone(), persistence.clone());
+        let storage_collector = StorageCollector::new(
+            ssh_client.clone(),
+            persistence,
+            config.storage_validation.min_required_storage_bytes,
+        );
 
         Self {
             ssh_client,
@@ -357,6 +364,7 @@ impl ValidationExecutor {
             speedtest_collector,
             docker_collector,
             nat_collector,
+            storage_collector,
             metrics,
         }
     }
@@ -380,6 +388,7 @@ impl ValidationExecutor {
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_lightweight_validation(
         &self,
+        miner_uid: u16,
         executor_info: &ExecutorInfoDetailed,
         ssh_details: &SshConnectionDetails,
         _session_info: &basilica_protocol::miner_discovery::InitiateSshSessionResponse,
@@ -391,12 +400,14 @@ impl ValidationExecutor {
         _config: &crate::config::VerificationConfig,
     ) -> Result<ExecutorVerificationResult> {
         info!(
+            miner_uid = miner_uid,
             executor_id = %executor_info.id,
             previous_score = previous_score,
             "[EVAL_FLOW] Executing lightweight validation"
         );
 
         let total_start = Instant::now();
+        let executor_id = executor_info.id.to_string();
 
         let connectivity_successful = match self
             .ssh_client
@@ -416,6 +427,7 @@ impl ValidationExecutor {
                 let gpus_detected = lines.iter().filter(|l| l.starts_with("GPU-")).count();
                 let gpu_present = gpus_detected > 0;
                 info!(
+                    miner_uid = miner_uid,
                     executor_id = %executor_info.id,
                     gpu_present = gpu_present,
                     gpus_detected = gpus_detected,
@@ -425,6 +437,7 @@ impl ValidationExecutor {
             }
             Err(e) => {
                 warn!(
+                    miner_uid = miner_uid,
                     executor_id = %executor_info.id,
                     error = %e,
                     "[EVAL_FLOW] Lightweight connectivity check failed"
@@ -433,9 +446,48 @@ impl ValidationExecutor {
             }
         };
 
+        let nat_validation_successful = if !connectivity_successful {
+            false
+        } else {
+            let nat_collector = self.nat_collector.clone();
+
+            match nat_collector
+                .collect_with_fallback(&executor_id, miner_uid, ssh_details)
+                .await
+            {
+                Some(result) if result.is_accessible => {
+                    info!(
+                        miner_uid = miner_uid,
+                        executor_id = %executor_info.id,
+                        "[EVAL_FLOW] NAT validation successful"
+                    );
+                    true
+                }
+                _ => {
+                    warn!(
+                        miner_uid = miner_uid,
+                        executor_id = %executor_info.id,
+                        "[EVAL_FLOW] NAT validation failed"
+                    );
+                    false
+                }
+            }
+        };
+
+        let validation_successful = connectivity_successful && nat_validation_successful;
+        if !validation_successful {
+            error!(
+                miner_uid = miner_uid,
+                executor_id = executor_id,
+                connectivity_successful = connectivity_successful,
+                nat_validation_successful = nat_validation_successful,
+                "[EVAL_FLOW] Critical validation failed during lightweight validation"
+            );
+        }
+
         let total_duration = total_start.elapsed();
 
-        let verification_score = if connectivity_successful {
+        let verification_score = if validation_successful {
             previous_score
         } else {
             0.0
@@ -446,16 +498,19 @@ impl ValidationExecutor {
             binary_upload_duration: Duration::from_secs(0),
             binary_execution_duration: Duration::from_secs(0),
             total_validation_duration: total_duration,
-            ssh_score: if connectivity_successful { 1.0 } else { 0.0 },
+            ssh_score: if validation_successful { 1.0 } else { 0.0 },
             binary_score: 0.0,
             combined_score: verification_score,
         };
 
         info!(
+            miner_uid = miner_uid,
             executor_id = %executor_info.id,
             score = verification_score,
             duration_ms = total_duration.as_millis(),
             node_available = connectivity_successful,
+            nat_validation_successful = nat_validation_successful,
+            validation_successful = validation_successful,
             "[EVAL_FLOW] Lightweight validation completed"
         );
 
@@ -466,9 +521,9 @@ impl ValidationExecutor {
                 .record_attestation_verification(
                     &executor_info.id.to_string(),
                     "connectivity_check",
-                    connectivity_successful,
-                    connectivity_successful, // signature_valid - connectivity successful
-                    false,                   // no hardware attestation in lightweight mode
+                    validation_successful,
+                    validation_successful,
+                    false,
                 )
                 .await;
         }
@@ -476,18 +531,16 @@ impl ValidationExecutor {
         Ok(ExecutorVerificationResult {
             executor_id: executor_info.id.clone(),
             grpc_endpoint: executor_info.grpc_endpoint.clone(),
-            verification_score: if connectivity_successful {
-                previous_score
-            } else {
-                0.0
-            },
-            ssh_connection_successful: connectivity_successful,
+            verification_score,
+            ssh_connection_successful: validation_successful,
             binary_validation_successful: false,
             executor_result,
-            error: if connectivity_successful {
+            error: if validation_successful {
                 None
-            } else {
+            } else if !connectivity_successful {
                 Some("Connectivity check failed".to_string())
+            } else {
+                Some("NAT validation failed".to_string())
             },
             execution_time: total_duration,
             validation_details: details,
@@ -558,6 +611,7 @@ impl ValidationExecutor {
             let speedtest_collector = self.speedtest_collector.clone();
             let docker_collector = self.docker_collector.clone();
             let nat_collector = self.nat_collector.clone();
+            let storage_collector = self.storage_collector.clone();
 
             let hardware_future =
                 hardware_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
@@ -569,22 +623,37 @@ impl ValidationExecutor {
                 docker_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
             let nat_future =
                 nat_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
+            let storage_future =
+                storage_collector.collect_with_fallback(&executor_id, miner_uid, ssh_details);
 
-            let (_hardware, _network, _speedtest, docker_result, nat_result) = tokio::join!(
+            let (_hardware, _network, _speedtest, docker_result, nat_result, storage_result) = tokio::join!(
                 hardware_future,
                 network_future,
                 speedtest_future,
                 docker_future,
-                nat_future
+                nat_future,
+                storage_future
             );
 
-            quality_validations_successful = docker_result.is_some() && nat_result.is_some();
+            // For now, I'm disabling storage validation from affecting the overall quality validation result
+            // as we may have valid executors with <1TB storage that we want to allow
+            // once we have a better understanding of the ecosystem we can re-enable this
+            // quality_validations_successful = docker_result.is_some() && nat_result.is_some() && storage_result.is_some();
+            let nat_successful = nat_result
+                .as_ref()
+                .map(|n| n.is_accessible)
+                .unwrap_or(false);
+            quality_validations_successful = docker_result.is_some() && nat_successful;
             if !quality_validations_successful {
                 error!(
                     miner_uid = miner_uid,
                     executor_id = %executor_info.id,
                     docker_successful = docker_result.is_some(),
                     nat_successful = nat_result.is_some(),
+                    storage_successful = storage_result.is_some(),
+                    storage_available_tb = storage_result.as_ref().map(|s|
+                        format!("{:.2}", s.available_bytes as f64 / 1024_f64.powi(4))
+                    ).unwrap_or_else(|| "N/A".to_string()),
                     "[EVAL_FLOW] Critical pre-validations failed"
                 );
             }

@@ -167,6 +167,12 @@ impl ValidatorPrometheusMetrics {
             "Total number of rentals created"
         );
 
+        // RPC failure metrics
+        describe_counter!(
+            "basilica_validator_rpc_critical_failures_total",
+            "Total RPC failures after all retry attempts exhausted"
+        );
+
         Ok(Self {
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
             persistence,
@@ -506,5 +512,19 @@ impl ValidatorPrometheusMetrics {
         }
 
         info!("Completed GPU metrics collection from database");
+    }
+
+    /// Record RPC critical failure
+    pub fn record_rpc_critical_failure(&self, method: &str, error_type: &str) {
+        counter!("basilica_validator_rpc_critical_failures_total",
+            "method" => method.to_string(),
+            "error_type" => error_type.to_string()
+        )
+        .increment(1);
+
+        error!(
+            "RPC critical failure recorded: method={}, error_type={}",
+            method, error_type
+        );
     }
 }

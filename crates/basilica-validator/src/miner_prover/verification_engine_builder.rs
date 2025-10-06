@@ -225,6 +225,7 @@ mod tests {
             executor_validation_interval: Duration::from_secs(12 * 3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
             enable_worker_queue: false,
+            storage_validation: crate::config::StorageValidationConfig::default(),
         };
 
         let automatic_verification_config = AutomaticVerificationConfig {
@@ -245,7 +246,7 @@ mod tests {
             key_cleanup_interval: Duration::from_secs(60),
             enable_automated_sessions: true,
             max_concurrent_sessions: 5,
-            session_rate_limit: 20,
+            session_rate_limit: 200,
             enable_audit_logging: true,
             audit_log_path: temp_dir.path().join("audit.log"),
             ssh_connection_timeout: Duration::from_secs(30),
@@ -381,6 +382,7 @@ mod tests {
             executor_validation_interval: Duration::from_secs(12 * 3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
             enable_worker_queue: false,
+            storage_validation: crate::config::StorageValidationConfig::default(),
         };
 
         let miner_client_config = MinerClientConfig::default();

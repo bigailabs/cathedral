@@ -596,6 +596,10 @@ impl VerificationEngine {
         miner_info: &super::types::MinerInfo,
     ) -> Result<()> {
         info!(
+            miner_uid = miner_uid,
+            executor_id = %executor_result.executor_id,
+            verification_score = executor_result.verification_score,
+            validation_type = %executor_result.validation_type,
             "Storing executor verification result to database for miner {}, executor {}: score={:.2}",
             miner_uid, executor_result.executor_id, executor_result.verification_score
         );
@@ -690,16 +694,25 @@ impl VerificationEngine {
         let status = match (success, &executor_result.validation_type) {
             (false, _) => "offline".to_string(),
             (true, ValidationType::Full) => "online".to_string(),
-            (true, ValidationType::Lightweight) => sqlx::query_scalar::<_, String>(
-                "SELECT status FROM miner_executors WHERE miner_id = ? AND executor_id = ?",
-            )
-            .bind(&miner_id)
-            .bind(&verification_log.executor_id)
-            .fetch_optional(self.persistence.pool())
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| "verified".to_string()),
+            (true, ValidationType::Lightweight) => {
+                match self
+                    .persistence
+                    .has_active_rental(&executor_result.executor_id.to_string(), &miner_id)
+                    .await
+                {
+                    Ok(true) => "online".to_string(),
+                    _ => sqlx::query_scalar::<_, String>(
+                        "SELECT status FROM miner_executors WHERE miner_id = ? AND executor_id = ?",
+                    )
+                    .bind(&miner_id)
+                    .bind(&verification_log.executor_id)
+                    .fetch_optional(self.persistence.pool())
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "verified".to_string()),
+                }
+            }
         };
 
         info!(
@@ -845,6 +858,10 @@ impl VerificationEngine {
         }
 
         info!(
+            miner_uid = miner_uid,
+            executor_id = %executor_result.executor_id,
+            verification_score = executor_result.verification_score,
+            validation_type = %executor_result.validation_type,
             "Executor verification result successfully stored to database for miner {}, executor {}: score={:.2}",
             miner_uid, executor_result.executor_id, executor_result.verification_score
         );
@@ -947,9 +964,9 @@ impl VerificationEngine {
             // Insert new relationship with required fields
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_executors (
-                    id, miner_id, executor_id, grpc_address, gpu_count, gpu_specs, cpu_specs,
-                    location, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    id, miner_id, executor_id, grpc_address, gpu_count,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             "#;
 
             let relationship_id = format!("{miner_id}_{executor_id}");
@@ -961,10 +978,7 @@ impl VerificationEngine {
                 .bind(executor_grpc_endpoint)
                 // -- these will be updated from verification details
                 .bind(0) // gpu_count
-                .bind("{}") // gpu_specs
-                .bind("{}") // cpu_specs
                 //---------
-                .bind("discovered") // location
                 .bind("online") // status - online until verification completes
                 .execute(self.persistence.pool())
                 .await
@@ -1401,11 +1415,32 @@ impl VerificationEngine {
             );
         } else {
             debug!(
+                security = true,
+                miner_uid = miner_uid,
+                executor_id = %executor_id,
+                validation_type = "lightweight",
                 "No GPU assignments found to update for {}/{} with {} reported UUIDs",
                 miner_id,
                 executor_id,
                 reported_gpu_uuids.len()
             );
+            if self
+                .persistence
+                .has_active_rental(executor_id, &miner_id)
+                .await
+                .unwrap_or(false)
+            {
+                self.store_gpu_uuid_assignments(miner_uid, executor_id, gpu_infos)
+                    .await?;
+            } else {
+                debug!(
+                    security = true,
+                    miner_uid = miner_uid,
+                    executor_id = %executor_id,
+                    validation_type = "lightweight",
+                    "Skipping GPU assignment creation in lightweight (no active rental)"
+                );
+            }
         }
 
         Ok(())
@@ -1756,9 +1791,6 @@ impl VerificationEngine {
             let executor_id: String = executor_row.get("executor_id");
             let grpc_address: String = executor_row.get("grpc_address");
             let gpu_count: i32 = executor_row.get("gpu_count");
-            let gpu_specs: String = executor_row.get("gpu_specs");
-            let cpu_specs: String = executor_row.get("cpu_specs");
-            let location: Option<String> = executor_row.try_get("location").ok();
             let status: String = executor_row
                 .try_get("status")
                 .unwrap_or_else(|_| "unknown".to_string());
@@ -1785,9 +1817,9 @@ impl VerificationEngine {
             let insert_executor = r#"
                 INSERT INTO miner_executors (
                     id, miner_id, executor_id, grpc_address, gpu_count,
-                    gpu_specs, cpu_specs, location, status, last_health_check,
+                    status, last_health_check,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'), datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, datetime('now'), datetime('now'))
             "#;
 
             sqlx::query(insert_executor)
@@ -1796,9 +1828,6 @@ impl VerificationEngine {
                 .bind(&executor_id)
                 .bind(&grpc_address)
                 .bind(gpu_count)
-                .bind(&gpu_specs)
-                .bind(&cpu_specs)
-                .bind(location)
                 .bind(&status)
                 .execute(&mut *tx)
                 .await
@@ -2537,6 +2566,7 @@ impl VerificationEngine {
                     .read()
                     .await
                     .execute_lightweight_validation(
+                        miner_uid,
                         executor_info,
                         &ssh_details,
                         &session_info,

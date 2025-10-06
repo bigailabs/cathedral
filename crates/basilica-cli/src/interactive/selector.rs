@@ -31,6 +31,7 @@ impl InteractiveSelector {
         executors: &[AvailableExecutor],
         use_detailed: bool,
         show_ids: bool,
+        gpu_count_filter: Option<u32>,
     ) -> Result<ExecutorSelection> {
         if executors.is_empty() {
             return Err(eyre!("No executors available").into());
@@ -38,10 +39,10 @@ impl InteractiveSelector {
 
         if use_detailed {
             // Detailed mode: Show all executors individually
-            self.select_executor_detailed(executors, show_ids)
+            self.select_executor_detailed(executors, show_ids, gpu_count_filter)
         } else {
             // Grouped mode: Group by GPU configuration
-            self.select_executor_grouped(executors)
+            self.select_executor_grouped(executors, gpu_count_filter)
         }
     }
 
@@ -50,7 +51,31 @@ impl InteractiveSelector {
         &self,
         executors: &[AvailableExecutor],
         show_ids: bool,
+        gpu_count_filter: Option<u32>,
     ) -> Result<ExecutorSelection> {
+        // Filter executors by exact GPU count if specified
+        let filtered_executors: Vec<&AvailableExecutor> =
+            if let Some(required_count) = gpu_count_filter {
+                executors
+                    .iter()
+                    .filter(|e| e.executor.gpu_specs.len() as u32 == required_count)
+                    .collect()
+            } else {
+                executors.iter().collect()
+            };
+
+        if filtered_executors.is_empty() {
+            if let Some(required_count) = gpu_count_filter {
+                return Err(eyre!(
+                    "No executors available with exactly {} GPU(s)",
+                    required_count
+                )
+                .into());
+            } else {
+                return Err(eyre!("No executors available").into());
+            }
+        }
+
         // Collect all display components to calculate proper column widths
         struct DisplayComponents {
             executor_id: String,
@@ -60,7 +85,7 @@ impl InteractiveSelector {
             use_case: String,
         }
 
-        let display_components: Vec<DisplayComponents> = executors
+        let display_components: Vec<DisplayComponents> = filtered_executors
             .iter()
             .map(|executor| {
                 // Extract executor ID (remove miner prefix if present)
@@ -206,7 +231,7 @@ impl InteractiveSelector {
         };
 
         // Get the selected executor ID
-        let executor_id = executors[selection].executor.id.clone();
+        let executor_id = filtered_executors[selection].executor.id.clone();
         let executor_id = match executor_id.split_once("__") {
             Some((_, second)) => second.to_string(),
             None => executor_id,
@@ -219,6 +244,7 @@ impl InteractiveSelector {
     fn select_executor_grouped(
         &self,
         executors: &[AvailableExecutor],
+        gpu_count_filter: Option<u32>,
     ) -> Result<ExecutorSelection> {
         // Group executors by GPU configuration
         let mut gpu_groups: HashMap<String, (String, u32, u32)> = HashMap::new();
@@ -251,11 +277,32 @@ impl InteractiveSelector {
         let mut gpu_configs: Vec<(String, String, u32, u32)> = gpu_groups
             .into_iter()
             .map(|(key, (gpu_type, count, memory))| (key, gpu_type, count, memory))
+            .filter(|(_, _, count, _)| {
+                // Filter by GPU count if specified
+                if let Some(required_count) = gpu_count_filter {
+                    *count == required_count
+                } else {
+                    true
+                }
+            })
             .collect();
         gpu_configs.sort_by(|a, b| {
             // Sort by GPU type, then count, then memory
             a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3))
         });
+
+        // Check if any configurations match the filter
+        if gpu_configs.is_empty() {
+            if let Some(required_count) = gpu_count_filter {
+                return Err(eyre!(
+                    "No GPU configurations available with exactly {} GPU(s)",
+                    required_count
+                )
+                .into());
+            } else {
+                return Err(eyre!("No GPU configurations available").into());
+            }
+        }
 
         // Create display items with GPU use case descriptions
         let selector_items: Vec<String> = gpu_configs

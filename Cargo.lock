@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "basilica-cli"
-version = "0.3.3"
+version = "0.3.5"
 dependencies = [
  "axum 0.7.9",
  "base64 0.21.7",
@@ -2524,6 +2524,7 @@ dependencies = [
  "async-trait",
  "basilica-common",
  "chrono",
+ "futures",
  "hex",
  "home",
  "parity-scale-codec",
@@ -2536,7 +2537,9 @@ dependencies = [
  "subxt-utils-fetchmetadata",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-test",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
@@ -15082,6 +15085,19 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "tokio-test"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2468baabc3311435b55dd935f702f42cd1b8abb7e754fb7dfb16bd36aa88f9f7"
+dependencies = [
+ "async-stream",
+ "bytes",
+ "futures-core",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
