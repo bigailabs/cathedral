@@ -230,11 +230,38 @@ ci-build-images TAG="k3_test":
         echo "GitHub CLI (gh) is not installed. Install from https://cli.github.com/" >&2
         exit 1
     fi
-    echo "Triggering GitHub Actions workflow: Build k3_test Images (tag={{TAG}})"
-    gh workflow run "Build k3_test Images" -f tag={{TAG}}
+    REF=$(git rev-parse --abbrev-ref HEAD)
+    echo "Triggering CI on ref $REF to build and push images with tag={{TAG}}"
+    if gh workflow run ci.yml -r "$REF" -f build_images=true -f image_tag={{TAG}}; then
+        echo "Dispatched workflow_dispatch successfully."
+    else
+        echo "workflow_dispatch not available on default branch; falling back to push-triggered build workflow..."
+        # Touch the trigger file and commit with TAG=<value> to pass tag to the workflow
+        mkdir -p .github/triggers
+        date +%s > .github/triggers/build-k3-test-images
+        git add .github/triggers/build-k3-test-images
+        git commit -m "trigger build-k3-test-images TAG={{TAG}}" --allow-empty
+        git push origin "$REF"
+        echo "Pushed trigger commit. The build-k3-test-images workflow will run on branch $REF."
+    fi
     echo
     echo "When the workflow finishes, deploy with Ansible:"
     echo "  cd scripts/ansible && ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \"-e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}}\" \"-e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}\""
+
+# Manually run CI on the current branch (or a given ref)
+ci-run REF="":
+    #!/usr/bin/env bash
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "GitHub CLI (gh) is not installed. Install from https://cli.github.com/" >&2
+        exit 1
+    fi
+    if [[ -z "{{REF}}" ]]; then
+        REF=$(git rev-parse --abbrev-ref HEAD)
+    else
+        REF={{REF}}
+    fi
+    echo "Triggering CI workflow on ref $REF"
+    gh workflow run ci.yml -r "$REF"
 
 # View logs for all services
 docker-logs:
