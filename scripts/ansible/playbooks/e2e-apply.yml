@@ -6,8 +6,8 @@
   vars:
     # Autodetect repo root on control host if not provided
     # playbook_dir = <repo>/scripts/ansible/playbooks
-    # We want <repo>, so go up two levels then dirname
-    _detected_repo_root: "{{ (playbook_dir + '/../..') | realpath | dirname }}"
+    # Use dirname three times to reach <repo>
+    _detected_repo_root: "{{ playbook_dir | realpath | dirname | dirname | dirname }}"
     repo_root_final: "{{ repo_root | default(_detected_repo_root, true) }}"
   tasks:
     - name: Ensure base directory on server
@@ -26,16 +26,15 @@
       when: generate_crds | bool
 
     # Try to generate CRDs with local cargo first (PATH includes ~/.cargo/bin)
-    - name: Generate CRDs locally via cargo
+    - name: Generate CRDs via cargo (capture stdout)
       delegate_to: localhost
       run_once: true
       ansible.builtin.shell: |
         set -euo pipefail
-        cd {{ repo_root_final | quote }}
         export PATH="$HOME/.cargo/bin:$PATH"
-        mkdir -p $(dirname {{ crds_output | quote }})
-        cargo --version
-        cargo run -p basilica-operator --bin crdgen > {{ crds_output | quote }}
+        cd {{ repo_root_final | quote }}
+        cargo --version >/dev/null
+        cargo run -p basilica-operator --bin crdgen
       args:
         executable: /bin/bash
       register: crdgen_cargo
@@ -43,7 +42,16 @@
       failed_when: false
       when: generate_crds | bool
 
-    - name: Generate CRDs locally via Docker (no local Rust)
+    - name: Write CRDs to file from cargo output
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.copy:
+        dest: "{{ repo_root_final }}/{{ crds_output }}"
+        content: "{{ crdgen_cargo.stdout }}"
+        mode: '0644'
+      when: generate_crds | bool and (crdgen_cargo.rc | default(1)) == 0
+
+    - name: Generate CRDs via Docker (capture stdout)
       delegate_to: localhost
       run_once: true
       ansible.builtin.shell: |
@@ -56,7 +64,7 @@
           -v "$(pwd)":/workspace \
           -w /workspace \
           rust:1.87-bookworm bash -lc \
-          'mkdir -p $(dirname {{ crds_output | quote }}) && /usr/local/cargo/bin/cargo --version && /usr/local/cargo/bin/cargo fetch && /usr/local/cargo/bin/cargo run -p basilica-operator --bin crdgen > {{ crds_output | quote }}'
+          '/usr/local/cargo/bin/cargo --version >/dev/null && /usr/local/cargo/bin/cargo fetch && /usr/local/cargo/bin/cargo run -p basilica-operator --bin crdgen'
       args:
         executable: /bin/bash
       register: crdgen_docker
@@ -64,14 +72,31 @@
       failed_when: false
       when: generate_crds | bool and (crdgen_cargo.rc | default(1)) != 0
 
-    - name: Fail if unable to generate CRDs (no cargo or docker)
+    - name: Write CRDs to file from docker output
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.copy:
+        dest: "{{ repo_root_final }}/{{ crds_output }}"
+        content: "{{ crdgen_docker.stdout }}"
+        mode: '0644'
+      when: generate_crds | bool and (crdgen_cargo.rc | default(1)) != 0 and (crdgen_docker.rc | default(1)) == 0
+
+    - name: Check CRDs file exists locally and is non-empty
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.stat:
+        path: "{{ repo_root_final }}/{{ crds_output }}"
+      register: crd_stat
+      when: generate_crds | bool
+
+    - name: Fail if CRDs file was not generated
       delegate_to: localhost
       run_once: true
       ansible.builtin.fail:
         msg: >-
-          Cannot generate CRDs automatically. Tried cargo (PATH including ~/.cargo/bin) and Dockerized cargo.
-          Install Rust (cargo) locally, or install Docker, or set generate_crds=false and provide basilica-crds.yaml at the repository root.
-      when: generate_crds | bool and (crdgen_cargo.rc | default(1)) != 0 and (crdgen_docker.rc | default(1)) != 0
+          CRD generation failed. cargo and Docker were attempted. Ensure Rust (cargo) or Docker is available on the control machine,
+          or set generate_crds=false and provide basilica-crds.yaml at the repository root.
+      when: generate_crds | bool and (not crd_stat.stat.exists or (crd_stat.stat.size | default(0)) == 0)
 
     - name: Copy CRDs to server
       ansible.builtin.copy:
@@ -175,6 +200,72 @@
         executable: /bin/bash
       changed_when: false
       when: run_smoke_probe | bool
+
+    # ----------------------------------------------------------------------------
+    # Generate a dev API key locally and insert into Postgres
+    # ----------------------------------------------------------------------------
+    - name: Generate API key locally (cargo)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        export PATH="$HOME/.cargo/bin:$PATH"
+        cd {{ repo_root_final | quote }}
+        cargo run -p basilica-api --bin gen-api-key -- --user {{ api_key_user | quote }} --name {{ api_key_name | quote }} {% for s in api_key_scopes %} --scopes {{ s | quote }} {% endfor %}
+      args:
+        executable: /bin/bash
+      register: genkey_out
+      changed_when: true
+      when: generate_api_key | bool
+
+    - name: Extract API key token and SQL from generator output
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.set_fact:
+        api_key_token: "{{ (genkey_out.stdout | regex_search('Token \(Authorization\): Bearer (.*)', '\\1')) | default('') }}"
+        api_key_sql: "{{ (genkey_out.stdout | regex_search('(?ms)(INSERT INTO api_keys.*?;)', '\\1')) | default('') }}"
+      when: generate_api_key | bool
+
+    - name: Show generated API token
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.debug:
+        msg: "Generated API token (use as Bearer): {{ api_key_token }}"
+      when: generate_api_key | bool and (api_key_token | length) > 0
+
+    - name: Get Postgres pod name
+      ansible.builtin.command: kubectl -n basilica-system get pods -l app=basilica-postgres -o jsonpath={.items[0].metadata.name}
+      register: pg_pod
+      changed_when: false
+      when: generate_api_key | bool and (api_key_sql | default('')) | length > 0
+
+    - name: Write API key SQL to server tmp
+      ansible.builtin.copy:
+        dest: /tmp/api_key.sql
+        content: "{{ api_key_sql }}"
+        mode: '0644'
+      when: generate_api_key | bool and (api_key_sql | default('')) | length > 0
+
+    - name: Copy SQL into Postgres pod
+      ansible.builtin.command: kubectl -n basilica-system cp /tmp/api_key.sql {{ pg_pod.stdout }}:/tmp/api_key.sql
+      changed_when: true
+      when: generate_api_key | bool and (api_key_sql | default('')) | length > 0
+
+    - name: Execute SQL inside Postgres pod
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system exec {{ pg_pod.stdout }} -- sh -lc 'psql {{ api_database_url | quote }} -v ON_ERROR_STOP=1 -f /tmp/api_key.sql'
+      args:
+        executable: /bin/bash
+      register: psql_run
+      changed_when: true
+      failed_when: false
+      when: generate_api_key | bool and (api_key_sql | default('')) | length > 0
+
+    - name: Report API key insertion result
+      ansible.builtin.debug:
+        msg: "Inserted API key into Postgres (rc={{ psql_run.rc }}). Token: {{ api_key_token }}"
+      when: generate_api_key | bool and (api_key_sql | default('')) | length > 0
 
     - name: Install long-lived API port-forward systemd service
       ansible.builtin.template:

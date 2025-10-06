@@ -299,6 +299,34 @@ docs-open:
     cargo doc --workspace --no-deps --document-private-items --open
 
 # =============================================================================
+# E2E APPLY HELPERS
+# =============================================================================
+
+# Apply the full stack on the remote K3s server with images by tag, and a test Postgres URL.
+# Defaults match config/deploy/postgres.yaml (user=basilica, db=basilica, password=devpassword).
+e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DB_HOST="basilica-postgres.basilica-system.svc.cluster.local"
+    DB_URL="postgres://{{DB_USER}}:{{DB_PASS}}@${DB_HOST}:5432/{{DB_NAME}}"
+    echo "Using DB_URL=${DB_URL}"
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
+      -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
+      -e api_database_url="${DB_URL}"
+    echo
+    echo "Look for 'Generated API token' in the output above."
+
+# Fresh reinstall helper: deletes namespaces + CRDs locally, then runs e2e-apply.
+e2e-reinstall TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica" TENANT_NS="u-test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Teardown local kube resources (namespaces + CRDs)..."
+    ./scripts/e2e/teardown.sh || true
+    just e2e-apply TAG={{TAG}} DB_USER={{DB_USER}} DB_PASS={{DB_PASS}} DB_NAME={{DB_NAME}}
+
+# =============================================================================
 # PYTHON SDK
 # =============================================================================
 

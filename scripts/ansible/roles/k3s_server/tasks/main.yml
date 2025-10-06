@@ -6,18 +6,52 @@
     state: present
   become: true
 
-- name: Install build dependencies for Rust (optional)
-  ansible.builtin.package:
+- name: Update apt cache (Debian/Ubuntu)
+  ansible.builtin.apt:
+    update_cache: yes
+  become: true
+  when: install_rust | default(false) | bool and ansible_os_family == 'Debian'
+
+- name: Install base build dependencies for Rust (Debian/Ubuntu)
+  ansible.builtin.apt:
     name:
       - build-essential
       - pkg-config
       - libssl-dev
-      - clang
-      - mold
       - protobuf-compiler
     state: present
   become: true
-  when: install_rust | default(false) | bool
+  when: install_rust | default(false) | bool and ansible_os_family == 'Debian'
+
+- name: Install optional clang (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: clang
+    state: present
+  become: true
+  ignore_errors: true
+  when: install_rust | default(false) | bool and ansible_os_family == 'Debian'
+
+- name: Install optional mold (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: mold
+    state: present
+  become: true
+  ignore_errors: true
+  when: install_rust | default(false) | bool and ansible_os_family == 'Debian'
+
+- name: Install base build dependencies for Rust (RHEL/CentOS/Alma/Rocky)
+  ansible.builtin.yum:
+    name:
+      - gcc
+      - gcc-c++
+      - pkgconfig
+      - openssl-devel
+      - protobuf-compiler
+      - clang
+    state: present
+  become: true
+  ignore_errors: true
+  when: install_rust | default(false) | bool and ansible_os_family == 'RedHat'
 
 - name: Check if cargo is already installed for the remote user
   become: true

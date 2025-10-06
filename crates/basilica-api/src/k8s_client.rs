@@ -548,7 +548,7 @@ impl ApiK8sClient for K8sClient {
         let env_objs: Vec<serde_json::Value> = spec
             .container_env
             .iter()
-            .map(|(k,v)| json!({"name": k, "value": v}))
+            .map(|(k, v)| json!({"name": k, "value": v}))
             .collect();
         let obj = json!({
             "apiVersion": "basilica.io/v1",

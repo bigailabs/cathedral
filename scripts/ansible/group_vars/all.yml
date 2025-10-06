@@ -46,6 +46,14 @@ use_templates: true
 # Run an ephemeral port-forward + /health probe for the API
 run_smoke_probe: true
 
+# Generate a dev API key and insert it into Postgres automatically
+generate_api_key: true
+api_key_user: test
+api_key_name: k3s
+api_key_scopes:
+  - rentals:*
+  - jobs:*
+
 # Long-lived port-forward systemd service (optional)
 port_forward:
   enabled: false
