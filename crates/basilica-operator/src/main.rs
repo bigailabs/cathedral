@@ -35,11 +35,22 @@ async fn main() {
     // Bind address from env or default
     let bind = std::env::var("OPERATOR_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9400".into());
     let listener = tokio::net::TcpListener::bind(&bind)
+    let bind = std::env::var("OPERATOR_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9400".into());
+    let listener = tokio::net::TcpListener::bind(&bind)
         .await
-        .expect("bind metrics addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve metrics");
+        .map_err(|e| {
+            tracing::error!("Failed to bind metrics server to {}: {}", bind, e);
+            e
+        })?;
+
+    info!("Metrics server listening on {}", bind);
+    let metrics_handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!("Metrics server failed: {}", e);
+        }
     });
+
+    // Optionally monitor the task or implement graceful shutdown
 
     info!("basilica-operator starting controllers");
     if let Err(e) = basilica_operator::runtime::run().await {
