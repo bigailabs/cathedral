@@ -84,7 +84,6 @@ pub struct BasilicaJobStatus {
 mod tests {
     use super::*;
     use kube::core::CustomResourceExt;
-    use serde_json::json;
 
     #[test]
     fn crd_metadata_is_correct() {

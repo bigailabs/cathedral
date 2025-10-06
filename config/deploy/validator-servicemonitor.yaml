@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: basilica-validator
+  namespace: basilica-validators
+  labels:
+    app: basilica-validator
+    # Adjust this label to match your Prometheus Operator's serviceMonitorSelector
+    # For kube-prometheus-stack, set to your release name, e.g., "prometheus"
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: basilica-validator
+  namespaceSelector:
+    matchNames:
+      - basilica-validators
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+

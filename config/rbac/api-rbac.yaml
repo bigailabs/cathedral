@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: basilica-api
+  namespace: basilica-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: basilica-api
+rules:
+  # Read/exec into pods for logs/exec endpoints
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+
+  # Basilica CRDs (create/list/get rentals in user namespaces)
+  - apiGroups: ["basilica.io"]
+    resources: ["gpurentals"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: ["basilica.io"]
+    resources: ["gpurentals/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: basilica-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: basilica-api
+subjects:
+  - kind: ServiceAccount
+    name: basilica-api
+    namespace: basilica-system
+

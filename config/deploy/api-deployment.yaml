@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: basilica-api
+  namespace: basilica-system
+  labels:
+    app: basilica-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: basilica-api
+  template:
+    metadata:
+      labels:
+        app: basilica-api
+    spec:
+      serviceAccountName: basilica-api
+      containers:
+        - name: api
+          # Replace with your published image reference
+          image: ghcr.io/REPLACE_ORG/basilica-api:REPLACE_TAG
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: metrics
+              containerPort: 9401
+          env:
+            - name: RUST_LOG
+              value: info
+            # Use the K8s-backed rentals API
+            - name: BASILICA_API_RENTAL_BACKEND
+              value: k8s
+            # Bittensor network configuration (adjust as needed)
+            - name: BASILICA_API_BITTENSOR__NETWORK
+              value: test
+            - name: BASILICA_API_BITTENSOR__NETUID
+              value: "387"
+            - name: BASILICA_API_BITTENSOR__CHAIN_ENDPOINT
+              value: wss://test.finney.opentensor.ai:443
+            # REQUIRED: Replace with your validator hotkey (SS58 address)
+            - name: BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY
+              value: REPLACE_VALIDATOR_HOTKEY
+            # Database connection (required)
+            - name: BASILICA_API_DATABASE__URL
+              value: postgres://basilica:devpassword@basilica-postgres.basilica-system.svc.cluster.local:5432/basilica
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: basilica-api
+  namespace: basilica-system
+  labels:
+    app: basilica-api
+spec:
+  selector:
+    app: basilica-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: metrics
+      port: 9401
+      targetPort: 9401

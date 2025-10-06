@@ -1,0 +1,170 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: basilica-validator-config
+  namespace: basilica-validators
+data:
+  validator.toml: |
+    [database]
+    url = "sqlite:/opt/basilica/data/validator.db?mode=rwc"
+    max_connections = 10
+    run_migrations = true
+
+    [server]
+    host = "0.0.0.0"
+    port = 8081
+    advertised_host = "127.0.0.1"
+    advertised_port = 8081
+    advertised_tls = false
+    max_connections = 100
+    request_timeout = { secs = 30 }
+
+    [bittensor]
+    wallet_name = "default"
+    hotkey_name = "default"
+    network = "test"  # "finney", "test", or "local"
+    netuid = 387
+    chain_endpoint = "wss://test.finney.opentensor.ai:443"
+    weight_interval_secs = 300
+    axon_port = 8081
+    external_ip = "127.0.0.1"
+
+    [verification]
+    max_concurrent_verifications = 1
+    max_concurrent_full_validations = 1
+    min_score_threshold = 0.0
+    verification_interval = { secs = 600 }
+    challenge_timeout = { secs = 120 }
+    retry_attempts = 1
+    retry_delay = { secs = 2 }
+    netuid = 387
+    use_dynamic_discovery = false
+    discovery_timeout = { secs = 30 }
+    fallback_to_static = true
+    cache_miner_info_ttl = { secs = 300 }
+    enable_worker_queue = false
+
+    [verification.binary_validation]
+    enabled = false
+    validator_binary_path = "/opt/basilica/bin/validator-binary"
+    executor_binary_path = "/opt/basilica/bin/executor-binary"
+    execution_timeout_secs = 1200
+    output_format = "json"
+
+    [metrics]
+    enabled = false
+
+    [logging]
+    level = "info"
+    format = "json"
+    output = "/opt/basilica/data/validator.log"
+    max_file_size = 10485760
+    max_files = 3
+
+    [api]
+    enabled = true
+    swagger_enabled = false
+    cors_enabled = false
+    rate_limit = 100
+
+    [storage]
+    data_dir = "/opt/basilica/data"
+
+    [ssh_session]
+    ssh_key_directory = "/opt/basilica/data/ssh_keys"
+    key_algorithm = "ed25519"
+    default_session_duration = 300
+    max_session_duration = 3600
+    rental_session_duration = 3600
+    key_cleanup_interval = { secs = 60, nanos = 0 }
+    enable_automated_sessions = true
+    max_concurrent_sessions = 3
+    session_rate_limit = 200
+    enable_audit_logging = false
+    audit_log_path = "/opt/basilica/data/ssh_audit.log"
+    ssh_connection_timeout = { secs = 30, nanos = 0 }
+    ssh_command_timeout = { secs = 60, nanos = 0 }
+    ssh_retry_attempts = 3
+    ssh_retry_delay = { secs = 2, nanos = 0 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: basilica-validator
+  namespace: basilica-validators
+  labels:
+    app: basilica-validator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: basilica-validator
+  template:
+    metadata:
+      labels:
+        app: basilica-validator
+    spec:
+      serviceAccountName: basilica-validator
+      containers:
+        - name: validator
+          # Replace with your published image reference
+          image: ghcr.io/REPLACE_ORG/basilica-validator:REPLACE_TAG
+          imagePullPolicy: IfNotPresent
+          command: ["basilica-validator"]
+          args: ["start", "--config", "/config/validator.toml", "--local_test"]
+          env:
+            - name: RUST_LOG
+              value: info
+            # K3s join gating (optional; set to true and configure URL/TOKEN to enable)
+            - name: BASILICA_ENABLE_K3S_JOIN
+              value: "false"
+            - name: BASILICA_K3S_URL
+              value: ""
+            - name: BASILICA_K3S_TOKEN
+              value: ""
+            # Optional exclusivity taint at join time
+            - name: BASILICA_TAINT_EXCLUSIVE
+              value: "false"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /opt/basilica/data
+          ports:
+            - name: http
+              containerPort: 8081
+            # Optional metrics exporter (enable in config to use)
+            - name: metrics
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "1Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: basilica-validator-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: basilica-validator
+  namespace: basilica-validators
+  labels:
+    app: basilica-validator
+spec:
+  selector:
+    app: basilica-validator
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+    # Scraped by ServiceMonitor when metrics are enabled
+    - name: metrics
+      port: 9090
+      targetPort: 9090

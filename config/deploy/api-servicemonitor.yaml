@@ -1,0 +1,20 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: basilica-api
+  namespace: basilica-system
+  labels:
+    app: basilica-api
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: basilica-api
+  namespaceSelector:
+    matchNames:
+      - basilica-system
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+
