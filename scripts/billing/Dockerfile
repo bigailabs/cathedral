@@ -12,15 +12,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy workspace files but only needed crates
+# Copy workspace files but only needed crates (plus operator to satisfy workspace)
 COPY Cargo.toml Cargo.lock ./
 COPY crates/basilica-billing ./crates/basilica-billing
 COPY crates/basilica-common ./crates/basilica-common
 COPY crates/basilica-protocol ./crates/basilica-protocol
 COPY crates/basilica-payments ./crates/basilica-payments
 COPY crates/bittensor ./crates/bittensor
+COPY crates/basilica-operator ./crates/basilica-operator
 
-# Remove problematic workspace members from Cargo.toml
+# Remove unrelated workspace members from Cargo.toml to avoid copying full repo
 RUN sed -i '/crates\/basilica-executor/d' Cargo.toml && \
     sed -i '/crates\/basilica-miner/d' Cargo.toml && \
     sed -i '/crates\/basilica-validator/d' Cargo.toml && \
