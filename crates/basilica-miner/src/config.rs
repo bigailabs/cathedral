@@ -129,28 +129,18 @@ pub struct NodeSshConfig {
 /// Validator assignment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorAssignmentConfig {
-    /// Enable validator discovery and assignment filtering
-    #[serde(default = "default_enable_validator_assignment")]
-    pub enabled: bool,
-
-    /// Assignment strategy to use ("highest_stake", "round_robin", etc.)
+    /// Assignment strategy to use ("highest_stake", "round_robin", "fixed_assignment")
     #[serde(default = "default_strategy")]
     pub strategy: String,
 
-    /// Minimum stake threshold in TAO for validator eligibility
-    #[serde(default = "default_min_stake_threshold")]
-    pub min_stake_threshold: f64,
-
-    /// Specific validator hotkey to assign nodes to (for highest_stake strategy)
+    /// Specific validator hotkey to assign nodes to (required for "fixed_assignment" strategy)
     pub validator_hotkey: Option<String>,
 }
 
 impl Default for ValidatorAssignmentConfig {
     fn default() -> Self {
         Self {
-            enabled: default_enable_validator_assignment(),
             strategy: default_strategy(),
-            min_stake_threshold: default_min_stake_threshold(),
             validator_hotkey: None,
         }
     }
@@ -188,16 +178,8 @@ impl Default for MinerConfig {
     }
 }
 
-fn default_enable_validator_assignment() -> bool {
-    true
-}
-
 fn default_strategy() -> String {
     "highest_stake".to_string()
-}
-
-fn default_min_stake_threshold() -> f64 {
-    6000.0 // 6000 TAO
 }
 
 impl Default for NodeSshConfig {
@@ -303,6 +285,18 @@ impl ConfigValidation for MinerConfig {
                     reason: "Node username cannot be empty".to_string(),
                 });
             }
+        }
+
+        // Validate validator assignment configuration
+        if self.validator_assignment.strategy == "fixed_assignment"
+            && self.validator_assignment.validator_hotkey.is_none()
+        {
+            return Err(ConfigurationError::InvalidValue {
+                key: "validator_assignment.validator_hotkey".to_string(),
+                value: "None".to_string(),
+                reason: "validator_hotkey is required when using 'fixed_assignment' strategy"
+                    .to_string(),
+            });
         }
 
         Ok(())

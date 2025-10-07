@@ -165,10 +165,9 @@ impl ValidatorService {
             None
         };
 
-        if let Some(miner_client) = miner_prover
+        if let Ok(miner_client) = miner_prover
             .get_verification_engine()
             .create_authenticated_client()
-            .ok()
         {
             api_handler = api_handler.with_miner_client(Arc::new(miner_client));
         }

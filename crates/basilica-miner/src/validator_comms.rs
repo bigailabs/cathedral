@@ -33,7 +33,7 @@ pub struct ValidatorCommsServer {
     config: ValidatorCommsConfig,
     security_config: SecurityConfig,
     node_manager: Arc<NodeManager>,
-    validator_discovery: Option<Arc<ValidatorDiscovery>>,
+    validator_discovery: Arc<ValidatorDiscovery>,
     authenticated_validators: Arc<RwLock<HashMap<String, String>>>,
     bittensor_service: Arc<bittensor::Service>,
 }
@@ -45,7 +45,7 @@ impl ValidatorCommsServer {
         config: ValidatorCommsConfig,
         security_config: SecurityConfig,
         node_manager: Arc<NodeManager>,
-        validator_discovery: Option<Arc<ValidatorDiscovery>>,
+        validator_discovery: Arc<ValidatorDiscovery>,
         bittensor_service: Arc<bittensor::Service>,
     ) -> Result<Self> {
         Ok(Self {
@@ -94,12 +94,10 @@ impl ValidatorCommsServer {
 
     /// Check if a validator is authorized
     async fn is_validator_authorized(&self, validator_hotkey: &str) -> bool {
-        if let Some(discovery) = &self.validator_discovery {
-            if let Ok(validators) = discovery.get_active_validators().await {
-                return validators.iter().any(|v| v.hotkey == validator_hotkey);
-            }
+        if let Ok(validators) = self.validator_discovery.get_active_validators().await {
+            return validators.iter().any(|v| v.hotkey == validator_hotkey);
         }
-        // If no discovery service or error, allow all validators
+        // If error, allow all validators
         true
     }
 }

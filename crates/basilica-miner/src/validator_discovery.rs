@@ -224,20 +224,42 @@ impl AssignmentStrategy for RoundRobinAssignment {
     }
 }
 
-/// Highest stake assignment strategy
-pub struct HighestStakeAssignment {
-    min_stake_threshold: u128,
-    validator_hotkey: Option<String>,
+/// Fixed assignment strategy - assigns all nodes to a specific validator
+pub struct FixedAssignment {
+    validator_hotkey: String,
 }
 
-impl HighestStakeAssignment {
-    pub fn new(min_stake_threshold: u128, validator_hotkey: Option<String>) -> Self {
-        Self {
-            min_stake_threshold,
-            validator_hotkey,
+impl FixedAssignment {
+    pub fn new(validator_hotkey: String) -> Self {
+        Self { validator_hotkey }
+    }
+}
+
+#[async_trait]
+impl AssignmentStrategy for FixedAssignment {
+    async fn select_validators(
+        &self,
+        validators: Vec<ValidatorInfo>,
+        nodes: Vec<RegisteredNode>,
+    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>> {
+        // Find the validator with the specified hotkey
+        if let Some(validator) = validators
+            .into_iter()
+            .find(|v| v.hotkey == self.validator_hotkey)
+        {
+            Ok(vec![(validator, nodes)])
+        } else {
+            warn!(
+                "Validator with hotkey {} not found in active validators",
+                self.validator_hotkey
+            );
+            Ok(vec![])
         }
     }
 }
+
+/// Highest stake assignment strategy - assigns all nodes to the validator with highest stake
+pub struct HighestStakeAssignment;
 
 #[async_trait]
 impl AssignmentStrategy for HighestStakeAssignment {
@@ -246,14 +268,6 @@ impl AssignmentStrategy for HighestStakeAssignment {
         mut validators: Vec<ValidatorInfo>,
         nodes: Vec<RegisteredNode>,
     ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>> {
-        // Filter by minimum stake
-        validators.retain(|v| v.stake >= self.min_stake_threshold);
-
-        // If specific validator is configured, filter to just that one
-        if let Some(ref hotkey) = self.validator_hotkey {
-            validators.retain(|v| &v.hotkey == hotkey);
-        }
-
         // Sort by stake (highest first)
         validators.sort_by(|a, b| b.stake.cmp(&a.stake));
 
