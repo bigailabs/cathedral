@@ -278,8 +278,8 @@ pub async fn stream_rental_logs(
 
     // Convert validator Event stream to axum SSE Events
     let stream = async_stream::stream! {
-        use futures::StreamExt;
-        futures::pin_mut!(validator_stream);
+        use futures_util::StreamExt;
+        futures_util::pin_mut!(validator_stream);
 
         while let Some(result) = validator_stream.next().await {
             match result {

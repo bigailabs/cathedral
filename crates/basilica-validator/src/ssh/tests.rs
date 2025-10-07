@@ -79,6 +79,8 @@ mod ssh_tests {
             max_transfer_size: 50 * 1024 * 1024, // 50MB
             retry_attempts: 5,
             cleanup_remote_files: false,
+            strict_host_key_checking: false,
+            known_hosts_file: None,
         };
 
         let client = ValidatorSshClient::with_config(ssh_config);

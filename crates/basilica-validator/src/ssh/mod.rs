@@ -148,8 +148,14 @@ impl ValidatorSshClient {
 
     /// Create a new validator SSH client with default configuration
     pub fn new() -> Self {
+        // Use permissive SSH config to avoid host key verification issues
+        let config = SshConnectionConfig {
+            strict_host_key_checking: false,
+            known_hosts_file: None,
+            ..Default::default()
+        };
         Self {
-            client: StandardSshClient::new(),
+            client: StandardSshClient::with_config(config),
             connection_pool: Arc::new(Mutex::new(HashMap::new())),
             session_stats: Arc::new(Mutex::new(SshSessionStats::default())),
             max_pool_size: 100,
