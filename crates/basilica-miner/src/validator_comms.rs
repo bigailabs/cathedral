@@ -35,7 +35,7 @@ pub struct ValidatorCommsServer {
     node_manager: Arc<NodeManager>,
     validator_discovery: Option<Arc<ValidatorDiscovery>>,
     authenticated_validators: Arc<RwLock<HashMap<String, String>>>,
-    bittensor_service: Option<Arc<bittensor::Service>>,
+    bittensor_service: Arc<bittensor::Service>,
 }
 
 impl ValidatorCommsServer {
@@ -46,7 +46,7 @@ impl ValidatorCommsServer {
         security_config: SecurityConfig,
         node_manager: Arc<NodeManager>,
         validator_discovery: Option<Arc<ValidatorDiscovery>>,
-        bittensor_service: Option<Arc<bittensor::Service>>,
+        bittensor_service: Arc<bittensor::Service>,
     ) -> Result<Self> {
         Ok(Self {
             config,
@@ -116,7 +116,7 @@ fn generate_session_token() -> String {
 #[derive(Clone)]
 pub struct MinerDiscoveryService {
     server: ValidatorCommsServer,
-    bittensor_service: Option<Arc<bittensor::Service>>,
+    bittensor_service: Arc<bittensor::Service>,
 }
 
 #[tonic::async_trait]
@@ -138,19 +138,17 @@ impl MinerDiscovery for MinerDiscoveryService {
         );
 
         // Verify target miner hotkey matches ours
-        if let Some(ref bittensor_service) = self.bittensor_service {
-            let our_hotkey = bittensor_service.get_account_id().to_string();
-            if auth_request.target_miner_hotkey != our_hotkey {
-                warn!(
-                    "Authentication request intended for different miner. Target: {}, Our hotkey: {}",
-                    auth_request.target_miner_hotkey, our_hotkey
-                );
-                return Err(Status::permission_denied(
-                    "Authentication request not intended for this miner",
-                ));
-            }
-            debug!("Target miner hotkey matches our hotkey");
+        let our_hotkey = self.bittensor_service.get_account_id().to_string();
+        if auth_request.target_miner_hotkey != our_hotkey {
+            warn!(
+                "Authentication request intended for different miner. Target: {}, Our hotkey: {}",
+                auth_request.target_miner_hotkey, our_hotkey
+            );
+            return Err(Status::permission_denied(
+                "Authentication request not intended for this miner",
+            ));
         }
+        debug!("Target miner hotkey matches our hotkey");
 
         // Verify the signature if enabled
         let validator_hotkey = Hotkey::new(auth_request.validator_hotkey.clone())
@@ -235,30 +233,28 @@ impl MinerDiscovery for MinerDiscoveryService {
         // Generate session token for validator
         let session_token = generate_session_token();
 
-        // Sign the response with miner's hotkey if bittensor service is available
-        let (miner_hotkey, miner_signature, response_nonce) =
-            if let Some(ref bittensor_service) = self.bittensor_service {
-                // Generate a fresh nonce for the response (security best practice)
-                let response_nonce = uuid::Uuid::new_v4().to_string();
-                let miner_hotkey = bittensor_service.get_account_id().to_string();
+        // Sign the response with miner's hotkey
+        // Generate a fresh nonce for the response (security best practice)
+        let response_nonce = uuid::Uuid::new_v4().to_string();
+        let miner_hotkey = self.bittensor_service.get_account_id().to_string();
 
-                // Create canonical response payload for signing
-                let canonical_response = format!(
-                    "MINER_AUTH_RESPONSE:{}:{}:{}",
-                    auth_request.validator_hotkey, response_nonce, session_token
-                );
+        // Create canonical response payload for signing
+        let canonical_response = format!(
+            "MINER_AUTH_RESPONSE:{}:{}:{}",
+            auth_request.validator_hotkey, response_nonce, session_token
+        );
 
-                // Sign with miner's hotkey
-                match bittensor_service.sign_data(canonical_response.as_bytes()) {
-                    Ok(sig) => (miner_hotkey, sig, response_nonce),
-                    Err(e) => {
-                        warn!("Failed to sign response: {}", e);
-                        (String::new(), String::new(), String::new())
-                    }
-                }
-            } else {
+        // Sign with miner's hotkey
+        let (miner_hotkey, miner_signature, response_nonce) = match self
+            .bittensor_service
+            .sign_data(canonical_response.as_bytes())
+        {
+            Ok(sig) => (miner_hotkey, sig, response_nonce),
+            Err(e) => {
+                warn!("Failed to sign response: {}", e);
                 (String::new(), String::new(), String::new())
-            };
+            }
+        };
 
         Ok(Response::new(MinerAuthResponse {
             authenticated: true,

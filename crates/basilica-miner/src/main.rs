@@ -122,10 +122,8 @@ impl MinerState {
         let chain_registration = ChainRegistration::new(config.bittensor.clone()).await?;
 
         // Initialize validator discovery based on configuration
-        let validator_discovery = if config.bittensor.skip_registration
-            || !config.validator_assignment.enabled
-        {
-            info!("Validator discovery disabled (local testing mode)");
+        let validator_discovery = if !config.validator_assignment.enabled {
+            info!("Validator discovery disabled via configuration");
             None
         } else {
             let strategy: Box<dyn validator_discovery::AssignmentStrategy> = match config
@@ -166,7 +164,7 @@ impl MinerState {
             config.security.clone(),
             node_manager.clone(),
             validator_discovery.clone(),
-            Some(chain_registration.get_bittensor_service()),
+            chain_registration.get_bittensor_service(),
         )
         .await?;
 
@@ -241,7 +239,7 @@ impl MinerState {
                 }
             }))
         } else {
-            info!("Validator discovery disabled (local testing mode)");
+            info!("Validator discovery disabled via configuration");
             None
         };
 

@@ -67,10 +67,6 @@ pub struct MinerBittensorConfig {
 
     /// Maximum number of UIDs to set weights for
     pub max_weight_uids: u16,
-
-    /// Skip chain registration check (for local testing only)
-    #[serde(default)]
-    pub skip_registration: bool,
 }
 
 /// Validator communications configuration
@@ -229,7 +225,6 @@ impl Default for MinerBittensorConfig {
             axon_port: 8091,
             external_ip: None,
             max_weight_uids: 256,
-            skip_registration: false,
         }
     }
 }

@@ -24,13 +24,12 @@ use tracing::{debug, error, info};
 /// Main validator service that manages all validator components and their lifecycle
 pub struct ValidatorService {
     config: ValidatorConfig,
-    local_test: bool,
 }
 
 impl ValidatorService {
     /// Create a new validator service instance
-    pub fn new(config: ValidatorConfig, local_test: bool) -> Self {
-        Self { config, local_test }
+    pub fn new(config: ValidatorConfig) -> Self {
+        Self { config }
     }
 
     /// Start the validator with all its components
@@ -78,89 +77,70 @@ impl ValidatorService {
             None
         };
 
-        if self.local_test {
-            info!("Running in local test mode - Bittensor services disabled");
+        let bittensor_service: Arc<BittensorService> =
+            Arc::new(BittensorService::new(self.config.bittensor.common.clone()).await?);
+
+        // Initialize chain registration and perform startup registration
+        let chain_registration =
+            ChainRegistration::new(&self.config, bittensor_service.clone()).await?;
+
+        // Perform one-time startup registration
+        chain_registration.register_startup().await?;
+        info!("Validator registered on chain with axon endpoint");
+
+        // Log the discovered UID
+        if let Some(uid) = chain_registration.get_discovered_uid().await {
+            info!("Validator registered with discovered UID: {uid}");
+        } else {
+            info!("No UID discovered - validator may not be registered on chain");
         }
 
-        let (bittensor_service, miner_prover_opt, weight_setter_opt) = if !self.local_test {
-            let bittensor_service: Arc<BittensorService> =
-                Arc::new(BittensorService::new(self.config.bittensor.common.clone()).await?);
+        let miner_prover = MinerProver::new(
+            self.config.verification.clone(),
+            self.config.automatic_verification.clone(),
+            self.config.ssh_session.clone(),
+            bittensor_service.clone(),
+            persistence_arc.clone(),
+            validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
+        )?;
 
-            // Initialize chain registration and perform startup registration
-            let chain_registration =
-                ChainRegistration::new(&self.config, bittensor_service.clone(), self.local_test)
-                    .await?;
+        // Initialize weight setter with block-based timing from emission config
+        let blocks_per_weight_set = self.config.emission.weight_set_interval_blocks;
 
-            // Perform one-time startup registration
-            chain_registration.register_startup().await?;
-            info!("Validator registered on chain with axon endpoint");
-
-            // Log the discovered UID
-            if let Some(uid) = chain_registration.get_discovered_uid().await {
-                info!("Validator registered with discovered UID: {uid}");
-            } else {
-                info!("No UID discovered - validator may not be registered on chain");
-            }
-
-            let miner_prover = Some(MinerProver::new(
-                self.config.verification.clone(),
-                self.config.automatic_verification.clone(),
-                self.config.ssh_session.clone(),
-                bittensor_service.clone(),
-                persistence_arc.clone(),
-                validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
-            )?);
-
-            // Initialize weight setter with block-based timing from emission config
-            let blocks_per_weight_set = self.config.emission.weight_set_interval_blocks;
-
-            // Create GPU scoring engine using the existing gpu_profile_repo
-            let gpu_scoring_engine = if let Some(ref metrics) = validator_metrics {
-                Arc::new(GpuScoringEngine::with_metrics(
-                    gpu_profile_repo.clone(),
-                    Arc::new(metrics.clone()),
-                    self.config.emission.clone(),
-                ))
-            } else {
-                Arc::new(GpuScoringEngine::new(
-                    gpu_profile_repo.clone(),
-                    self.config.emission.clone(),
-                ))
-            };
-
-            let weight_setter = WeightSetter::new(
-                self.config.bittensor.common.clone(),
-                bittensor_service.clone(),
-                storage.clone(),
-                persistence_arc.clone(),
-                self.config.verification.min_score_threshold,
-                blocks_per_weight_set,
-                gpu_scoring_engine,
-                self.config.emission.clone(),
+        // Create GPU scoring engine using the existing gpu_profile_repo
+        let gpu_scoring_engine = if let Some(ref metrics) = validator_metrics {
+            Arc::new(GpuScoringEngine::with_metrics(
                 gpu_profile_repo.clone(),
-                validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
-            )?;
-            let weight_setter_arc = Arc::new(weight_setter);
-
-            let weight_setter_opt = Some(weight_setter_arc);
-
-            (Some(bittensor_service), miner_prover, weight_setter_opt)
+                Arc::new(metrics.clone()),
+                self.config.emission.clone(),
+            ))
         } else {
-            (None, None, None)
+            Arc::new(GpuScoringEngine::new(
+                gpu_profile_repo.clone(),
+                self.config.emission.clone(),
+            ))
         };
+
+        let weight_setter = WeightSetter::new(
+            self.config.bittensor.common.clone(),
+            bittensor_service.clone(),
+            storage.clone(),
+            persistence_arc.clone(),
+            self.config.verification.min_score_threshold,
+            blocks_per_weight_set,
+            gpu_scoring_engine,
+            self.config.emission.clone(),
+            gpu_profile_repo.clone(),
+            validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
+        )?;
+        let weight_setter = Arc::new(weight_setter);
 
         // Create validator hotkey for API handler
-        let validator_hotkey = if let Some(ref bittensor_service) = bittensor_service {
-            // Get the account ID from bittensor service and convert to SS58 string
-            let account_id = bittensor_service.get_account_id();
-            let ss58_address = format!("{account_id}");
-            basilica_common::identity::Hotkey::new(ss58_address)
-                .map_err(|e| anyhow::anyhow!("Failed to create hotkey: {}", e))?
-        } else {
-            // In local test mode, create a dummy hotkey
-            basilica_common::identity::Hotkey::new("local-test-validator".to_string())
-                .map_err(|e| anyhow::anyhow!("Failed to create hotkey: {}", e))?
-        };
+        // Get the account ID from bittensor service and convert to SS58 string
+        let account_id = bittensor_service.get_account_id();
+        let ss58_address = format!("{account_id}");
+        let validator_hotkey = basilica_common::identity::Hotkey::new(ss58_address)
+            .map_err(|e| anyhow::anyhow!("Failed to create hotkey: {}", e))?;
 
         let mut api_handler = ApiHandler::new(
             self.config.api.clone(),
@@ -185,11 +165,11 @@ impl ValidatorService {
             None
         };
 
-        if let Some(miner_client) = miner_prover_opt.as_ref().and_then(|mp| {
-            mp.get_verification_engine()
-                .create_authenticated_client()
-                .ok()
-        }) {
+        if let Some(miner_client) = miner_prover
+            .get_verification_engine()
+            .create_authenticated_client()
+            .ok()
+        {
             api_handler = api_handler.with_miner_client(Arc::new(miner_client));
         }
 
@@ -202,35 +182,29 @@ impl ValidatorService {
 
         info!("All components initialized successfully");
 
-        // Start scoring update task if weight setter is available
-        let scoring_task_handle = weight_setter_opt.as_ref().map(|weight_setter| {
-            let weight_setter = weight_setter.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(300)); // Update scores every 5 minutes
-                loop {
-                    interval.tick().await;
-                    if let Err(e) = weight_setter.update_all_miner_scores().await {
-                        error!("Failed to update miner scores: {}", e);
-                    }
+        // Start scoring update task
+        let weight_setter_clone = weight_setter.clone();
+        let scoring_task_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300)); // Update scores every 5 minutes
+            loop {
+                interval.tick().await;
+                if let Err(e) = weight_setter_clone.update_all_miner_scores().await {
+                    error!("Failed to update miner scores: {}", e);
                 }
-            })
+            }
         });
 
-        let weight_setter_handle = weight_setter_opt.map(|weight_setter| {
-            let weight_setter = weight_setter.clone();
-            tokio::spawn(async move {
-                if let Err(e) = weight_setter.start().await {
-                    error!("Weight setter task failed: {}", e);
-                }
-            })
+        let weight_setter_clone = weight_setter.clone();
+        let weight_setter_handle = tokio::spawn(async move {
+            if let Err(e) = weight_setter_clone.start().await {
+                error!("Weight setter task failed: {}", e);
+            }
         });
 
-        let miner_prover_handle = miner_prover_opt.map(|miner_prover| {
-            tokio::spawn(async move {
-                if let Err(e) = miner_prover.start().await {
-                    error!("Miner prover task failed: {}", e);
-                }
-            })
+        let miner_prover_handle = tokio::spawn(async move {
+            if let Err(e) = miner_prover.start().await {
+                error!("Miner prover task failed: {}", e);
+            }
         });
 
         let api_handler_handle = tokio::spawn(async move {
@@ -269,15 +243,9 @@ impl ValidatorService {
         signal::ctrl_c().await?;
         info!("Shutdown signal received, stopping validator...");
 
-        if let Some(handle) = scoring_task_handle {
-            handle.abort();
-        }
-        if let Some(handle) = weight_setter_handle {
-            handle.abort();
-        }
-        if let Some(handle) = miner_prover_handle {
-            handle.abort();
-        }
+        scoring_task_handle.abort();
+        weight_setter_handle.abort();
+        miner_prover_handle.abort();
         if let Some(handle) = cleanup_task_handle {
             handle.abort();
         }

@@ -655,7 +655,6 @@ axon_port = 8080
 
 # Advanced settings (usually don't need to change)
 max_weight_uids = 256
-skip_registration = false            # Set to true for local testing ONLY
 ```
 
 ```bash
