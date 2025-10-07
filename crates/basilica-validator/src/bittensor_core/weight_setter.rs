@@ -575,13 +575,12 @@ impl WeightSetter {
                 let uid_list: Vec<u16> = normalized_weights.iter().map(|w| w.uid).collect();
 
                 Err(anyhow::anyhow!(
-                    "Weight submission failed ({}): {} - Context: {}",
+                    "Weight submission failed ({}): {} - Context: netuid={}, version_key={}, uids={:?}",
                     error_context,
                     e,
-                    format!(
-                        "netuid={}, version_key={}, uids={:?}",
-                        self.config.netuid, version_key, uid_list
-                    )
+                    self.config.netuid,
+                    version_key,
+                    uid_list
                 ))
             }
         }
