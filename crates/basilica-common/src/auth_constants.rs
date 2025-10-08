@@ -54,6 +54,8 @@ pub fn auth0_callback_ports() -> &'static [u16] {
     AUTH_CALLBACK_PORTS
 }
 
+const DEV_AUTH0_DOMAIN: &str = "dev-ndynjuhl74mrh162.us.auth0.com";
+
 /// Check if running in development environment
 ///
 /// Returns `true` when the current Auth0 domain matches the compile-time default domain,
@@ -72,5 +74,5 @@ pub fn auth0_callback_ports() -> &'static [u16] {
 /// }
 /// ```
 pub fn is_development_environment() -> bool {
-    auth0_domain() == AUTH0_DOMAIN
+    auth0_domain() == DEV_AUTH0_DOMAIN
 }
