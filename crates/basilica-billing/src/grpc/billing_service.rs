@@ -943,9 +943,16 @@ impl BillingService for BillingServiceImpl {
 
         if let Some(ref metrics) = self.metrics {
             if let Some(timer) = timer {
+                let status = if events_failed == 0 {
+                    "success"
+                } else if events_processed > 0 {
+                    "partial_failure"
+                } else {
+                    "failure"
+                };
                 metrics
                     .billing_metrics()
-                    .record_grpc_request(timer, "ingest_telemetry", "success")
+                    .record_grpc_request(timer, "ingest_telemetry", status)
                     .await;
             }
         }
