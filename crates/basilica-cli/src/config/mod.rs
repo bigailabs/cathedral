@@ -40,8 +40,7 @@ pub struct ApiConfig {
 impl Default for ApiConfig {
     fn default() -> Self {
         // Use localhost for development environment, production URL otherwise
-        let current_domain = basilica_common::auth0_domain();
-        let base_url = if current_domain == basilica_common::auth_constants::AUTH0_DOMAIN {
+        let base_url = if basilica_common::is_development_environment() {
             "http://localhost:8000".to_string()
         } else {
             "https://api.basilica.ai".to_string()

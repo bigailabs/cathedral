@@ -28,8 +28,7 @@ impl TokenStore {
         })?;
 
         // Detect environment based on Auth0 domain
-        let current_domain = basilica_common::auth0_domain();
-        let auth_file_name = if current_domain == basilica_common::auth_constants::AUTH0_DOMAIN {
+        let auth_file_name = if basilica_common::is_development_environment() {
             "auth.dev.json"
         } else {
             "auth.json"
