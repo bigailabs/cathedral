@@ -20,6 +20,13 @@ use tracing::{debug, info, warn};
 
 use crate::config::NodeSshConfig;
 
+/// Shell command template for securely rewriting authorized_keys
+/// Creates a secure temp file, filters out validator keys, and atomically replaces authorized_keys
+const SSH_REWRITE_AUTHORIZED_KEYS_BASE: &str = r#"umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && tmp="$(mktemp ~/.ssh/authorized_keys.XXXXXX)" && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || true) > "$tmp""#;
+
+/// Shell command suffix to atomically move temp file to authorized_keys
+const SSH_MOVE_TO_AUTHORIZED_KEYS: &str = r#"mv -f "$tmp" ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"#;
+
 /// Configuration for a single node
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -422,10 +429,10 @@ impl NodeManager {
     ) -> Result<()> {
         debug!("Removing all validator keys from node {}", node_id);
 
-        let ssh_command = "mkdir -p ~/.ssh && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || echo -n '') > ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys";
+        let ssh_command = format!("{} && {}", SSH_REWRITE_AUTHORIZED_KEYS_BASE, SSH_MOVE_TO_AUTHORIZED_KEYS);
 
         self.ssh_client
-            .execute_command(connection_details, ssh_command, false)
+            .execute_command(connection_details, &ssh_command, false)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -452,8 +459,13 @@ impl NodeManager {
     ) -> Result<()> {
         // Atomic operation: remove all validator keys and add the new one
         let ssh_command = format!(
-            "mkdir -p ~/.ssh && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || echo -n '') > ~/.ssh/authorized_keys.tmp && printf '%s\\n' '{}' >> ~/.ssh/authorized_keys.tmp && mv ~/.ssh/authorized_keys.tmp ~/.ssh/authorized_keys",
-            normalized_key
+            r#"{} && cat >> "$tmp" <<'EOF'
+{}
+EOF
+&& {}"#,
+            SSH_REWRITE_AUTHORIZED_KEYS_BASE,
+            normalized_key,
+            SSH_MOVE_TO_AUTHORIZED_KEYS
         );
 
         self.ssh_client
