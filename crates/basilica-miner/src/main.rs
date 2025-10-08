@@ -19,7 +19,6 @@ mod metrics;
 mod node_manager;
 mod persistence;
 mod services;
-mod ssh;
 mod validator_comms;
 mod validator_discovery;
 
@@ -27,7 +26,6 @@ use bittensor_core::ChainRegistration;
 use config::MinerConfig;
 use node_manager::NodeManager;
 use persistence::RegistrationDb;
-use ssh::ValidatorAccessService;
 use validator_comms::ValidatorCommsServer;
 
 use crate::cli::{Args, Commands};
@@ -38,11 +36,9 @@ pub struct MinerState {
     pub miner_uid: MinerUid,
     pub chain_registration: ChainRegistration,
     pub validator_comms: ValidatorCommsServer,
-    pub node_manager: Arc<NodeManager>,
     pub registration_db: RegistrationDb,
-    pub ssh_access_service: ValidatorAccessService,
     pub metrics: Option<metrics::MinerMetrics>,
-    pub validator_discovery: Option<std::sync::Arc<validator_discovery::ValidatorDiscovery>>,
+    pub validator_discovery: Arc<validator_discovery::ValidatorDiscovery>,
 }
 
 impl MinerState {
@@ -115,50 +111,38 @@ impl MinerState {
             info!("Successfully registered {} nodes", registered_nodes.len());
         }
 
-        // Initialize SSH services
-        let ssh_access_service = ValidatorAccessService::new(node_manager.clone())?;
-
         // Initialize Bittensor chain registration
         let chain_registration = ChainRegistration::new(config.bittensor.clone()).await?;
 
-        // Initialize validator discovery based on configuration
-        let validator_discovery = if config.bittensor.skip_registration
-            || !config.validator_assignment.enabled
+        // Initialize validator discovery
+        let strategy: Box<dyn validator_discovery::AssignmentStrategy> = match config
+            .validator_assignment
+            .strategy
+            .as_str()
         {
-            info!("Validator discovery disabled (local testing mode)");
-            None
-        } else {
-            let strategy: Box<dyn validator_discovery::AssignmentStrategy> = match config
-                .validator_assignment
-                .strategy
-                .as_str()
-            {
-                "round_robin" => Box::new(validator_discovery::RoundRobinAssignment),
-                "highest_stake" => {
-                    let min_stake_rao =
-                        (config.validator_assignment.min_stake_threshold * 1_000_000_000.0) as u128;
-                    let strategy = validator_discovery::HighestStakeAssignment::new(
-                        min_stake_rao,
-                        config.validator_assignment.validator_hotkey.clone(),
-                    );
-                    Box::new(strategy)
-                }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                                "Unknown assignment strategy '{}'. Valid strategies are: highest_stake, round_robin",
-                                config.validator_assignment.strategy
-                            ));
-                }
-            };
-
-            let discovery = validator_discovery::ValidatorDiscovery::new(
-                chain_registration.get_bittensor_service(),
-                node_manager.clone(),
-                strategy,
-                config.bittensor.common.netuid,
-            );
-            Some(std::sync::Arc::new(discovery))
+            "highest_stake" => Box::new(validator_discovery::HighestStakeAssignment),
+            "fixed_assignment" => {
+                let validator_hotkey = config
+                    .validator_assignment
+                    .validator_hotkey
+                    .clone()
+                    .expect("validator_hotkey is required for fixed_assignment strategy");
+                Box::new(validator_discovery::FixedAssignment::new(validator_hotkey))
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Unknown assignment strategy '{}'. Valid strategies are: highest_stake, fixed_assignment",
+                    config.validator_assignment.strategy
+                ));
+            }
         };
+
+        let validator_discovery = Arc::new(validator_discovery::ValidatorDiscovery::new(
+            chain_registration.get_bittensor_service(),
+            node_manager.clone(),
+            strategy,
+            config.bittensor.common.netuid,
+        ));
 
         // Initialize validator communications server
         let validator_comms = ValidatorCommsServer::new(
@@ -166,7 +150,7 @@ impl MinerState {
             config.security.clone(),
             node_manager.clone(),
             validator_discovery.clone(),
-            Some(chain_registration.get_bittensor_service()),
+            chain_registration.get_bittensor_service(),
         )
         .await?;
 
@@ -178,9 +162,7 @@ impl MinerState {
             miner_uid,
             chain_registration,
             validator_comms,
-            node_manager,
             registration_db,
-            ssh_access_service,
             metrics,
             validator_discovery,
         })
@@ -227,47 +209,31 @@ impl MinerState {
             })
         };
 
-        // Start validator discovery service if enabled
-        let discovery_handle = if let Some(ref discovery) = self.validator_discovery {
-            let discovery = discovery.clone();
-            let discovery_interval = tokio::time::Duration::from_secs(600); // 10 minutes
-            Some(tokio::spawn(async move {
-                info!("Starting validator discovery service");
-                loop {
-                    if let Err(e) = discovery.run_discovery().await {
-                        error!("Validator discovery error: {}", e);
-                    }
-                    tokio::time::sleep(discovery_interval).await;
+        // Start validator discovery service
+        let discovery = self.validator_discovery.clone();
+        let discovery_interval = tokio::time::Duration::from_secs(600); // 10 minutes
+        let discovery_handle = tokio::spawn(async move {
+            info!("Starting validator discovery service");
+            loop {
+                if let Err(e) = discovery.run_discovery().await {
+                    error!("Validator discovery error: {}", e);
                 }
-            }))
-        } else {
-            info!("Validator discovery disabled (local testing mode)");
-            None
-        };
+                tokio::time::sleep(discovery_interval).await;
+            }
+        });
 
         info!("All miner services started successfully");
 
         // Wait for shutdown signal
-        if let Some(discovery_handle) = discovery_handle {
-            tokio::select! {
-                _ = signal::ctrl_c() => {
-                    info!("Received shutdown signal, stopping miner...");
-                }
-                _ = validator_handle => {
-                    error!("Validator comms server stopped unexpectedly");
-                }
-                _ = discovery_handle => {
-                    error!("Validator discovery service stopped unexpectedly");
-                }
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal, stopping miner...");
             }
-        } else {
-            tokio::select! {
-                _ = signal::ctrl_c() => {
-                    info!("Received shutdown signal, stopping miner...");
-                }
-                _ = validator_handle => {
-                    error!("Validator comms server stopped unexpectedly");
-                }
+            _ = validator_handle => {
+                error!("Validator comms server stopped unexpectedly");
+            }
+            _ = discovery_handle => {
+                error!("Validator discovery service stopped unexpectedly");
             }
         }
 
