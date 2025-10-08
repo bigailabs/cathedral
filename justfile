@@ -302,6 +302,7 @@ e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basili
     echo "Using DB_URL=${DB_URL}"
     cd scripts/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e install_local_subtensor_k8s=true \
       -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
       -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
       -e api_database_url="${DB_URL}"
@@ -317,6 +318,321 @@ e2e-reinstall TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="ba
     ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml -e tenant_namespace={{TENANT_NS}} || true
     cd - >/dev/null
     just e2e-apply TAG={{TAG}} DB_USER={{DB_USER}} DB_PASS={{DB_PASS}} DB_NAME={{DB_NAME}}
+
+# =============================================================================
+# SUBTENSOR (LOCALNET) HELPERS
+# =============================================================================
+
+# Spin up Subtensor local devnet (Alice + Bob) in Kubernetes and run init script
+subtensor-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-up.yml
+
+# Tear down Subtensor local devnet (delete Alice/Bob/ConfigMap/Job)
+subtensor-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-down.yml || true
+
+# Show Subtensor resources and recent events
+subtensor-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-status.yml
+
+# Tail Subtensor init job logs
+subtensor-logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KUBECONFIG=../build/k3s.yaml
+    POD=$(kubectl -n basilica-system get pod -l job-name=subtensor-init -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -z "$POD" ]; then
+        echo "No subtensor-init pod found; have you run 'just subtensor-up' or e2e-apply with install_local_subtensor_k8s=true?" >&2
+        exit 1
+    fi
+    echo "Streaming logs from $POD... (Ctrl-C to stop)"
+    kubectl -n basilica-system logs -f "$POD" || kubectl -n basilica-system logs job/subtensor-init --tail=-1 || true
+
+# API logs and describe (runs on server)
+api-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/api-status.yml
+
+# API logs locally using KUBECONFIG=build/k3s.yaml
+api-logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KUBECONFIG=build/k3s.yaml
+    kubectl -n basilica-system logs deploy/basilica-api --tail=200 -f
+
+# Start local Subtensor (Alice/Bob) + Envoy WSS
+local-subtensor-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/subtensor-local/start.sh
+
+# Setup remote K3s cluster via Ansible (run ONCE to provision the cluster)
+k3s-provision TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🚀 Provisioning remote K3s cluster via Ansible..."
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/k3s-setup.yml
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
+      -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}
+    cd ../..
+    echo "✅ Remote K3s cluster provisioned"
+    echo "   Kubeconfig: build/k3s.yaml"
+    echo ""
+    export KUBECONFIG="$(pwd)/build/k3s.yaml"
+    kubectl get nodes -o wide
+
+# Setup k3d cluster for local development (alternative to remote K3s)
+local-k3d-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Install k3d if needed
+    if ! command -v k3d &> /dev/null; then
+        echo "Installing k3d..."
+        curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+    fi
+
+    # Create cluster if it doesn't exist
+    if ! k3d cluster list | grep -q basilica-local; then
+        echo "Creating k3d cluster..."
+        k3d cluster create basilica-local \
+            --api-port 6443 \
+            --port "8000:80@loadbalancer" \
+            --port "8443:443@loadbalancer" \
+            --k3s-arg "--disable=traefik@server:0"
+    fi
+
+    # Export kubeconfig
+    mkdir -p build
+    k3d kubeconfig get basilica-local > build/k3s.yaml
+    echo "✅ k3d cluster ready, kubeconfig at: build/k3s.yaml"
+    echo "   export KUBECONFIG=\$(pwd)/build/k3s.yaml"
+
+# Teardown k3d cluster
+local-k3d-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if k3d cluster list | grep -q basilica-local; then
+        k3d cluster delete basilica-local
+        rm -f build/k3s.yaml
+        echo "✅ k3d cluster deleted"
+    else
+        echo "No k3d cluster found"
+    fi
+
+# Start local API (uses scripts/api/.env.local if present)
+local-api-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Check if kubeconfig already exists (from Ansible or previous k3d setup)
+    if [ -f build/k3s.yaml ]; then
+        echo "✅ Using existing kubeconfig from build/k3s.yaml"
+        # Check if it's from k3d or remote K3s
+        if grep -q "k3d-basilica-local" build/k3s.yaml; then
+            echo "   (k3d cluster detected)"
+            # Ensure k3d cluster is running
+            if ! k3d cluster list 2>/dev/null | grep -q basilica-local; then
+                echo "⚠️  k3d cluster not running, starting it..."
+                just local-k3d-up
+            fi
+        else
+            echo "   (Remote K3s cluster detected - from Ansible setup)"
+        fi
+    else
+        echo "⚠️  No kubeconfig found. Setting up local k3d cluster..."
+        just local-k3d-up
+    fi
+
+    echo "Creating scripts/api/.env.local for local API..."
+    {
+        printf 'RUST_LOG=basilica_api=debug\n'
+        printf 'RUST_BACKTRACE=1\n'
+        printf 'BASILICA_API_BITTENSOR__NETWORK=local\n'
+        printf 'BASILICA_API_BITTENSOR__NETUID=2\n'
+        printf 'BASILICA_API_BITTENSOR__CHAIN_ENDPOINT=wss://host.docker.internal:9944\n'
+        printf 'BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY=5DJBmrfyRqe6eUUHLaWSho3Wgr5i8gDTWKxxWEmXvFhHvWTM\n'
+        printf 'SSL_CERT_FILE=/etc/ssl/certs/subtensor-ca.crt\n'
+    } > scripts/api/.env.local
+
+    docker compose -f scripts/api/compose.dev.yml up -d
+    echo "✅ API started with k8s backend enabled"
+
+# Stop local API
+local-api-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/api/compose.dev.yml down
+
+# Start local Validator against local Subtensor
+local-validator-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Detect external IP
+    EXTERNAL_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "127.0.0.1")
+    echo "Detected external IP: $EXTERNAL_IP"
+
+    # Always regenerate validator.local.toml with current external IP
+    echo "Creating config/validator.local.toml for local validator..."
+    {
+        printf '[database]\n'
+        printf 'url = "sqlite:/app/data/validator.db?mode=rwc"\n'
+        printf 'max_connections = 10\n'
+        printf 'run_migrations = true\n\n'
+        printf '[server]\n'
+        printf 'host = "0.0.0.0"\n'
+        printf 'port = 8080\n'
+        printf 'advertised_host = "%s"\n' "$EXTERNAL_IP"
+        printf 'advertised_port = 8080\n'
+        printf 'advertised_tls = false\n'
+        printf 'max_connections = 1000\n'
+        printf 'request_timeout = { secs = 30 }\n\n'
+        printf '[bittensor]\n'
+        printf 'wallet_name = "Alice"\n'
+        printf 'hotkey_name = "default"\n'
+        printf 'network = "local"\n'
+        printf 'netuid = 2\n'
+        printf 'chain_endpoint = "wss://host.docker.internal:9944"\n'
+        printf 'weight_interval_secs = 300\n'
+        printf 'axon_port = 8080\n'
+        printf 'external_ip = "%s"\n\n' "$EXTERNAL_IP"
+        printf '[metrics]\n'
+        printf 'enabled = true\n\n'
+        printf '[logging]\n'
+        printf 'level = "debug"\n'
+        printf 'format = "json"\n'
+        printf 'output = "./validator.log"\n'
+        printf '\n[emission]\n'
+        printf 'burn_percentage = 0.0\n'
+        printf 'burn_uid = 0\n'
+        printf 'weight_set_interval_blocks = 360\n'
+        printf '\n[emission.gpu_allocations]\n'
+        printf 'A100 = { weight = 50.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+        printf 'H100 = { weight = 30.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+        printf 'B200 = { weight = 20.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+    } > config/validator.local.toml
+    # Run validator container
+    docker compose -f scripts/validator/compose.local.yml up -d
+
+local-validator-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/validator/compose.local.yml down -v
+
+# Start local Subtensor + API together
+local-dev-up TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🔧 Starting local Subtensor (Alice/Bob + Envoy WSS)..."
+    just local-subtensor-up
+    echo "⏳ Waiting a few seconds for WS/WSS to settle..."
+    sleep 5
+    echo "🧠 Starting local Validator (Alice/default)..."
+    just local-validator-up
+    echo "⏳ Waiting a few seconds for Validator to initialize..."
+    sleep 5
+    echo "🚀 Deploying operator to the cluster (TAG={{TAG}})..."
+    just deploy-operator-api TAG={{TAG}}
+    echo "🌐 Starting local API (compose.dev)..."
+    just local-api-up
+    echo "✅ Local dev is up: API on http://localhost:8000, WSS ws(s)://localhost:9944"
+
+local-dev-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🛑 Stopping local API..."
+    just local-api-down
+    echo "🛑 Stopping local Subtensor (Alice/Bob + Envoy)..."
+    docker compose -f scripts/subtensor-local/docker-compose.yml down -v
+    echo "🛑 Stopping local Validator..."
+    just local-validator-down
+    echo "🧹 Removing operator from cluster..."
+    just operator-down
+    echo "✅ Local dev is down and operator removed."
+
+# Optional: remove the operator from the cluster as well
+operator-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KUBECONFIG=build/k3s.yaml
+    echo "🧹 Deleting operator deployment/service (if present)..."
+    kubectl -n basilica-system delete deploy/basilica-operator svc/basilica-operator --ignore-not-found
+    echo "✅ Operator removed."
+
+# Deploy only Operator and API (templates + rollout)
+deploy-operator-api TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
+      -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
+      --tags deploy_api_operator
+
+# Resume only the Subtensor WSS setup inside e2e-apply
+wss-enable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags subtensor_wss
+
+# Resume only the public WSS (Ingress + cert-manager) setup
+wss-public-enable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags subtensor_public_wss
+
+# Bootstrap only the cluster networking (ingress-nginx + cert-manager + ClusterIssuer)
+networking-bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags networking
+
+# Run only WSS setup via subtensor-up playbook
+subtensor-wss:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-up.yml --tags subtensor_wss
+
+# Regenerate local kubeconfig (and install kubectl if missing)
+k3s-kubeconfig:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f build/k3s.yaml || true
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags kubeconfig
+
+# Regenerate local kubeconfig for SSH tunnel (server=127.0.0.1)
+k3s-kubeconfig-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f build/k3s.yaml || true
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags kubeconfig -e kubeconfig_server=127.0.0.1
+
+# # Open an SSH tunnel to the K3s API (local 6443 -> remote 127.0.0.1:6443)
+# # Usage: just k3s-tunnel HOST KEY=~/.ssh/sam.pem USER=ubuntu
+# k3s-tunnel HOST KEY=~/.ssh/sam.pem USER=ubuntu:
+#     #!/usr/bin/env bash
+#     set -euo pipefail
+#     echo "Opening SSH tunnel on localhost:6443 to {{HOST}} (Ctrl-C to close)"
+#     ssh -i {{KEY}} -N -L 6443:127.0.0.1:6443 {{USER}}@{{HOST}}
 
 # =============================================================================
 # PYTHON SDK
@@ -800,6 +1116,185 @@ localnet:
 localnet-restart:
     #!/usr/bin/env bash
     cd scripts/localnet && ./restart.sh
+
+# =============================================================================
+# E2E LOCAL DEVELOPMENT ENVIRONMENT
+# =============================================================================
+
+# Setup complete E2E environment (local subtensor + remote K3s + operator + local validator + local API)
+# Prerequisites: Run 'just ci-build-images' first to build and push images with k3_test tag
+e2e-up TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🚀 Setting up complete E2E environment..."
+    echo "Using image tag: {{TAG}}"
+    echo ""
+
+    # 1. Start local Subtensor
+    echo "📡 Starting local Subtensor..."
+    just local-subtensor-up
+
+    # 1.5 Verify subnet has neurons registered (sometimes needs re-run)
+    echo "🔍 Verifying subnet initialization..."
+    NEURON_COUNT=$(python3 scripts/subtensor-local/check_neurons.py 2>/dev/null || echo "0")
+
+    if [ "$NEURON_COUNT" -lt 3 ]; then
+        echo "⚠️  Subnet has only $NEURON_COUNT neurons, re-running initialization..."
+        cd scripts/subtensor-local
+        CHAIN_ENDPOINT="wss://localhost:9944" NETUID=2 WALLET_PATH="$HOME/.bittensor/wallets" python3 init.py
+        cd ../..
+    else
+        echo "✅ Subnet has $NEURON_COUNT neurons registered"
+    fi
+
+    # 2. Provision remote K3s cluster and deploy operator via Ansible
+    echo "☸️  Provisioning remote K3s cluster and deploying operator..."
+    just k3s-provision {{TAG}}
+
+    # 3. Start local validator
+    echo "🔍 Starting local validator..."
+    just local-validator-up
+
+    # 4. Start local API (connects to remote K3s and local Subtensor)
+    echo "🌐 Starting local API..."
+    just local-api-up
+
+    echo "✅ E2E environment is ready!"
+    echo ""
+    echo "📊 Environment status:"
+    echo "  - Local Subtensor: wss://localhost:9944"
+    echo "  - Remote K3s cluster: see build/k3s.yaml"
+    echo "  - Operator image: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+    echo "  - API image: ghcr.io/one-covenant/basilica-api:{{TAG}}"
+    echo "  - Local Validator: running"
+    echo "  - Local API: http://localhost:8000"
+    echo ""
+    echo "Run 'just e2e-status' to check all components"
+
+# Tear down E2E environment (remote K3s deployments + local services)
+e2e-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🔄 Tearing down E2E environment..."
+
+    # 1. Teardown remote K3s deployments via Ansible
+    echo "🧹 Cleaning up remote K3s deployments..."
+    cd scripts/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml || true
+    cd ../..
+
+    # 2. Stop local API
+    echo "🛑 Stopping local API..."
+    just local-api-down || true
+
+    # 3. Stop local validator
+    echo "🛑 Stopping local validator..."
+    just local-validator-down || true
+
+    # 4. Stop local Subtensor
+    echo "🛑 Stopping local Subtensor..."
+    cd scripts/subtensor-local && docker compose down -v || true
+    cd ../..
+
+    echo "✅ E2E environment torn down"
+    echo ""
+    echo "Note: Remote K3s cluster is still running (use 'just k3s-teardown' to remove it completely)"
+
+# Show which K3s cluster is configured
+k3s-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ ! -f build/k3s.yaml ]; then
+        echo "❌ No kubeconfig found at build/k3s.yaml"
+        echo ""
+        echo "To set up a cluster, run ONE of:"
+        echo "  just k3s-provision      # Remote K3s via Ansible"
+        echo "  just local-k3d-up       # Local k3d cluster"
+        exit 1
+    fi
+
+    export KUBECONFIG=build/k3s.yaml
+    SERVER=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}')
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "☸️  K3s Cluster Status"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Server: $SERVER"
+
+    if echo "$SERVER" | grep -q "k3d"; then
+        echo "Type: k3d (local)"
+    else
+        echo "Type: Remote K3s (Ansible-managed)"
+    fi
+    echo ""
+    echo "Nodes:"
+    kubectl get nodes -o wide || echo "  ❌ Cannot reach cluster"
+    echo ""
+    echo "Basilica Pods:"
+    kubectl get pods -n basilica-system 2>/dev/null || echo "  No basilica-system namespace found"
+
+# Show status of E2E environment
+e2e-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📊 E2E Environment Status"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Local Subtensor
+    echo "📡 Local Subtensor:"
+    if docker ps --filter "name=subtensor" --format "{{{{.Names}}}}" | grep -q subtensor; then
+        docker ps --filter "name=subtensor" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+    else
+        echo "  ❌ Not running"
+    fi
+    echo ""
+
+    # Remote K3s cluster
+    echo "☸️  Remote K3s Cluster:"
+    if [ -f build/k3s.yaml ]; then
+        export KUBECONFIG=build/k3s.yaml
+        SERVER=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "")
+        if [ -n "$SERVER" ]; then
+            echo "  ✅ Configured: $SERVER"
+            kubectl get nodes -o wide 2>/dev/null || echo "  ⚠️  Cannot reach cluster"
+        else
+            echo "  ❌ Invalid kubeconfig"
+        fi
+    else
+        echo "  ❌ No kubeconfig (run 'just k3s-provision')"
+    fi
+    echo ""
+
+    # K8s deployments
+    if command -v kubectl &> /dev/null && [ -f build/k3s.yaml ]; then
+        export KUBECONFIG=build/k3s.yaml
+        echo "🎯 Remote Basilica Services:"
+        kubectl get pods -n basilica-system 2>/dev/null || echo "  ❌ No pods found"
+        echo ""
+    fi
+
+    # Local Validator
+    echo "🔍 Local Validator:"
+    if docker ps --filter "name=basilica-validator" --format "{{{{.Names}}}}" | grep -q validator; then
+        docker ps --filter "name=basilica-validator" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+    else
+        echo "  ❌ Not running"
+    fi
+    echo ""
+
+    # Local API
+    echo "🌐 Local API:"
+    if docker ps --filter "name=basilica-api" --format "{{{{.Names}}}}" | grep -q api; then
+        docker ps --filter "name=basilica-api" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+        echo "  URL: http://localhost:8000"
+    else
+        echo "  ❌ Not running"
+    fi
 
 # =============================================================================
 # SHOW HELP

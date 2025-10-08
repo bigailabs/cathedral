@@ -25,11 +25,19 @@ api_image: ghcr.io/one-covenant/basilica-api:latest
 # API config overrides
 api_hotkey: ""                    # set to your validator hotkey if required
 api_database_url: postgres://basilica:devpassword@basilica-postgres.basilica-system.svc.cluster.local:5432/basilica
+api_bittensor_network: test
+api_chain_endpoint: wss://test.finney.opentensor.ai:443
+api_bittensor_netuid: "387"
 
 # Toggles
 install_envoy_forward_proxy: true   # apply forward proxy (config/deploy/ingress/*)
 install_gateway_api: true           # apply Gateway API bits (config/deploy/gateway/*)
 install_monitoring_stack: false     # apply optional monitoring (Prometheus/Grafana)
+
+# Deployment mode
+deploy_api_in_cluster: false        # Only deploy operator/CRDs to cluster; run API locally
+deploy_postgres_in_cluster: false   # If true, install in-cluster Postgres for API
+create_local_api_env: true          # Generate env file for running API locally
 
 # CRD generation
 generate_crds: true
@@ -46,8 +54,25 @@ use_templates: true
 # Run an ephemeral port-forward + /health probe for the API
 run_smoke_probe: true
 
+# Optional: deploy a local Subtensor dev chain via Docker Compose on the K3s server
+install_local_subtensor: false
+install_local_subtensor_k8s: false
+subtensor_wss:
+  enabled: false
+  hostname: alice-wss.basilica-system.svc.cluster.local
+  service_name: alice-wss
+  secret_name: subtensor-tls
+subtensor_public_wss:
+  enabled: false
+  host: alice-wss.example.com
+  acme_email: you@example.com
+  use_staging: true
+subtensor_compose_src: ""          # path on control machine to your compose.yml (if provided)
+subtensor_compose_dir: /opt/subtensor
+subtensor_ws_port: 9944
+
 # Generate a dev API key and insert it into Postgres automatically
-generate_api_key: true
+generate_api_key: false
 api_key_user: test
 api_key_name: k3s
 api_key_scopes:
@@ -92,4 +117,9 @@ envoy_admin_forward:
   resource_name: basilica-envoy
   local_port: 9901
   remote_port: 9901
+  bind_address: 127.0.0.1
+
+# Long-lived Subtensor WSS port-forward (when not exposing publicly)
+wss_forward:
+  enabled: true
   bind_address: 127.0.0.1

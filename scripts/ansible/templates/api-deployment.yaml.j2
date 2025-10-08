@@ -15,6 +15,16 @@ spec:
       labels:
         app: basilica-api
     spec:
+      initContainers:
+        - name: install-subtensor-ca
+          image: debian:bookworm-slim
+          command: ["bash","-lc","set -euo pipefail; apt-get update >/dev/null 2>&1 && apt-get install -y ca-certificates >/dev/null 2>&1; mkdir -p /custom; cp /ca/tls.crt /custom/subtensor-ca.crt; cat /etc/ssl/certs/ca-certificates.crt /custom/subtensor-ca.crt > /work/ca-bundle.crt; chown 1000:1000 /work/ca-bundle.crt"]
+          volumeMounts:
+            - name: subtensor-ca
+              mountPath: /ca
+              readOnly: true
+            - name: custom-ca-bundle
+              mountPath: /work
       serviceAccountName: basilica-api
       containers:
         - name: api
@@ -27,19 +37,21 @@ spec:
               containerPort: 9401
           env:
             - name: RUST_LOG
-              value: info
+              value: "info"
             - name: BASILICA_API_RENTAL_BACKEND
-              value: k8s
+              value: "k8s"
             - name: BASILICA_API_BITTENSOR__NETWORK
-              value: test
+              value: "{{ api_bittensor_network | default('test') }}"
             - name: BASILICA_API_BITTENSOR__NETUID
-              value: "387"
+              value: "{{ api_bittensor_netuid | default('387') }}"
             - name: BASILICA_API_BITTENSOR__CHAIN_ENDPOINT
-              value: wss://test.finney.opentensor.ai:443
+              value: "{{ api_chain_endpoint | default('wss://test.finney.opentensor.ai:443') }}"
             - name: BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY
-              value: {{ api_hotkey | default('REPLACE_VALIDATOR_HOTKEY') | quote }}
+              value: "{{ api_hotkey | default('REPLACE_VALIDATOR_HOTKEY') }}"
             - name: BASILICA_API_DATABASE__URL
-              value: {{ api_database_url | quote }}
+              value: "{{ api_database_url }}"
+            - name: SSL_CERT_FILE
+              value: /etc/ssl/custom/ca-bundle.crt
           resources:
             requests:
               cpu: "100m"
@@ -47,6 +59,16 @@ spec:
             limits:
               cpu: "500m"
               memory: "1Gi"
+          volumeMounts:
+            - name: custom-ca-bundle
+              mountPath: /etc/ssl/custom
+              readOnly: true
+      volumes:
+        - name: subtensor-ca
+          secret:
+            secretName: {{ subtensor_wss.secret_name | default('subtensor-tls') }}
+        - name: custom-ca-bundle
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

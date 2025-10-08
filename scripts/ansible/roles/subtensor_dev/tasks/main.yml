@@ -1,0 +1,88 @@
+- name: Ensure Docker and compose plugin (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose-plugin
+    update_cache: yes
+    state: present
+  when: ansible_os_family == 'Debian'
+
+- name: Create subtensor compose directory
+  ansible.builtin.file:
+    path: "{{ subtensor_compose_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Copy provided compose.yml (if any)
+  ansible.builtin.copy:
+    src: "{{ subtensor_compose_src }}"
+    dest: "{{ subtensor_compose_dir }}/compose.yml"
+    mode: '0644'
+  when: (subtensor_compose_src | length) > 0
+
+- name: Create placeholder compose.yml if none provided (edit me)
+  ansible.builtin.copy:
+    dest: "{{ subtensor_compose_dir }}/compose.yml"
+    mode: '0644'
+    content: |
+      version: "3.8"
+      services:
+        subtensor:
+          image: opentensor/subtensor:latest
+          command: ["subtensor", "--dev", "--ws-external", "--rpc-external"]
+          ports:
+            - "{{ subtensor_ws_port }}:9944"
+          restart: unless-stopped
+      # NOTE: Replace image/command with your working localnet if needed.
+  when: (subtensor_compose_src | length) == 0
+
+- name: Start subtensor via docker compose
+  ansible.builtin.shell: |
+    set -euo pipefail
+    cd {{ subtensor_compose_dir | quote }}
+    docker compose up -d
+  args:
+    executable: /bin/bash
+
+- name: Wait for websockets port on server
+  ansible.builtin.wait_for:
+    host: "{{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}"
+    port: "{{ subtensor_ws_port }}"
+    delay: 2
+    timeout: 60
+
+- name: Create K8s Service for subtensor (headless)
+  ansible.builtin.shell: |
+    cat <<'EOF' | kubectl apply -f -
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: subtensor
+      namespace: basilica-system
+    spec:
+      clusterIP: None
+      ports:
+        - name: ws
+          port: 9944
+          targetPort: 9944
+    ---
+    apiVersion: v1
+    kind: Endpoints
+    metadata:
+      name: subtensor
+      namespace: basilica-system
+    subsets:
+      - addresses:
+          - ip: {{ hostvars[inventory_hostname]['ansible_host'] | default(inventory_hostname) }}
+        ports:
+          - name: ws
+            port: {{ subtensor_ws_port }}
+    EOF
+  args:
+    executable: /bin/bash
+
+- name: Set API overrides for local subtensor
+  ansible.builtin.set_fact:
+    api_bittensor_network: local
+    api_chain_endpoint: "ws://alice.basilica-system.svc.cluster.local:9944"
+    api_hotkey: "alice"

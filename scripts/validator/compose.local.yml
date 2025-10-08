@@ -1,0 +1,38 @@
+services:
+  validator:
+    build:
+      context: ../..
+      dockerfile: scripts/validator/Dockerfile
+    container_name: basilica-validator-local
+    restart: unless-stopped
+
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+      - SSL_CERT_FILE=/etc/ssl/certs/subtensor-ca.crt
+
+    volumes:
+      - ../../config/validator.local.toml:/app/validator.toml:ro
+      - ./data:/app/data:rw
+      - ~/.bittensor:/root/.bittensor:rw
+      - ../subtensor-local/tls/ca.crt:/etc/ssl/certs/subtensor-ca.crt:ro
+      - ../../crates:/app/crates:ro
+      - ../../Cargo.toml:/app/Cargo.toml:ro
+      - ../../Cargo.lock:/app/Cargo.lock:ro
+      - ./entrypoint.local.sh:/app/validator-entrypoint.sh:ro
+
+    ports:
+      - "8080:8080"     # Server/API port
+      - "9090:9090"     # Metrics port
+
+    networks:
+      - basilica_network_local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    entrypoint: ["/bin/bash", "/app/validator-entrypoint.sh"]
+    command: ["/usr/local/bin/basilica-validator", "--config", "/app/validator.toml", "start"]
+
+networks:
+  basilica_network_local:
+    driver: bridge

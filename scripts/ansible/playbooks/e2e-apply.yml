@@ -16,6 +16,61 @@
         state: directory
         mode: '0755'
 
+    # ------------------------------------------------------------------------
+    # Optional: Bootstrap cluster networking (Ingress + cert-manager) early
+    # ------------------------------------------------------------------------
+    - name: Bootstrap public WSS prerequisites (ingress-nginx + cert-manager)
+      when: subtensor_public_wss.enabled | bool
+      block:
+        - name: Install ingress-nginx (cloud provider manifest)
+          ansible.builtin.shell: |
+            set -euo pipefail
+            kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml
+          args:
+            executable: /bin/bash
+          tags: ["networking"]
+
+        - name: Wait for ingress-nginx controller
+          ansible.builtin.shell: |
+            set -euo pipefail
+            kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s
+          args:
+            executable: /bin/bash
+          tags: ["networking"]
+
+        - name: Install cert-manager CRDs and controller
+          ansible.builtin.shell: |
+            set -euo pipefail
+            kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.3/cert-manager.yaml
+          args:
+            executable: /bin/bash
+          tags: ["networking"]
+
+        - name: Wait for cert-manager
+          ansible.builtin.shell: |
+            set -euo pipefail
+            kubectl -n cert-manager rollout status deploy/cert-manager --timeout=300s
+            kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=300s
+            kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=300s
+          args:
+            executable: /bin/bash
+          tags: ["networking"]
+
+        - name: Create ClusterIssuer for Let's Encrypt
+          ansible.builtin.template:
+            src: ../templates/clusterissuer.yaml.j2
+            dest: /opt/basilica/clusterissuer.yaml
+            mode: '0644'
+          vars:
+            issuer_name: "{{ 'letsencrypt-staging' if subtensor_public_wss.use_staging | bool else 'letsencrypt' }}"
+            acme_email: "{{ subtensor_public_wss.acme_email }}"
+            acme_server: "{{ 'https://acme-staging-v02.api.letsencrypt.org/directory' if subtensor_public_wss.use_staging | bool else 'https://acme-v02.api.letsencrypt.org/directory' }}"
+          tags: ["networking"]
+
+        - name: Apply ClusterIssuer
+          ansible.builtin.command: kubectl apply -f /opt/basilica/clusterissuer.yaml
+          tags: ["networking"]
+
     - name: Ensure CRDs output directory exists (local)
       delegate_to: localhost
       run_once: true
@@ -131,10 +186,240 @@
     - name: Deploy Postgres for API
       ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/postgres.yaml
 
+    - name: Optionally deploy local Subtensor (dev chain via Docker Compose)
+      include_role:
+        name: subtensor_dev
+      when: install_local_subtensor | bool
+
+    - name: Optionally deploy local Subtensor (Kubernetes)
+      when: install_local_subtensor_k8s | bool
+      block:
+        - name: Apply Subtensor ConfigMap
+          ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/subtensor-configmap.yaml
+        - name: Apply Subtensor Deployment
+          ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-deployment.yaml
+        - name: Apply Subtensor Service
+          ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-service.yaml
+        - name: Wait for Alice rollout
+          ansible.builtin.command: kubectl -n basilica-system rollout status deploy/alice --timeout=180s
+        - name: Apply Bob Deployment
+          ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/bob-deployment.yaml
+        - name: Apply Bob Service
+          ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/bob-service.yaml
+        - name: Wait for Bob rollout
+          ansible.builtin.command: kubectl -n basilica-system rollout status deploy/bob --timeout=180s
+        - name: Run Subtensor init Job
+          ansible.builtin.shell: |
+            set -euo pipefail
+            kubectl -n basilica-system delete job/subtensor-init --ignore-not-found || true
+            cat <<'EOF' | kubectl apply -f -
+            apiVersion: batch/v1
+            kind: Job
+            metadata:
+              name: subtensor-init
+              namespace: basilica-system
+            spec:
+              backoffLimit: 0
+              template:
+                spec:
+                  restartPolicy: Never
+                  containers:
+                    - name: init
+                      image: python:3.11-slim
+                      env:
+                        - name: SUBTENSOR_WS
+                          value: ws://alice.basilica-system.svc.cluster.local:9944
+                        - name: NETUID
+                          value: "2"
+                      volumeMounts:
+                        - name: script
+                          mountPath: /opt/init
+                      command: ["bash","-lc","bash /opt/init/set_up_local.net.sh"]
+                  volumes:
+                    - name: script
+                      configMap:
+                        name: subtensor-init
+                        defaultMode: 0755
+            EOF
+            kubectl -n basilica-system wait --for=condition=complete job/subtensor-init --timeout=1200s || kubectl -n basilica-system logs job/subtensor-init --tail=-1 || true
+          args:
+            executable: /bin/bash
+        - name: Set API overrides for local Subtensor (K8s)
+          ansible.builtin.set_fact:
+            api_bittensor_network: local
+            api_chain_endpoint: ws://alice.basilica-system.svc.cluster.local:9944
+            api_hotkey: alice
+            api_bittensor_netuid: "2"
+        - name: Optionally enable WSS for Subtensor via Envoy TLS
+          when: subtensor_wss.enabled | bool
+          block:
+            - name: Sync Envoy WSS manifest to server
+              ansible.builtin.copy:
+                src: "{{ repo_root_final }}/config/deploy/subtensor/alice-wss-envoy.yaml"
+                dest: "/opt/basilica/config/deploy/subtensor/alice-wss-envoy.yaml"
+                mode: '0644'
+              tags: ["subtensor_wss"]
+            - name: Generate self-signed TLS cert for Subtensor WSS (local)
+              delegate_to: localhost
+              run_once: true
+              ansible.builtin.shell: |
+                set -euo pipefail
+                TMPDIR=$(mktemp -d)
+                openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
+                  -keyout "$TMPDIR/tls.key" -out "$TMPDIR/tls.crt" \
+                  -subj "/CN={{ subtensor_wss.hostname }}" \
+                  -addext "subjectAltName=DNS:{{ subtensor_wss.hostname }}"
+                echo "$TMPDIR"
+              register: _wss_tls_tmp
+              changed_when: true
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_wss"]
+            - name: Read generated TLS cert (local)
+              delegate_to: localhost
+              run_once: true
+              ansible.builtin.slurp:
+                src: "{{ _wss_tls_tmp.stdout }}/tls.crt"
+              register: wss_tls_crt
+              tags: ["subtensor_wss"]
+
+            - name: Read generated TLS key (local)
+              delegate_to: localhost
+              run_once: true
+              ansible.builtin.slurp:
+                src: "{{ _wss_tls_tmp.stdout }}/tls.key"
+              register: wss_tls_key
+              tags: ["subtensor_wss"]
+
+            - name: Create/Update TLS secret for Subtensor WSS (apply YAML)
+              ansible.builtin.shell: |
+                set -euo pipefail
+                cat <<EOF | kubectl apply -f -
+                apiVersion: v1
+                kind: Secret
+                metadata:
+                  name: {{ subtensor_wss.secret_name }}
+                  namespace: basilica-system
+                type: kubernetes.io/tls
+                data:
+                  tls.crt: {{ wss_tls_crt.content }}
+                  tls.key: {{ wss_tls_key.content }}
+                EOF
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_wss"]
+            - name: Apply Envoy TLS gateway for Subtensor (alice-wss)
+              ansible.builtin.shell: |
+                set -euo pipefail
+                kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-wss-envoy.yaml
+                # Ensure pod restarts to pick up ConfigMap changes
+                kubectl -n basilica-system rollout restart deploy/subtensor-wss || true
+                kubectl -n basilica-system rollout status deploy/subtensor-wss --timeout=600s
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_wss"]
+            - name: Show wss-gateway pod status (debug)
+              ansible.builtin.shell: |
+                set -euo pipefail
+                kubectl -n basilica-system get pods -l app=subtensor,component=wss-gateway -o wide || true
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_wss"]
+        - name: Override API chain endpoint to WSS gateway
+          ansible.builtin.set_fact:
+            api_chain_endpoint: "wss://{{ subtensor_wss.service_name }}.basilica-system.svc.cluster.local:9944"
+          tags: ["subtensor_wss"]
+
+        - name: Install long-lived WSS port-forward service (when not using public WSS)
+          when: (not subtensor_public_wss.enabled | bool) and (wss_forward.enabled | bool) and (subtensor_wss.enabled | bool)
+          block:
+            - name: Install WSS port-forward systemd service
+              ansible.builtin.template:
+                src: ../templates/basilica-wss-portforward.service.j2
+                dest: /etc/systemd/system/basilica-wss-portforward.service
+                mode: '0644'
+            - name: Reload systemd for WSS service
+              ansible.builtin.systemd:
+                daemon_reload: true
+            - name: Enable and start WSS port-forward service
+              ansible.builtin.systemd:
+                name: basilica-wss-portforward.service
+                enabled: true
+                state: started
+
+        - name: Optionally expose Subtensor WSS publicly with Let's Encrypt
+          when: subtensor_public_wss.enabled | bool
+          block:
+            - name: Install ingress-nginx (cloud provider manifest)
+              ansible.builtin.shell: |
+                set -euo pipefail
+                kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.10.1/deploy/static/provider/cloud/deploy.yaml
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_public_wss"]
+
+            - name: Wait for ingress-nginx controller
+              ansible.builtin.shell: |
+                set -euo pipefail
+                kubectl -n ingress-nginx rollout status deploy/ingress-nginx-controller --timeout=300s
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_public_wss"]
+
+            - name: Install cert-manager CRDs and controller
+              ansible.builtin.shell: |
+                set -euo pipefail
+                kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.15.3/cert-manager.yaml
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_public_wss"]
+
+            - name: Wait for cert-manager
+              ansible.builtin.shell: |
+                set -euo pipefail
+                kubectl -n cert-manager rollout status deploy/cert-manager --timeout=300s
+                kubectl -n cert-manager rollout status deploy/cert-manager-webhook --timeout=300s
+                kubectl -n cert-manager rollout status deploy/cert-manager-cainjector --timeout=300s
+              args:
+                executable: /bin/bash
+              tags: ["subtensor_public_wss"]
+
+            - name: Create ClusterIssuer for Let's Encrypt
+              ansible.builtin.template:
+                src: ../templates/clusterissuer.yaml.j2
+                dest: /opt/basilica/clusterissuer.yaml
+                mode: '0644'
+              vars:
+                issuer_name: "{{ 'letsencrypt-staging' if subtensor_public_wss.use_staging | bool else 'letsencrypt' }}"
+                acme_email: "{{ subtensor_public_wss.acme_email }}"
+                acme_server: "{{ 'https://acme-staging-v02.api.letsencrypt.org/directory' if subtensor_public_wss.use_staging | bool else 'https://acme-v02.api.letsencrypt.org/directory' }}"
+              tags: ["subtensor_public_wss"]
+
+            - name: Apply ClusterIssuer
+              ansible.builtin.command: kubectl apply -f /opt/basilica/clusterissuer.yaml
+              tags: ["subtensor_public_wss"]
+
+            - name: Create Ingress for alice-wss with TLS
+              ansible.builtin.template:
+                src: "{{ repo_root_final }}/config/deploy/subtensor/alice-wss-ingress.yaml.j2"
+                dest: /opt/basilica/config/deploy/subtensor/alice-wss-ingress.yaml
+                mode: '0644'
+              tags: ["subtensor_public_wss"]
+
+            - name: Apply Ingress
+              ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-wss-ingress.yaml
+              tags: ["subtensor_public_wss"]
+
+            - name: Override API chain endpoint to public WSS
+              ansible.builtin.set_fact:
+                api_chain_endpoint: "wss://{{ subtensor_public_wss.host }}:443"
+              tags: ["subtensor_public_wss"]
+
     - name: Sanitize image variables (strip accidental TAG= prefixes)
       ansible.builtin.set_fact:
         operator_image_effective: "{{ (operator_image | default('')) | regex_replace('TAG=','') }}"
         api_image_effective: "{{ (api_image | default('')) | regex_replace('TAG=','') }}"
+      tags: ["deploy_api_operator"]
 
     - name: Use templated operator manifest
       ansible.builtin.template:
@@ -142,13 +427,17 @@
         dest: /opt/basilica/config/deploy/operator-deployment.yaml
         mode: '0644'
       when: use_templates | bool
+      tags: ["deploy_api_operator"]
 
-    - name: Use templated API manifest
+    - name: Use templated API manifest (only if deploying API in cluster)
       ansible.builtin.template:
         src: ../templates/api-deployment.yaml.j2
         dest: /opt/basilica/config/deploy/api-deployment.yaml
         mode: '0644'
-      when: use_templates | bool
+      when: use_templates | bool and deploy_api_in_cluster | bool
+      tags: ["deploy_api_operator"]
+
+    # NETUID is quoted in the template; no post-replace needed
 
     - name: Update operator image in deployment manifest (fallback when not templating)
       ansible.builtin.replace:
@@ -162,7 +451,7 @@
         path: /opt/basilica/config/deploy/api-deployment.yaml
         regexp: '^(\\s*)image:\s.*$'
         replace: '\\1image: {{ api_image }}'
-      when: not use_templates | bool
+      when: (not use_templates | bool) and deploy_api_in_cluster | bool
 
     - name: Ensure API database URL is set (fallback when not templating)
       ansible.builtin.replace:
@@ -171,7 +460,7 @@
         replace: |-
           name: BASILICA_API_DATABASE__URL
           value: {{ api_database_url | quote }}
-      when: not use_templates | bool
+      when: (not use_templates | bool) and deploy_api_in_cluster | bool
 
     - name: Optionally set API validator hotkey (fallback when not templating)
       ansible.builtin.replace:
@@ -180,21 +469,33 @@
         replace: |-
           name: BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY
           value: {{ api_hotkey | quote }}
-      when: (not use_templates | bool) and (api_hotkey | length > 0)
+      when: (not use_templates | bool) and (api_hotkey | length > 0) and deploy_api_in_cluster | bool
 
-    - name: Deploy Operator and API
+    - name: Deploy Operator
       ansible.builtin.shell: |
         set -euo pipefail
         kubectl apply -f /opt/basilica/config/deploy/operator-deployment.yaml
+      args:
+        executable: /bin/bash
+      tags: ["deploy_api_operator"]
+
+    - name: Deploy API (only when enabled)
+      ansible.builtin.shell: |
+        set -euo pipefail
         kubectl apply -f /opt/basilica/config/deploy/api-deployment.yaml
       args:
         executable: /bin/bash
+      when: deploy_api_in_cluster | bool
+      tags: ["deploy_api_operator"]
 
     - name: Wait for operator rollout
       ansible.builtin.command: kubectl -n basilica-system rollout status deploy/basilica-operator --timeout=180s
+      tags: ["deploy_api_operator"]
 
     - name: Wait for API rollout
       ansible.builtin.command: kubectl -n basilica-system rollout status deploy/basilica-api --timeout=300s
+      when: deploy_api_in_cluster | bool
+      tags: ["deploy_api_operator"]
 
     - name: Port-forward API and probe /health (ephemeral)
       ansible.builtin.shell: |
@@ -208,7 +509,34 @@
       args:
         executable: /bin/bash
       changed_when: false
-      when: run_smoke_probe | bool
+      when: run_smoke_probe | bool and deploy_api_in_cluster | bool
+
+    # ------------------------------------------------------------------------
+    # Generate local API environment file for docker-compose
+    # ------------------------------------------------------------------------
+    - name: Prepare local API .env file
+      when: create_local_api_env | bool
+      block:
+        - name: Compute local Subtensor WSS cert path
+          delegate_to: localhost
+          run_once: true
+          ansible.builtin.set_fact:
+            _local_wss_cert: "{{ (repo_root_final + '/scripts/subtensor-local/tls/tls.crt') }}"
+
+        - name: Write scripts/api/.env.local with chain + SSL settings
+          delegate_to: localhost
+          run_once: true
+          ansible.builtin.copy:
+            dest: "{{ repo_root_final }}/scripts/api/.env.local"
+            mode: '0644'
+            content: |-
+              RUST_LOG=basilica_api=debug
+              RUST_BACKTRACE=1
+              BASILICA_API_BITTENSOR__NETWORK=local
+              BASILICA_API_BITTENSOR__NETUID=2
+              BASILICA_API_BITTENSOR__CHAIN_ENDPOINT=wss://host.docker.internal:9944
+              BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+              SSL_CERT_FILE={{ _local_wss_cert }}
 
     # ----------------------------------------------------------------------------
     # Generate a dev API key locally and insert into Postgres
@@ -422,6 +750,7 @@
       run_once: true
       ansible.builtin.setup:
       when: true
+      tags: ["kubeconfig"]
 
     - name: Check for local kubectl
       delegate_to: localhost
@@ -430,6 +759,7 @@
       register: kubectl_check
       changed_when: false
       failed_when: false
+      tags: ["kubeconfig"]
 
     - name: Determine OS/arch for kubectl download
       delegate_to: localhost
@@ -438,6 +768,7 @@
         _kubectl_os: "{{ 'darwin' if ansible_facts['system'] == 'Darwin' else 'linux' }}"
         _kubectl_arch: "{{ 'arm64' if ansible_facts['architecture'] in ['aarch64','arm64'] else 'amd64' }}"
       when: kubectl_check.rc != 0
+      tags: ["kubeconfig"]
 
     - name: Get latest stable kubectl version
       delegate_to: localhost
@@ -451,6 +782,7 @@
       changed_when: false
       failed_when: false
       when: kubectl_check.rc != 0
+      tags: ["kubeconfig"]
 
     - name: Set kubectl version fact (fallback)
       delegate_to: localhost
@@ -458,6 +790,7 @@
       ansible.builtin.set_fact:
         _kubectl_version: "{{ (kubectl_ver.stdout | trim) if (kubectl_ver.stdout | default('')) | length > 0 else 'v1.29.7' }}"
       when: kubectl_check.rc != 0
+      tags: ["kubeconfig"]
 
     - name: Ensure local bin directory exists
       delegate_to: localhost
@@ -467,6 +800,7 @@
         state: directory
         mode: '0755'
       when: kubectl_check.rc != 0
+      tags: ["kubeconfig"]
 
     - name: Download kubectl to local bin
       delegate_to: localhost
@@ -476,6 +810,7 @@
         dest: "{{ ansible_env.HOME }}/.local/bin/kubectl"
         mode: '0755'
       when: kubectl_check.rc != 0
+      tags: ["kubeconfig"]
 
     - name: Create local kubeconfig directory
       delegate_to: localhost
@@ -484,23 +819,44 @@
         path: "{{ repo_root_final }}/build"
         state: directory
         mode: '0755'
+      tags: ["kubeconfig"]
 
     - name: Read kubeconfig from server
       ansible.builtin.slurp:
         src: /etc/rancher/k3s/k3s.yaml
       register: kubeconfig_raw
+      tags: ["kubeconfig"]
 
-    - name: Write kubeconfig locally with public server URL
+    - name: Compute kubeconfig server host
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.set_fact:
+        kubeconfig_server_effective: >-
+          {{
+            (kubeconfig_server | default(''))
+            | ternary(kubeconfig_server,
+                     (hostvars[groups['k3s_server'][0]]['ansible_host'] | default(hostvars[groups['k3s_server'][0]]['inventory_hostname'])))
+          }}
+      tags: ["kubeconfig"]
+
+    - name: Write kubeconfig locally (raw)
       delegate_to: localhost
       run_once: true
       ansible.builtin.copy:
         dest: "{{ repo_root_final }}/build/k3s.yaml"
-        content: >-
-          {{
-            (kubeconfig_raw.content | b64decode)
-            | regex_replace('(?m)^\s*server:\s*https://.*:6443\s*$', 'server: https://' ~ (hostvars[groups['k3s_server'][0]]['ansible_host'] | default(hostvars[groups['k3s_server'][0]]['inventory_hostname'])) ~ ':6443')
-          }}
+        content: "{{ kubeconfig_raw.content | b64decode }}"
         mode: '0644'
+      tags: ["kubeconfig"]
+
+    - name: Rewrite server URL in local kubeconfig (preserve indentation)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.lineinfile:
+        path: "{{ repo_root_final }}/build/k3s.yaml"
+        regexp: '^(\s*)server:\s*https://.*:6443\s*$'
+        line: "\\1server: https://{{ kubeconfig_server_effective }}:6443"
+        backrefs: true
+      tags: ["kubeconfig"]
 
 
 
@@ -513,3 +869,4 @@
           Use it with your kubeconfig:
             export KUBECONFIG={{ repo_root_final }}/build/k3s.yaml
             {{ ansible_env.HOME }}/.local/bin/kubectl get nodes -o wide
+      tags: ["kubeconfig"]

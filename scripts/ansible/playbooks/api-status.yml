@@ -1,0 +1,32 @@
+- hosts: k3s_server
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Describe API deployment
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system describe deploy/basilica-api || true
+      args:
+        executable: /bin/bash
+
+    - name: Show API pods
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system get pods -l app=basilica-api -o wide || true
+      args:
+        executable: /bin/bash
+
+    - name: Tail API logs (last 200 lines)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system logs deploy/basilica-api --tail=200 || true
+      args:
+        executable: /bin/bash
+
+    - name: Recent events (basilica-system)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system get events --sort-by=.lastTimestamp | tail -n 50 || true
+      args:
+        executable: /bin/bash
+

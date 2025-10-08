@@ -86,8 +86,8 @@ COPY --from=builder /tmp/target/${BUILD_MODE}/basilica-validator /usr/local/bin/
 RUN mkdir -p /opt/basilica/bin
 
 # Copy veritas binaries if they exist in build context
-COPY executor-binary /opt/basilica/bin/executor-binary
-COPY validator-binary /opt/basilica/bin/validator-binary
+COPY bin/executor-binary /opt/basilica/bin/executor-binary
+COPY bin/validator-binary /opt/basilica/bin/validator-binary
 
 # Make binaries executable
 RUN chmod +x /usr/local/bin/basilica-validator && \

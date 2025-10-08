@@ -1,0 +1,164 @@
+- hosts: k3s_server
+  gather_facts: false
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+  vars:
+    # Autodetect repo root on control host
+    # playbook_dir = <repo>/scripts/ansible/playbooks
+    # Go up three levels to reach <repo>
+    _detected_repo_root: "{{ playbook_dir | realpath | dirname | dirname | dirname }}"
+    repo_root_final: "{{ repo_root | default(_detected_repo_root, true) }}"
+  tasks:
+    - name: Ensure basilica-system namespace exists
+      ansible.builtin.shell: |
+        kubectl get ns basilica-system >/dev/null 2>&1 || kubectl create ns basilica-system
+      args:
+        executable: /bin/bash
+
+    - name: Copy Subtensor manifests to server
+      ansible.builtin.copy:
+        src: "{{ repo_root_final }}/config/deploy/subtensor/"
+        dest: "/opt/basilica/config/deploy/subtensor/"
+        mode: '0644'
+
+    - name: Apply Subtensor ConfigMap
+      ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/subtensor/subtensor-configmap.yaml
+
+    - name: Apply Alice
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-deployment.yaml
+        kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-service.yaml
+        kubectl -n basilica-system rollout status deploy/alice --timeout=240s
+      args:
+        executable: /bin/bash
+
+    - name: Apply Bob
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/subtensor/bob-deployment.yaml
+        kubectl apply -f /opt/basilica/config/deploy/subtensor/bob-service.yaml
+        kubectl -n basilica-system rollout status deploy/bob --timeout=240s
+      args:
+        executable: /bin/bash
+
+    - name: Run Subtensor init Job (wallets, subnet, registration)
+      ansible.builtin.shell: |
+        set -euo pipefail
+        # Replace any previous job to pick up script changes
+        kubectl -n basilica-system delete job/subtensor-init --ignore-not-found || true
+        cat <<'EOF' | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: subtensor-init
+          namespace: basilica-system
+        spec:
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              containers:
+                - name: init
+                  image: python:3.11-slim
+                  env:
+                    - name: SUBTENSOR_WS
+                      value: ws://alice.basilica-system.svc.cluster.local:9944
+                    - name: NETUID
+                      value: "2"
+                  volumeMounts:
+                    - name: script
+                      mountPath: /opt/init
+                  command: ["bash","-lc","bash /opt/init/set_up_local.net.sh"]
+              volumes:
+                - name: script
+                  configMap:
+                    name: subtensor-init
+                    defaultMode: 0755
+        EOF
+        kubectl -n basilica-system wait --for=condition=complete job/subtensor-init --timeout=1200s || kubectl -n basilica-system logs job/subtensor-init --tail=-1 || true
+      args:
+        executable: /bin/bash
+
+    - name: Generate self-signed TLS cert for Subtensor WSS (local)
+      when: subtensor_wss.enabled | bool
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.shell: |
+        set -euo pipefail
+        TMPDIR=$(mktemp -d)
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
+          -keyout "$TMPDIR/tls.key" -out "$TMPDIR/tls.crt" \
+          -subj "/CN={{ subtensor_wss.hostname }}" \
+          -addext "subjectAltName=DNS:{{ subtensor_wss.hostname }}"
+        echo "$TMPDIR"
+      register: _wss_tls_tmp
+      changed_when: true
+      args:
+        executable: /bin/bash
+      tags: ["subtensor_wss"]
+
+    - name: Read generated TLS cert (local)
+      when: subtensor_wss.enabled | bool
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.slurp:
+        src: "{{ _wss_tls_tmp.stdout }}/tls.crt"
+      register: wss_tls_crt
+      tags: ["subtensor_wss"]
+
+    - name: Read generated TLS key (local)
+      when: subtensor_wss.enabled | bool
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.slurp:
+        src: "{{ _wss_tls_tmp.stdout }}/tls.key"
+      register: wss_tls_key
+      tags: ["subtensor_wss"]
+
+    - name: Create/Update TLS secret for Subtensor WSS (apply YAML)
+      when: subtensor_wss.enabled | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: {{ subtensor_wss.secret_name }}
+          namespace: basilica-system
+        type: kubernetes.io/tls
+        data:
+          tls.crt: {{ wss_tls_crt.content }}
+          tls.key: {{ wss_tls_key.content }}
+        EOF
+      args:
+        executable: /bin/bash
+      tags: ["subtensor_wss"]
+
+    - name: Sync Envoy WSS manifest to server (tagged)
+      when: subtensor_wss.enabled | bool
+      ansible.builtin.copy:
+        src: "{{ repo_root_final }}/config/deploy/subtensor/alice-wss-envoy.yaml"
+        dest: "/opt/basilica/config/deploy/subtensor/alice-wss-envoy.yaml"
+        mode: '0644'
+      tags: ["subtensor_wss"]
+
+    - name: Apply Envoy TLS gateway for Subtensor (alice-wss)
+      when: subtensor_wss.enabled | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl apply -f /opt/basilica/config/deploy/subtensor/alice-wss-envoy.yaml
+        kubectl -n basilica-system rollout restart deploy/subtensor-wss || true
+        kubectl -n basilica-system rollout status deploy/subtensor-wss --timeout=600s
+      args:
+        executable: /bin/bash
+      tags: ["subtensor_wss"]
+    - name: Show wss-gateway pod status (debug)
+      when: subtensor_wss.enabled | bool
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n basilica-system get pods -l app=subtensor,component=wss-gateway -o wide || true
+      args:
+        executable: /bin/bash
+      tags: ["subtensor_wss"]

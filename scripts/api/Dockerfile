@@ -79,8 +79,7 @@ RUN useradd -m -u 1000 -s /bin/bash basilica
 RUN mkdir -p /etc/basilica && chown basilica:basilica /etc/basilica
 RUN mkdir -p /home/basilica/.bittensor/wallets && chown -R basilica:basilica /home/basilica/.bittensor
 
-COPY ./scripts/api/service-wallet/default /home/basilica/.bittensor/wallets/default
-RUN chown -R basilica:basilica /home/basilica/.bittensor
+# Wallets are provided via bind mount in compose; no bundled wallet
 
 # Switch to non-root user
 USER basilica
