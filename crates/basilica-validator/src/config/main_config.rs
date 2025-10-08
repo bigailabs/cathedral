@@ -843,8 +843,7 @@ impl ConfigValidation for ValidatorConfig {
                 return Err(ConfigurationError::InvalidValue {
                     key: "billing.billing_endpoint".to_string(),
                     value: self.billing.billing_endpoint.clone(),
-                    reason: "Billing endpoint cannot be empty when billing is enabled"
-                        .to_string(),
+                    reason: "Billing endpoint cannot be empty when billing is enabled".to_string(),
                 });
             }
 

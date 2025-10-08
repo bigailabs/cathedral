@@ -21,7 +21,6 @@ pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
 use crate::billing::BillingClient;
-use crate::config::BillingConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;

@@ -151,10 +151,9 @@ impl BillingClient {
                 Err(e) => {
                     attempt += 1;
                     if attempt >= config.max_retries {
-                        return Err(e.context(format!(
-                            "Failed after {} attempts",
-                            config.max_retries
-                        )));
+                        return Err(
+                            e.context(format!("Failed after {} attempts", config.max_retries))
+                        );
                     }
 
                     warn!(

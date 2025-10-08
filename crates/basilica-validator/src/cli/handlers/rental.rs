@@ -3,7 +3,6 @@
 //! Handles CLI commands for container rental operations via the Validator API
 
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -16,7 +15,6 @@ use crate::api::types::{ListAvailableNodesQuery, LogQuery, TerminateRentalReques
 use crate::cli::commands::RentalAction;
 use crate::config::ValidatorConfig;
 use crate::rental::types::RentalState;
-use crate::rental::RentalManager;
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 
 /// Create a ValidatorClient from configuration

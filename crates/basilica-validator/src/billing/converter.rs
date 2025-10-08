@@ -1,5 +1,7 @@
 use anyhow::Result;
-use basilica_protocol::billing::{GpuUsage as ProtoGpuUsage, ResourceUsage as ProtoResourceUsage, TelemetryData};
+use basilica_protocol::billing::{
+    GpuUsage as ProtoGpuUsage, ResourceUsage as ProtoResourceUsage, TelemetryData,
+};
 use chrono::Utc;
 
 use crate::rental::types::ResourceUsage;
@@ -101,12 +103,9 @@ mod tests {
             gpu_usage: vec![],
         };
 
-        let telemetry = resource_usage_to_telemetry(
-            "rental-789".to_string(),
-            "node-101".to_string(),
-            usage,
-        )
-        .unwrap();
+        let telemetry =
+            resource_usage_to_telemetry("rental-789".to_string(), "node-101".to_string(), usage)
+                .unwrap();
 
         let proto_usage = telemetry.resource_usage.unwrap();
         assert!(proto_usage.gpu_usage.is_empty());

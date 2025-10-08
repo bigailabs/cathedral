@@ -125,12 +125,9 @@ impl RentalBillingMonitor {
             .await
             .context("Failed to get resource usage")?;
 
-        let telemetry = resource_usage_to_telemetry(
-            rental.rental_id.clone(),
-            rental.node_id.clone(),
-            usage,
-        )
-        .context("Failed to convert resource usage to telemetry")?;
+        let telemetry =
+            resource_usage_to_telemetry(rental.rental_id.clone(), rental.node_id.clone(), usage)
+                .context("Failed to convert resource usage to telemetry")?;
 
         self.billing_client
             .stream_telemetry(telemetry)
