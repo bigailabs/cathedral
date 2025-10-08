@@ -18,6 +18,7 @@ pub struct BillingClient {
     channel: Option<Channel>,
     telemetry_tx: mpsc::Sender<TelemetryData>,
     telemetry_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<TelemetryData>>>,
+    streaming_handle: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl BillingClient {
@@ -30,6 +31,7 @@ impl BillingClient {
                 channel: None,
                 telemetry_tx: tx,
                 telemetry_rx: Arc::new(tokio::sync::Mutex::new(rx)),
+                streaming_handle: Arc::new(tokio::sync::Mutex::new(None)),
             });
         }
 
@@ -65,6 +67,7 @@ impl BillingClient {
             channel: Some(channel),
             telemetry_tx: tx,
             telemetry_rx: Arc::new(tokio::sync::Mutex::new(rx)),
+            streaming_handle: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 
@@ -73,12 +76,16 @@ impl BillingClient {
             return Ok(());
         }
 
-        self.telemetry_tx
-            .send(telemetry)
-            .await
-            .with_context(|| "Failed to send telemetry to internal buffer")?;
-
-        Ok(())
+        match self.telemetry_tx.try_send(telemetry) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                warn!("Telemetry channel buffer full, dropping telemetry record");
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("Telemetry channel closed"))
+            }
+        }
     }
 
     pub async fn start_streaming_task(self: Arc<Self>) {
@@ -91,11 +98,13 @@ impl BillingClient {
         let rx = Arc::clone(&self.telemetry_rx);
         let channel = self.channel.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = Self::streaming_loop(config, channel, rx).await {
                 error!("Telemetry streaming loop failed: {}", e);
             }
         });
+
+        *self.streaming_handle.lock().await = Some(handle);
 
         info!("Telemetry streaming task started");
     }
@@ -210,6 +219,12 @@ impl BillingClient {
         info!("Closing billing client");
 
         drop(self.telemetry_tx);
+
+        if let Some(handle) = self.streaming_handle.lock().await.take() {
+            debug!("Waiting for streaming task to complete");
+            let _ = handle.await;
+            info!("Streaming task completed");
+        }
 
         Ok(())
     }
