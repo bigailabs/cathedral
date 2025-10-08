@@ -72,9 +72,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: blacksmith-4vcpu-ubuntu-2204
             suffix: linux-amd64
-          # Linux ARM64 - native build on GitHub ARM runner
+          # Linux ARM64 - native build on Blacksmith ARM runner
           - target: aarch64-unknown-linux-gnu
-            os: blacksmith-4vcpu-ubuntu-2204 # Free GitHub ARM runner
+            os: blacksmith-4vcpu-ubuntu-2404-arm
             suffix: linux-arm64
           # macOS Intel build
           - target: x86_64-apple-darwin
