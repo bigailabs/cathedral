@@ -36,7 +36,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid;
 
 pub struct BillingServiceImpl {
@@ -148,6 +148,36 @@ impl BillingServiceImpl {
             RentalState::Completed => RentalStatus::Stopped,
             RentalState::Failed => RentalStatus::Failed,
         }
+    }
+
+    fn determine_final_cost(
+        validator_provided_cost: &str,
+        calculated_cost: CreditBalance,
+        rental_id: &RentalId,
+    ) -> Result<CreditBalance, Status> {
+        if validator_provided_cost.is_empty() {
+            return Ok(calculated_cost);
+        }
+
+        let validator_cost = rust_decimal::Decimal::from_str(validator_provided_cost)
+            .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?;
+
+        if validator_cost.is_sign_negative() {
+            return Err(Status::invalid_argument("final_cost cannot be negative"));
+        }
+
+        let validator_balance = CreditBalance::from_decimal(validator_cost);
+
+        let cost_tolerance = rust_decimal::Decimal::new(1, 2);
+
+        if (calculated_cost.as_decimal() - validator_balance.as_decimal()).abs() > cost_tolerance {
+            warn!(
+                "Validator-provided final_cost ({}) differs from computed cost ({}) for rental {}",
+                validator_balance, calculated_cost, rental_id
+            );
+        }
+
+        Ok(validator_balance)
     }
 }
 
@@ -733,13 +763,18 @@ impl BillingService for BillingServiceImpl {
                 }
             }
 
-            let final_balance = cost_breakdown.total_cost;
+            let calculated_cost = cost_breakdown.total_cost;
+
+            let final_balance =
+                Self::determine_final_cost(&req.final_cost, calculated_cost, &rental_id)?;
+
             let final_cost = final_balance.as_decimal();
 
             info!(
-                "Finalizing rental {} with calculated cost {} (rules applied: {})",
+                "Finalizing rental {} with final cost {} (calculated: {}, rules applied: {})",
                 rental_id,
                 final_cost,
+                calculated_cost.as_decimal(),
                 rules_evaluated.len()
             );
 
@@ -1132,5 +1167,115 @@ impl BillingService for BillingServiceImpl {
         };
 
         Ok(Response::new(response))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_determine_final_cost_uses_validator_cost_when_provided() {
+        let rental_id = RentalId::new();
+        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
+        let validator_cost = "25.5";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_ok());
+        let final_cost = result.unwrap();
+        assert_eq!(
+            final_cost.as_decimal(),
+            rust_decimal::Decimal::from_str("25.5").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_determine_final_cost_falls_back_to_calculated_when_empty() {
+        let rental_id = RentalId::new();
+        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(15));
+        let validator_cost = "";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_ok());
+        let final_cost = result.unwrap();
+        assert_eq!(final_cost.as_decimal(), rust_decimal::Decimal::from(15));
+    }
+
+    #[test]
+    fn test_determine_final_cost_rejects_invalid_decimal() {
+        let rental_id = RentalId::new();
+        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
+        let validator_cost = "not-a-number";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn test_determine_final_cost_handles_zero_validator_cost() {
+        let rental_id = RentalId::new();
+        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
+        let validator_cost = "0";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_ok());
+        let final_cost = result.unwrap();
+        assert_eq!(final_cost.as_decimal(), rust_decimal::Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_determine_final_cost_with_exact_match() {
+        let rental_id = RentalId::new();
+        let calculated =
+            CreditBalance::from_decimal(rust_decimal::Decimal::from_str("25.5").unwrap());
+        let validator_cost = "25.5";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_ok());
+        let final_cost = result.unwrap();
+        assert_eq!(final_cost, calculated);
+    }
+
+    #[test]
+    fn test_determine_final_cost_with_high_precision() {
+        let rental_id = RentalId::new();
+        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
+        let validator_cost = "25.123456";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_ok());
+        let final_cost = result.unwrap();
+        assert_eq!(
+            final_cost.as_decimal(),
+            rust_decimal::Decimal::from_str("25.123456").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_determine_final_cost_rejects_negative_cost() {
+        let rental_id = RentalId::new();
+        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
+        let validator_cost = "-5.0";
+
+        let result =
+            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("cannot be negative"));
     }
 }
