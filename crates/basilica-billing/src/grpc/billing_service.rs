@@ -2,19 +2,20 @@ use crate::domain::events::EventStore;
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
     rentals::{RentalManager, RentalOperations},
-    rules_engine::RulesEngine,
+    rules_engine::{RulesEngine, RulesEvaluator},
     types::{
         CreditBalance, GpuSpec, PackageId, RentalId, RentalState, ReservationId, ResourceSpec,
         UserId,
     },
 };
 use crate::error::BillingError;
+use crate::metrics::BillingMetricsSystem;
 use crate::storage::events::{EventType, UsageEvent};
 use crate::storage::rds::RdsConnection;
 use crate::storage::SqlRulesRepository;
 use crate::storage::{PackageRepository, SqlPackageRepository};
 use crate::storage::{RentalRepository, SqlCreditRepository, SqlRentalRepository};
-use crate::storage::{SqlUserPreferencesRepository, UserPreferencesRepository};
+use crate::storage::{SqlUserPreferencesRepository, UsageRepository, UserPreferencesRepository};
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 
 use basilica_protocol::billing::{
@@ -41,14 +42,16 @@ use uuid;
 pub struct BillingServiceImpl {
     credit_manager: Arc<dyn CreditOperations + Send + Sync>,
     rental_manager: Arc<dyn RentalOperations + Send + Sync>,
-    _rules_engine: Arc<RulesEngine>,
+    rules_engine: Arc<RulesEngine>,
     #[allow(dead_code)] // Used in server's consumer loop
     telemetry_processor: Arc<TelemetryProcessor>,
     telemetry_ingester: Arc<TelemetryIngester>,
     rental_repository: Arc<dyn RentalRepository + Send + Sync>,
     package_repository: Arc<dyn PackageRepository + Send + Sync>,
     user_preferences_repository: Arc<dyn UserPreferencesRepository + Send + Sync>,
+    usage_repository: Arc<dyn UsageRepository + Send + Sync>,
     event_store: Arc<EventStore>,
+    metrics: Option<Arc<BillingMetricsSystem>>,
 }
 
 impl BillingServiceImpl {
@@ -56,6 +59,7 @@ impl BillingServiceImpl {
         rds_connection: Arc<RdsConnection>,
         telemetry_ingester: Arc<TelemetryIngester>,
         telemetry_processor: Arc<TelemetryProcessor>,
+        metrics: Option<Arc<BillingMetricsSystem>>,
     ) -> Self {
         let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));
         let rental_repository = Arc::new(SqlRentalRepository::new(rds_connection.clone()));
@@ -63,6 +67,9 @@ impl BillingServiceImpl {
         let rules_repository = Arc::new(SqlRulesRepository::new(rds_connection.pool().clone()));
         let user_preferences_repository =
             Arc::new(SqlUserPreferencesRepository::new(rds_connection.clone()));
+        let usage_repository = Arc::new(crate::storage::SqlUsageRepository::new(
+            rds_connection.clone(),
+        ));
 
         // Create event repositories using proper pattern
         let event_repository = Arc::new(crate::storage::events::SqlEventRepository::new(
@@ -81,7 +88,7 @@ impl BillingServiceImpl {
         Self {
             credit_manager: Arc::new(CreditManager::new(credit_repository.clone())),
             rental_manager: Arc::new(RentalManager::new(rental_repository.clone())),
-            _rules_engine: Arc::new(RulesEngine::new(
+            rules_engine: Arc::new(RulesEngine::new(
                 package_repository.clone(),
                 rules_repository,
             )),
@@ -90,7 +97,9 @@ impl BillingServiceImpl {
             rental_repository: rental_repository.clone(),
             package_repository: package_repository.clone(),
             user_preferences_repository: user_preferences_repository.clone(),
+            usage_repository,
             event_store,
+            metrics,
         }
     }
 
@@ -148,28 +157,56 @@ impl BillingService for BillingServiceImpl {
         &self,
         request: Request<ApplyCreditsRequest>,
     ) -> std::result::Result<Response<ApplyCreditsResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.billing_metrics().start_grpc_timer());
+
         let req = request.into_inner();
-        let user_id = UserId::new(req.user_id);
-        let amount = Self::parse_decimal(&req.amount)
-            .map_err(|e| Status::invalid_argument(format!("Invalid amount: {}", e)))?;
-        let credit_balance = CreditBalance::from_decimal(amount);
+        let user_id = UserId::new(req.user_id.clone());
 
-        info!("Applying {} credits to user {}", amount, user_id);
+        let result = async {
+            let amount = Self::parse_decimal(&req.amount)
+                .map_err(|e| Status::invalid_argument(format!("Invalid amount: {}", e)))?;
+            let credit_balance = CreditBalance::from_decimal(amount);
 
-        let new_balance = self
-            .credit_manager
-            .apply_credits(&user_id, credit_balance)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to apply credits: {}", e)))?;
+            info!("Applying {} credits to user {}", amount, user_id);
 
-        let response = ApplyCreditsResponse {
-            success: true,
-            new_balance: Self::format_credit_balance(new_balance),
-            credit_id: req.transaction_id,
-            applied_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-        };
+            let new_balance = self
+                .credit_manager
+                .apply_credits(&user_id, credit_balance)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to apply credits: {}", e)))?;
 
-        Ok(Response::new(response))
+            if let Some(ref metrics) = self.metrics {
+                metrics
+                    .billing_metrics()
+                    .record_credit_applied(amount.to_f64().unwrap_or(0.0), user_id.as_str())
+                    .await;
+            }
+
+            let response = ApplyCreditsResponse {
+                success: true,
+                new_balance: Self::format_credit_balance(new_balance),
+                credit_id: req.transaction_id,
+                applied_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+            };
+
+            Ok(response)
+        }
+        .await;
+
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                let status = if result.is_ok() { "success" } else { "error" };
+                metrics
+                    .billing_metrics()
+                    .record_grpc_request(timer, "apply_credits", status)
+                    .await;
+            }
+        }
+
+        result.map(Response::new)
     }
 
     async fn get_balance(
@@ -318,130 +355,159 @@ impl BillingService for BillingServiceImpl {
         &self,
         request: Request<TrackRentalRequest>,
     ) -> std::result::Result<Response<TrackRentalResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.billing_metrics().start_grpc_timer());
+
         let req = request.into_inner();
-        let rental_id = RentalId::from_str(&req.rental_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
-        let user_id = UserId::new(req.user_id);
-        let hourly_rate = Self::parse_decimal(&req.hourly_rate)
-            .map_err(|e| Status::invalid_argument(format!("Invalid hourly rate: {}", e)))?;
-        let credit_rate = CreditBalance::from_decimal(hourly_rate);
 
-        info!(
-            "Tracking rental {} for user {} at {} credits/hour",
-            rental_id, user_id, hourly_rate
-        );
+        let result = async {
+            let rental_id = RentalId::from_str(&req.rental_id)
+                .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
+            let user_id = UserId::new(req.user_id);
+            let hourly_rate = Self::parse_decimal(&req.hourly_rate)
+                .map_err(|e| Status::invalid_argument(format!("Invalid hourly rate: {}", e)))?;
+            let credit_rate = CreditBalance::from_decimal(hourly_rate);
 
-        let resource_spec = if let Some(spec) = req.resource_spec {
-            ResourceSpec {
-                gpu_specs: spec
-                    .gpus
-                    .into_iter()
-                    .map(|gpu| GpuSpec {
-                        model: gpu.model,
-                        memory_mb: gpu.memory_mb,
-                        count: gpu.count,
-                    })
-                    .collect(),
-                cpu_cores: spec.cpu_cores,
-                memory_gb: (spec.memory_mb / 1024) as u32,
-                storage_gb: spec.disk_gb as u32,
-                disk_iops: 0,
-                network_bandwidth_mbps: spec.network_bandwidth_mbps,
-            }
-        } else {
-            ResourceSpec {
-                gpu_specs: vec![],
-                cpu_cores: 4,
-                memory_gb: 16,
-                storage_gb: 100,
-                disk_iops: 1000,
-                network_bandwidth_mbps: 1000,
-            }
-        };
+            info!(
+                "Tracking rental {} for user {} at {} credits/hour",
+                rental_id, user_id, hourly_rate
+            );
 
-        // Select package based on GPU model
-        let package_id = if !resource_spec.gpu_specs.is_empty() {
-            PackageId::from_gpu_model(&resource_spec.gpu_specs[0].model)
-        } else {
-            PackageId::custom()
-        };
-        let package_id_str = package_id.to_string();
-        let resource_spec_value =
-            serde_json::to_value(&resource_spec).unwrap_or(serde_json::Value::Null);
-        let validator_id = req.validator_id.clone();
-        let validator_id_copy = validator_id.clone();
-
-        let rental_id = self
-            .rental_manager
-            .create_rental(
-                user_id.clone(),
-                req.node_id.clone(),
-                validator_id,
-                package_id,
-                resource_spec,
-                None,
-            )
-            .await
-            .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
-
-        let _created = self
-            .rental_manager
-            .get_rental(&rental_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get created rental: {}", e)))?;
-
-        let proto_duration = req
-            .max_duration
-            .ok_or_else(|| Status::invalid_argument("Max duration is required"))?;
-        let max_duration = Duration::seconds(proto_duration.seconds)
-            + Duration::nanoseconds(proto_duration.nanos as i64);
-        let max_duration_hours = max_duration.num_hours() as u32;
-        let estimated_cost = credit_rate.multiply(Decimal::from(max_duration_hours));
-
-        let reservation_id = self
-            .credit_manager
-            .reserve_credits(&user_id, estimated_cost, max_duration, Some(rental_id))
-            .await
-            .map_err(|e| match e {
-                BillingError::InsufficientBalance { .. } => {
-                    Status::failed_precondition(format!("Insufficient balance: {}", e))
+            let resource_spec = if let Some(spec) = req.resource_spec {
+                ResourceSpec {
+                    gpu_specs: spec
+                        .gpus
+                        .into_iter()
+                        .map(|gpu| GpuSpec {
+                            model: gpu.model,
+                            memory_mb: gpu.memory_mb,
+                            count: gpu.count,
+                        })
+                        .collect(),
+                    cpu_cores: spec.cpu_cores,
+                    memory_gb: (spec.memory_mb / 1024) as u32,
+                    storage_gb: spec.disk_gb as u32,
+                    disk_iops: 0,
+                    network_bandwidth_mbps: spec.network_bandwidth_mbps,
                 }
-                _ => Status::internal(format!("Failed to reserve credits: {}", e)),
-            })?;
+            } else {
+                ResourceSpec {
+                    gpu_specs: vec![],
+                    cpu_cores: 4,
+                    memory_gb: 16,
+                    storage_gb: 100,
+                    disk_iops: 1000,
+                    network_bandwidth_mbps: 1000,
+                }
+            };
 
-        let rental_start_event = UsageEvent {
-            event_id: uuid::Uuid::new_v4(),
-            rental_id: rental_id.as_uuid(),
-            user_id: user_id.to_string(),
-            node_id: req.node_id.clone(),
-            validator_id: validator_id_copy,
-            event_type: EventType::RentalStart,
-            event_data: serde_json::json!({
-                "package_id": package_id_str,
-                "hourly_rate": Self::format_decimal(hourly_rate),
-                "resource_spec": resource_spec_value,
-                "estimated_cost": Self::format_credit_balance(estimated_cost),
-                "max_duration_hours": max_duration_hours,
-            }),
-            timestamp: chrono::Utc::now(),
-            processed: false,
-            processed_at: None,
-            batch_id: None,
-        };
+            let package_id = if !resource_spec.gpu_specs.is_empty() {
+                PackageId::from_gpu_model(&resource_spec.gpu_specs[0].model)
+            } else {
+                PackageId::custom()
+            };
+            let package_id_str = package_id.to_string();
+            let resource_spec_value =
+                serde_json::to_value(&resource_spec).unwrap_or(serde_json::Value::Null);
+            let validator_id = req.validator_id.clone();
+            let validator_id_copy = validator_id.clone();
 
-        self.event_store
-            .append_usage_event(&rental_start_event)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to store rental start event: {}", e)))?;
+            let rental_id = self
+                .rental_manager
+                .create_rental(
+                    user_id.clone(),
+                    req.node_id.clone(),
+                    validator_id,
+                    package_id,
+                    resource_spec,
+                    None,
+                )
+                .await
+                .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
 
-        let response = TrackRentalResponse {
-            success: true,
-            tracking_id: rental_id.to_string(),
-            reservation_id: reservation_id.to_string(),
-            estimated_cost: Self::format_credit_balance(estimated_cost),
-        };
+            let _created = self
+                .rental_manager
+                .get_rental(&rental_id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get created rental: {}", e)))?;
 
-        Ok(Response::new(response))
+            let proto_duration = req
+                .max_duration
+                .ok_or_else(|| Status::invalid_argument("Max duration is required"))?;
+            let max_duration = Duration::seconds(proto_duration.seconds)
+                + Duration::nanoseconds(proto_duration.nanos as i64);
+            let max_duration_hours = max_duration.num_hours() as u32;
+            let estimated_cost = credit_rate.multiply(Decimal::from(max_duration_hours));
+
+            let reservation_id = self
+                .credit_manager
+                .reserve_credits(&user_id, estimated_cost, max_duration, Some(rental_id))
+                .await
+                .map_err(|e| match e {
+                    BillingError::InsufficientBalance { .. } => {
+                        Status::failed_precondition(format!("Insufficient balance: {}", e))
+                    }
+                    _ => Status::internal(format!("Failed to reserve credits: {}", e)),
+                })?;
+
+            let rental_start_event = UsageEvent {
+                event_id: uuid::Uuid::new_v4(),
+                rental_id: rental_id.as_uuid(),
+                user_id: user_id.to_string(),
+                node_id: req.node_id.clone(),
+                validator_id: validator_id_copy,
+                event_type: EventType::RentalStart,
+                event_data: serde_json::json!({
+                    "package_id": package_id_str,
+                    "hourly_rate": Self::format_decimal(hourly_rate),
+                    "resource_spec": resource_spec_value,
+                    "estimated_cost": Self::format_credit_balance(estimated_cost),
+                    "max_duration_hours": max_duration_hours,
+                }),
+                timestamp: chrono::Utc::now(),
+                processed: false,
+                processed_at: None,
+                batch_id: None,
+            };
+
+            self.event_store
+                .append_usage_event(&rental_start_event)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("Failed to store rental start event: {}", e))
+                })?;
+
+            if let Some(ref metrics) = self.metrics {
+                metrics
+                    .billing_metrics()
+                    .record_rental_tracked(&rental_id.to_string(), &package_id_str)
+                    .await;
+            }
+
+            let response = TrackRentalResponse {
+                success: true,
+                tracking_id: rental_id.to_string(),
+                reservation_id: reservation_id.to_string(),
+                estimated_cost: Self::format_credit_balance(estimated_cost),
+            };
+
+            Ok(response)
+        }
+        .await;
+
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                let status = if result.is_ok() { "success" } else { "error" };
+                metrics
+                    .billing_metrics()
+                    .record_grpc_request(timer, "track_rental", status)
+                    .await;
+            }
+        }
+
+        result.map(Response::new)
     }
 
     async fn update_rental_status(
@@ -613,86 +679,167 @@ impl BillingService for BillingServiceImpl {
         &self,
         request: Request<FinalizeRentalRequest>,
     ) -> std::result::Result<Response<FinalizeRentalResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.billing_metrics().start_grpc_timer());
+
         let req = request.into_inner();
-        let rental_id = RentalId::from_str(&req.rental_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
-        let final_cost = Self::parse_decimal(&req.final_cost)
-            .map_err(|e| Status::invalid_argument(format!("Invalid final cost: {}", e)))?;
-        let final_balance = CreditBalance::from_decimal(final_cost);
 
-        info!("Finalizing rental {} with cost {}", rental_id, final_cost);
+        let result = async {
+            let rental_id = RentalId::from_str(&req.rental_id)
+                .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
 
-        let rental = self
-            .rental_manager
-            .finalize_rental(&rental_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to finalize rental: {}", e)))?;
+            info!("Finalizing rental {}", rental_id);
 
-        let duration = rental.last_updated - rental.created_at;
-        let _duration_hours =
-            duration.num_hours() as f64 + (duration.num_minutes() % 60) as f64 / 60.0;
-
-        let reservations = self
-            .credit_manager
-            .get_active_reservations(&rental.user_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get reservations: {}", e)))?;
-
-        let rental_reservation = reservations.iter().find(|r| r.rental_id == Some(rental_id));
-
-        let (charged_amount, refunded_amount) = if let Some(reservation) = rental_reservation {
-            let reserved = reservation.amount;
-            let refunded = reserved
-                .subtract(final_balance)
-                .unwrap_or(CreditBalance::zero());
-
-            self.credit_manager
-                .charge_from_reservation(&reservation.id, final_balance)
+            let rental = self
+                .rental_manager
+                .finalize_rental(&rental_id)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to charge reservation: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Failed to finalize rental: {}", e)))?;
 
-            (final_balance, refunded)
-        } else {
-            self.credit_manager
-                .charge_credits(&rental.user_id, final_balance)
+            let usage_metrics = self
+                .usage_repository
+                .get_usage_for_rental(&rental_id)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to charge credits: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Failed to get usage metrics: {}", e)))?;
 
-            (final_balance, CreditBalance::zero())
-        };
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert("user_id".to_string(), rental.user_id.to_string());
+            metadata.insert("rental_id".to_string(), rental_id.to_string());
+            metadata.insert("validator_id".to_string(), rental.validator_id.clone());
+            metadata.insert("node_id".to_string(), rental.node_id.clone());
 
-        let final_rental = self
-            .rental_manager
-            .get_rental(&rental_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?;
-        self.rental_repository
-            .update_rental(&final_rental)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to persist rental: {}", e)))?;
+            let cost_breakdown = self
+                .rules_engine
+                .evaluate_package(&rental.package_id, &usage_metrics, &metadata)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("Failed to evaluate billing rules: {}", e))
+                })?;
 
-        let duration_proto = prost_types::Duration {
-            seconds: duration.num_seconds(),
-            nanos: (duration.num_nanoseconds().unwrap_or(0) % 1_000_000_000) as i32,
-        };
+            let rules_evaluated = self
+                .rules_engine
+                .evaluate_rules(&usage_metrics, &metadata)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to evaluate rules: {}", e)))?;
 
-        let response = FinalizeRentalResponse {
-            success: true,
-            total_cost: Self::format_decimal(final_cost),
-            duration: Some(duration_proto),
-            charged_amount: Self::format_credit_balance(charged_amount),
-            refunded_amount: Self::format_credit_balance(refunded_amount),
-        };
+            if let Some(ref metrics) = self.metrics {
+                for rule in &rules_evaluated {
+                    metrics
+                        .billing_metrics()
+                        .record_rule_applied(&rule.id, &rule.name)
+                        .await;
+                }
+            }
 
-        Ok(Response::new(response))
+            let final_balance = cost_breakdown.total_cost;
+            let final_cost = final_balance.as_decimal();
+
+            info!(
+                "Finalizing rental {} with calculated cost {} (rules applied: {})",
+                rental_id,
+                final_cost,
+                rules_evaluated.len()
+            );
+
+            let duration = rental.last_updated - rental.created_at;
+            let _duration_hours =
+                duration.num_hours() as f64 + (duration.num_minutes() % 60) as f64 / 60.0;
+
+            let reservations = self
+                .credit_manager
+                .get_active_reservations(&rental.user_id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get reservations: {}", e)))?;
+
+            let rental_reservation = reservations.iter().find(|r| r.rental_id == Some(rental_id));
+
+            let (charged_amount, refunded_amount) = if let Some(reservation) = rental_reservation {
+                let reserved = reservation.amount;
+                let refunded = reserved
+                    .subtract(final_balance)
+                    .unwrap_or(CreditBalance::zero());
+
+                self.credit_manager
+                    .charge_from_reservation(&reservation.id, final_balance)
+                    .await
+                    .map_err(|e| {
+                        Status::internal(format!("Failed to charge reservation: {}", e))
+                    })?;
+
+                (final_balance, refunded)
+            } else {
+                self.credit_manager
+                    .charge_credits(&rental.user_id, final_balance)
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to charge credits: {}", e)))?;
+
+                (final_balance, CreditBalance::zero())
+            };
+
+            let final_rental = self
+                .rental_manager
+                .get_rental(&rental_id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?;
+            self.rental_repository
+                .update_rental(&final_rental)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to persist rental: {}", e)))?;
+
+            if let Some(ref metrics) = self.metrics {
+                metrics
+                    .billing_metrics()
+                    .record_rental_finalized(
+                        &rental_id.to_string(),
+                        final_cost.to_f64().unwrap_or(0.0),
+                    )
+                    .await;
+            }
+
+            let duration_proto = prost_types::Duration {
+                seconds: duration.num_seconds(),
+                nanos: (duration.num_nanoseconds().unwrap_or(0) % 1_000_000_000) as i32,
+            };
+
+            let response = FinalizeRentalResponse {
+                success: true,
+                total_cost: Self::format_decimal(final_cost),
+                duration: Some(duration_proto),
+                charged_amount: Self::format_credit_balance(charged_amount),
+                refunded_amount: Self::format_credit_balance(refunded_amount),
+            };
+
+            Ok(response)
+        }
+        .await;
+
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                let status = if result.is_ok() { "success" } else { "error" };
+                metrics
+                    .billing_metrics()
+                    .record_grpc_request(timer, "finalize_rental", status)
+                    .await;
+            }
+        }
+
+        result.map(Response::new)
     }
 
     async fn ingest_telemetry(
         &self,
         request: Request<tonic::Streaming<TelemetryData>>,
     ) -> std::result::Result<Response<IngestResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.billing_metrics().start_grpc_timer());
+
         let mut stream = request.into_inner();
         let ingester = self.telemetry_ingester.clone();
+        let metrics = self.metrics.clone();
 
         let mut events_received = 0u64;
         let mut events_processed = 0u64;
@@ -704,20 +851,43 @@ impl BillingService for BillingServiceImpl {
                 Ok(telemetry_data) => {
                     events_received += 1;
 
+                    let rental_id = telemetry_data.rental_id.clone();
+
                     match ingester.ingest(telemetry_data).await {
                         Ok(_) => {
                             events_processed += 1;
                             last_processed = chrono::Utc::now();
+
+                            if let Some(ref metrics) = metrics {
+                                metrics
+                                    .billing_metrics()
+                                    .record_telemetry_received(&rental_id)
+                                    .await;
+                            }
                         }
                         Err(e) => {
                             error!("Failed to ingest telemetry: {}", e);
                             events_failed += 1;
+
+                            if let Some(ref metrics) = metrics {
+                                metrics
+                                    .billing_metrics()
+                                    .record_telemetry_dropped("ingestion_failed")
+                                    .await;
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     error!("Error receiving telemetry: {}", e);
                     events_failed += 1;
+
+                    if let Some(ref metrics) = metrics {
+                        metrics
+                            .billing_metrics()
+                            .record_telemetry_dropped("stream_error")
+                            .await;
+                    }
                 }
             }
         }
@@ -730,6 +900,15 @@ impl BillingService for BillingServiceImpl {
                 last_processed,
             ))),
         };
+
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                metrics
+                    .billing_metrics()
+                    .record_grpc_request(timer, "ingest_telemetry", "success")
+                    .await;
+            }
+        }
 
         Ok(Response::new(response))
     }

@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use basilica_billing::config::BillingConfig;
 use basilica_billing::server::BillingServer;
 use clap::Parser;
 use clap_verbosity_flag::{InfoLevel, Verbosity};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info};
 
@@ -48,7 +49,24 @@ async fn main() -> Result<()> {
     info!("Environment: {}", config.service.environment);
     info!("Service ID: {}", config.service.service_id);
 
-    let server = BillingServer::new_with_config(config.clone()).await?;
+    let metrics_system = if config.service.metrics_enabled {
+        let metrics_config = basilica_common::config::types::MetricsConfig::default();
+        let metrics = Arc::new(
+            basilica_billing::metrics::BillingMetricsSystem::new(metrics_config.clone())
+                .context("Failed to initialize metrics system")?,
+        );
+
+        metrics
+            .start_collection()
+            .await
+            .context("Failed to start metrics collection")?;
+
+        Some(metrics)
+    } else {
+        None
+    };
+
+    let server = BillingServer::new_with_config(config.clone(), metrics_system).await?;
 
     if args.dry_run {
         info!("Configuration validated successfully (dry-run mode)");

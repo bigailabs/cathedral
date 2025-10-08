@@ -2,6 +2,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod grpc;
+pub mod metrics;
 pub mod server;
 pub mod storage;
 pub mod telemetry;

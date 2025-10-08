@@ -1,3 +1,4 @@
+pub mod aggregations;
 pub mod billing_handlers;
 pub mod credits;
 pub mod events;
@@ -7,6 +8,7 @@ pub mod rentals;
 pub mod rules_engine;
 pub mod types;
 
+pub use aggregations::AggregationJobs;
 pub use billing_handlers::BillingEventHandlers;
 pub use credits::{CreditManager, CreditOperations, Reservation};
 pub use events::{EventStore, EventStoreOperations};
