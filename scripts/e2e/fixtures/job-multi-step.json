@@ -1,0 +1,13 @@
+{
+  "image": "busybox:latest",
+  "command": [
+    "sh",
+    "-c",
+    "echo step1 && sleep 2 && echo step2 && sleep 2 && echo step3-complete"
+  ],
+  "resources": {
+    "cpu": "0.5",
+    "memory": "256Mi"
+  },
+  "ttl_seconds": 300
+}

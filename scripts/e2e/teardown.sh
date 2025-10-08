@@ -62,16 +62,16 @@ kubectl delete -f config/rbac/validator-rbac.yaml --ignore-not-found || true
 
 if [ "$KEEP_CRDS" = false ]; then
   echo "[teardown] Deleting Basilica CR instances (if any)"
-  kubectl delete gpurentals.basilica.io --all -A --ignore-not-found || true
-  kubectl delete basilicajobs.basilica.io --all -A --ignore-not-found || true
-  kubectl delete basilicanodeprofiles.basilica.io --all -A --ignore-not-found || true
-  kubectl delete basilicaqueues.basilica.io --all -A --ignore-not-found || true
+  kubectl delete gpurentals.basilica.ai --all -A --ignore-not-found || true
+  kubectl delete basilicajobs.basilica.ai --all -A --ignore-not-found || true
+  kubectl delete basilicanodeprofiles.basilica.ai --all -A --ignore-not-found || true
+  kubectl delete basilicaqueues.basilica.ai --all -A --ignore-not-found || true
 
   echo "[teardown] Deleting CRDs"
   if [ -f basilica-crds.yaml ]; then
     kubectl delete -f basilica-crds.yaml --ignore-not-found || true
   else
-    kubectl delete crd gpurentals.basilica.io basilicajobs.basilica.io basilicanodeprofiles.basilica.io basilicaqueues.basilica.io --ignore-not-found || true
+    kubectl delete crd gpurentals.basilica.ai basilicajobs.basilica.ai basilicanodeprofiles.basilica.ai basilicaqueues.basilica.ai --ignore-not-found || true
   fi
 fi
 

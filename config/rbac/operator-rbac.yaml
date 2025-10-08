@@ -45,10 +45,10 @@ rules:
     verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
 
   # Basilica CRDs
-  - apiGroups: ["basilica.io"]
+  - apiGroups: ["basilica.ai"]
     resources: ["basilicajobs", "gpurentals", "basilicanodeprofiles"]
     verbs: ["get", "list", "watch", "patch"]
-  - apiGroups: ["basilica.io"]
+  - apiGroups: ["basilica.ai"]
     resources: ["basilicajobs/status", "gpurentals/status", "basilicanodeprofiles/status"]
     verbs: ["patch", "update"]
 ---

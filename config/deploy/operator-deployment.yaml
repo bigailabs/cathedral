@@ -19,7 +19,7 @@ spec:
       containers:
         - name: operator
           # Replace with your published image reference
-          image: ghcr.io/one-covenant/basilica//basilica-operator:k3_test
+          image: ghcr.io/one-covenant/basilica/basilica-operator:k3_test
           imagePullPolicy: IfNotPresent
           env:
             - name: RUST_LOG

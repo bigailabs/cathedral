@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alice-wss-ingress
+  namespace: basilica-system
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: "alice"
+spec:
+  tls:
+    - hosts:
+        - {{ subtensor_public_wss.host | quote }}
+      secretName: alice-wss-tls
+  rules:
+    - host: {{ subtensor_public_wss.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: alice
+                port:
+                  number: 9944
+

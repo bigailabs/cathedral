@@ -23,7 +23,7 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
-  - apiGroups: ["basilica.io"]
+  - apiGroups: ["basilica.ai"]
     resources: ["basilicajobs", "gpurentals"]
     verbs: ["create", "get", "list", "watch", "patch", "update", "delete"]
   - apiGroups: ["gateway.networking.k8s.io"]

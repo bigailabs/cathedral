@@ -10,15 +10,15 @@ metadata:
   name: basilica-validator
 rules:
   # Publish BasilicaNodeProfile and patch status
-  - apiGroups: ["basilica.io"]
+  - apiGroups: ["basilica.ai"]
     resources: ["basilicanodeprofiles"]
     verbs: ["get", "list", "watch", "create"]
-  - apiGroups: ["basilica.io"]
+  - apiGroups: ["basilica.ai"]
     resources: ["basilicanodeprofiles/status"]
     verbs: ["patch", "update"]
 
   # Optional: create GpuRental CRs (if validator is allowed to submit rentals)
-  - apiGroups: ["basilica.io"]
+  - apiGroups: ["basilica.ai"]
     resources: ["gpurentals"]
     verbs: ["create", "get"]
 

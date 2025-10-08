@@ -1,0 +1,17 @@
+{
+  "container_image": "busybox:latest",
+  "command": ["sh", "-c", "while true; do sleep 3600; done"],
+  "resources": {
+    "cpu": "4",
+    "memory": "16Gi",
+    "gpus": {
+      "count": 0,
+      "model": []
+    }
+  },
+  "exclusive": true,
+  "network": {
+    "ingress_ports": [],
+    "egress_policy": "open"
+  }
+}

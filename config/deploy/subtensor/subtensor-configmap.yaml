@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: subtensor-init
+  namespace: basilica-system
+data:
+  set_up_local.net.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -x
+    echo "🚀 Setting up local subtensor testing environment (Kubernetes)..."
+
+    # Ensure base tools present and PATH sane
+    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+    # Require python3 to install bittensor CLI
+    if ! command -v python3 >/dev/null 2>&1; then
+      echo "python3 is required inside the init container" >&2
+      exit 1
+    fi
+    # Install build deps needed for some wheels (best-effort)
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update -y >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gcc g++ git libssl-dev pkg-config curl ca-certificates >/dev/null 2>&1 || true
+      rm -rf /var/lib/apt/lists/* || true
+    fi
+    python3 -m pip install --no-cache-dir --upgrade pip >/dev/null 2>&1 || true
+    # Install the Bittensor CLI which provides the `btcli` command
+    python3 -m pip install --no-cache-dir bittensor-cli >/dev/null 2>&1 || { echo "pip install bittensor-cli failed" >&2; exit 1; }
+    command -v btcli >/dev/null 2>&1 || { echo "btcli not found after bittensor-cli install" >&2; exit 1; }
+
+    export CHAIN_ENDPOINT="${SUBTENSOR_WS:-ws://alice.basilica-system.svc.cluster.local:9944}"
+    export NETUID="${NETUID:-2}"
+    export WALLET_PATH="${WALLET_PATH:-/root/.bittensor/wallets}"
+
+    echo "Waiting for subtensor WS endpoint: ${CHAIN_ENDPOINT}"
+    host_port="${CHAIN_ENDPOINT#*//}"
+    host="${host_port%%:*}"
+    port="${host_port##*:}"
+    for i in $(seq 1 60); do
+      if bash -c "</dev/tcp/${host}/${port}" 2>/dev/null; then
+        echo "chain ready"; break
+      fi
+      sleep 2
+    done
+
+    echo "Creating wallets if missing (Alice/default, M1, M2)"
+    mkdir -p "${WALLET_PATH}/Alice/hotkeys"
+    if [ ! -f "${WALLET_PATH}/Alice/coldkey" ]; then
+      btcli wallet regen_coldkey --wallet.path "${WALLET_PATH}" --wallet.name Alice \
+        --seed "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a" \
+        --no-use-password || true
+    fi
+    [ -f "${WALLET_PATH}/Alice/hotkeys/default" ] || btcli wallet new_hotkey --wallet.path "${WALLET_PATH}" --wallet.name Alice --wallet.hotkey default --n_words 12 --no-use-password
+    [ -f "${WALLET_PATH}/Alice/hotkeys/M1" ] || btcli wallet new_hotkey --wallet.path "${WALLET_PATH}" --wallet.name Alice --wallet.hotkey M1 --n_words 12 --no-use-password
+    [ -f "${WALLET_PATH}/Alice/hotkeys/M2" ] || btcli wallet new_hotkey --wallet.path "${WALLET_PATH}" --wallet.name Alice --wallet.hotkey M2 --n_words 12 --no-use-password
+
+    echo "Creating subnet NETUID=${NETUID} (may already exist)"
+    printf "\n\n\n\n\n\n\n" | btcli subnet create --subtensor.network custom --subtensor.chain_endpoint "${CHAIN_ENDPOINT}" \
+      --wallet.path "${WALLET_PATH}" --wallet.name Alice --wallet.hotkey default \
+      --subnet-name "grail-local" --no_prompt || true
+
+    echo "Registering miners on subnet ${NETUID}"
+    register() {
+      local hk="$1"
+      local n=0
+      until [ $n -ge 5 ]; do
+        if btcli subnet register --netuid "${NETUID}" --subtensor.network custom --subtensor.chain_endpoint "${CHAIN_ENDPOINT}" \
+            --wallet.path "${WALLET_PATH}" --wallet.name Alice --wallet.hotkey "$hk" --no_prompt 2>&1 | tee /tmp/register_$hk.log | grep -q "✅ Registered"; then
+          echo "Registered $hk"; return 0; fi
+        grep -q "already registered" /tmp/register_$hk.log && { echo "$hk already registered"; return 0; }
+        sleep 5; n=$((n+1))
+      done
+      return 0
+    }
+    register M1 || true
+    register M2 || true
+
+    echo "Starting subnet emission (may already be started)"
+    btcli subnet start --netuid "${NETUID}" --subtensor.network custom --subtensor.chain_endpoint "${CHAIN_ENDPOINT}" \
+      --wallet.path "${WALLET_PATH}" --wallet.name Alice --wallet.hotkey default --no_prompt || true
+    echo "✅ Subtensor localnet initialization complete"

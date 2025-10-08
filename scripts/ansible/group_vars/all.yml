@@ -10,7 +10,7 @@ k3s_server_exec_args: >-
 
 # Agents can add custom args (e.g., taints/labels)
 k3s_agent_exec_args: >-
-  --node-label basilica.io/workloads-only=true
+  --node-label basilica.ai/workloads-only=true
 
 # Install Rust toolchain on the K3s server host (for generating CRDs or building tools)
 install_rust: true

@@ -1,0 +1,20 @@
+{
+  "container_image": "busybox:latest",
+  "command": ["sh", "-c", "echo data > /data/test.txt && tail -f /data/test.txt"],
+  "resources": {
+    "cpu": "0.5",
+    "memory": "512Mi",
+    "gpus": {
+      "count": 0,
+      "model": []
+    }
+  },
+  "storage": {
+    "persistent_volume_gb": 10,
+    "mount_path": "/data"
+  },
+  "network": {
+    "ingress_ports": [],
+    "egress_policy": "open"
+  }
+}

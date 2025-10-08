@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alice
+  namespace: basilica-system
+  labels:
+    app: subtensor
+    node: alice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: subtensor
+      node: alice
+  template:
+    metadata:
+      labels:
+        app: subtensor
+        node: alice
+    spec:
+      containers:
+        - name: alice
+          image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: info
+          args:
+            - --dev
+            - --alice
+            - --rpc-external
+            - --rpc-cors=all
+            - --rpc-methods=unsafe
+            - --port=30333
+            - --rpc-port=9944
+            - --base-path=/tmp/blockchain
+            - --validator
+            - --allow-private-ipv4
+            - --discover-local
+          ports:
+            - name: ws
+              containerPort: 9944
+            - name: p2p
+              containerPort: 30333
+          readinessProbe:
+            tcpSocket:
+              port: 9944
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 9944
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      restartPolicy: Always
+

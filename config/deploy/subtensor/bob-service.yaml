@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bob
+  namespace: basilica-system
+  labels:
+    app: subtensor
+    node: bob
+spec:
+  selector:
+    app: subtensor
+    node: bob
+  ports:
+    - name: ws
+      port: 9945
+      targetPort: 9945
+    - name: p2p
+      port: 30334
+      targetPort: 30334
+

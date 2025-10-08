@@ -70,10 +70,10 @@
     - name: Delete Basilica CR instances (if any)
       ansible.builtin.shell: |
         set -euo pipefail
-        kubectl delete gpurentals.basilica.io --all -A --ignore-not-found || true
-        kubectl delete basilicajobs.basilica.io --all -A --ignore-not-found || true
-        kubectl delete basilicanodeprofiles.basilica.io --all -A --ignore-not-found || true
-        kubectl delete basilicaqueues.basilica.io --all -A --ignore-not-found || true
+        kubectl delete gpurentals.basilica.ai --all -A --ignore-not-found || true
+        kubectl delete basilicajobs.basilica.ai --all -A --ignore-not-found || true
+        kubectl delete basilicanodeprofiles.basilica.ai --all -A --ignore-not-found || true
+        kubectl delete basilicaqueues.basilica.ai --all -A --ignore-not-found || true
       args:
         executable: /bin/bash
 
@@ -81,7 +81,7 @@
       ansible.builtin.shell: |
         set -euo pipefail
         kubectl delete -f /opt/basilica/basilica-crds.yaml --ignore-not-found || true
-        kubectl delete crd gpurentals.basilica.io basilicajobs.basilica.io basilicanodeprofiles.basilica.io basilicaqueues.basilica.io --ignore-not-found || true
+        kubectl delete crd gpurentals.basilica.ai basilicajobs.basilica.ai basilicanodeprofiles.basilica.ai basilicaqueues.basilica.ai --ignore-not-found || true
       args:
         executable: /bin/bash
 
