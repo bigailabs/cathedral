@@ -18,12 +18,24 @@ pub struct TokenStore {
 
 impl TokenStore {
     /// Create a new token store with the provided data directory
+    ///
+    /// The token file name is determined by the current Auth0 domain:
+    /// - Development (matches basilica_common::AUTH0_DOMAIN): auth.dev.json
+    /// - Production (different domain via env var): auth.json
     pub fn new(data_dir: PathBuf) -> AuthResult<Self> {
         fs::create_dir_all(&data_dir).map_err(|e| {
             AuthError::StorageError(format!("Failed to create data directory: {}", e))
         })?;
 
-        let auth_file_path = data_dir.join("auth.json");
+        // Detect environment based on Auth0 domain
+        let current_domain = basilica_common::auth0_domain();
+        let auth_file_name = if current_domain == basilica_common::auth_constants::AUTH0_DOMAIN {
+            "auth.dev.json"
+        } else {
+            "auth.json"
+        };
+
+        let auth_file_path = data_dir.join(auth_file_name);
 
         Ok(Self { auth_file_path })
     }
