@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use rand::Rng;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -303,23 +303,11 @@ impl MinerDiscovery for MinerDiscoveryService {
             discover_request.validator_hotkey
         );
 
-        let current_assignment = self
-            .server
-            .validator_discovery
-            .get_current_assignment()
-            .await;
+        // Get the currently assigned validator from NodeManager (single source of truth)
+        let assigned_validator = self.server.node_manager.get_assigned_validator().await;
 
-        let Some(assignment) = current_assignment else {
-            info!(
-                "Validator {} requested nodes but no assignment is currently active",
-                discover_request.validator_hotkey
-            );
-            return Ok(Response::new(ListNodeConnectionDetailsResponse {
-                nodes: vec![],
-            }));
-        };
-
-        if assignment.validator_hotkey != discover_request.validator_hotkey {
+        // Check if the requesting validator is the assigned validator
+        if assigned_validator.as_deref() != Some(&discover_request.validator_hotkey) {
             info!(
                 "Validator {} is not the assigned validator; returning empty node list",
                 discover_request.validator_hotkey
@@ -329,41 +317,53 @@ impl MinerDiscovery for MinerDiscoveryService {
             }));
         }
 
-        if assignment.node_ids.is_empty() {
-            info!(
-                "Assigned validator {} has no nodes allocated; returning empty node list",
-                discover_request.validator_hotkey
-            );
-            return Ok(Response::new(ListNodeConnectionDetailsResponse {
-                nodes: vec![],
-            }));
-        }
-
-        // Handle the discovery request through the node manager
-        match self
+        // Deploy SSH keys to all nodes (exclusive access, removes old validator keys)
+        if let Err(e) = self
             .server
             .node_manager
-            .handle_discover_nodes(discover_request.clone())
+            .deploy_validator_keys(
+                &discover_request.validator_hotkey,
+                &discover_request.validator_public_key,
+            )
             .await
         {
-            Ok(mut response) => {
-                let allowed: HashSet<&str> =
-                    assignment.node_ids.iter().map(|id| id.as_str()).collect();
-                response
-                    .nodes
-                    .retain(|node| allowed.contains(node.node_id.as_str()));
-
-                info!(
-                    "Returning {} nodes to validator {}",
-                    response.nodes.len(),
-                    discover_request.validator_hotkey
-                );
-                Ok(Response::new(response))
-            }
-            Err(e) => {
-                error!("Failed to discover nodes: {}", e);
-                Err(Status::internal(format!("Failed to discover nodes: {e}")))
-            }
+            error!("Failed to deploy validator SSH keys: {}", e);
+            return Err(Status::internal(format!("Failed to deploy SSH keys: {e}")));
         }
+
+        // Get all nodes and return them to the validator
+        let nodes = match self.server.node_manager.list_nodes().await {
+            Ok(nodes) => nodes,
+            Err(e) => {
+                error!("Failed to list nodes: {}", e);
+                return Err(Status::internal(format!("Failed to list nodes: {e}")));
+            }
+        };
+
+        // Convert to protocol format
+        let node_details: Vec<basilica_protocol::miner_discovery::NodeConnectionDetails> = nodes
+            .into_iter()
+            .map(|registered_node| {
+                basilica_protocol::miner_discovery::NodeConnectionDetails {
+                    node_id: registered_node.node_id,
+                    host: registered_node.config.host,
+                    port: registered_node.config.port.to_string(),
+                    username: registered_node.config.username,
+                    additional_opts: registered_node.config.additional_opts.unwrap_or_default(),
+                    gpu_spec: None, // Validators discover GPU specs via SSH
+                    status: "available".to_string(),
+                }
+            })
+            .collect();
+
+        info!(
+            "Returning {} nodes to validator {}",
+            node_details.len(),
+            discover_request.validator_hotkey
+        );
+
+        Ok(Response::new(ListNodeConnectionDetailsResponse {
+            nodes: node_details,
+        }))
     }
 }

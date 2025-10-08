@@ -3,12 +3,9 @@
 //! This module manages the nodes that the miner offers to validators.
 //! Nodes are compute resources with SSH access that validators can use directly.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use basilica_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
-};
-use basilica_protocol::miner_discovery::{
-    DiscoverNodesRequest, ListNodeConnectionDetailsResponse, NodeConnectionDetails,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -58,8 +55,8 @@ impl NodeConfig {
 pub struct NodeManager {
     /// Map of node_id to node configuration
     nodes: Arc<RwLock<HashMap<String, NodeConfig>>>,
-    /// Currently assigned validator (single-assignment model)
-    current_validator: Arc<RwLock<Option<ValidatorAssignment>>>,
+    /// Currently assigned validator hotkey (single-assignment model)
+    current_assigned_validator: Arc<RwLock<Option<String>>>,
     /// SSH client for executing remote commands
     ssh_client: Arc<StandardSshClient>,
     /// SSH configuration
@@ -73,20 +70,13 @@ pub struct RegisteredNode {
     pub config: NodeConfig,
 }
 
-/// Tracks the validator currently assigned to this miner
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ValidatorAssignment {
-    pub hotkey: String,
-    pub ssh_public_key: String,
-}
-
 impl std::fmt::Debug for NodeManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeManager")
             .field("nodes", &"<Arc<RwLock<HashMap>>>")
             .field(
-                "current_validator",
-                &"<Arc<RwLock<Option<ValidatorAssignment>>>>",
+                "current_assigned_validator",
+                &"<Arc<RwLock<Option<String>>>>",
             )
             .field("ssh_client", &"<StandardSshClient>")
             .finish()
@@ -110,7 +100,7 @@ impl NodeManager {
         };
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
-            current_validator: Arc::new(RwLock::new(None)),
+            current_assigned_validator: Arc::new(RwLock::new(None)),
             ssh_client: Arc::new(StandardSshClient::with_config(config)),
             ssh_config,
         }
@@ -180,8 +170,22 @@ impl NodeManager {
         }
     }
 
-    /// Authorize a validator's SSH public key and deploy it to all nodes
-    pub async fn authorize_validator(
+    /// Set the currently assigned validator (no SSH operations, just updates state)
+    pub async fn set_assigned_validator(&self, validator_hotkey: &str) {
+        let mut current = self.current_assigned_validator.write().await;
+        *current = Some(validator_hotkey.to_string());
+        info!("Assigned validator: {}", validator_hotkey);
+    }
+
+    /// Get the currently assigned validator hotkey
+    pub async fn get_assigned_validator(&self) -> Option<String> {
+        self.current_assigned_validator.read().await.clone()
+    }
+
+    /// Deploy validator SSH keys to all managed nodes
+    /// This method validates the SSH key, normalizes it, and deploys it to all nodes
+    /// using exclusive access (removes old validator keys, adds new one)
+    pub async fn deploy_validator_keys(
         &self,
         validator_hotkey: &str,
         ssh_public_key: &str,
@@ -194,74 +198,45 @@ impl NodeManager {
         // Normalize the key with our identifier
         let normalized_key = Self::normalize_ssh_key(ssh_public_key, validator_hotkey);
 
-        let should_deploy = {
-            let current = self.current_validator.read().await;
-            !matches!(
-                current.as_ref(),
-                Some(assignment) if assignment.hotkey == validator_hotkey
-                    && assignment.ssh_public_key == ssh_public_key
-            )
-        };
+        // Get all nodes
+        let nodes = self.list_nodes().await?;
+        let node_count = nodes.len();
 
-        let node_count;
-
-        if should_deploy {
-            let nodes = self.list_nodes().await?;
-            node_count = nodes.len();
-
-            if node_count == 0 {
-                info!(
-                    "Validator {} has no available nodes; skipping SSH key deployment",
-                    validator_hotkey
-                );
-            } else {
-                // Get the miner's SSH private key path from config
-                let private_key_path = self.get_ssh_key_path();
-
-                // Deploy the SSH key to each node, ensuring exclusive access
-                for registered_node in &nodes {
-                    info!(
-                        "Setting exclusive SSH access for validator {} on node {}",
-                        validator_hotkey, registered_node.node_id
-                    );
-
-                    // Build SSH connection details
-                    let connection_details = registered_node
-                        .config
-                        .to_ssh_connection_details(private_key_path.clone());
-
-                    // Set exclusive validator key (removes all other validators, adds current one)
-                    self.set_exclusive_validator_key_on_node(
-                        &connection_details,
-                        &registered_node.node_id,
-                        validator_hotkey,
-                        &normalized_key,
-                    )
-                    .await?;
-                }
-            }
-        } else {
-            node_count = {
-                let nodes = self.nodes.read().await;
-                nodes.len()
-            };
-
-            debug!(
-                "Validator {} already has current SSH key deployed; skipping redeploy",
+        if node_count == 0 {
+            info!(
+                "Validator {} has no available nodes; skipping SSH key deployment",
                 validator_hotkey
             );
+            return Ok(());
         }
 
-        {
-            let mut current = self.current_validator.write().await;
-            *current = Some(ValidatorAssignment {
-                hotkey: validator_hotkey.to_string(),
-                ssh_public_key: ssh_public_key.to_string(),
-            });
+        // Get the miner's SSH private key path from config
+        let private_key_path = self.get_ssh_key_path();
+
+        // Deploy the SSH key to each node, ensuring exclusive access
+        for registered_node in &nodes {
+            info!(
+                "Setting exclusive SSH access for validator {} on node {}",
+                validator_hotkey, registered_node.node_id
+            );
+
+            // Build SSH connection details
+            let connection_details = registered_node
+                .config
+                .to_ssh_connection_details(private_key_path.clone());
+
+            // Set exclusive validator key (removes all other validators, adds current one)
+            self.set_exclusive_validator_key_on_node(
+                &connection_details,
+                &registered_node.node_id,
+                validator_hotkey,
+                &normalized_key,
+            )
+            .await?;
         }
 
         info!(
-            "Authorized validator {} with SSH key on {} nodes",
+            "Deployed SSH keys for validator {} on {} nodes",
             validator_hotkey, node_count
         );
 
@@ -272,13 +247,10 @@ impl NodeManager {
     pub async fn revoke_validator(&self, validator_hotkey: &str) -> Result<()> {
         info!("Revoking validator {} authorization", validator_hotkey);
 
-        // Get all nodes
+        // Check if this validator is currently assigned
         let should_revoke = {
-            let current = self.current_validator.read().await;
-            current
-                .as_ref()
-                .map(|assignment| assignment.hotkey == validator_hotkey)
-                .unwrap_or(false)
+            let current = self.current_assigned_validator.read().await;
+            current.as_deref() == Some(validator_hotkey)
         };
 
         if !should_revoke {
@@ -319,7 +291,7 @@ impl NodeManager {
         }
 
         // Remove from assignment
-        let mut current = self.current_validator.write().await;
+        let mut current = self.current_assigned_validator.write().await;
         current.take();
 
         info!(
@@ -333,48 +305,8 @@ impl NodeManager {
 
     /// Check if a validator is authorized
     pub async fn is_validator_authorized(&self, validator_hotkey: &str) -> bool {
-        let current = self.current_validator.read().await;
-        current
-            .as_ref()
-            .map(|assignment| assignment.hotkey == validator_hotkey)
-            .unwrap_or(false)
-    }
-
-    /// Handle DiscoverNodes request from validator
-    pub async fn handle_discover_nodes(
-        &self,
-        request: DiscoverNodesRequest,
-    ) -> Result<ListNodeConnectionDetailsResponse> {
-        // Verify the validator is providing an SSH public key
-        if request.validator_public_key.is_empty() {
-            return Err(anyhow::anyhow!("Validator must provide SSH public key"));
-        }
-
-        // Authorize the validator's SSH key on all managed nodes
-        self.authorize_validator(&request.validator_hotkey, &request.validator_public_key)
-            .await
-            .context("Failed to authorize validator")?;
-
-        // Get the nodes visible to this validator (all nodes managed by this miner)
-        let nodes = self.list_nodes().await?;
-
-        // Convert to protocol format
-        let node_details: Vec<NodeConnectionDetails> = nodes
-            .into_iter()
-            .map(|registered_node| NodeConnectionDetails {
-                node_id: registered_node.node_id,
-                host: registered_node.config.host,
-                port: registered_node.config.port.to_string(),
-                username: registered_node.config.username,
-                additional_opts: registered_node.config.additional_opts.unwrap_or_default(),
-                gpu_spec: None, // Validators discover GPU specs via SSH
-                status: "available".to_string(),
-            })
-            .collect();
-
-        Ok(ListNodeConnectionDetailsResponse {
-            nodes: node_details,
-        })
+        let current = self.current_assigned_validator.read().await;
+        current.as_deref() == Some(validator_hotkey)
     }
 
     /// Validate SSH public key format
@@ -520,55 +452,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_validator_authorization() {
+    async fn test_validator_assignment() {
         let manager = NodeManager::new(NodeSshConfig::default());
 
         let validator_key = "validator-hotkey-123";
-        let ssh_key = "ssh-rsa AAAAB3NzaC1yc2E...";
 
-        // Without any nodes, this should succeed but not deploy anywhere
-        manager
-            .authorize_validator(validator_key, ssh_key)
-            .await
-            .unwrap();
+        // Set assigned validator
+        manager.set_assigned_validator(validator_key).await;
 
         assert!(manager.is_validator_authorized(validator_key).await);
         assert!(!manager.is_validator_authorized("unknown-validator").await);
     }
 
     #[tokio::test]
-    async fn test_discover_nodes_request() {
+    async fn test_deploy_validator_keys_without_nodes() {
         let manager = NodeManager::new(NodeSshConfig::default());
 
-        // Register a node
-        let config = NodeConfig {
-            host: "10.0.0.50".to_string(),
-            port: 22,
-            username: "gpu_user".to_string(),
-            additional_opts: Some("-o StrictHostKeyChecking=no".to_string()),
-        };
+        let validator_key = "validator-123";
+        let ssh_key = "ssh-rsa AAAAB3NzaC1yc2E...";
 
-        let node_id = "gpu-node-1".to_string();
-        manager
-            .register_node(node_id.clone(), config)
-            .await
-            .unwrap();
-
-        // Create a discovery request
-        let request = DiscoverNodesRequest {
-            validator_hotkey: "validator-123".to_string(),
-            signature: "signature".to_string(),
-            nonce: "nonce".to_string(),
-            validator_public_key: "ssh-rsa AAAAB3NzaC1yc2E...".to_string(),
-            timestamp: None,
-            target_miner_hotkey: "miner-456".to_string(),
-        };
-
-        // Note: This will try to SSH to 10.0.0.50, which won't work in tests
-        // In a real system, you'd mock the SSH client or use a test double
-        let result = manager.handle_discover_nodes(request).await;
-
-        // The test will fail when trying to SSH, which is expected
-        assert!(result.is_err());
+        // Without any nodes, this should succeed but not deploy anywhere
+        let result = manager.deploy_validator_keys(validator_key, ssh_key).await;
+        assert!(result.is_ok());
     }
 }

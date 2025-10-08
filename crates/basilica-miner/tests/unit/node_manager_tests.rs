@@ -2,7 +2,6 @@
 
 use basilica_miner::config::NodeSshConfig;
 use basilica_miner::node_manager::{NodeConfig, NodeManager};
-use basilica_protocol::miner_discovery::DiscoverNodesRequest;
 
 #[tokio::test]
 async fn test_node_registration() {
@@ -114,7 +113,7 @@ async fn test_unregister_node() {
 }
 
 #[tokio::test]
-async fn test_validator_authorization_tracking() {
+async fn test_validator_assignment_tracking() {
     let manager = NodeManager::new(NodeSshConfig::default());
 
     let validator_hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
@@ -122,17 +121,10 @@ async fn test_validator_authorization_tracking() {
     // Initially not authorized
     assert!(!manager.is_validator_authorized(validator_hotkey).await);
 
-    // Note: We can't test actual SSH key deployment without real SSH infrastructure,
-    // but we can test the authorization tracking logic by checking that it would
-    // fail with no nodes (which is expected behavior)
+    // Set the assigned validator
+    manager.set_assigned_validator(validator_hotkey).await;
 
-    let ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... test@example.com";
-
-    let result = manager
-        .authorize_validator(validator_hotkey, ssh_public_key)
-        .await;
-
-    assert!(result.is_ok());
+    // Now should be authorized
     assert!(manager.is_validator_authorized(validator_hotkey).await);
 }
 
@@ -142,20 +134,15 @@ async fn test_validator_assignment_overwrites_previous() {
 
     let validator_a = "validator-a";
     let validator_b = "validator-b";
-    let ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey";
 
-    manager
-        .authorize_validator(validator_a, ssh_key)
-        .await
-        .expect("first authorization should succeed");
+    // Assign to validator A
+    manager.set_assigned_validator(validator_a).await;
 
     assert!(manager.is_validator_authorized(validator_a).await);
     assert!(!manager.is_validator_authorized(validator_b).await);
 
-    manager
-        .authorize_validator(validator_b, ssh_key)
-        .await
-        .expect("second authorization should succeed");
+    // Reassign to validator B
+    manager.set_assigned_validator(validator_b).await;
 
     assert!(!manager.is_validator_authorized(validator_a).await);
     assert!(manager.is_validator_authorized(validator_b).await);
@@ -166,15 +153,13 @@ async fn test_revoke_clears_current_assignment() {
     let manager = NodeManager::new(NodeSshConfig::default());
 
     let validator_hotkey = "validator-revoke";
-    let ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey";
 
-    manager
-        .authorize_validator(validator_hotkey, ssh_key)
-        .await
-        .expect("authorization should succeed");
+    // Assign validator
+    manager.set_assigned_validator(validator_hotkey).await;
 
     assert!(manager.is_validator_authorized(validator_hotkey).await);
 
+    // Revoke (without actual SSH operations since there are no nodes)
     manager
         .revoke_validator(validator_hotkey)
         .await
@@ -190,25 +175,18 @@ async fn test_revoke_clears_current_assignment() {
 }
 
 #[tokio::test]
-async fn test_handle_discover_nodes_without_registered_nodes_returns_empty() {
+async fn test_deploy_validator_keys_without_nodes() {
     let manager = NodeManager::new(NodeSshConfig::default());
 
-    let request = DiscoverNodesRequest {
-        validator_hotkey: "validator-no-nodes".to_string(),
-        signature: "signature".to_string(),
-        nonce: "nonce".to_string(),
-        validator_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey validator@example.com"
-            .to_string(),
-        timestamp: None,
-        target_miner_hotkey: "miner-hotkey".to_string(),
-    };
+    let validator_hotkey = "validator-no-nodes";
+    let ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey validator@example.com";
 
-    let response = manager
-        .handle_discover_nodes(request)
-        .await
-        .expect("discover_nodes should succeed when there are no nodes to share");
+    // Deploy keys without any registered nodes should succeed (no-op)
+    let result = manager
+        .deploy_validator_keys(validator_hotkey, ssh_public_key)
+        .await;
 
-    assert!(response.nodes.is_empty());
+    assert!(result.is_ok());
 }
 
 #[test]
