@@ -187,7 +187,11 @@ impl StandardSshClient {
         let host_spec = Self::format_host_spec(&details.host, details.port);
         let known_hosts_path = self.get_known_hosts_path()?;
 
-        debug!("Removing host key for {} from {}", host_spec, known_hosts_path.display());
+        debug!(
+            "Removing host key for {} from {}",
+            host_spec,
+            known_hosts_path.display()
+        );
 
         let output = std::process::Command::new("ssh-keygen")
             .arg("-R")
