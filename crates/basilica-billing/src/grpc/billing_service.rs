@@ -150,6 +150,7 @@ impl BillingServiceImpl {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn determine_final_cost(
         validator_provided_cost: &str,
         calculated_cost: CreditBalance,

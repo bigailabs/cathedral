@@ -179,8 +179,9 @@ impl BillingMetrics {
 
     pub async fn record_credit_applied(&self, amount: f64, user_id: &str) {
         let labels = &[("user_id", user_id)];
+        let amount_units = (amount * 1000.0) as u64;
         self.recorder
-            .increment_counter(BillingMetricNames::CREDITS_APPLIED, labels)
+            .record_counter(BillingMetricNames::CREDITS_APPLIED, amount_units, labels)
             .await;
     }
 
@@ -193,15 +194,17 @@ impl BillingMetrics {
 
     pub async fn record_rental_finalized(&self, rental_id: &str, total_cost: f64) {
         let labels = &[("rental_id", rental_id)];
+        let cost_units = (total_cost * 1000.0) as u64;
         self.recorder
-            .increment_counter(BillingMetricNames::RENTALS_FINALIZED, labels)
+            .record_counter(BillingMetricNames::RENTALS_FINALIZED, cost_units, labels)
             .await;
     }
 
     pub async fn record_reservation_created(&self, reservation_id: &str, amount: f64) {
         let labels = &[("reservation_id", reservation_id)];
+        let amount_units = (amount * 1000.0) as u64;
         self.recorder
-            .increment_counter(BillingMetricNames::RESERVATIONS_CREATED, labels)
+            .record_counter(BillingMetricNames::RESERVATIONS_CREATED, amount_units, labels)
             .await;
     }
 

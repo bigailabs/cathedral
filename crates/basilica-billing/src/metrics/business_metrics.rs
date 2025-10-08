@@ -105,8 +105,9 @@ impl BillingBusinessMetrics {
 
     pub async fn record_credit_applied(&self, amount: f64, labels: &[(&str, &str)]) {
         self.stats.credits_applied.fetch_add(1, Ordering::Relaxed);
+        let amount_units = (amount * 1000.0) as u64;
         self.recorder
-            .increment_counter("basilca_billing_credits_applied_total", labels)
+            .record_counter("basilca_billing_credits_applied_total", amount_units, labels)
             .await;
     }
 
@@ -119,8 +120,9 @@ impl BillingBusinessMetrics {
 
     pub async fn record_rental_finalized(&self, total_cost: f64, labels: &[(&str, &str)]) {
         self.stats.rentals_finalized.fetch_add(1, Ordering::Relaxed);
+        let cost_units = (total_cost * 1000.0) as u64;
         self.recorder
-            .increment_counter("basilca_billing_rentals_finalized_total", labels)
+            .record_counter("basilca_billing_rentals_finalized_total", cost_units, labels)
             .await;
     }
 
