@@ -60,7 +60,13 @@ impl TokenStore {
     pub async fn retrieve_tokens(&self) -> AuthResult<Option<TokenSet>> {
         // Check if file exists
         match fs::try_exists(&self.auth_file_path).await {
-            Ok(false) | Err(_) => return Ok(None),
+            Ok(false) => return Ok(None),
+            Err(e) => {
+                return Err(AuthError::StorageError(format!(
+                    "Failed to check if auth file exists: {}",
+                    e
+                )))
+            }
             Ok(true) => {}
         }
 
