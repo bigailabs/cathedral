@@ -185,12 +185,15 @@ impl StandardSshClient {
     /// Remove host key from known_hosts file
     pub async fn remove_host_key(&self, details: &SshConnectionDetails) -> Result<()> {
         let host_spec = Self::format_host_spec(&details.host, details.port);
+        let known_hosts_path = self.get_known_hosts_path()?;
 
-        debug!("Removing host key for {}", host_spec);
+        debug!("Removing host key for {} from {}", host_spec, known_hosts_path.display());
 
         let output = std::process::Command::new("ssh-keygen")
             .arg("-R")
             .arg(&host_spec)
+            .arg("-f")
+            .arg(&known_hosts_path)
             .output()
             .map_err(|e| anyhow::anyhow!("Failed to execute ssh-keygen: {}", e))?;
 
@@ -215,10 +218,13 @@ impl StandardSshClient {
     /// Check if host key exists in known_hosts
     fn host_key_exists(&self, details: &SshConnectionDetails) -> Result<bool> {
         let host_spec = Self::format_host_spec(&details.host, details.port);
+        let known_hosts_path = self.get_known_hosts_path()?;
 
         let output = std::process::Command::new("ssh-keygen")
             .arg("-F")
             .arg(&host_spec)
+            .arg("-f")
+            .arg(&known_hosts_path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -307,10 +313,13 @@ impl StandardSshClient {
     /// Get existing host key fingerprints from known_hosts
     fn get_known_host_fingerprints(&self, details: &SshConnectionDetails) -> Result<Vec<String>> {
         let host_spec = Self::format_host_spec(&details.host, details.port);
+        let known_hosts_path = self.get_known_hosts_path()?;
 
         let output = std::process::Command::new("ssh-keygen")
             .arg("-F")
             .arg(&host_spec)
+            .arg("-f")
+            .arg(&known_hosts_path)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .output()
@@ -468,6 +477,10 @@ impl StandardSshClient {
 
     /// Get the path to known_hosts file
     fn get_known_hosts_path(&self) -> Result<std::path::PathBuf> {
+        if let Some(ref path) = self.config.known_hosts_file {
+            return Ok(path.clone());
+        }
+
         match std::env::var("HOME") {
             Ok(home) => Ok(std::path::PathBuf::from(home)
                 .join(".ssh")
