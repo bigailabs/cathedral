@@ -205,7 +205,11 @@ impl BillingMetrics {
         let labels = &[("reservation_id", reservation_id)];
         let amount_units = (amount * 1000.0) as u64;
         self.recorder
-            .record_counter(BillingMetricNames::RESERVATIONS_CREATED, amount_units, labels)
+            .record_counter(
+                BillingMetricNames::RESERVATIONS_CREATED,
+                amount_units,
+                labels,
+            )
             .await;
     }
 
