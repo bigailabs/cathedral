@@ -469,8 +469,12 @@ impl BillingService for BillingServiceImpl {
                 .ok_or_else(|| Status::invalid_argument("Max duration is required"))?;
             let max_duration = Duration::seconds(proto_duration.seconds)
                 + Duration::nanoseconds(proto_duration.nanos as i64);
-            let max_duration_hours = max_duration.num_hours() as u32;
-            let estimated_cost = credit_rate.multiply(Decimal::from(max_duration_hours));
+            let max_duration_hours =
+                max_duration.num_hours() as f64 + (max_duration.num_minutes() % 60) as f64 / 60.0;
+            let estimated_cost =
+                credit_rate.multiply(Decimal::from_f64(max_duration_hours).ok_or_else(|| {
+                    Status::invalid_argument("Invalid duration for cost calculation")
+                })?);
 
             let reservation_id = self
                 .credit_manager
