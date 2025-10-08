@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1]
+
 ### Added
 - Port mappings display in rental listings (`ps` command)
   - New "Ports (Host → Container)" column showing mapped ports (e.g., "8080→80")
