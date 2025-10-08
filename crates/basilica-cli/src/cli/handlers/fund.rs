@@ -195,13 +195,6 @@ fn display_deposits_table(
     Ok(())
 }
 
-fn format_datetime(datetime_str: &str) -> String {
-    // Parse and format the datetime string
-    // Expected format: ISO 8601
-    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(datetime_str) {
-        dt.format("%Y-%m-%d %H:%M:%S").to_string()
-    } else {
-        // Fallback to the original string if parsing fails
-        datetime_str.to_string()
-    }
+fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
+    dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
