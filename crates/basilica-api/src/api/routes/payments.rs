@@ -7,6 +7,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
 
@@ -23,6 +24,28 @@ pub struct CreateDepositAccountResponse {
     pub address: String,
 }
 
+/// Deposit status
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DepositStatus {
+    Pending,
+    Finalized,
+    Credited,
+    Failed,
+}
+
+impl DepositStatus {
+    fn parse(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "pending" => Self::Pending,
+            "finalized" => Self::Finalized,
+            "credited" => Self::Credited,
+            "failed" => Self::Failed,
+            _ => Self::Pending,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct DepositRecord {
     pub tx_hash: String,
@@ -31,10 +54,10 @@ pub struct DepositRecord {
     pub from_address: String,
     pub to_address: String,
     pub amount_tao: String,
-    pub status: String,
-    pub observed_at: String,
-    pub finalized_at: Option<String>,
-    pub credited_at: Option<String>,
+    pub status: DepositStatus,
+    pub observed_at: DateTime<Utc>,
+    pub finalized_at: Option<DateTime<Utc>>,
+    pub credited_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,30 +179,42 @@ async fn list_deposits(
     let deposits: Vec<DepositRecord> = response
         .items
         .into_iter()
-        .map(|item| {
+        .filter_map(|item| {
             let amount_plancks: u128 = item.amount_plancks.parse().unwrap_or(0);
             let amount_tao = format!("{:.9}", amount_plancks as f64 / 1_000_000_000f64);
 
-            DepositRecord {
+            let observed_at = DateTime::parse_from_rfc3339(&item.observed_at)
+                .ok()?
+                .with_timezone(&Utc);
+
+            let finalized_at = if item.finalized_at.is_empty() {
+                None
+            } else {
+                DateTime::parse_from_rfc3339(&item.finalized_at)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            };
+
+            let credited_at = if item.credited_at.is_empty() {
+                None
+            } else {
+                DateTime::parse_from_rfc3339(&item.credited_at)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            };
+
+            Some(DepositRecord {
                 tx_hash: item.tx_hash,
                 block_number: item.block_number,
                 event_index: item.event_index,
                 from_address: item.from_address,
                 to_address: item.to_address,
                 amount_tao,
-                status: item.status,
-                observed_at: item.observed_at,
-                finalized_at: if item.finalized_at.is_empty() {
-                    None
-                } else {
-                    Some(item.finalized_at)
-                },
-                credited_at: if item.credited_at.is_empty() {
-                    None
-                } else {
-                    Some(item.credited_at)
-                },
-            }
+                status: DepositStatus::parse(&item.status),
+                observed_at,
+                finalized_at,
+                credited_at,
+            })
         })
         .collect();
 
