@@ -130,24 +130,25 @@ impl BillingMetrics {
         events_aggregated: u64,
     ) {
         let status = if success { "success" } else { "failure" };
-        let labels = &[("type", aggregation_type), ("status", status)];
+        let agg_labels = &[("type", aggregation_type), ("status", status)];
+        let event_labels = &[("event_type", aggregation_type), ("status", status)];
 
         timer.finish(&*self.recorder).await;
 
         if success {
             self.recorder
-                .increment_counter(BillingMetricNames::AGGREGATION_RUNS, labels)
+                .increment_counter(BillingMetricNames::AGGREGATION_RUNS, agg_labels)
                 .await;
             self.recorder
                 .record_counter(
                     BillingMetricNames::EVENTS_PROCESSED,
                     events_aggregated,
-                    labels,
+                    event_labels,
                 )
                 .await;
         } else {
             self.recorder
-                .increment_counter(BillingMetricNames::AGGREGATION_FAILURES, labels)
+                .increment_counter(BillingMetricNames::AGGREGATION_FAILURES, agg_labels)
                 .await;
         }
     }
