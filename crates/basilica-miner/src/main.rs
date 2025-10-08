@@ -19,7 +19,6 @@ mod metrics;
 mod node_manager;
 mod persistence;
 mod services;
-mod ssh;
 mod validator_comms;
 mod validator_discovery;
 
@@ -27,7 +26,6 @@ use bittensor_core::ChainRegistration;
 use config::MinerConfig;
 use node_manager::NodeManager;
 use persistence::RegistrationDb;
-use ssh::ValidatorAccessService;
 use validator_comms::ValidatorCommsServer;
 
 use crate::cli::{Args, Commands};
@@ -38,11 +36,9 @@ pub struct MinerState {
     pub miner_uid: MinerUid,
     pub chain_registration: ChainRegistration,
     pub validator_comms: ValidatorCommsServer,
-    pub node_manager: Arc<NodeManager>,
     pub registration_db: RegistrationDb,
-    pub ssh_access_service: ValidatorAccessService,
     pub metrics: Option<metrics::MinerMetrics>,
-    pub validator_discovery: std::sync::Arc<validator_discovery::ValidatorDiscovery>,
+    pub validator_discovery: Arc<validator_discovery::ValidatorDiscovery>,
 }
 
 impl MinerState {
@@ -115,9 +111,6 @@ impl MinerState {
             info!("Successfully registered {} nodes", registered_nodes.len());
         }
 
-        // Initialize SSH services
-        let ssh_access_service = ValidatorAccessService::new(node_manager.clone())?;
-
         // Initialize Bittensor chain registration
         let chain_registration = ChainRegistration::new(config.bittensor.clone()).await?;
 
@@ -144,13 +137,12 @@ impl MinerState {
             }
         };
 
-        let validator_discovery =
-            std::sync::Arc::new(validator_discovery::ValidatorDiscovery::new(
-                chain_registration.get_bittensor_service(),
-                node_manager.clone(),
-                strategy,
-                config.bittensor.common.netuid,
-            ));
+        let validator_discovery = Arc::new(validator_discovery::ValidatorDiscovery::new(
+            chain_registration.get_bittensor_service(),
+            node_manager.clone(),
+            strategy,
+            config.bittensor.common.netuid,
+        ));
 
         // Initialize validator communications server
         let validator_comms = ValidatorCommsServer::new(
@@ -170,9 +162,7 @@ impl MinerState {
             miner_uid,
             chain_registration,
             validator_comms,
-            node_manager,
             registration_db,
-            ssh_access_service,
             metrics,
             validator_discovery,
         })
