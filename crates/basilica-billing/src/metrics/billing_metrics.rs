@@ -182,9 +182,6 @@ impl BillingMetrics {
         self.recorder
             .increment_counter(BillingMetricNames::CREDITS_APPLIED, labels)
             .await;
-        self.recorder
-            .record_gauge(BillingMetricNames::TOTAL_CREDITS_BALANCE, amount, labels)
-            .await;
     }
 
     pub async fn record_rental_tracked(&self, rental_id: &str, package_id: &str) {
@@ -199,22 +196,12 @@ impl BillingMetrics {
         self.recorder
             .increment_counter(BillingMetricNames::RENTALS_FINALIZED, labels)
             .await;
-        self.recorder
-            .record_gauge(
-                BillingMetricNames::TOTAL_CREDITS_BALANCE,
-                total_cost,
-                labels,
-            )
-            .await;
     }
 
     pub async fn record_reservation_created(&self, reservation_id: &str, amount: f64) {
         let labels = &[("reservation_id", reservation_id)];
         self.recorder
             .increment_counter(BillingMetricNames::RESERVATIONS_CREATED, labels)
-            .await;
-        self.recorder
-            .record_gauge(BillingMetricNames::TOTAL_CREDITS_BALANCE, amount, labels)
             .await;
     }
 

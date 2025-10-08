@@ -108,9 +108,6 @@ impl BillingBusinessMetrics {
         self.recorder
             .increment_counter("basilca_billing_credits_applied_total", labels)
             .await;
-        self.recorder
-            .record_gauge("basilca_billing_total_credits_balance", amount, labels)
-            .await;
     }
 
     pub async fn record_rental_tracked(&self, labels: &[(&str, &str)]) {
@@ -124,9 +121,6 @@ impl BillingBusinessMetrics {
         self.stats.rentals_finalized.fetch_add(1, Ordering::Relaxed);
         self.recorder
             .increment_counter("basilca_billing_rentals_finalized_total", labels)
-            .await;
-        self.recorder
-            .record_gauge("basilca_billing_total_credits_balance", total_cost, labels)
             .await;
     }
 
