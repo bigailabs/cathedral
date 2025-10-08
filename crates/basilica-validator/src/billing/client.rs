@@ -6,7 +6,7 @@ use futures::stream;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
 
 use crate::config::BillingConfig;
@@ -34,22 +34,27 @@ impl BillingClient {
         }
 
         info!(
-            "Initializing billing client for endpoint: {}",
-            config.billing_endpoint
+            "Initializing billing client for endpoint: {} (TLS: {})",
+            config.billing_endpoint, config.use_tls
         );
 
-        let channel = Channel::from_shared(config.billing_endpoint.clone())
+        let mut endpoint = Endpoint::from_shared(config.billing_endpoint.clone())
             .with_context(|| format!("Invalid billing endpoint: {}", config.billing_endpoint))?
             .connect_timeout(Duration::from_secs(config.timeout_secs))
-            .timeout(Duration::from_secs(config.timeout_secs))
-            .connect()
-            .await
-            .with_context(|| {
-                format!(
-                    "Failed to connect to billing service at {}",
-                    config.billing_endpoint
-                )
-            })?;
+            .timeout(Duration::from_secs(config.timeout_secs));
+
+        if config.use_tls {
+            endpoint = endpoint
+                .tls_config(ClientTlsConfig::new())
+                .with_context(|| "Failed to configure TLS for billing endpoint")?;
+        }
+
+        let channel = endpoint.connect().await.with_context(|| {
+            format!(
+                "Failed to connect to billing service at {}",
+                config.billing_endpoint
+            )
+        })?;
 
         info!("Successfully connected to billing service");
 
@@ -105,11 +110,18 @@ impl BillingClient {
         loop {
             let mut batch = Vec::new();
             let mut rx_guard = rx.lock().await;
+            let mut closed = false;
 
             while batch.len() < config.batch_size {
                 tokio::select! {
-                    Some(telemetry) = rx_guard.recv() => {
-                        batch.push(telemetry);
+                    maybe = rx_guard.recv() => {
+                        match maybe {
+                            Some(telemetry) => batch.push(telemetry),
+                            None => {
+                                closed = true;
+                                break;
+                            }
+                        }
                     }
                     _ = tokio::time::sleep(Duration::from_secs(config.flush_interval_secs)) => {
                         break;
@@ -120,6 +132,10 @@ impl BillingClient {
             drop(rx_guard);
 
             if batch.is_empty() {
+                if closed {
+                    info!("Telemetry channel closed; exiting streaming loop");
+                    return Ok(());
+                }
                 continue;
             }
 
@@ -127,6 +143,11 @@ impl BillingClient {
 
             if let Err(e) = Self::send_batch_with_retry(&channel, batch, &config).await {
                 error!("Failed to send telemetry batch after retries: {}", e);
+            }
+
+            if closed {
+                info!("Telemetry channel closed after final batch; exiting streaming loop");
+                return Ok(());
             }
         }
     }
