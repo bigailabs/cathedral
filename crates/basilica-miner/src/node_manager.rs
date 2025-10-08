@@ -25,7 +25,8 @@ use crate::config::NodeSshConfig;
 const SSH_REWRITE_AUTHORIZED_KEYS_BASE: &str = r#"umask 077; mkdir -p ~/.ssh && chmod 700 ~/.ssh && tmp="$(mktemp ~/.ssh/authorized_keys.XXXXXX)" && (grep -v 'validator-' ~/.ssh/authorized_keys 2>/dev/null || true) > "$tmp""#;
 
 /// Shell command suffix to atomically move temp file to authorized_keys
-const SSH_MOVE_TO_AUTHORIZED_KEYS: &str = r#"mv -f "$tmp" ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"#;
+const SSH_MOVE_TO_AUTHORIZED_KEYS: &str =
+    r#"mv -f "$tmp" ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"#;
 
 /// Configuration for a single node
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -429,7 +430,10 @@ impl NodeManager {
     ) -> Result<()> {
         debug!("Removing all validator keys from node {}", node_id);
 
-        let ssh_command = format!("{} && {}", SSH_REWRITE_AUTHORIZED_KEYS_BASE, SSH_MOVE_TO_AUTHORIZED_KEYS);
+        let ssh_command = format!(
+            "{} && {}",
+            SSH_REWRITE_AUTHORIZED_KEYS_BASE, SSH_MOVE_TO_AUTHORIZED_KEYS
+        );
 
         self.ssh_client
             .execute_command(connection_details, &ssh_command, false)
@@ -463,9 +467,7 @@ impl NodeManager {
 {}
 EOF
 && {}"#,
-            SSH_REWRITE_AUTHORIZED_KEYS_BASE,
-            normalized_key,
-            SSH_MOVE_TO_AUTHORIZED_KEYS
+            SSH_REWRITE_AUTHORIZED_KEYS_BASE, normalized_key, SSH_MOVE_TO_AUTHORIZED_KEYS
         );
 
         self.ssh_client

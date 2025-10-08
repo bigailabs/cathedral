@@ -94,11 +94,13 @@ impl ValidatorCommsServer {
 
     /// Check if a validator is authorized
     async fn is_validator_authorized(&self, validator_hotkey: &str) -> bool {
-        if let Ok(validators) = self.validator_discovery.get_active_validators().await {
-            return validators.iter().any(|v| v.hotkey == validator_hotkey);
+        match self.validator_discovery.get_active_validators().await {
+            Ok(validators) => validators.iter().any(|v| v.hotkey == validator_hotkey),
+            Err(e) => {
+                error!(error = %e, "Failed to fetch active validators");
+                false
+            }
         }
-        // If error, allow all validators
-        true
     }
 }
 
