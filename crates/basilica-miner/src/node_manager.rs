@@ -224,7 +224,7 @@ impl NodeManager {
 
                     if let Err(e) = self
                         .ssh_client
-                        .execute_command(&connection_details, &remove_old_command, false)
+                        .execute_command(&connection_details, &remove_old_command, true)
                         .await
                     {
                         warn!(
@@ -242,7 +242,7 @@ impl NodeManager {
 
                     match self
                         .ssh_client
-                        .execute_command(&connection_details, &add_key_command, false)
+                        .execute_command(&connection_details, &add_key_command, true)
                         .await
                     {
                         Ok(_) => {
