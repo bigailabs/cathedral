@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -301,6 +301,42 @@ impl MinerDiscovery for MinerDiscoveryService {
             discover_request.validator_hotkey
         );
 
+        let current_assignment = self
+            .server
+            .validator_discovery
+            .get_current_assignment()
+            .await;
+
+        let Some(assignment) = current_assignment else {
+            info!(
+                "Validator {} requested nodes but no assignment is currently active",
+                discover_request.validator_hotkey
+            );
+            return Ok(Response::new(ListNodeConnectionDetailsResponse {
+                nodes: vec![],
+            }));
+        };
+
+        if assignment.validator_hotkey != discover_request.validator_hotkey {
+            info!(
+                "Validator {} is not the assigned validator; returning empty node list",
+                discover_request.validator_hotkey
+            );
+            return Ok(Response::new(ListNodeConnectionDetailsResponse {
+                nodes: vec![],
+            }));
+        }
+
+        if assignment.node_ids.is_empty() {
+            info!(
+                "Assigned validator {} has no nodes allocated; returning empty node list",
+                discover_request.validator_hotkey
+            );
+            return Ok(Response::new(ListNodeConnectionDetailsResponse {
+                nodes: vec![],
+            }));
+        }
+
         // Handle the discovery request through the node manager
         match self
             .server
@@ -308,7 +344,13 @@ impl MinerDiscovery for MinerDiscoveryService {
             .handle_discover_nodes(discover_request.clone())
             .await
         {
-            Ok(response) => {
+            Ok(mut response) => {
+                let allowed: HashSet<&str> =
+                    assignment.node_ids.iter().map(|id| id.as_str()).collect();
+                response
+                    .nodes
+                    .retain(|node| allowed.contains(node.node_id.as_str()));
+
                 info!(
                     "Returning {} nodes to validator {}",
                     response.nodes.len(),

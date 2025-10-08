@@ -2,6 +2,7 @@
 
 use basilica_miner::config::NodeSshConfig;
 use basilica_miner::node_manager::{NodeConfig, NodeManager};
+use basilica_protocol::miner_discovery::DiscoverNodesRequest;
 
 #[tokio::test]
 async fn test_node_registration() {
@@ -127,15 +128,87 @@ async fn test_validator_authorization_tracking() {
 
     let ssh_public_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... test@example.com";
 
-    // This will fail because there are no nodes to deploy to, but that's expected
     let result = manager
         .authorize_validator(validator_hotkey, ssh_public_key)
         .await;
 
-    // The error is expected since we have no nodes, but the authorization tracking
-    // is separate and happens after successful deployment
-    // For now, we just verify the method exists and can be called
-    assert!(result.is_err() || result.is_ok());
+    assert!(result.is_ok());
+    assert!(manager.is_validator_authorized(validator_hotkey).await);
+}
+
+#[tokio::test]
+async fn test_validator_assignment_overwrites_previous() {
+    let manager = NodeManager::new(NodeSshConfig::default());
+
+    let validator_a = "validator-a";
+    let validator_b = "validator-b";
+    let ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey";
+
+    manager
+        .authorize_validator(validator_a, ssh_key)
+        .await
+        .expect("first authorization should succeed");
+
+    assert!(manager.is_validator_authorized(validator_a).await);
+    assert!(!manager.is_validator_authorized(validator_b).await);
+
+    manager
+        .authorize_validator(validator_b, ssh_key)
+        .await
+        .expect("second authorization should succeed");
+
+    assert!(!manager.is_validator_authorized(validator_a).await);
+    assert!(manager.is_validator_authorized(validator_b).await);
+}
+
+#[tokio::test]
+async fn test_revoke_clears_current_assignment() {
+    let manager = NodeManager::new(NodeSshConfig::default());
+
+    let validator_hotkey = "validator-revoke";
+    let ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey";
+
+    manager
+        .authorize_validator(validator_hotkey, ssh_key)
+        .await
+        .expect("authorization should succeed");
+
+    assert!(manager.is_validator_authorized(validator_hotkey).await);
+
+    manager
+        .revoke_validator(validator_hotkey)
+        .await
+        .expect("revocation should succeed");
+
+    assert!(!manager.is_validator_authorized(validator_hotkey).await);
+
+    // Second revoke should be a no-op
+    manager
+        .revoke_validator(validator_hotkey)
+        .await
+        .expect("repeated revoke should not fail");
+}
+
+#[tokio::test]
+async fn test_handle_discover_nodes_without_registered_nodes_returns_empty() {
+    let manager = NodeManager::new(NodeSshConfig::default());
+
+    let request = DiscoverNodesRequest {
+        validator_hotkey: "validator-no-nodes".to_string(),
+        signature: "signature".to_string(),
+        nonce: "nonce".to_string(),
+        validator_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey validator@example.com"
+            .to_string(),
+        timestamp: None,
+        target_miner_hotkey: "miner-hotkey".to_string(),
+    };
+
+    let response = manager
+        .handle_discover_nodes(request)
+        .await
+        .expect("discover_nodes should succeed when there are no nodes to share");
+
+    assert!(response.nodes.is_empty());
 }
 
 #[test]

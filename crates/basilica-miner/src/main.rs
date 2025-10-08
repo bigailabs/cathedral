@@ -127,7 +127,6 @@ impl MinerState {
             .strategy
             .as_str()
         {
-            "round_robin" => Box::new(validator_discovery::RoundRobinAssignment),
             "highest_stake" => Box::new(validator_discovery::HighestStakeAssignment),
             "fixed_assignment" => {
                 let validator_hotkey = config
@@ -139,9 +138,9 @@ impl MinerState {
             }
             _ => {
                 return Err(anyhow::anyhow!(
-                            "Unknown assignment strategy '{}'. Valid strategies are: highest_stake, round_robin, fixed_assignment",
-                            config.validator_assignment.strategy
-                        ));
+                    "Unknown assignment strategy '{}'. Valid strategies are: highest_stake, fixed_assignment",
+                    config.validator_assignment.strategy
+                ));
             }
         };
 

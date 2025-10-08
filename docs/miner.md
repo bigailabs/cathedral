@@ -372,7 +372,6 @@ Assigns ALL nodes to the validator with highest stake above threshold.
 
 ```toml
 [validator_assignment]
-enabled = true
 strategy = "highest_stake"
 min_stake_threshold = 12000.0  # TAO
 validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
@@ -392,30 +391,7 @@ validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 - Otherwise: selects highest-staked validator
 - Only considers online validators (with axon endpoints)
 
-#### 2. **Round Robin**
-
-Distributes nodes evenly across ALL eligible validators.
-
-```toml
-[validator_assignment]
-enabled = true
-strategy = "round_robin"
-min_stake_threshold = 6000.0
-```
-
-**Use cases:**
-
-- Testing with multiple validators
-- Geographic distribution
-- Load balancing across validators
-
-**Behavior:**
-
-- `nodes_per_validator = total_nodes / total_validators`
-- Remainder nodes assigned to first validator
-- Fair distribution regardless of stake
-
-#### 3. **Disabled** (Open Access)
+#### 2. **Disabled** (Open Access)
 
 All validators can discover and access all nodes.
 
@@ -763,8 +739,7 @@ curl http://localhost:9090/metrics
 
 ```toml
 [validator_assignment]
-enabled = true
-strategy = "highest_stake"           # Options: highest_stake, round_robin
+strategy = "highest_stake"           # Options: highest_stake, fixed_assignment
 min_stake_threshold = 12000.0        # Minimum TAO stake required
 
 # Optional: Assign to specific validator
@@ -774,8 +749,8 @@ min_stake_threshold = 12000.0        # Minimum TAO stake required
 **Choosing a strategy:**
 
 - **Production**: Use `highest_stake` with high threshold (≥12000 TAO)
-- **Testing**: Use `round_robin` to distribute across validators
-- **Development**: Disable assignment (`enabled = false`)
+- **Testing**: Use `highest_stake` to assign all nodes to the top validator
+- **Development**: Disable assignment by omitting this section
 
 #### 9. Advertised Addresses (Optional)
 

@@ -129,7 +129,7 @@ pub struct NodeSshConfig {
 /// Validator assignment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorAssignmentConfig {
-    /// Assignment strategy to use ("highest_stake", "round_robin", "fixed_assignment")
+    /// Assignment strategy to use ("highest_stake", "fixed_assignment")
     #[serde(default = "default_strategy")]
     pub strategy: String,
 
