@@ -262,6 +262,16 @@ pub struct CreateDepositAccountResponse {
     pub address: String,
 }
 
+/// Deposit status
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DepositStatus {
+    Pending,
+    Finalized,
+    Credited,
+    Failed,
+}
+
 /// Individual deposit record
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DepositRecord {
@@ -271,10 +281,10 @@ pub struct DepositRecord {
     pub from_address: String,
     pub to_address: String,
     pub amount_tao: String,
-    pub status: String,
-    pub observed_at: String,
-    pub finalized_at: Option<String>,
-    pub credited_at: Option<String>,
+    pub status: DepositStatus,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub finalized_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub credited_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// List deposits response
