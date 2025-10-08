@@ -3,7 +3,7 @@
 use crate::{
     api::{
         extractors::ownership::{
-            archive_rental_ownership, get_user_rentals_with_ssh, store_rental_ownership,
+            archive_rental_ownership, get_user_rentals_with_details, store_rental_ownership,
             OwnedRental,
         },
         middleware::AuthContext,
@@ -44,10 +44,16 @@ pub async fn get_rental_status(
     let client = &state.validator_client;
     let validator_response = client.get_rental_status(&owned_rental.rental_id).await?;
 
-    // Create extended response with SSH credentials from database
+    // Deserialize port mappings from JSON
+    let port_mappings = owned_rental.port_mappings.and_then(|json| {
+        serde_json::from_value::<Vec<basilica_validator::rental::PortMapping>>(json).ok()
+    });
+
+    // Create extended response with SSH credentials and port mappings from database
     let response_with_ssh = RentalStatusWithSshResponse::from_validator_response(
         validator_response,
         owned_rental.ssh_credentials,
+        port_mappings,
     );
 
     Ok(Json(response_with_ssh))
@@ -160,12 +166,20 @@ pub async fn start_rental(
         .start_rental(validator_request)
         .await?;
 
-    // Store ownership record in database with SSH credentials
+    // Serialize port mappings from validator response
+    let port_mappings_json = if !validator_response.container_info.mapped_ports.is_empty() {
+        Some(serde_json::to_value(&validator_response.container_info.mapped_ports).ok())
+    } else {
+        None
+    };
+
+    // Store ownership record in database with SSH credentials and port mappings
     if let Err(e) = store_rental_ownership(
         &state.db,
         &validator_response.rental_id,
         user_id,
         validator_response.ssh_credentials.as_deref(),
+        port_mappings_json.flatten(),
     )
     .await
     {
@@ -323,17 +337,19 @@ pub async fn list_rentals_validator(
     // Get user ID from auth context (already extracted via Extension)
     let user_id = &auth_context.user_id;
 
-    // Get user's rental IDs with SSH status from database
-    let user_rentals_with_ssh = get_user_rentals_with_ssh(&state.db, user_id)
+    // Get user's rental IDs with SSH status and port mappings from database
+    let user_rentals_with_details = get_user_rentals_with_details(&state.db, user_id)
         .await
         .map_err(|e| crate::error::ApiError::Internal {
             message: format!("Failed to get user rentals: {}", e),
         })?;
 
-    // Create a map for quick lookup of SSH status
+    // Create maps for quick lookup of SSH status and port mappings
     let mut ssh_status_map = std::collections::HashMap::new();
-    for rental in &user_rentals_with_ssh {
+    let mut port_mappings_map = std::collections::HashMap::new();
+    for rental in &user_rentals_with_details {
         ssh_status_map.insert(rental.rental_id.clone(), rental.has_ssh);
+        port_mappings_map.insert(rental.rental_id.clone(), rental.port_mappings.clone());
     }
 
     // Get all rentals from validator
@@ -355,6 +371,15 @@ pub async fn list_rentals_validator(
             None => continue, // User doesn't own this rental
         };
 
+        // Get port mappings from database and deserialize
+        let port_mappings = port_mappings_map
+            .get(&rental.rental_id)
+            .and_then(|json_opt| json_opt.as_ref())
+            .and_then(|json| {
+                serde_json::from_value::<Vec<basilica_validator::rental::PortMapping>>(json.clone())
+                    .ok()
+            });
+
         // Create API rental item with node details from validator response
         api_rentals.push(ApiRentalListItem {
             rental_id: rental.rental_id,
@@ -369,6 +394,7 @@ pub async fn list_rentals_validator(
             cpu_specs: rental.cpu_specs,
             location: rental.location,
             network_speed: rental.network_speed,
+            port_mappings,
         });
     }
 

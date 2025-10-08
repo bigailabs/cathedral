@@ -96,7 +96,6 @@ port = 9090
 # VALIDATOR ASSIGNMENT STRATEGY
 # =============================================================================
 [validator_assignment]
-enabled = true
 strategy = "highest_stake"
 min_stake_threshold = 12000.0
 validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"

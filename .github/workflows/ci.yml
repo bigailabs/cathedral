@@ -125,7 +125,7 @@ jobs:
 
   # Lint complex packages
   lint-complex:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: quick-checks
     steps:
       - uses: actions/checkout@v4
@@ -228,7 +228,7 @@ jobs:
 
   # Build and test miner
   build-miner:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.miner == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -282,7 +282,7 @@ jobs:
 
   # Build and test basilica-api
   build-api:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.basilica-api == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -336,7 +336,7 @@ jobs:
 
   # Build and test basilica-cli
   build-cli:
-    runs-on: blacksmith-32vcpu-ubuntu-2204
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     needs: changes
     if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:

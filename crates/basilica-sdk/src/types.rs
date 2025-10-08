@@ -84,6 +84,9 @@ pub struct ApiRentalListItem {
     /// Optional network speed information
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_speed: Option<NetworkSpeedInfo>,
+    /// Port mappings for this rental
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
 }
 
 /// API list rentals response with GPU information
@@ -170,6 +173,10 @@ pub struct RentalStatusWithSshResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_credentials: Option<String>,
 
+    /// Port mappings (from database)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
+
     /// Creation timestamp
     pub created_at: chrono::DateTime<chrono::Utc>,
 
@@ -178,16 +185,18 @@ pub struct RentalStatusWithSshResponse {
 }
 
 impl RentalStatusWithSshResponse {
-    /// Create from validator response and database SSH credentials
+    /// Create from validator response, database SSH credentials, and port mappings
     pub fn from_validator_response(
         response: ValidatorRentalStatusResponse,
         ssh_credentials: Option<String>,
+        port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
     ) -> Self {
         Self {
             rental_id: response.rental_id,
             status: response.status,
             node: response.node,
             ssh_credentials,
+            port_mappings,
             created_at: response.created_at,
             updated_at: response.updated_at,
         }

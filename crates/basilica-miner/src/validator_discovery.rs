@@ -1,12 +1,11 @@
 //! Validator discovery and assignment module
 //!
-//! This module handles discovering active validators and assigning nodes to them.
+//! This module handles discovering active validators and selecting the single
+//! validator that should receive all managed nodes.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::node_manager::{NodeManager, RegisteredNode};
@@ -28,23 +27,19 @@ pub struct ValidatorDiscovery {
     bittensor_service: Arc<bittensor::Service>,
     node_manager: Arc<NodeManager>,
     assignment_strategy: Box<dyn AssignmentStrategy>,
-    assignments: Arc<RwLock<HashMap<String, Vec<String>>>>, // validator_hotkey -> node_ids
     netuid: u16,
 }
 
 /// Strategy for assigning nodes to validators
 #[async_trait]
 pub trait AssignmentStrategy: Send + Sync {
-    /// Select validators to assign nodes to
-    async fn select_validators(
+    /// Select validator to assign nodes to (all nodes are assigned to the selected validator)
+    async fn select_assignment(
         &self,
         validators: Vec<ValidatorInfo>,
         nodes: Vec<RegisteredNode>,
-    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>>;
+    ) -> Result<Option<ValidatorInfo>>;
 }
-
-/// Round-robin assignment strategy
-pub struct RoundRobinAssignment;
 
 impl ValidatorDiscovery {
     /// Create new validator discovery service
@@ -58,7 +53,6 @@ impl ValidatorDiscovery {
             bittensor_service,
             node_manager,
             assignment_strategy,
-            assignments: Arc::new(RwLock::new(HashMap::new())),
             netuid,
         }
     }
@@ -135,133 +129,78 @@ impl ValidatorDiscovery {
             return Ok(());
         }
 
-        // Run assignment strategy
-        let assignments = self
+        // Run assignment strategy to select the validator (all nodes go to selected validator)
+        let selected_validator = self
             .assignment_strategy
-            .select_validators(validators, nodes)
+            .select_assignment(validators, nodes)
             .await?;
 
-        // Update assignments
-        let mut current_assignments = self.assignments.write().await;
-        current_assignments.clear();
-
-        for (validator, assigned_nodes) in assignments {
-            let node_ids: Vec<String> = assigned_nodes
-                .iter()
-                .map(|node| node.node_id.clone())
-                .collect();
-
+        if let Some(validator) = selected_validator {
             info!(
-                "Assigned {} nodes to validator {} (uid: {})",
-                node_ids.len(),
-                validator.hotkey,
-                validator.uid
+                "Assigning all nodes to validator {} (uid: {})",
+                validator.hotkey, validator.uid
             );
 
-            current_assignments.insert(validator.hotkey, node_ids);
+            // Update assignment in NodeManager (single source of truth)
+            self.node_manager
+                .set_assigned_validator(&validator.hotkey)
+                .await;
+        } else {
+            info!("No eligible validators found during discovery; no assignment made");
         }
 
         Ok(())
     }
+}
 
-    /// Get current assignments
-    pub async fn get_assignments(&self) -> HashMap<String, Vec<String>> {
-        self.assignments.read().await.clone()
-    }
+/// Fixed assignment strategy - assigns all nodes to a specific validator
+pub struct FixedAssignment {
+    validator_hotkey: String,
+}
 
-    /// Get nodes assigned to a specific validator
-    pub async fn get_validator_nodes(&self, validator_hotkey: &str) -> Vec<String> {
-        self.assignments
-            .read()
-            .await
-            .get(validator_hotkey)
-            .cloned()
-            .unwrap_or_default()
+impl FixedAssignment {
+    pub fn new(validator_hotkey: String) -> Self {
+        Self { validator_hotkey }
     }
 }
 
 #[async_trait]
-impl AssignmentStrategy for RoundRobinAssignment {
-    async fn select_validators(
+impl AssignmentStrategy for FixedAssignment {
+    async fn select_assignment(
         &self,
         validators: Vec<ValidatorInfo>,
-        nodes: Vec<RegisteredNode>,
-    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>> {
-        if validators.is_empty() || nodes.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let mut assignments = Vec::new();
-        let nodes_per_validator = (nodes.len() / validators.len()).max(1);
-        let mut node_iter = nodes.into_iter();
-
-        for validator in validators {
-            let mut validator_nodes = Vec::new();
-            for _ in 0..nodes_per_validator {
-                if let Some(node) = node_iter.next() {
-                    validator_nodes.push(node);
-                } else {
-                    break;
-                }
-            }
-
-            if !validator_nodes.is_empty() {
-                assignments.push((validator, validator_nodes));
-            }
-        }
-
-        // Assign remaining nodes to the first validator
-        if let Some(remaining) = node_iter.next() {
-            if let Some((_, ref mut nodes)) = assignments.first_mut() {
-                nodes.push(remaining);
-                for node in node_iter {
-                    nodes.push(node);
-                }
-            }
-        }
-
-        Ok(assignments)
-    }
-}
-
-/// Highest stake assignment strategy
-pub struct HighestStakeAssignment {
-    min_stake_threshold: u128,
-    validator_hotkey: Option<String>,
-}
-
-impl HighestStakeAssignment {
-    pub fn new(min_stake_threshold: u128, validator_hotkey: Option<String>) -> Self {
-        Self {
-            min_stake_threshold,
-            validator_hotkey,
+        _nodes: Vec<RegisteredNode>,
+    ) -> Result<Option<ValidatorInfo>> {
+        // Find the validator with the specified hotkey
+        if let Some(validator) = validators
+            .into_iter()
+            .find(|v| v.hotkey == self.validator_hotkey)
+        {
+            Ok(Some(validator))
+        } else {
+            warn!(
+                "Validator with hotkey {} not found in active validators",
+                self.validator_hotkey
+            );
+            Ok(None)
         }
     }
 }
+
+/// Highest stake assignment strategy - assigns all nodes to the validator with highest stake
+pub struct HighestStakeAssignment;
 
 #[async_trait]
 impl AssignmentStrategy for HighestStakeAssignment {
-    async fn select_validators(
+    async fn select_assignment(
         &self,
         mut validators: Vec<ValidatorInfo>,
-        nodes: Vec<RegisteredNode>,
-    ) -> Result<Vec<(ValidatorInfo, Vec<RegisteredNode>)>> {
-        // Filter by minimum stake
-        validators.retain(|v| v.stake >= self.min_stake_threshold);
-
-        // If specific validator is configured, filter to just that one
-        if let Some(ref hotkey) = self.validator_hotkey {
-            validators.retain(|v| &v.hotkey == hotkey);
-        }
-
+        _nodes: Vec<RegisteredNode>,
+    ) -> Result<Option<ValidatorInfo>> {
         // Sort by stake (highest first)
         validators.sort_by(|a, b| b.stake.cmp(&a.stake));
 
         // Take the highest staked validator
-        if let Some(validator) = validators.into_iter().next() {
-            Ok(vec![(validator, nodes)])
-        } else {
-            Ok(vec![])
-        }
+        Ok(validators.into_iter().next())
     }
 }

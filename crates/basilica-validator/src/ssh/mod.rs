@@ -274,6 +274,17 @@ impl ValidatorSshClient {
         }
     }
 
+    /// Refresh host key for node
+    pub async fn refresh_host_key(&self, details: &SshConnectionDetails) -> Result<()> {
+        info!(
+            target: "ssh_audit",
+            host = %details.host,
+            port = details.port,
+            "Refreshing host key"
+        );
+        self.client.refresh_host_key(details).await
+    }
+
     /// Test SSH connection to node
     pub async fn test_connection(&self, details: &SshConnectionDetails) -> Result<()> {
         info!(
