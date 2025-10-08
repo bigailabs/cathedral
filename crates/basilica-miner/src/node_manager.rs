@@ -394,12 +394,11 @@ impl NodeManager {
         normalized_key: &str,
     ) -> Result<()> {
         // Atomic operation: remove all validator keys and add the new one
+        // Escape single quotes in the SSH key for safe shell interpolation
+        let escaped_key = normalized_key.replace("'", "'\\''");
         let ssh_command = format!(
-            r#"{} && cat >> "$tmp" <<'EOF'
-{}
-EOF
-&& {}"#,
-            SSH_REWRITE_AUTHORIZED_KEYS_BASE, normalized_key, SSH_MOVE_TO_AUTHORIZED_KEYS
+            r#"{} && printf '%s\n' '{}' >> "$tmp" && {}"#,
+            SSH_REWRITE_AUTHORIZED_KEYS_BASE, escaped_key, SSH_MOVE_TO_AUTHORIZED_KEYS
         );
 
         self.ssh_client
