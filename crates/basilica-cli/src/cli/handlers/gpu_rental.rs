@@ -13,8 +13,7 @@ use crate::CliError;
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
     GpuRequirements, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile, NodeSelection,
-    RentalState, RentalStatusResponse, ResourceRequirementsRequest, SshAccess,
-    StartRentalApiRequest,
+    RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use basilica_validator::gpu::categorization::GpuCategory;
@@ -437,15 +436,7 @@ pub async fn handle_status(
     if json {
         json_output(&status)?;
     } else {
-        // Convert to validator's RentalStatusResponse for display (without SSH credentials)
-        let display_status = RentalStatusResponse {
-            rental_id: status.rental_id,
-            status: status.status,
-            node: status.node,
-            created_at: status.created_at,
-            updated_at: status.updated_at,
-        };
-        display_rental_status(&display_status);
+        display_rental_status_with_details(&status, config);
     }
 
     Ok(())
@@ -506,7 +497,7 @@ pub async fn handle_logs(
 
     // Parse and display SSE stream
     use eventsource_stream::Eventsource;
-    use futures::StreamExt;
+    use futures_util::StreamExt;
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -525,7 +516,7 @@ pub async fn handle_logs(
         println!("Following log output - press Ctrl+C to stop");
     }
 
-    futures::pin_mut!(stream);
+    futures_util::pin_mut!(stream);
 
     while let Some(event) = stream.next().await {
         match event {
@@ -1016,7 +1007,10 @@ fn split_remote_path(path: &str) -> (Option<String>, String) {
     }
 }
 
-fn display_rental_status(status: &RentalStatusResponse) {
+fn display_rental_status_with_details(
+    status: &basilica_sdk::types::RentalStatusWithSshResponse,
+    config: &CliConfig,
+) {
     println!("Rental Status: {}", status.rental_id);
     println!("  Status: {:?}", status.status);
     println!("  Node: {}", status.node.id);
@@ -1029,20 +1023,53 @@ fn display_rental_status(status: &RentalStatusResponse) {
         status.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
 
-    // println!("\nNode Details:");
-    // println!("  GPUs: {} available", status.node.gpu_specs.len());
-    // for gpu in &status.node.gpu_specs {
-    //     println!("    - {} ({} GB)", gpu.name, gpu.memory_gb);
-    // }
-    // println!(
-    //     "  CPU: {} cores ({})",
-    //     status.node.cpu_specs.cores, status.node.cpu_specs.model
-    // );
-    // println!("  Memory: {} GB", status.node.cpu_specs.memory_gb);
+    // Display port mappings if available
+    if let Some(ref port_mappings) = status.port_mappings {
+        if !port_mappings.is_empty() {
+            println!("\nPort Mappings (Host → Container):");
+            let port_strings: Vec<String> = port_mappings
+                .iter()
+                .map(|p| format!("{}→{}", p.host_port, p.container_port))
+                .collect();
+            println!("  {}", port_strings.join(", "));
+        }
+    }
 
-    // if let Some(location) = &status.node.location {
-    //     println!("  Location: {location}");
-    // }
+    // Display SSH connection instructions if available
+    if let Some(ref ssh_credentials) = status.ssh_credentials {
+        if let Ok((host, port, username)) = parse_ssh_credentials(ssh_credentials) {
+            let private_key_path = &config.ssh.private_key_path;
+
+            println!();
+            print_info("SSH Connection:");
+            println!();
+
+            // Option 1: Using basilica CLI (simplest)
+            println!("  1. Using Basilica CLI:");
+            println!(
+                "     {}",
+                console::style(format!("basilica ssh {}", status.rental_id))
+                    .cyan()
+                    .bold()
+            );
+            println!();
+
+            // Option 2: Using standard SSH command
+            println!("  2. Using standard SSH:");
+            println!(
+                "     {}",
+                console::style(format!(
+                    "ssh -i {} -p {} {}@{}",
+                    compress_path(private_key_path),
+                    port,
+                    username,
+                    host
+                ))
+                .cyan()
+                .bold()
+            );
+        }
+    }
 }
 
 /// Display quick start commands after ps output

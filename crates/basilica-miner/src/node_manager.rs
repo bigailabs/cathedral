@@ -436,7 +436,7 @@ impl NodeManager {
         );
 
         self.ssh_client
-            .execute_command(connection_details, &ssh_command, false)
+            .execute_command(connection_details, &ssh_command, true)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -471,7 +471,7 @@ EOF
         );
 
         self.ssh_client
-            .execute_command(connection_details, &ssh_command, false)
+            .execute_command(connection_details, &ssh_command, true)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(

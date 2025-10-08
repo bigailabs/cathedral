@@ -685,6 +685,17 @@ impl ValidationNode {
 
         // Phase 1: SSH Connection Test
         let ssh_test_start = Instant::now();
+
+        // Refresh host key to prevent stale key issues with validator binary
+        if let Err(e) = self.ssh_client.refresh_host_key(ssh_details).await {
+            warn!(
+                miner_uid = miner_uid,
+                node_id = %node_info.id,
+                error = %e,
+                "[EVAL_FLOW] Failed to refresh host key, continuing with validation"
+            );
+        }
+
         let ssh_connection_successful: bool =
             match self.ssh_client.test_connection(ssh_details).await {
                 Ok(_) => {

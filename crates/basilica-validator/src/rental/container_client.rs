@@ -352,8 +352,11 @@ impl ContainerClient {
 
         let container_data = &inspect_data[0];
 
-        // Extract port mappings
+        // Extract port mappings and deduplicate
+        // Docker returns multiple bindings per port (typically IPv4 and IPv6)
         let mut mapped_ports = Vec::new();
+        let mut seen_ports = std::collections::HashSet::new();
+
         if let Some(ports) = container_data["NetworkSettings"]["Ports"].as_object() {
             for (container_port_proto, bindings) in ports {
                 if let Some(bindings_arr) = bindings.as_array() {
@@ -368,11 +371,20 @@ impl ContainerClient {
                                 .unwrap_or("tcp")
                                 .to_string();
 
-                            mapped_ports.push(PortMapping {
-                                container_port: container_port.parse().unwrap_or(0),
-                                host_port: host_port.parse().unwrap_or(0),
-                                protocol,
-                            });
+                            let container_port_num: u32 = container_port.parse().unwrap_or(0);
+                            let host_port_num: u32 = host_port.parse().unwrap_or(0);
+
+                            // Create a unique key for this port mapping
+                            let key = (container_port_num, host_port_num, protocol.clone());
+
+                            // Only add if we haven't seen this exact mapping before
+                            if seen_ports.insert(key) {
+                                mapped_ports.push(PortMapping {
+                                    container_port: container_port_num,
+                                    host_port: host_port_num,
+                                    protocol,
+                                });
+                            }
                         }
                     }
                 }
