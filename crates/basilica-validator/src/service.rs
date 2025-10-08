@@ -1,6 +1,5 @@
 use crate::api::ApiHandler;
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
-use crate::cli::handlers::rental::create_rental_manager;
 use crate::collateral::collateral_scan::Collateral;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
@@ -10,7 +9,7 @@ use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use basilica_common::MemoryStorage;
 use bittensor::Service as BittensorService;
 use reqwest::Client;
@@ -172,14 +171,26 @@ impl ValidatorService {
         );
 
         let rental_manager = if let Some(ref metrics) = validator_metrics {
-            Some(
-                create_rental_manager(
-                    &self.config,
-                    persistence_arc.clone(),
-                    metrics.prometheus(), // Pass prometheus metrics
-                )
-                .await?,
+            let manager = crate::rental::RentalManager::create(
+                &self.config,
+                persistence_arc.clone(),
+                metrics.prometheus(),
             )
+            .await?;
+
+            manager.start();
+
+            manager
+                .initialize_rental_metrics()
+                .await
+                .context("Failed to initialize rental metrics")?;
+
+            manager
+                .initialize_node_metrics()
+                .await
+                .context("Failed to initialize node metrics")?;
+
+            Some(manager)
         } else {
             tracing::warn!("Rental manager disabled: metrics must be enabled for rentals");
             None

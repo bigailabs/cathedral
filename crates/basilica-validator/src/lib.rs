@@ -4,6 +4,7 @@
 //! scoring, and participates in the Bittensor network.
 
 pub mod api;
+pub mod billing;
 pub mod bittensor_core;
 pub mod cli;
 pub mod collateral;

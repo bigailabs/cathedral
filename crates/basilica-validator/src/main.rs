@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::Parser;
 
 mod api;
+mod billing;
 mod bittensor_core;
 mod cli;
 mod collateral;

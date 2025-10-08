@@ -8,16 +8,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub mod billing;
 pub mod container_client;
 pub mod deployment;
 pub mod monitoring;
 pub mod types;
 
+pub use billing::RentalBillingMonitor;
 pub use container_client::ContainerClient;
 pub use deployment::DeploymentManager;
 pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
+use crate::billing::BillingClient;
+use crate::config::BillingConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
@@ -32,6 +36,8 @@ pub struct RentalManager {
     log_streamer: Arc<LogStreamer>,
     /// Health monitor
     health_monitor: Arc<DatabaseHealthMonitor>,
+    /// Billing telemetry monitor (optional)
+    billing: Option<Arc<RentalBillingMonitor>>,
     /// SSH key manager for validator keys
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
     /// Metrics for tracking rental status (required)
@@ -151,14 +157,66 @@ impl RentalManager {
             deployment_manager: deployment_manager.clone(),
             log_streamer: log_streamer.clone(),
             health_monitor,
+            billing: None,
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
         }
     }
 
-    // Start the monitoring loop
-    pub fn start_monitor(&self) {
+    /// Create rental manager with all components (SSH, billing if enabled)
+    /// Does NOT start monitoring loops - call start() separately
+    pub async fn create(
+        config: &crate::config::ValidatorConfig,
+        persistence: Arc<SimplePersistence>,
+        metrics: Arc<ValidatorPrometheusMetrics>,
+    ) -> Result<Self> {
+        // Create SSH key manager
+        let ssh_key_dir = config.ssh_session.ssh_key_directory.clone();
+        let mut ssh_key_manager = ValidatorSshKeyManager::new(ssh_key_dir).await?;
+        ssh_key_manager
+            .load_or_generate_persistent_key(None)
+            .await?;
+        let ssh_key_manager = Arc::new(ssh_key_manager);
+
+        // Create health monitor
+        let health_monitor = Arc::new(DatabaseHealthMonitor::new(
+            persistence.clone(),
+            ssh_key_manager.clone(),
+            metrics.clone(),
+        ));
+
+        // Create billing monitor if enabled
+        let billing = if config.billing.enabled {
+            let billing_client = Arc::new(BillingClient::new(config.billing.clone()).await?);
+            billing_client.clone().start_streaming_task().await;
+
+            Some(Arc::new(RentalBillingMonitor::new(
+                persistence.clone(),
+                ssh_key_manager.clone(),
+                billing_client,
+                &config.billing,
+            )))
+        } else {
+            None
+        };
+
+        Ok(Self {
+            persistence,
+            deployment_manager: Arc::new(DeploymentManager::new()),
+            log_streamer: Arc::new(LogStreamer::new()),
+            health_monitor,
+            billing,
+            ssh_key_manager: Some(ssh_key_manager),
+            metrics,
+        })
+    }
+
+    /// Start all monitoring loops (health + billing)
+    pub fn start(&self) {
         self.health_monitor.start_monitoring_loop();
+        if let Some(ref billing) = self.billing {
+            billing.start();
+        }
     }
 
     /// Initialize metrics for all existing rentals on startup
@@ -554,7 +612,10 @@ impl RentalManager {
 impl Drop for RentalManager {
     fn drop(&mut self) {
         self.health_monitor.stop();
-        tracing::debug!("Stopped health monitor for RentalManager");
+        if let Some(ref billing) = self.billing {
+            billing.stop();
+        }
+        tracing::debug!("Stopped monitors for RentalManager");
     }
 }
 
