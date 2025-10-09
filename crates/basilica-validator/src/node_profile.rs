@@ -351,8 +351,16 @@ mod tests {
         }
 
         // Should be roughly 30/70 split (allow some variance due to hashing)
-        assert!(jobs_count > 20 && jobs_count < 40, "jobs_count: {}", jobs_count);
-        assert!(rentals_count > 60 && rentals_count < 80, "rentals_count: {}", rentals_count);
+        assert!(
+            jobs_count > 20 && jobs_count < 40,
+            "jobs_count: {}",
+            jobs_count
+        );
+        assert!(
+            rentals_count > 60 && rentals_count < 80,
+            "rentals_count: {}",
+            rentals_count
+        );
     }
 
     #[test]
