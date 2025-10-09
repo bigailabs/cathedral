@@ -119,16 +119,15 @@ fn display_deposits_table(
     use tabled::{builder::Builder, settings::Style};
 
     println!();
-    println!("{}", style("# Shows historical deposits → credits").dim());
+    println!("{}", style("# Deposit History").dim());
     println!();
 
     let mut builder = Builder::default();
 
     // Add header
-    builder.push_record(["Date (UTC)", "TAO", "Tx Hash", "Conf", "Block", "Credited"]);
+    builder.push_record(["Date (UTC)", "TAO", "Tx Hash", "Conf", "Block", "Status"]);
 
     let mut total_tao = 0.0;
-    let mut total_credits = 0.0;
 
     for deposit in &response.deposits {
         let amount_tao: f64 = deposit.amount_tao.parse().unwrap_or(0.0);
@@ -155,13 +154,13 @@ fn display_deposits_table(
             "-".to_string()
         };
 
-        // Format credits (assuming 1 TAO = 1000 credits)
-        let credited = if deposit.credited_at.is_some() {
-            let credits = amount_tao * 1000.0;
-            total_credits += credits;
-            format!("{:.3}", credits)
+        // Format status
+        let status = if deposit.credited_at.is_some() {
+            "Credited"
+        } else if deposit.finalized_at.is_some() {
+            "Finalized"
         } else {
-            "-".to_string()
+            "Pending"
         };
 
         builder.push_record([
@@ -170,7 +169,7 @@ fn display_deposits_table(
             tx_hash.as_str(),
             confirmations.as_str(),
             &deposit.block_number.to_string(),
-            credited.as_str(),
+            status,
         ]);
     }
 
@@ -180,17 +179,8 @@ fn display_deposits_table(
 
     // Display totals
     println!();
-    println!("{}:", style("Totals").bold());
-    println!(
-        "  {}: {} TAO",
-        style("Deposits").cyan(),
-        style(format!("{:.3}", total_tao)).green()
-    );
-    println!(
-        "  {}: {}",
-        style("Credits").cyan(),
-        style(format!("{:.3}", total_credits)).green()
-    );
+    println!("{}:", style("Total Deposits").bold());
+    println!("  {} TAO", style(format!("{:.3}", total_tao)).green());
 
     Ok(())
 }
