@@ -37,7 +37,6 @@ impl ChainRegistration {
             config.axon_port,
         )
         .external_ip(config.external_ip.clone())
-        .skip_registration(config.skip_registration)
         .local_spoofed_ip("10.0.0.1".to_string())
         .neuron_type("miner".to_string())
         .build();

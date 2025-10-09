@@ -12,7 +12,6 @@ uid = 0
 coldkey_name = "default"
 axon_port = ${MINER_AXON_PORT}
 max_weight_uids = 256
-skip_registration = false
 
 [database]
 url = "sqlite:///opt/basilica/data/miner.db?mode=rwc"

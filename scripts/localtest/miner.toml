@@ -13,7 +13,6 @@ coldkey_name = "default"
 axon_port = 8091
 external_ip = "127.0.0.1"  # Localhost for testing
 max_weight_uids = 256
-skip_registration = true  # Skip chain registration for local testing
 
 [database]
 url = "sqlite:///var/lib/basilica/miner/miner.db?mode=rwc"
@@ -55,7 +54,6 @@ auto_recovery = true
 
 [security]
 verify_signatures = false  # Disabled for local testing
-skip_registration = true  # Skip chain registration for local testing
 
 [logging]
 level = "debug"

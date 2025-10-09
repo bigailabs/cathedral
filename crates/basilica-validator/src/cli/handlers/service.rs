@@ -5,14 +5,14 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-pub async fn handle_start(config_path: PathBuf, local_test: bool) -> Result<()> {
+pub async fn handle_start(config_path: PathBuf) -> Result<()> {
     HandlerUtils::print_info("Starting Basilica Validator...");
 
     let config = HandlerUtils::load_config(config_path)?;
 
     HandlerUtils::validate_config(&config)?;
 
-    let service = ValidatorService::new(config, local_test);
+    let service = ValidatorService::new(config);
     service.start().await
 }
 
@@ -45,7 +45,7 @@ pub async fn handle_status(config_path: PathBuf) -> Result<()> {
     println!("  NetUID: {}", config.bittensor.common.netuid);
 
     // Get service status
-    let service = ValidatorService::new(config, false);
+    let service = ValidatorService::new(config);
     let status = service.status().await?;
 
     // Display process status
