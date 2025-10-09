@@ -197,6 +197,15 @@ impl GpuScoringEngine {
         }
     }
 
+    /// Calculate uptime-based multiplication factor for a specific node
+    /// Currently returns 1.0 as a placeholder
+    /// TODO: Implement actual uptime-based calculation using uptime_percentage from miners table
+    fn calculate_uptime_multiplication_factor(&self, _miner_uid: MinerUid, _node_id: &str) -> f64 {
+        // Placeholder - always returns 1.0 for now
+        // Later: fetch uptime from database and calculate multiplication factor
+        1.0
+    }
+
     /// Get all miners grouped by GPU category with multi-category support
     /// A single miner can appear in multiple categories if they have multiple GPU types
     /// Only includes GPU categories configured in emission config for rewards
@@ -265,7 +274,7 @@ impl GpuScoringEngine {
                 continue;
             }
 
-            let rewardable_gpus: Vec<(GpuCategory, u32)> = self
+            let rewardable_gpus: Vec<(String, GpuCategory, u32)> = self
                 .gpu_profile_repo
                 .get_miner_gpu_assignments(profile.miner_uid)
                 .await?.iter().filter_map(|(node_id, (gpu_count, gpu_name, gpu_memory_gb))| {
@@ -294,7 +303,7 @@ impl GpuScoringEngine {
                                         min_required = allocation.min_gpu_count,
                                         "Miner meets all emission requirements"
                                     );
-                                    Some((category, *gpu_count))
+                                    Some((node_id.clone(), category, *gpu_count))
                                 } else {
                                     if !meets_gpu_count {
                                         info!(
@@ -330,12 +339,14 @@ impl GpuScoringEngine {
                 })
                 .collect();
 
-            let rewardable_gpu_counts: HashMap<String, u32> =
+            let rewardable_gpu_counts: HashMap<String, f64> =
                 rewardable_gpus
                     .into_iter()
-                    .fold(HashMap::new(), |mut acc, (category, count)| {
+                    .fold(HashMap::new(), |mut acc, (node_id, category, count)| {
                         let normalized_model = category.to_string();
-                        *acc.entry(normalized_model).or_insert(0) += count;
+                        let uptime_factor = self.calculate_uptime_multiplication_factor(profile.miner_uid, &node_id);
+                        let weighted_count = count as f64 * uptime_factor;
+                        *acc.entry(normalized_model).or_insert(0.0) += weighted_count;
                         acc
                     });
 
@@ -345,9 +356,9 @@ impl GpuScoringEngine {
             }
 
             // Add the miner to each rewardable category they have GPUs in
-            for (normalized_model, gpu_count) in rewardable_gpu_counts {
-                // Multiply by gpu_count to get the actual linear score
-                let category_score = profile.total_score * gpu_count as f64;
+            for (normalized_model, weighted_gpu_count) in rewardable_gpu_counts {
+                // Multiply by weighted_gpu_count to get the actual linear score
+                let category_score = profile.total_score * weighted_gpu_count;
 
                 miners_by_category
                     .entry(normalized_model)
