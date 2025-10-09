@@ -90,6 +90,25 @@ impl Default for PaymentsServiceConfig {
     }
 }
 
+/// Billing service configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingServiceConfig {
+    /// Enable billing service integration
+    pub enabled: bool,
+
+    /// Billing service gRPC endpoint
+    pub endpoint: String,
+}
+
+impl Default for BillingServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: "http://localhost:50051".to_string(),
+        }
+    }
+}
+
 /// Main configuration structure for the Basilica API
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
