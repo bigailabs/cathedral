@@ -8,7 +8,7 @@ pub use cache::{CacheBackend, CacheConfig};
 pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
-use basilica_common::config::BittensorConfig;
+use basilica_common::config::{types::MetricsConfig, BittensorConfig};
 use basilica_common::ConfigurationError as ConfigError;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -110,6 +110,13 @@ pub struct Config {
 
     /// Payments service configuration
     pub payments: PaymentsServiceConfig,
+
+    /// Billing service configuration
+    pub billing: BillingServiceConfig,
+
+    /// Metrics configuration
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 impl Config {

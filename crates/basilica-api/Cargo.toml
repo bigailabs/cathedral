@@ -12,6 +12,7 @@ basilica-common = { path = "../basilica-common" }
 bittensor = { path = "../bittensor" }
 basilica-validator = { path = "../basilica-validator", features = ["client"] }
 basilica-sdk = { path = "../basilica-sdk" }
+basilica-billing = { path = "../basilica-billing" }
 basilica-payments = { path = "../basilica-payments" }
 basilica-protocol = { path = "../basilica-protocol" }
 
@@ -59,9 +60,18 @@ moka = { workspace = true }
 # Concurrent collections
 dashmap = { workspace = true }
 
+# Metrics
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+rust_decimal = { workspace = true }
+
+# Async traits
+async-trait = { workspace = true }
+
 # Database
 sqlx = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 clap = { workspace = true }
 clap-verbosity-flag = { workspace = true }
 futures = { workspace = true }
