@@ -16,6 +16,12 @@ spec:
         app: basilica-operator
     spec:
       serviceAccountName: basilica-operator
+      # Allow operator to run on control plane nodes
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
       containers:
         - name: operator
           image: {{ (operator_image_effective | default(operator_image)) | quote }}

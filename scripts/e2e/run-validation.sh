@@ -56,7 +56,7 @@ echo ""
 # ============================================================================
 # STEP 1: RBAC Validation
 # ============================================================================
-echo -e "${YELLOW}[Step 1/4] Validating RBAC permissions...${NC}"
+echo -e "${YELLOW}[Step 1/5] Validating RBAC permissions...${NC}"
 if [ -x "$SCRIPT_DIR/validate-rbac.sh" ]; then
     if "$SCRIPT_DIR/validate-rbac.sh"; then
         echo -e "${GREEN}✓ RBAC validation passed${NC}"
@@ -73,7 +73,7 @@ echo ""
 # ============================================================================
 # STEP 2: Bootstrap API Key
 # ============================================================================
-echo -e "${YELLOW}[Step 2/4] Bootstrapping API key...${NC}"
+echo -e "${YELLOW}[Step 2/5] Bootstrapping API key...${NC}"
 if [ -x "$SCRIPT_DIR/bootstrap-api-key.sh" ]; then
     # Run bootstrap script and capture token
     BOOTSTRAP_OUTPUT=$("$SCRIPT_DIR/bootstrap-api-key.sh" 2>&1)
@@ -97,7 +97,7 @@ echo ""
 # ============================================================================
 # STEP 3: Rentals Smoke Test
 # ============================================================================
-echo -e "${YELLOW}[Step 3/4] Running Rentals smoke test...${NC}"
+echo -e "${YELLOW}[Step 3/5] Running Rentals smoke test...${NC}"
 if [ -x "$SCRIPT_DIR/smoke-test-rentals.sh" ]; then
     if "$SCRIPT_DIR/smoke-test-rentals.sh"; then
         echo -e "${GREEN}✓ Rentals smoke test passed${NC}"
@@ -114,7 +114,7 @@ echo ""
 # ============================================================================
 # STEP 4: Jobs Smoke Test
 # ============================================================================
-echo -e "${YELLOW}[Step 4/4] Running Jobs smoke test...${NC}"
+echo -e "${YELLOW}[Step 4/5] Running Jobs smoke test...${NC}"
 if [ -x "$SCRIPT_DIR/smoke-test-jobs.sh" ]; then
     if "$SCRIPT_DIR/smoke-test-jobs.sh"; then
         echo -e "${GREEN}✓ Jobs smoke test passed${NC}"
@@ -124,6 +124,23 @@ if [ -x "$SCRIPT_DIR/smoke-test-jobs.sh" ]; then
     fi
 else
     echo -e "${RED}✗ smoke-test-jobs.sh not found or not executable${NC}"
+    exit 1
+fi
+echo ""
+
+# ============================================================================
+# STEP 5: Node Groups Isolation Test
+# ============================================================================
+echo -e "${YELLOW}[Step 5/5] Running Node Groups isolation test...${NC}"
+if [ -x "$SCRIPT_DIR/smoke-test-node-groups.sh" ]; then
+    if "$SCRIPT_DIR/smoke-test-node-groups.sh"; then
+        echo -e "${GREEN}✓ Node Groups isolation test passed${NC}"
+    else
+        echo -e "${RED}✗ Node Groups isolation test failed${NC}"
+        exit 1
+    fi
+else
+    echo -e "${RED}✗ smoke-test-node-groups.sh not found or not executable${NC}"
     exit 1
 fi
 echo ""
@@ -140,6 +157,7 @@ echo "  ✓ RBAC permissions validated"
 echo "  ✓ API key authentication working"
 echo "  ✓ Rentals v2 lifecycle (create/logs/exec/delete)"
 echo "  ✓ Jobs v1 lifecycle (create/logs/delete)"
+echo "  ✓ Node Groups isolation (jobs vs rentals workload separation)"
 echo ""
 echo "Next steps:"
 echo "  1. Review test output above for any warnings"
