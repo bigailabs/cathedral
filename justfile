@@ -618,6 +618,23 @@ local-validator-up:
         printf 'A100 = { weight = 50.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
         printf 'H100 = { weight = 30.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
         printf 'B200 = { weight = 20.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+
+        # Add verification section with K8s profile publishing if K3s is configured
+        if [ "${BASILICA_ENABLE_K3S_JOIN:-false}" = "true" ]; then
+            printf '\n[verification]\n'
+            printf 'max_concurrent_verifications = 10\n'
+            printf 'verification_interval = { secs = 60 }  # Verify every 60 seconds\n'
+            printf 'min_score_threshold = 0.1\n'
+            printf 'challenge_timeout = { secs = 120 }\n'
+            printf 'retry_attempts = 3\n'
+            printf 'retry_delay = { secs = 5 }\n'
+            printf 'enable_k8s_profile_publishing = true\n'
+            printf 'k8s_profile_namespace = "default"\n'
+            printf '\n[verification.node_groups]\n'
+            printf 'strategy = "all-jobs"  # Options: round-robin, all-jobs, all-rentals\n'
+            printf '# jobs_percentage = 30  # For round-robin: 30%% jobs, 70%% rentals\n'
+            printf '# force_group = "jobs" # Optional: override all assignments\n'
+        fi
     } > config/validator.local.toml
     # Run validator container
     docker compose -f scripts/validator/compose.local.yml up -d

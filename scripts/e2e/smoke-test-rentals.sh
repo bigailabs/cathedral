@@ -57,6 +57,37 @@ fi
 
 log "Testing Rentals v2 API at $API_URL"
 log "Using namespace: $NAMESPACE"
+echo ""
+
+# ===========================================================================
+# PRE-CHECK: Verify rental nodes exist (for node groups feature)
+# ===========================================================================
+if command -v kubectl &>/dev/null && [ -n "${KUBECONFIG:-}" ] && [ -f "${KUBECONFIG:-}" ]; then
+  RENTALS_NODES=$(kubectl get nodes -l basilica.ai/node-group=rentals -o name 2>/dev/null | wc -l || echo "0")
+  if [ "$RENTALS_NODES" -eq 0 ]; then
+    warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    warn "No nodes with basilica.ai/node-group=rentals label found"
+    warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    warn ""
+    warn "This cluster is configured with node groups, but no nodes"
+    warn "are assigned to the 'rentals' group. Rentals cannot schedule."
+    warn ""
+    warn "Current node group configuration:"
+    JOBS_NODES=$(kubectl get nodes -l basilica.ai/node-group=jobs -o name 2>/dev/null | wc -l || echo "0")
+    warn "  - Jobs nodes: $JOBS_NODES"
+    warn "  - Rentals nodes: $RENTALS_NODES"
+    warn ""
+    warn "To enable rentals, update validator config:"
+    warn "  [verification.node_groups]"
+    warn "  strategy = \"round-robin\"  # or \"all-rentals\""
+    warn "  jobs_percentage = 30        # for round-robin"
+    warn ""
+    warn "Skipping rentals smoke test (expected with all-jobs strategy)"
+    exit 0
+  fi
+  log "✓ Found $RENTALS_NODES node(s) available for rentals"
+  echo ""
+fi
 
 # Cleanup function
 RENTAL_ID=""

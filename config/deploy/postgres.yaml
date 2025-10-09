@@ -25,6 +25,12 @@ spec:
       labels:
         app: basilica-postgres
     spec:
+      # Allow postgres to run on control plane nodes
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
       containers:
         - name: postgres
           image: postgres:16
