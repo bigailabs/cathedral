@@ -39,8 +39,15 @@ pub struct ApiConfig {
 
 impl Default for ApiConfig {
     fn default() -> Self {
+        // Use localhost for development environment, production URL otherwise
+        let base_url = if basilica_common::is_development_environment() {
+            "http://localhost:8000".to_string()
+        } else {
+            "https://api.basilica.ai".to_string()
+        };
+
         Self {
-            base_url: "https://api.basilica.ai".to_string(),
+            base_url,
             request_timeout: 900,
         }
     }
