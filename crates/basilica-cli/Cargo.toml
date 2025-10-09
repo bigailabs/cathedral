@@ -23,6 +23,7 @@ clap = { workspace = true }
 clap-verbosity-flag = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rust_decimal = { workspace = true }
 
 # HTTP client for API communication
 reqwest = { workspace = true }

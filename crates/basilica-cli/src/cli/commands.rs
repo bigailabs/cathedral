@@ -140,6 +140,49 @@ pub enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
+
+    /// Check your account balance
+    Balance {
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
+
+    /// Check GPU rental pricing and calculate costs
+    Price {
+        /// GPU type to check pricing for (e.g., 'h100', 'h200')
+        gpu_type: Option<String>,
+
+        /// Number of hours to calculate cost for
+        #[arg(long)]
+        hours: Option<u32>,
+
+        /// Show pricing for all GPU types
+        #[arg(long)]
+        all: bool,
+
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
+
+    /// View rental usage history and costs
+    Usage {
+        /// Rental ID for detailed usage breakdown
+        rental_id: Option<String>,
+
+        /// Limit number of results (default: 50)
+        #[arg(long)]
+        limit: Option<u32>,
+
+        /// Offset for pagination (default: 0)
+        #[arg(long)]
+        offset: Option<u32>,
+
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
 }
 
 /// Fund management actions
@@ -195,7 +238,10 @@ impl Commands {
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
             | Commands::Tokens { .. }
-            | Commands::Fund { .. } => true,
+            | Commands::Fund { .. }
+            | Commands::Balance { .. }
+            | Commands::Price { .. }
+            | Commands::Usage { .. } => true,
 
             // Authentication and delegation commands don't require auth
             Commands::Login { .. }
