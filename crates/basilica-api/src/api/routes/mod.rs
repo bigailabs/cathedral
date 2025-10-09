@@ -2,5 +2,6 @@
 
 pub mod api_keys;
 pub mod health;
+pub mod metrics;
 pub mod payments;
 pub mod rentals;
