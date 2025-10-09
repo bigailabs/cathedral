@@ -149,6 +149,39 @@ docker-push-operator TAG="latest":
     docker push ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG
     echo "✅ Operator image pushed: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
 
+# Build storage daemon Docker image locally
+docker-build-storage TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/storage-daemon/build.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    echo "Building storage daemon image with tag: $CLEAN_TAG"
+    ./scripts/storage-daemon/build.sh --image-name ghcr.io/one-covenant/basilica/storage-daemon --image-tag "$CLEAN_TAG"
+    echo "✅ Storage daemon image built: ghcr.io/one-covenant/basilica/storage-daemon:$CLEAN_TAG"
+    echo ""
+    echo "To push to registry, run:"
+    echo "  just docker-push-storage $CLEAN_TAG"
+
+# Build and push storage daemon Docker image
+docker-push-storage TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/storage-daemon/push.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    # Build first
+    just docker-build-storage "$CLEAN_TAG"
+    # Push
+    echo "Pushing storage daemon image to registry..."
+    ./scripts/storage-daemon/push.sh \
+      --source-image ghcr.io/one-covenant/basilica/storage-daemon \
+      --target-image ghcr.io/one-covenant/basilica/storage-daemon \
+      --tag "$CLEAN_TAG"
+    echo "✅ Storage daemon image pushed: ghcr.io/one-covenant/basilica/storage-daemon:$CLEAN_TAG"
+
 # =============================================================================
 # DEPLOYMENT COMMANDS
 # =============================================================================

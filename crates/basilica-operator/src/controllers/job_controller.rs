@@ -167,6 +167,113 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     };
 
     let mut containers = vec![container];
+
+    // Optional persistent storage sidecar (FUSE)
+    if let Some(storage) = &spec.storage {
+        if let Some(persistent) = &storage.persistent {
+            if persistent.enabled {
+                let mut env = Vec::new();
+
+                // Experiment ID (use job name as unique identifier)
+                env.push(EnvVar {
+                    name: "EXPERIMENT_ID".into(),
+                    value: Some(name.to_string()),
+                    ..Default::default()
+                });
+
+                // Storage backend configuration
+                env.push(EnvVar {
+                    name: "STORAGE_BACKEND".into(),
+                    value: Some(persistent.backend.clone()),
+                    ..Default::default()
+                });
+
+                env.push(EnvVar {
+                    name: "STORAGE_BUCKET".into(),
+                    value: Some(persistent.bucket.clone()),
+                    ..Default::default()
+                });
+
+                if let Some(region) = &persistent.region {
+                    env.push(EnvVar {
+                        name: "STORAGE_REGION".into(),
+                        value: Some(region.clone()),
+                        ..Default::default()
+                    });
+                }
+
+                if let Some(endpoint) = &persistent.endpoint {
+                    env.push(EnvVar {
+                        name: "STORAGE_ENDPOINT".into(),
+                        value: Some(endpoint.clone()),
+                        ..Default::default()
+                    });
+                }
+
+                // Mount point
+                let mount_path = if persistent.mount_path.is_empty() {
+                    "/data".to_string()
+                } else {
+                    persistent.mount_path.clone()
+                };
+                env.push(EnvVar {
+                    name: "MOUNT_POINT".into(),
+                    value: Some(mount_path),
+                    ..Default::default()
+                });
+
+                // Sync interval
+                env.push(EnvVar {
+                    name: "SYNC_INTERVAL_MS".into(),
+                    value: Some(persistent.sync_interval_ms.unwrap_or(1000).to_string()),
+                    ..Default::default()
+                });
+
+                // Cache size
+                env.push(EnvVar {
+                    name: "CACHE_SIZE_MB".into(),
+                    value: Some(persistent.cache_size_mb.unwrap_or(2048).to_string()),
+                    ..Default::default()
+                });
+
+                // Credentials from secret
+                let env_from = persistent.credentials_secret.as_ref().map(|secret_name| {
+                    vec![EnvFromSource {
+                        secret_ref: Some(SecretEnvSource {
+                            name: Some(secret_name.clone()),
+                            optional: Some(false),
+                        }),
+                        ..Default::default()
+                    }]
+                });
+
+                let storage_sidecar = Container {
+                    name: format!("basilica-storage-{}", name),
+                    image: Some("basilica/storage-daemon:latest".into()),
+                    command: Some(vec!["/usr/local/bin/basilica-storage-daemon".into()]),
+                    args: Some(vec!["--allow-other".into()]),
+                    env: Some(env),
+                    env_from,
+                    security_context: Some(SecurityContext {
+                        privileged: Some(true), // Required for FUSE
+                        allow_privilege_escalation: Some(true),
+                        capabilities: Some(Capabilities {
+                            add: Some(vec!["SYS_ADMIN".into()]),
+                            ..Default::default()
+                        }),
+                        seccomp_profile: Some(SeccompProfile {
+                            type_: "RuntimeDefault".into(),
+                            localhost_profile: None,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                containers.push(storage_sidecar);
+            }
+        }
+    }
+
     // Optional artifact sidecar
     if let Some(art) = &spec.artifacts {
         if art.enabled {

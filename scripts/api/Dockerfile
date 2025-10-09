@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     build-essential \
     protobuf-compiler \
+    libfuse3-dev \
+    fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install rustfmt (required by crabtensor build)
@@ -64,6 +66,8 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     wget \
+    libfuse3-3 \
+    fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary

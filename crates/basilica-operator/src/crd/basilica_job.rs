@@ -53,8 +53,56 @@ pub struct GpuSpec {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageSpec {
+    /// Ephemeral storage size (e.g., "10Gi")
+    #[serde(default)]
     pub ephemeral: String,
+
+    /// Persistent storage configuration
+    #[serde(default)]
+    pub persistent: Option<PersistentStorageSpec>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentStorageSpec {
+    /// Whether to enable FUSE-based persistent storage
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Storage backend type (r2, s3, gcs)
+    #[serde(default)]
+    pub backend: String,
+
+    /// Bucket name
+    #[serde(default)]
+    pub bucket: String,
+
+    /// Optional region (for S3)
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// Optional endpoint (for R2 or custom S3-compatible services)
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// K8s Secret name containing storage credentials
+    /// Expected keys: access_key_id, secret_access_key
+    #[serde(default)]
+    pub credentials_secret: Option<String>,
+
+    /// Sync interval in milliseconds (default: 1000)
+    #[serde(default)]
+    pub sync_interval_ms: Option<u64>,
+
+    /// Cache size in MB (default: 2048)
+    #[serde(default)]
+    pub cache_size_mb: Option<usize>,
+
+    /// Mount path for persistent storage (default: /data)
+    #[serde(default)]
+    pub mount_path: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]

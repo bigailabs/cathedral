@@ -4,19 +4,26 @@
 //!
 //! ## Architecture
 //!
-//! This crate implements a snapshot-on-pause approach for MVP:
-//! - Jobs write to local disk during execution
-//! - On pause/suspend, we snapshot the working directory to object storage
-//! - On resume, we restore from the snapshot
+//! ### FUSE Filesystem (Production)
+//! - Transparent file I/O backed by object storage
+//! - In-memory caching with background sync
+//! - Continuous protection (syncs every 1 second)
+//! - Zero code changes for users
+//! - Supports mmap for numpy/PyTorch
 //!
-//! Future: Full FUSE-based mmap-to-object-storage translation for real-time sync.
+//! ### Snapshot Manager (Legacy/Testing)
+//! - Manual snapshot-on-pause approach
+//! - For testing and backwards compatibility
+//! - Use FUSE for production workloads
 
 pub mod backend;
-pub mod snapshot;
 pub mod config;
 pub mod error;
+pub mod fuse;
+pub mod snapshot;
 
-pub use backend::{StorageBackend, ObjectStoreBackend};
-pub use snapshot::{SnapshotManager, SnapshotMetadata};
+pub use backend::{ObjectStoreBackend, StorageBackend};
 pub use config::StorageConfig;
-pub use error::{StorageError, Result};
+pub use error::{Result, StorageError};
+pub use fuse::{BasilicaFS, DirtyPageTracker, PageCache, SyncWorker};
+pub use snapshot::{SnapshotManager, SnapshotMetadata};
