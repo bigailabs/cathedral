@@ -100,7 +100,7 @@ fn display_pricing_table(
         hours_available: String,
     }
 
-    let mut rows = Vec::new();
+    let mut rows: Vec<(Decimal, PricingRow)> = Vec::new();
 
     // Parse balance once if available
     let available_balance = balance.and_then(|b| b.available.parse::<Decimal>().ok());
@@ -129,17 +129,23 @@ fn display_pricing_table(
             "-".to_string()
         };
 
-        rows.push(PricingRow {
-            gpu_type: package.name.clone(),
-            hourly_rate: format!("${:.2}/hr", hourly_rate),
-            eight_hour: format!("${:.2}", eight_hour_cost),
-            twenty_four_hour: format!("${:.2}", twenty_four_hour_cost),
-            hours_available,
-        });
+        rows.push((
+            hourly_rate,
+            PricingRow {
+                gpu_type: package.name.clone(),
+                hourly_rate: format!("${:.2}/hr", hourly_rate),
+                eight_hour: format!("${:.2}", eight_hour_cost),
+                twenty_four_hour: format!("${:.2}", twenty_four_hour_cost),
+                hours_available,
+            },
+        ));
     }
 
-    // Sort by hourly rate ascending
-    rows.sort_by(|a, b| a.hourly_rate.cmp(&b.hourly_rate));
+    // Sort by hourly rate ascending (numeric)
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Extract rows after sorting
+    let rows: Vec<PricingRow> = rows.into_iter().map(|(_, r)| r).collect();
 
     println!();
     println!("{}", style("GPU Pricing").bold());
@@ -205,7 +211,7 @@ fn display_gpu_pricing(
         println!(
             "  {}: {} credits",
             style("Your Balance").cyan(),
-            style(format!("${:.2}", available_balance)).green()
+            style(format!("{:.2}", available_balance)).green()
         );
 
         if hourly_rate > Decimal::ZERO {
@@ -224,7 +230,7 @@ fn display_gpu_pricing(
                     println!(
                         "  {}: {} credits",
                         style("Shortfall").red().bold(),
-                        style(format!("${:.2}", shortfall)).red()
+                        style(format!("{:.2}", shortfall)).red()
                     );
                     println!(
                         "  {} Run `basilica fund` to add credits",
@@ -235,7 +241,7 @@ fn display_gpu_pricing(
                     println!(
                         "  {}: {} credits",
                         style("Remaining After").dim(),
-                        style(format!("${:.2}", remaining)).dim()
+                        style(format!("{:.2}", remaining)).dim()
                     );
                 }
             }

@@ -60,11 +60,18 @@ impl BillingClient {
     }
 
     async fn connect_with_tls_and_retry(endpoint_url: &str) -> Result<Channel> {
+        let host = endpoint_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split([':', '/'].as_ref())
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("Invalid TLS endpoint: {}", endpoint_url))?;
+
         let endpoint = Endpoint::from_shared(endpoint_url.to_string())
             .with_context(|| format!("Invalid billing endpoint: {}", endpoint_url))?
             .connect_timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
             .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
-            .tls_config(ClientTlsConfig::new())
+            .tls_config(ClientTlsConfig::new().domain_name(host))
             .with_context(|| "Failed to configure TLS for billing endpoint")?;
 
         Self::connect_endpoint_with_retry(endpoint).await

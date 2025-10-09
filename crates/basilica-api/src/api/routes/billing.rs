@@ -110,9 +110,9 @@ async fn get_balance(
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
     let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!("Invalid user_id format: {}", e);
+        error!("Invalid user_id format for {}: {}. User ID must be a valid UUID.", auth.user_id, e);
         ApiError::BadRequest {
-            message: format!("Invalid user_id format: {}", e),
+            message: "User ID must be a valid UUID for billing operations".to_string(),
         }
     })?;
 
@@ -151,9 +151,9 @@ async fn get_packages(
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
     let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!("Invalid user_id format: {}", e);
+        error!("Invalid user_id format for {}: {}. User ID must be a valid UUID.", auth.user_id, e);
         ApiError::BadRequest {
-            message: format!("Invalid user_id format: {}", e),
+            message: "User ID must be a valid UUID for billing operations".to_string(),
         }
     })?;
 
@@ -173,8 +173,11 @@ async fn get_packages(
         .map(|pkg| {
             let hourly_rate = pkg
                 .rates
-                .and_then(|r| r.gpu_rates.into_iter().next())
-                .map(|(_, rate)| rate)
+                .and_then(|r| {
+                    let mut pairs: Vec<(String, String)> = r.gpu_rates.into_iter().collect();
+                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+                    pairs.into_iter().next().map(|(_, rate)| rate)
+                })
                 .unwrap_or_default();
 
             BillingPackageInfo {
@@ -215,9 +218,9 @@ async fn get_usage_history(
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
     let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!("Invalid user_id format: {}", e);
+        error!("Invalid user_id format for {}: {}. User ID must be a valid UUID.", auth.user_id, e);
         ApiError::BadRequest {
-            message: format!("Invalid user_id format: {}", e),
+            message: "User ID must be a valid UUID for billing operations".to_string(),
         }
     })?;
 

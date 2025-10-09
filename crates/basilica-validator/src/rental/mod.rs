@@ -420,6 +420,7 @@ impl RentalManager {
                 })?;
 
             // Store rental info
+            let now = chrono::Utc::now();
             let rental_info = RentalInfo {
                 rental_id: rental_id.clone(),
                 validator_hotkey: request.validator_hotkey.clone(),
@@ -428,7 +429,8 @@ impl RentalManager {
                 ssh_session_id: format!("direct-{}", rental_id),
                 ssh_credentials: ssh_credentials.clone(),
                 state: RentalState::Active,
-                created_at: chrono::Utc::now(),
+                created_at: now,
+                updated_at: now,
                 container_spec: request.container_spec.clone(),
                 miner_id: miner_id.clone(),
                 node_details: node_details.clone(),
@@ -552,6 +554,7 @@ impl RentalManager {
         // Update rental state
         let mut updated_rental = rental_info.clone();
         updated_rental.state = RentalState::Stopped;
+        updated_rental.updated_at = chrono::Utc::now();
         self.persistence.save_rental(&updated_rental).await?;
 
         // Clear rental metric

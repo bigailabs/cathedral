@@ -31,39 +31,3 @@ pub async fn metrics_middleware(
 
     response
 }
-
-impl crate::metrics::ApiMetrics {
-    async fn record_request_duration(
-        &self,
-        method: &str,
-        path: &str,
-        status: u16,
-        duration: std::time::Duration,
-    ) {
-        let status_str = status.to_string();
-        let labels = &[
-            ("method", method),
-            ("path", path),
-            ("status", status_str.as_str()),
-        ];
-        self.recorder()
-            .record_histogram(
-                crate::metrics::ApiMetricNames::REQUEST_DURATION,
-                duration.as_secs_f64(),
-                labels,
-            )
-            .await;
-    }
-
-    async fn record_request_count(&self, method: &str, path: &str, status: u16) {
-        let status_str = status.to_string();
-        let labels = &[
-            ("method", method),
-            ("path", path),
-            ("status", status_str.as_str()),
-        ];
-        self.recorder()
-            .increment_counter(crate::metrics::ApiMetricNames::REQUESTS_TOTAL, labels)
-            .await;
-    }
-}

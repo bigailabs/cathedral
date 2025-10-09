@@ -28,42 +28,40 @@ pub async fn balance_validation_middleware(
         .clone();
 
     if let Some(billing_client) = &state.billing_client {
-        let user_uuid = uuid::Uuid::from_str(&auth_context.user_id).map_err(|e| {
-            tracing::warn!(
-                "Invalid user ID format: {}. Allowing request to proceed.",
-                e
-            );
-            ApiError::Internal {
-                message: format!("Invalid user ID format: {}", e),
-            }
-            .into_response()
-        })?;
+        match uuid::Uuid::from_str(&auth_context.user_id) {
+            Ok(user_uuid) => match billing_client.get_balance(user_uuid).await {
+                Ok(balance_response) => match Decimal::from_str(&balance_response.available_balance) {
+                    Ok(available_balance) => {
+                        let min_balance =
+                            Decimal::from_f64_retain(MIN_BALANCE_USD).unwrap_or(Decimal::ZERO);
 
-        match billing_client.get_balance(user_uuid).await {
-            Ok(balance_response) => match Decimal::from_str(&balance_response.available_balance) {
-                Ok(available_balance) => {
-                    let min_balance =
-                        Decimal::from_f64_retain(MIN_BALANCE_USD).unwrap_or(Decimal::ZERO);
-
-                    if available_balance < min_balance {
-                        return Err(ApiError::InsufficientBalance {
-                                message: "Your account balance is below the minimum required to create rentals".to_string(),
-                                current_balance: balance_response.available_balance.clone(),
-                                required: MIN_BALANCE_USD.to_string(),
-                            }
-                            .into_response());
+                        if available_balance < min_balance {
+                            return Err(ApiError::InsufficientBalance {
+                                    message: "Your account balance is below the minimum required to create rentals".to_string(),
+                                    current_balance: balance_response.available_balance.clone(),
+                                    required: MIN_BALANCE_USD.to_string(),
+                                }
+                                .into_response());
+                        }
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse balance as Decimal: {}. Allowing request to proceed.",
+                            e
+                        );
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to parse balance as Decimal: {}. Allowing request to proceed.",
+                        "Balance check failed for user {}: {}. Allowing request to proceed (graceful degradation).",
+                        auth_context.user_id,
                         e
                     );
                 }
             },
             Err(e) => {
                 tracing::warn!(
-                    "Balance check failed for user {}: {}. Allowing request to proceed (graceful degradation).",
+                    "Invalid user ID format for {}: {}. Skipping balance validation.",
                     auth_context.user_id,
                     e
                 );
