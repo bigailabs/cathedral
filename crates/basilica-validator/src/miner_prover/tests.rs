@@ -115,6 +115,7 @@ async fn test_dynamic_discovery_config() {
         gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
         enable_worker_queue: false,
         storage_validation: crate::config::StorageValidationConfig::default(),
+        node_groups: crate::config::NodeGroupConfig::default(),
     };
 
     // Verify configuration
