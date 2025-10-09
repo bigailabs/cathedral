@@ -13,15 +13,26 @@ use axum::{
 
 /// Create all API routes
 pub fn routes(state: AppState) -> Router<AppState> {
-    // Unprotected routes (for health checks, etc.)
+    // Unprotected routes (for health checks, metrics, etc.)
     let public_routes = Router::new()
         // Health endpoint - no authentication required for ALB health checks
-        .route("/health", get(routes::health::health_check));
+        .route("/health", get(routes::health::health_check))
+        // Metrics endpoint - no authentication required for Prometheus scraping
+        .route("/metrics", get(routes::metrics::metrics_handler));
+
+    // Routes that require balance validation
+    let rental_creation_route = Router::new()
+        .route("/rentals", post(routes::rentals::start_rental))
+        // Balance validation (after auth, before handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::balance_validation_middleware,
+        ));
 
     // Protected routes with unified authentication and scope validation
     let protected_routes = Router::new()
         .route("/rentals", get(routes::rentals::list_rentals_validator))
-        .route("/rentals", post(routes::rentals::start_rental))
+        .merge(rental_creation_route)
         .route("/rentals/:id", get(routes::rentals::get_rental_status))
         .route("/rentals/:id", delete(routes::rentals::stop_rental))
         .route(
@@ -37,6 +48,8 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api-keys/:name", delete(routes::api_keys::revoke_key))
         // Payment service endpoints
         .nest("/payments", routes::payments::routes())
+        // Billing service endpoints
+        .nest("/billing", routes::billing::routes())
         // Apply scope validation AFTER auth middleware
         .layer(axum::middleware::from_fn(
             middleware::scope_validation_middleware,
