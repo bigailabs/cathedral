@@ -8,11 +8,13 @@ use super::categorization::{GpuCategory, MinerGpuProfile, NodeValidationResult};
 use crate::config::emission::EmissionConfig;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
+use crate::persistence::SimplePersistence;
 use basilica_common::identity::MinerUid;
 use std::str::FromStr;
 
 pub struct GpuScoringEngine {
     gpu_profile_repo: Arc<GpuProfileRepository>,
+    persistence: Arc<SimplePersistence>,
     metrics: Option<Arc<ValidatorMetrics>>,
     emission_config: EmissionConfig,
 }
@@ -20,10 +22,12 @@ pub struct GpuScoringEngine {
 impl GpuScoringEngine {
     pub fn new(
         gpu_profile_repo: Arc<GpuProfileRepository>,
+        persistence: Arc<SimplePersistence>,
         emission_config: EmissionConfig,
     ) -> Self {
         Self {
             gpu_profile_repo,
+            persistence,
             metrics: None,
             emission_config,
         }
@@ -32,11 +36,13 @@ impl GpuScoringEngine {
     /// Create new engine with metrics support
     pub fn with_metrics(
         gpu_profile_repo: Arc<GpuProfileRepository>,
+        persistence: Arc<SimplePersistence>,
         metrics: Arc<ValidatorMetrics>,
         emission_config: EmissionConfig,
     ) -> Self {
         Self {
             gpu_profile_repo,
+            persistence,
             metrics: Some(metrics),
             emission_config,
         }
@@ -198,12 +204,37 @@ impl GpuScoringEngine {
     }
 
     /// Calculate uptime-based multiplication factor for a specific node
-    /// Currently returns 1.0 as a placeholder
-    /// TODO: Implement actual uptime-based calculation using uptime_percentage from miners table
-    fn calculate_uptime_multiplication_factor(&self, _miner_uid: MinerUid, _node_id: &str) -> f64 {
-        // Placeholder - always returns 1.0 for now
-        // Later: fetch uptime from database and calculate multiplication factor
-        1.0
+    /// Uses 14-day linear ramp-up based on actual uptime from verification logs
+    async fn calculate_uptime_multiplication_factor(
+        &self,
+        miner_uid: MinerUid,
+        node_id: &str,
+    ) -> f64 {
+        let miner_id = format!("miner_{}", miner_uid.as_u16());
+
+        match self.persistence
+            .calculate_node_uptime_multiplier(&miner_id, node_id)
+            .await
+        {
+            Ok(multiplier) => {
+                debug!(
+                    miner_uid = miner_uid.as_u16(),
+                    node_id = %node_id,
+                    multiplier = multiplier,
+                    "Applied uptime multiplication factor"
+                );
+                multiplier
+            }
+            Err(e) => {
+                warn!(
+                    miner_uid = miner_uid.as_u16(),
+                    node_id = %node_id,
+                    error = %e,
+                    "Failed to calculate node uptime multiplier, using default 1.0"
+                );
+                1.0  // Fallback to no penalty on error
+            }
+        }
     }
 
     /// Get all miners grouped by GPU category with multi-category support
@@ -339,16 +370,16 @@ impl GpuScoringEngine {
                 })
                 .collect();
 
-            let rewardable_gpu_counts: HashMap<String, f64> =
-                rewardable_gpus
-                    .into_iter()
-                    .fold(HashMap::new(), |mut acc, (node_id, category, count)| {
-                        let normalized_model = category.to_string();
-                        let uptime_factor = self.calculate_uptime_multiplication_factor(profile.miner_uid, &node_id);
-                        let weighted_count = count as f64 * uptime_factor;
-                        *acc.entry(normalized_model).or_insert(0.0) += weighted_count;
-                        acc
-                    });
+            let mut rewardable_gpu_counts: HashMap<String, f64> = HashMap::new();
+            for (node_id, category, count) in rewardable_gpus {
+                let normalized_model = category.to_string();
+                let uptime_factor = self.calculate_uptime_multiplication_factor(
+                    profile.miner_uid,
+                    &node_id
+                ).await;
+                let weighted_count = count as f64 * uptime_factor;
+                *rewardable_gpu_counts.entry(normalized_model).or_insert(0.0) += weighted_count;
+            }
 
             // Skip miners with no rewardable GPUs
             if rewardable_gpu_counts.is_empty() {
@@ -609,16 +640,16 @@ mod tests {
         Ok(())
     }
 
-    async fn create_test_gpu_profile_repo() -> Result<Arc<GpuProfileRepository>> {
-        let persistence = crate::persistence::SimplePersistence::for_testing().await?;
+    async fn create_test_gpu_profile_repo() -> Result<(Arc<GpuProfileRepository>, Arc<SimplePersistence>)> {
+        let persistence = Arc::new(crate::persistence::SimplePersistence::for_testing().await?);
         let repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        Ok(repo)
+        Ok((repo, persistence))
     }
 
     #[tokio::test]
     async fn test_verification_score_calculation() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
 
         // Test with valid attestations
         let validations = vec![
@@ -725,8 +756,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_gpu_count_weighting() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
 
         // Test different GPU counts
         for gpu_count in 1..=8 {
@@ -765,8 +796,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_miner_profile_update() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
 
         let miner_uid = MinerUid::new(1);
         let validations = vec![NodeValidationResult {
@@ -808,8 +839,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_category_statistics() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), EmissionConfig::for_testing());
 
         // Create test profiles
         let mut a100_counts_1 = HashMap::new();
@@ -829,7 +860,6 @@ mod tests {
         ];
 
         // Seed all required data
-        let persistence = crate::persistence::SimplePersistence::with_pool(repo.pool().clone());
         seed_test_data(&persistence, &repo, &profiles)
             .await
             .unwrap();
@@ -855,8 +885,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_pass_fail_scoring_edge_cases() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
 
         // Test all invalid validations
         let all_invalid = vec![
@@ -921,8 +951,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_direct_score_update() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo.clone(), persistence, EmissionConfig::for_testing());
 
         let miner_uid = MinerUid::new(100);
 
@@ -954,8 +984,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_scoring_ignores_gpu_memory() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo, EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo, persistence, EmissionConfig::for_testing());
 
         // Test various memory sizes all get same score
         let memory_sizes = vec![16, 24, 40, 80, 100];
@@ -978,8 +1008,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_b200_gpu_support() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), EmissionConfig::for_testing());
 
         // Test that B200 is considered rewardable
         assert!(engine.is_gpu_model_rewardable("B200"));
@@ -1001,7 +1031,6 @@ mod tests {
         let b200_profile = create_test_profile(100, b200_counts, 1.0, now);
 
         // Seed B200 data
-        let persistence = crate::persistence::SimplePersistence::with_pool(repo.pool().clone());
         seed_test_data(&persistence, &repo, &[b200_profile])
             .await
             .unwrap();
@@ -1020,7 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_emission_config_filtering() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
 
         // Create custom emission config with only A100 and B200 (exclude H100)
         let mut custom_gpu_allocations = HashMap::new();
@@ -1042,7 +1071,7 @@ mod tests {
             weight_version_key: 0,
         };
 
-        let engine = GpuScoringEngine::new(repo.clone(), custom_emission_config);
+        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), custom_emission_config);
 
         // Test filtering matches custom config
         assert!(engine.is_gpu_model_rewardable("A100"));
@@ -1067,7 +1096,6 @@ mod tests {
         ];
 
         // Seed all data
-        let persistence = crate::persistence::SimplePersistence::with_pool(repo.pool().clone());
         seed_test_data(&persistence, &repo, &profiles)
             .await
             .unwrap();
@@ -1091,8 +1119,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_gpu_category_with_b200() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), EmissionConfig::for_testing());
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
+        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), EmissionConfig::for_testing());
 
         // Create a miner with multiple GPU types including B200
         let mut multi_gpu_counts = HashMap::new();
@@ -1103,7 +1131,6 @@ mod tests {
         let multi_gpu_profile = create_test_profile(42, multi_gpu_counts, 0.9, now);
 
         // Seed data
-        let persistence = crate::persistence::SimplePersistence::with_pool(repo.pool().clone());
         seed_test_data(&persistence, &repo, &[multi_gpu_profile])
             .await
             .unwrap();
@@ -1176,7 +1203,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_min_gpu_count_filtering() {
-        let repo = create_test_gpu_profile_repo().await.unwrap();
+        let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
 
         // Create custom emission config with min_gpu_count requirements
         let mut gpu_allocations = HashMap::new();
@@ -1202,7 +1229,7 @@ mod tests {
             weight_version_key: 0,
         };
 
-        let engine = GpuScoringEngine::new(repo.clone(), emission_config);
+        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), emission_config);
 
         // Create profiles with different GPU counts
         let now = Utc::now();
@@ -1230,7 +1257,6 @@ mod tests {
         ];
 
         // Seed all required data
-        let persistence = crate::persistence::SimplePersistence::with_pool(repo.pool().clone());
         seed_test_data(&persistence, &repo, &profiles)
             .await
             .unwrap();
@@ -1265,5 +1291,300 @@ mod tests {
         // Test get_miners_by_gpu_category_since_epoch is skipped
         // The metagraph type requires complex initialization that comes from the chain
         // The important min_gpu_count filtering logic is already tested in get_category_statistics above
+    }
+
+    #[tokio::test]
+    async fn test_uptime_ramp_up_calculation() {
+        // Test cases for different uptime durations
+        let test_cases = vec![
+            (0.0, 0.0),           // 0 minutes = 0%
+            (1440.0, 0.0714),     // 1 day = 7.14%
+            (4320.0, 0.2143),     // 3 days = 21.43%
+            (10080.0, 0.5),       // 7 days = 50%
+            (20160.0, 1.0),       // 14 days = 100%
+            (43200.0, 1.0),       // 30 days = 100% (capped)
+        ];
+
+        for (uptime_minutes, expected_multiplier) in test_cases {
+            const FULL_WEIGHT_MINUTES: f64 = 20_160.0;
+            let multiplier = uptime_minutes / FULL_WEIGHT_MINUTES;
+            let actual = multiplier.min(1.0);
+            assert!(
+                (actual - expected_multiplier).abs() < 0.0001,
+                "For {uptime_minutes} minutes, expected {expected_multiplier}, got {actual}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_node_with_no_verifications() {
+        let (_, persistence) = create_test_gpu_profile_repo().await.unwrap();
+
+        let miner_id = "miner_999";
+        let node_id = "test_node_new";
+        let now = Utc::now();
+
+        // Create miner and node without any verification logs
+        sqlx::query(
+            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(miner_id)
+        .bind("hotkey_999")
+        .bind("127.0.0.1:8080")
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind("{}")
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(format!("{}:{}", miner_id, node_id))
+        .bind(miner_id)
+        .bind(node_id)
+        .bind("127.0.0.1:8080")
+        .bind(1i64)
+        .bind("online")
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Should get 0.0 multiplier (no GPU UUID assigned)
+        let multiplier = persistence
+            .calculate_node_uptime_multiplier(miner_id, node_id)
+            .await
+            .unwrap();
+
+        assert_eq!(multiplier, 0.0, "New node without GPU UUID should get 0.0 multiplier");
+    }
+
+    #[tokio::test]
+    async fn test_node_with_continuous_success() {
+        let (_, persistence) = create_test_gpu_profile_repo().await.unwrap();
+
+        let miner_id = "miner_1000";
+        let node_id = "test_node_success";
+        let now = Utc::now();
+        let seven_days_ago = now - chrono::Duration::days(7);
+
+        // Create miner and node
+        sqlx::query(
+            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(miner_id)
+        .bind("hotkey_1000")
+        .bind("127.0.0.1:8080")
+        .bind(now.to_rfc3339())
+        .bind(seven_days_ago.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind("{}")
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(format!("{}:{}", miner_id, node_id))
+        .bind(miner_id)
+        .bind(node_id)
+        .bind("127.0.0.1:8080")
+        .bind(1i64)
+        .bind("online")
+        .bind(seven_days_ago.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Add GPU UUID
+        sqlx::query(
+            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
+             VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind("test-gpu-uuid-1000")
+        .bind(0i32)
+        .bind(node_id)
+        .bind(miner_id)
+        .bind("A100")
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Add verification logs showing 7 days of continuous success
+        sqlx::query(
+            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind("log-1")
+        .bind(node_id)
+        .bind("validator_hotkey")
+        .bind("gpu_validation")
+        .bind(seven_days_ago.to_rfc3339())
+        .bind(1.0)
+        .bind(1i32) // success
+        .bind("{}")
+        .bind(1000i64)
+        .bind("binary_validation_data") // last_binary_validation IS NOT NULL
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Should get ~0.5 multiplier (7 days out of 14)
+        let multiplier = persistence
+            .calculate_node_uptime_multiplier(miner_id, node_id)
+            .await
+            .unwrap();
+
+        assert!(
+            (multiplier - 0.5).abs() < 0.01,
+            "Node with 7 days uptime should get ~0.5 multiplier, got {multiplier}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_node_with_failure_resets_uptime() {
+        let (_, persistence) = create_test_gpu_profile_repo().await.unwrap();
+
+        let miner_id = "miner_1001";
+        let node_id = "test_node_failure";
+        let now = Utc::now();
+        let seven_days_ago = now - chrono::Duration::days(7);
+        let one_day_ago = now - chrono::Duration::days(1);
+
+        // Create miner and node
+        sqlx::query(
+            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(miner_id)
+        .bind("hotkey_1001")
+        .bind("127.0.0.1:8080")
+        .bind(now.to_rfc3339())
+        .bind(seven_days_ago.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind("{}")
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(format!("{}:{}", miner_id, node_id))
+        .bind(miner_id)
+        .bind(node_id)
+        .bind("127.0.0.1:8080")
+        .bind(1i64)
+        .bind("online")
+        .bind(seven_days_ago.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Add GPU UUID
+        sqlx::query(
+            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
+             VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind("test-gpu-uuid-1001")
+        .bind(0i32)
+        .bind(node_id)
+        .bind(miner_id)
+        .bind("A100")
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Add verification logs: success 7 days ago, failure 2 days ago, success 1 day ago
+        // Only the last success period (1 day) should count
+        sqlx::query(
+            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind("log-1")
+        .bind(node_id)
+        .bind("validator_hotkey")
+        .bind("gpu_validation")
+        .bind(seven_days_ago.to_rfc3339())
+        .bind(1.0)
+        .bind(1i32) // success
+        .bind("{}")
+        .bind(1000i64)
+        .bind("binary_validation_data")
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Failure 2 days ago - this resets uptime
+        let two_days_ago = now - chrono::Duration::days(2);
+        sqlx::query(
+            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind("log-2")
+        .bind(node_id)
+        .bind("validator_hotkey")
+        .bind("gpu_validation")
+        .bind(two_days_ago.to_rfc3339())
+        .bind(0.0)
+        .bind(0i32) // failure
+        .bind("{}")
+        .bind(1000i64)
+        .bind("binary_validation_data")
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Success 1 day ago - starts new uptime period
+        sqlx::query(
+            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind("log-3")
+        .bind(node_id)
+        .bind("validator_hotkey")
+        .bind("gpu_validation")
+        .bind(one_day_ago.to_rfc3339())
+        .bind(1.0)
+        .bind(1i32) // success
+        .bind("{}")
+        .bind(1000i64)
+        .bind("binary_validation_data")
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await
+        .unwrap();
+
+        // Should get ~0.071 multiplier (1 day out of 14, ~7.14%)
+        let multiplier = persistence
+            .calculate_node_uptime_multiplier(miner_id, node_id)
+            .await
+            .unwrap();
+
+        assert!(
+            multiplier < 0.1,
+            "Node with failure should only count uptime from last success, got {multiplier}"
+        );
     }
 }

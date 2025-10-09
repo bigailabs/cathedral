@@ -259,7 +259,7 @@ mod tests {
     async fn test_scoring_engine_epoch_filtering_logic() -> anyhow::Result<()> {
         let persistence = Arc::new(SimplePersistence::for_testing().await?);
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let scoring_engine = GpuScoringEngine::new(gpu_repo.clone(), EmissionConfig::for_testing());
+        let scoring_engine = GpuScoringEngine::new(gpu_repo.clone(), persistence.clone(), EmissionConfig::for_testing());
 
         let now = Utc::now();
         let one_hour_ago = now - chrono::Duration::hours(1);

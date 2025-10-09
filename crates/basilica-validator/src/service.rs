@@ -111,12 +111,14 @@ impl ValidatorService {
         let gpu_scoring_engine = if let Some(ref metrics) = validator_metrics {
             Arc::new(GpuScoringEngine::with_metrics(
                 gpu_profile_repo.clone(),
+                persistence_arc.clone(),
                 Arc::new(metrics.clone()),
                 self.config.emission.clone(),
             ))
         } else {
             Arc::new(GpuScoringEngine::new(
                 gpu_profile_repo.clone(),
+                persistence_arc.clone(),
                 self.config.emission.clone(),
             ))
         };

@@ -887,4 +887,140 @@ impl SimplePersistence {
 
         Ok(node_metrics)
     }
+
+    /// Helper function to parse datetime from various formats
+    fn parse_datetime(s: &str) -> Result<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .or_else(|_| {
+                chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                    .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to parse datetime '{}': {}", s, e))
+    }
+
+    /// Calculate node uptime multiplier based on verification history
+    /// Returns value between 0.0 and 1.0:
+    /// - 0.0 = node just registered or all verifications failed
+    /// - 1.0 = node has 14+ days of uptime
+    pub async fn calculate_node_uptime_multiplier(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<f64> {
+        // Step 1: Get node registration time
+        let node_query = r#"
+            SELECT created_at
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+        "#;
+
+        let node_row = sqlx::query(node_query)
+            .bind(miner_id)
+            .bind(node_id)
+            .fetch_one(self.pool())
+            .await?;
+
+        let created_at_str: String = node_row.get("created_at");
+        let _created_at = Self::parse_datetime(&created_at_str)?;
+
+        // Step 2: Get a GPU UUID for this node (all GPUs have same uptime)
+        let gpu_query = r#"
+            SELECT gpu_uuid
+            FROM gpu_uuid_assignments
+            WHERE miner_id = ? AND node_id = ?
+            LIMIT 1
+        "#;
+
+        let gpu_row = sqlx::query(gpu_query)
+            .bind(miner_id)
+            .bind(node_id)
+            .fetch_optional(self.pool())
+            .await?;
+
+        let _gpu_uuid = match gpu_row {
+            Some(row) => row.get::<String, _>("gpu_uuid"),
+            None => {
+                // No GPU UUID assigned yet, node just registered
+                debug!(
+                    miner_id = %miner_id,
+                    node_id = %node_id,
+                    "No GPU UUID found for node, returning 0.0 multiplier"
+                );
+                return Ok(0.0);
+            }
+        };
+
+        // Step 3: Get FULL validation logs since registration
+        // IMPORTANT: Only consider full validations (last_binary_validation IS NOT NULL)
+        let logs_query = r#"
+            SELECT timestamp, success
+            FROM verification_logs
+            WHERE node_id = ?
+                AND timestamp >= ?
+                AND last_binary_validation IS NOT NULL
+            ORDER BY timestamp ASC
+        "#;
+
+        let logs = sqlx::query(logs_query)
+            .bind(node_id)
+            .bind(&created_at_str)
+            .fetch_all(self.pool())
+            .await?;
+
+        if logs.is_empty() {
+            // No full validations yet
+            debug!(
+                miner_id = %miner_id,
+                node_id = %node_id,
+                "No full validation logs found, returning 0.0 multiplier"
+            );
+            return Ok(0.0);
+        }
+
+        // Step 4: Find start of current continuous success period
+        // Only the current uninterrupted success period counts toward uptime
+        let mut current_success_start: Option<DateTime<Utc>> = None;
+
+        for log in logs {
+            let timestamp_str: String = log.get("timestamp");
+            let timestamp = Self::parse_datetime(&timestamp_str)?;
+            let success: i32 = log.get("success");
+
+            if success == 1 {
+                // Successful validation
+                if current_success_start.is_none() {
+                    // Start tracking new success period
+                    current_success_start = Some(timestamp);
+                }
+                // If already tracking, continue (no action needed)
+            } else {
+                // Failed validation - RESET the uptime period
+                current_success_start = None;
+            }
+        }
+
+        // Calculate uptime from current success period start to now
+        let total_uptime_minutes = if let Some(start) = current_success_start {
+            let now = Utc::now();
+            (now - start).num_minutes() as f64
+        } else {
+            // No current success period (last validation was a failure)
+            0.0
+        };
+
+        // Step 5: Calculate ramp-up multiplier (0-100% over 14 days)
+        const FULL_WEIGHT_MINUTES: f64 = 20_160.0; // 14 days
+        let multiplier = (total_uptime_minutes / FULL_WEIGHT_MINUTES).min(1.0);
+
+        debug!(
+            miner_id = %miner_id,
+            node_id = %node_id,
+            total_uptime_minutes = total_uptime_minutes,
+            multiplier = multiplier,
+            "Calculated node uptime multiplier"
+        );
+
+        Ok(multiplier)
+    }
 }
