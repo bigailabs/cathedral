@@ -67,22 +67,68 @@ pub fn to_node_profile_spec(input: &NodeProfileInput<'_>) -> NodeProfileSpec {
     }
 }
 
+/// Determine which node group a node should be assigned to based on strategy
+pub fn assign_node_group(node_id: &str, config: &crate::config::NodeGroupConfig) -> &'static str {
+    // Strategy 1: Force override if specified in config
+    if let Some(ref force_group) = config.force_group {
+        return match force_group.as_str() {
+            "jobs" => "jobs",
+            "rentals" => "rentals",
+            _ => "rentals", // default
+        };
+    }
+
+    // Strategy 2: Use configured strategy
+    match config.strategy.as_str() {
+        "round-robin" => {
+            // Use hash of node_id to deterministically assign groups
+            // This ensures consistent assignment across restarts
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            node_id.hash(&mut hasher);
+            let hash = hasher.finish();
+
+            // Use configured percentage split
+            let jobs_percentage = config.jobs_percentage.min(100);
+
+            if (hash % 100) < jobs_percentage {
+                "jobs"
+            } else {
+                "rentals"
+            }
+        }
+        "all-jobs" => "jobs",
+        "all-rentals" => "rentals",
+        _ => "rentals", // default to rentals
+    }
+}
+
 /// Produce Kubernetes node labels from a validation result and context.
 pub fn labels_from_validation(
     nr: &NodeResult,
     provider: &str,
     region: &str,
+    node_group: Option<&str>,
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
+
+    // CRITICAL: Mark as miner node (distinguishes from control plane)
+    labels.insert("basilica.ai/node-role".into(), "miner".into());
     labels.insert("basilica.ai/validated".into(), "true".into());
     labels.insert("basilica.ai/provider".into(), provider.to_string());
     labels.insert("basilica.ai/region".into(), region.to_string());
+
+    // Node group for workload isolation (jobs vs rentals)
+    if let Some(group) = node_group {
+        labels.insert("basilica.ai/node-group".into(), group.to_string());
+    }
+
     let model = nr
         .gpu_infos
         .first()
         .map(|g| g.gpu_name.clone())
         .unwrap_or_else(|| nr.gpu_name.clone());
-    labels.insert("basilica.ai/gpu-model".into(), model);
+    labels.insert("basilica.ai/gpu-model".into(), model.clone());
     labels.insert(
         "basilica.ai/gpu-count".into(),
         nr.gpu_infos.len().to_string(),
@@ -95,6 +141,19 @@ pub fn labels_from_validation(
             .unwrap_or(0)
             .to_string(),
     );
+
+    // Add compute tier based on GPU model (handle vendor prefixes)
+    let tier = if model.contains("H100") || model.contains("H200") || model.contains("B200") {
+        "premium"
+    } else if model.contains("A100") {
+        "high"
+    } else if model.contains("A10G") || model.contains("T4") || model.contains("L4") {
+        "standard"
+    } else {
+        "basic"
+    };
+    labels.insert("basilica.ai/compute-tier".into(), tier.into());
+
     labels
 }
 
@@ -192,12 +251,146 @@ mod tests {
     #[test]
     fn produces_k8s_labels() {
         let nr = sample_node_result();
-        let labels = labels_from_validation(&nr, "onprem", "us-east-1");
+        let labels = labels_from_validation(&nr, "onprem", "us-east-1", Some("rentals"));
+        assert_eq!(labels.get("basilica.ai/node-role").unwrap(), "miner");
+        assert_eq!(labels.get("basilica.ai/validated").unwrap(), "true");
         assert_eq!(labels.get("basilica.ai/provider").unwrap(), "onprem");
         assert_eq!(labels.get("basilica.ai/region").unwrap(), "us-east-1");
         assert_eq!(labels.get("basilica.ai/gpu-model").unwrap(), "NVIDIA A100");
         assert_eq!(labels.get("basilica.ai/gpu-count").unwrap(), "1");
         assert_eq!(labels.get("basilica.ai/gpu-mem").unwrap(), "80");
-        assert_eq!(labels.get("basilica.ai/validated").unwrap(), "true");
+        assert_eq!(labels.get("basilica.ai/compute-tier").unwrap(), "high");
+        assert_eq!(labels.get("basilica.ai/node-group").unwrap(), "rentals");
+    }
+
+    #[test]
+    fn test_node_group_force_override() {
+        let config = crate::config::NodeGroupConfig {
+            strategy: "round-robin".to_string(),
+            jobs_percentage: 50,
+            force_group: Some("jobs".to_string()),
+        };
+
+        // Should always return jobs when forced
+        assert_eq!(assign_node_group("node-1", &config), "jobs");
+        assert_eq!(assign_node_group("node-2", &config), "jobs");
+        assert_eq!(assign_node_group("node-3", &config), "jobs");
+
+        // Test force rentals
+        let config_rentals = crate::config::NodeGroupConfig {
+            strategy: "round-robin".to_string(),
+            jobs_percentage: 50,
+            force_group: Some("rentals".to_string()),
+        };
+        assert_eq!(assign_node_group("node-1", &config_rentals), "rentals");
+        assert_eq!(assign_node_group("node-2", &config_rentals), "rentals");
+    }
+
+    #[test]
+    fn test_node_group_all_jobs_strategy() {
+        let config = crate::config::NodeGroupConfig {
+            strategy: "all-jobs".to_string(),
+            jobs_percentage: 50,
+            force_group: None,
+        };
+
+        // Should always return jobs
+        assert_eq!(assign_node_group("node-1", &config), "jobs");
+        assert_eq!(assign_node_group("node-2", &config), "jobs");
+        assert_eq!(assign_node_group("node-3", &config), "jobs");
+    }
+
+    #[test]
+    fn test_node_group_all_rentals_strategy() {
+        let config = crate::config::NodeGroupConfig {
+            strategy: "all-rentals".to_string(),
+            jobs_percentage: 50,
+            force_group: None,
+        };
+
+        // Should always return rentals
+        assert_eq!(assign_node_group("node-1", &config), "rentals");
+        assert_eq!(assign_node_group("node-2", &config), "rentals");
+        assert_eq!(assign_node_group("node-3", &config), "rentals");
+    }
+
+    #[test]
+    fn test_node_group_round_robin_deterministic() {
+        let config = crate::config::NodeGroupConfig {
+            strategy: "round-robin".to_string(),
+            jobs_percentage: 50,
+            force_group: None,
+        };
+
+        // Same node ID should always return same group
+        let node_id = "test-node-123";
+        let first_assignment = assign_node_group(node_id, &config);
+        let second_assignment = assign_node_group(node_id, &config);
+        assert_eq!(first_assignment, second_assignment);
+    }
+
+    #[test]
+    fn test_node_group_round_robin_distribution() {
+        let config = crate::config::NodeGroupConfig {
+            strategy: "round-robin".to_string(),
+            jobs_percentage: 30, // 30% jobs, 70% rentals
+            force_group: None,
+        };
+
+        // Test multiple nodes to verify distribution
+        let mut jobs_count = 0;
+        let mut rentals_count = 0;
+
+        for i in 0..100 {
+            let node_id = format!("node-{}", i);
+            match assign_node_group(&node_id, &config) {
+                "jobs" => jobs_count += 1,
+                "rentals" => rentals_count += 1,
+                _ => panic!("unexpected group"),
+            }
+        }
+
+        // Should be roughly 30/70 split (allow some variance due to hashing)
+        assert!(jobs_count > 20 && jobs_count < 40, "jobs_count: {}", jobs_count);
+        assert!(rentals_count > 60 && rentals_count < 80, "rentals_count: {}", rentals_count);
+    }
+
+    #[test]
+    fn test_node_group_round_robin_extreme_percentages() {
+        // Test 0% jobs (all rentals)
+        let config_0 = crate::config::NodeGroupConfig {
+            strategy: "round-robin".to_string(),
+            jobs_percentage: 0,
+            force_group: None,
+        };
+
+        for i in 0..10 {
+            let node_id = format!("node-{}", i);
+            assert_eq!(assign_node_group(&node_id, &config_0), "rentals");
+        }
+
+        // Test 100% jobs
+        let config_100 = crate::config::NodeGroupConfig {
+            strategy: "round-robin".to_string(),
+            jobs_percentage: 100,
+            force_group: None,
+        };
+
+        for i in 0..10 {
+            let node_id = format!("node-{}", i);
+            assert_eq!(assign_node_group(&node_id, &config_100), "jobs");
+        }
+    }
+
+    #[test]
+    fn test_node_group_default_strategy() {
+        let config = crate::config::NodeGroupConfig {
+            strategy: "unknown-strategy".to_string(),
+            jobs_percentage: 50,
+            force_group: None,
+        };
+
+        // Unknown strategy should default to rentals
+        assert_eq!(assign_node_group("node-1", &config), "rentals");
     }
 }

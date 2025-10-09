@@ -1104,7 +1104,8 @@ impl VerificationEngine {
         )?;
 
         // Base labels from validation
-        let mut labels = labels_from_validation(nr, provider, region);
+        let node_group = crate::node_profile::assign_node_group(node_id, &self.config.node_groups);
+        let mut labels = labels_from_validation(nr, provider, region, Some(node_group));
         // Enrich labels with Docker profile if available
         if let Ok(Some((
             _full_json,

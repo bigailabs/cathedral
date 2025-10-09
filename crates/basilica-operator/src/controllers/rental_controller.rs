@@ -109,16 +109,40 @@ fn build_tolerations() -> Vec<Toleration> {
 }
 
 fn build_node_affinity(gpu: &GpuSpec) -> Option<Affinity> {
-    if gpu.model.is_empty() {
-        return None;
-    }
-    let expr = NodeSelectorRequirement {
-        key: "basilica.ai/gpu-model".into(),
+    let mut match_expressions = Vec::new();
+
+    // CRITICAL: Always require miner nodes (never schedule on control plane)
+    match_expressions.push(NodeSelectorRequirement {
+        key: "basilica.ai/node-role".into(),
         operator: "In".into(),
-        values: Some(gpu.model.clone()),
-    };
+        values: Some(vec!["miner".into()]),
+    });
+
+    // CRITICAL: Always require validated nodes
+    match_expressions.push(NodeSelectorRequirement {
+        key: "basilica.ai/validated".into(),
+        operator: "In".into(),
+        values: Some(vec!["true".into()]),
+    });
+
+    // CRITICAL: Rentals must schedule on nodes in the "rentals" group
+    match_expressions.push(NodeSelectorRequirement {
+        key: "basilica.ai/node-group".into(),
+        operator: "In".into(),
+        values: Some(vec!["rentals".into()]),
+    });
+
+    // Add GPU model requirement if specified
+    if !gpu.model.is_empty() {
+        match_expressions.push(NodeSelectorRequirement {
+            key: "basilica.ai/gpu-model".into(),
+            operator: "In".into(),
+            values: Some(gpu.model.clone()),
+        });
+    }
+
     let term = NodeSelectorTerm {
-        match_expressions: Some(vec![expr]),
+        match_expressions: Some(match_expressions),
         match_fields: None,
     };
     let ns = NodeSelector {
