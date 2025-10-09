@@ -212,7 +212,8 @@ impl GpuScoringEngine {
     ) -> f64 {
         let miner_id = format!("miner_{}", miner_uid.as_u16());
 
-        match self.persistence
+        match self
+            .persistence
             .calculate_node_uptime_multiplier(&miner_id, node_id)
             .await
         {
@@ -232,7 +233,7 @@ impl GpuScoringEngine {
                     error = %e,
                     "Failed to calculate node uptime multiplier, using default 1.0"
                 );
-                1.0  // Fallback to no penalty on error
+                1.0 // Fallback to no penalty on error
             }
         }
     }
@@ -373,10 +374,9 @@ impl GpuScoringEngine {
             let mut rewardable_gpu_counts: HashMap<String, f64> = HashMap::new();
             for (node_id, category, count) in rewardable_gpus {
                 let normalized_model = category.to_string();
-                let uptime_factor = self.calculate_uptime_multiplication_factor(
-                    profile.miner_uid,
-                    &node_id
-                ).await;
+                let uptime_factor = self
+                    .calculate_uptime_multiplication_factor(profile.miner_uid, &node_id)
+                    .await;
                 let weighted_count = count as f64 * uptime_factor;
                 *rewardable_gpu_counts.entry(normalized_model).or_insert(0.0) += weighted_count;
             }
@@ -640,7 +640,8 @@ mod tests {
         Ok(())
     }
 
-    async fn create_test_gpu_profile_repo() -> Result<(Arc<GpuProfileRepository>, Arc<SimplePersistence>)> {
+    async fn create_test_gpu_profile_repo(
+    ) -> Result<(Arc<GpuProfileRepository>, Arc<SimplePersistence>)> {
         let persistence = Arc::new(crate::persistence::SimplePersistence::for_testing().await?);
         let repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
         Ok((repo, persistence))
@@ -840,7 +841,11 @@ mod tests {
     #[tokio::test]
     async fn test_category_statistics() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(
+            repo.clone(),
+            persistence.clone(),
+            EmissionConfig::for_testing(),
+        );
 
         // Create test profiles
         let mut a100_counts_1 = HashMap::new();
@@ -952,7 +957,8 @@ mod tests {
     #[tokio::test]
     async fn test_direct_score_update() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), persistence, EmissionConfig::for_testing());
+        let engine =
+            GpuScoringEngine::new(repo.clone(), persistence, EmissionConfig::for_testing());
 
         let miner_uid = MinerUid::new(100);
 
@@ -1009,7 +1015,11 @@ mod tests {
     #[tokio::test]
     async fn test_b200_gpu_support() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(
+            repo.clone(),
+            persistence.clone(),
+            EmissionConfig::for_testing(),
+        );
 
         // Test that B200 is considered rewardable
         assert!(engine.is_gpu_model_rewardable("B200"));
@@ -1071,7 +1081,8 @@ mod tests {
             weight_version_key: 0,
         };
 
-        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), custom_emission_config);
+        let engine =
+            GpuScoringEngine::new(repo.clone(), persistence.clone(), custom_emission_config);
 
         // Test filtering matches custom config
         assert!(engine.is_gpu_model_rewardable("A100"));
@@ -1120,7 +1131,11 @@ mod tests {
     #[tokio::test]
     async fn test_multi_gpu_category_with_b200() {
         let (repo, persistence) = create_test_gpu_profile_repo().await.unwrap();
-        let engine = GpuScoringEngine::new(repo.clone(), persistence.clone(), EmissionConfig::for_testing());
+        let engine = GpuScoringEngine::new(
+            repo.clone(),
+            persistence.clone(),
+            EmissionConfig::for_testing(),
+        );
 
         // Create a miner with multiple GPU types including B200
         let mut multi_gpu_counts = HashMap::new();
@@ -1297,12 +1312,12 @@ mod tests {
     async fn test_uptime_ramp_up_calculation() {
         // Test cases for different uptime durations
         let test_cases = vec![
-            (0.0, 0.0),           // 0 minutes = 0%
-            (1440.0, 0.0714),     // 1 day = 7.14%
-            (4320.0, 0.2143),     // 3 days = 21.43%
-            (10080.0, 0.5),       // 7 days = 50%
-            (20160.0, 1.0),       // 14 days = 100%
-            (43200.0, 1.0),       // 30 days = 100% (capped)
+            (0.0, 0.0),       // 0 minutes = 0%
+            (1440.0, 0.0714), // 1 day = 7.14%
+            (4320.0, 0.2143), // 3 days = 21.43%
+            (10080.0, 0.5),   // 7 days = 50%
+            (20160.0, 1.0),   // 14 days = 100%
+            (43200.0, 1.0),   // 30 days = 100% (capped)
         ];
 
         for (uptime_minutes, expected_multiplier) in test_cases {
@@ -1362,7 +1377,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(multiplier, 0.0, "New node without GPU UUID should get 0.0 multiplier");
+        assert_eq!(
+            multiplier, 0.0,
+            "New node without GPU UUID should get 0.0 multiplier"
+        );
     }
 
     #[tokio::test]
