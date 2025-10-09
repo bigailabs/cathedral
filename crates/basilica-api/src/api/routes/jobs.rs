@@ -81,8 +81,9 @@ pub async fn get_job_status(
             return Err(ApiError::ServiceUnavailable);
         }
     };
-    let ns = "default"; // could be inferred from tenancy in future
-    let st = client.get_job_status(ns, &job_id).await?;
+    // TODO: infer from authenticated user's tenant namespace
+    let ns = std::env::var("TENANT_NAMESPACE").unwrap_or_else(|_| "u-test".into());
+    let st = client.get_job_status(&ns, &job_id).await?;
     apimetrics::record_request("jobs.status", "GET", start, true);
     Ok(Json(JobStatusResponse { job_id, status: st }))
 }
@@ -104,8 +105,9 @@ pub async fn delete_job(
             return Err(ApiError::ServiceUnavailable);
         }
     };
-    let ns = "default";
-    client.delete_job(ns, &job_id).await?;
+    // TODO: infer from authenticated user's tenant namespace
+    let ns = std::env::var("TENANT_NAMESPACE").unwrap_or_else(|_| "u-test".into());
+    client.delete_job(&ns, &job_id).await?;
     apimetrics::record_request("jobs.delete", "DELETE", start, true);
     Ok(Json(DeleteJobResponse { job_id }))
 }
@@ -128,8 +130,9 @@ pub async fn get_job_logs(
             return Err(ApiError::ServiceUnavailable);
         }
     };
-    let ns = "default";
-    let logs = client.get_job_logs(ns, &job_id).await?;
+    // TODO: infer from authenticated user's tenant namespace
+    let ns = std::env::var("TENANT_NAMESPACE").unwrap_or_else(|_| "u-test".into());
+    let logs = client.get_job_logs(&ns, &job_id).await?;
     apimetrics::record_request("jobs.logs", "GET", start, true);
     Ok(Json(JobLogsResponse { job_id, logs }))
 }

@@ -136,6 +136,7 @@ fn build_node_affinity(gpu: &GpuSpec) -> Option<Affinity> {
 fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityContext>) {
     let pod_sc = Some(PodSecurityContext {
         run_as_non_root: Some(true),
+        run_as_user: Some(1000),  // Run as non-root user ID 1000
         seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
             type_: "RuntimeDefault".into(),
             localhost_profile: None,

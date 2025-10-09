@@ -20,12 +20,18 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]
 
-  # Basilica CRDs (create/list/get rentals in user namespaces)
+  # Basilica CRDs (full CRUD for rentals and jobs)
   - apiGroups: ["basilica.ai"]
     resources: ["gpurentals"]
-    verbs: ["create", "get", "list", "watch"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
   - apiGroups: ["basilica.ai"]
     resources: ["gpurentals/status"]
+    verbs: ["get"]
+  - apiGroups: ["basilica.ai"]
+    resources: ["basilicajobs"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: ["basilica.ai"]
+    resources: ["basilicajobs/status"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

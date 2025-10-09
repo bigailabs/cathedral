@@ -125,23 +125,29 @@ docker-build-operator TAG="latest":
     #!/usr/bin/env bash
     set -euo pipefail
     chmod +x scripts/operator/build.sh
-    echo "Building operator image with tag: {{TAG}}"
-    ./scripts/operator/build.sh --image-name ghcr.io/one-covenant/basilica-operator --image-tag {{TAG}}
-    echo "✅ Operator image built: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    echo "Building operator image with tag: $CLEAN_TAG"
+    ./scripts/operator/build.sh --image-name ghcr.io/one-covenant/basilica-operator --image-tag "$CLEAN_TAG"
+    echo "✅ Operator image built: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
     echo ""
     echo "To push to registry, run:"
-    echo "  docker push ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+    echo "  docker push ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
 
 # Build and push operator Docker image
 docker-push-operator TAG="latest":
     #!/usr/bin/env bash
     set -euo pipefail
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
     # Build first
-    just docker-build-operator {{TAG}}
+    just docker-build-operator "$CLEAN_TAG"
     # Push
     echo "Pushing operator image to registry..."
-    docker push ghcr.io/one-covenant/basilica-operator:{{TAG}}
-    echo "✅ Operator image pushed: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+    docker push ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG
+    echo "✅ Operator image pushed: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
 
 # =============================================================================
 # DEPLOYMENT COMMANDS
@@ -654,6 +660,44 @@ operator-down:
     echo "🧹 Deleting operator deployment/service (if present)..."
     kubectl -n basilica-system delete deploy/basilica-operator svc/basilica-operator --ignore-not-found
     echo "✅ Operator removed."
+
+# Redeploy operator with new image (updates image and restarts)
+operator-redeploy TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    export KUBECONFIG=build/k3s.yaml
+
+    echo "🔄 Redeploying operator with image: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
+
+    # Check if deployment exists
+    if ! kubectl get deployment/basilica-operator -n basilica-system &>/dev/null; then
+        echo "❌ Operator deployment not found in basilica-system namespace"
+        echo "Run 'just deploy-operator-api $CLEAN_TAG' to deploy it first"
+        exit 1
+    fi
+
+    # Get the container name from the deployment
+    CONTAINER_NAME=$(kubectl get deployment/basilica-operator -n basilica-system -o jsonpath='{.spec.template.spec.containers[0].name}')
+    echo "📦 Container name: $CONTAINER_NAME"
+
+    # Update the image
+    kubectl set image deployment/basilica-operator \
+      "$CONTAINER_NAME=ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG" \
+      -n basilica-system
+
+    echo "⏳ Waiting for rollout to complete..."
+    kubectl rollout status deployment/basilica-operator -n basilica-system --timeout=120s
+    echo ""
+    echo "✅ Operator redeployed successfully"
+    echo ""
+    echo "📋 Operator pods:"
+    kubectl get pods -n basilica-system -l app=basilica-operator
+    echo ""
+    echo "📝 Recent logs:"
+    kubectl logs -n basilica-system -l app=basilica-operator --tail=20 --prefix=true || echo "  (No logs yet)"
 
 # Deploy only Operator and API (templates + rollout)
 deploy-operator-api TAG="k3_test":

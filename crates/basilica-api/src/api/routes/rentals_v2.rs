@@ -26,6 +26,22 @@ pub struct CreateRentalRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub environment: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub ports: Vec<u16>,
+    #[serde(default)]
+    pub network: Option<NetworkConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkConfig {
+    #[serde(default)]
+    pub ingress_ports: Vec<u16>,
+    #[serde(default)]
+    pub egress_policy: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,13 +113,39 @@ pub async fn create_rental(
         .clone()
         .unwrap_or_else(|| format!("rent-{}", rand::random::<u32>()));
     let ns = user_namespace(&auth.user_id);
+
+    // Map environment
+    let container_env: Vec<(String, String)> = req.environment.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    // Map ports to container ports and network ingress
+    let mut container_ports: Vec<crate::k8s_client::RentalPortDto> = Vec::new();
+    let mut network_ingress: Vec<crate::k8s_client::IngressRuleDto> = Vec::new();
+
+    // Ports from the ports field
+    for port in &req.ports {
+        container_ports.push(crate::k8s_client::RentalPortDto {
+            container_port: *port,
+            protocol: "TCP".to_string(),
+        });
+    }
+
+    // Ingress ports from network config
+    if let Some(ref net) = req.network {
+        for port in &net.ingress_ports {
+            network_ingress.push(crate::k8s_client::IngressRuleDto {
+                port: *port,
+                exposure: "NodePort".to_string(),
+            });
+        }
+    }
+
     let spec = RentalSpecDto {
         container_image: req.container_image,
         resources: req.resources,
-        container_env: vec![],
-        container_command: vec![],
-        container_ports: vec![],
-        network_ingress: vec![],
+        container_env,
+        container_command: req.command,
+        container_ports,
+        network_ingress,
         ssh: None,
         name: Some(name.clone()),
         namespace: Some(ns.clone()),

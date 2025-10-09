@@ -116,6 +116,14 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),
 
+        // Job endpoints (v1)
+        (&Method::POST, "/jobs") => Some("jobs:create".to_string()),
+        (&Method::GET, p) if p.starts_with("/jobs/") && p.ends_with("/logs") => {
+            Some("jobs:logs".to_string())
+        }
+        (&Method::DELETE, p) if p.starts_with("/jobs/") => Some("jobs:delete".to_string()),
+        (&Method::GET, p) if p.starts_with("/jobs/") => Some("jobs:view".to_string()),
+
         // API Key management endpoints
         (&Method::POST, "/api-keys") => Some("keys:create".to_string()),
         (&Method::GET, "/api-keys") => Some("keys:list".to_string()),
