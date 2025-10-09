@@ -302,3 +302,81 @@ pub struct ListDepositsQuery {
     #[serde(default)]
     pub offset: u32,
 }
+
+// Billing Management Types
+
+/// Balance response from billing service
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BalanceResponse {
+    pub available: String,
+    pub reserved: String,
+    pub total: String,
+    pub last_updated: String,
+}
+
+/// Billing package information
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BillingPackageInfo {
+    pub package_id: String,
+    pub name: String,
+    pub description: String,
+    pub hourly_rate: String,
+    pub is_active: bool,
+}
+
+/// Packages response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PackagesResponse {
+    pub packages: Vec<BillingPackageInfo>,
+    pub current_package_id: String,
+}
+
+// Usage History Types
+
+/// Individual rental usage record
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RentalUsageRecord {
+    pub rental_id: String,
+    pub node_id: String,
+    pub status: String,
+    pub hourly_rate: String,
+    pub current_cost: String,
+    pub start_time: chrono::DateTime<chrono::Utc>,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+/// Usage history response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsageHistoryResponse {
+    pub rentals: Vec<RentalUsageRecord>,
+    pub total_count: u64,
+}
+
+/// Time-series usage data point
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsageDataPoint {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub cpu_percent: f64,
+    pub memory_mb: u64,
+    pub cost: String,
+}
+
+/// Aggregated usage summary
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsageSummary {
+    pub avg_cpu_percent: f64,
+    pub avg_memory_mb: u64,
+    pub total_network_bytes: u64,
+    pub total_disk_bytes: u64,
+    pub avg_gpu_utilization: f64,
+    pub duration_secs: u64,
+}
+
+/// Detailed rental usage response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RentalUsageResponse {
+    pub rental_id: String,
+    pub data_points: Vec<UsageDataPoint>,
+    pub summary: Option<UsageSummary>,
+    pub total_cost: String,
+}
