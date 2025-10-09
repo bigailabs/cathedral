@@ -183,6 +183,17 @@
     - name: Apply CRDs
       ansible.builtin.command: kubectl apply -f /opt/basilica/basilica-crds.yaml
 
+    - name: Taint control plane nodes to prevent workload scheduling
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl taint nodes \
+          -l node-role.kubernetes.io/control-plane \
+          node-role.kubernetes.io/control-plane=:NoSchedule \
+          --overwrite || true
+      args:
+        executable: /bin/bash
+      tags: ["control_plane"]
+
     - name: Deploy Postgres for API
       ansible.builtin.command: kubectl apply -f /opt/basilica/config/deploy/postgres.yaml
 

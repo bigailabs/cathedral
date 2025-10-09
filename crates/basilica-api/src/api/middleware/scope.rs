@@ -99,7 +99,12 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/v2/rentals") => Some("rentals:list".to_string()),
         (&Method::POST, "/v2/rentals") => Some("rentals:create".to_string()),
         (&Method::POST, "/v2/rentals-compat") => Some("rentals:create".to_string()),
-        (&Method::DELETE, p) if p.starts_with("/v2/rentals/") && !p.contains("/logs") && !p.contains("/exec") && !p.contains("/extend") => {
+        (&Method::DELETE, p)
+            if p.starts_with("/v2/rentals/")
+                && !p.contains("/logs")
+                && !p.contains("/exec")
+                && !p.contains("/extend") =>
+        {
             Some("rentals:stop".to_string())
         }
         (&Method::GET, p) if p.starts_with("/v2/rentals/") && p.ends_with("/logs") => {

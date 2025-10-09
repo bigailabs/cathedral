@@ -191,7 +191,10 @@ impl K8sTestContext {
                 match ns_api.list(&ListParams::default().limit(1)).await {
                     Ok(_) => false, // Cluster is reachable
                     Err(e) => {
-                        tracing::warn!("Skipping K8s integration test (cluster not reachable): {}", e);
+                        tracing::warn!(
+                            "Skipping K8s integration test (cluster not reachable): {}",
+                            e
+                        );
                         true
                     }
                 }

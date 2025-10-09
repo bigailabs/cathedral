@@ -48,7 +48,7 @@ static_resources:
             address:
               socket_address:
                 address: alice
-                port_value: 9944
+                port_value: 9945
 admin:
   access_log_path: /tmp/admin_access.log
   address:

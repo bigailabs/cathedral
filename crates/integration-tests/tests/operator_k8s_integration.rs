@@ -426,9 +426,7 @@ async fn test_operator_rbac_namespace_scoped() -> Result<()> {
     let api: Api<BasilicaJob> = Api::namespaced(ctx.client.clone(), &ctx.namespace);
     let _created = api.create(&kube::api::PostParams::default(), &job).await?;
 
-    println!(
-        "✓ Created BasilicaJob via API (RBAC allows namespace-scoped create)"
-    );
+    println!("✓ Created BasilicaJob via API (RBAC allows namespace-scoped create)");
 
     // Try to get it (should succeed)
     let _retrieved = api.get("rbac-test-job").await?;
@@ -497,7 +495,10 @@ async fn test_concurrent_job_creation() -> Result<()> {
         }
     }
 
-    assert_eq!(success_count, 5, "All 5 jobs should be created successfully");
+    assert_eq!(
+        success_count, 5,
+        "All 5 jobs should be created successfully"
+    );
     println!("✓ Created 5 jobs concurrently");
 
     // Clean up

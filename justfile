@@ -516,16 +516,6 @@ local-api-down:
 local-validator-up:
     #!/usr/bin/env bash
     set -euo pipefail
-
-    # Stop existing validator if running
-    echo "🛑 Stopping existing validator..."
-    docker compose -f scripts/validator/compose.local.yml down -v || true
-
-    # Rebuild validator Docker image with latest code
-    echo "🔨 Rebuilding validator Docker image..."
-    docker compose -f scripts/validator/compose.local.yml build --no-cache
-    echo "✅ Validator image rebuilt"
-
     # Detect external IP
     EXTERNAL_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "127.0.0.1")
     echo "Detected external IP: $EXTERNAL_IP"
@@ -595,13 +585,6 @@ local-validator-up:
         printf 'A100 = { weight = 50.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
         printf 'H100 = { weight = 30.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
         printf 'B200 = { weight = 20.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
-        printf '\n[verification]\n'
-        printf 'netuid = 2  # Local subnet\n'
-        printf 'node_validation_interval = { secs = 60 }  # 60 seconds for E2E testing\n\n'
-        printf '[verification.binary_validation]\n'
-        printf 'enabled = true  # Enabled - validator has GPU access\n'
-        printf 'validator_binary_path = "/app/validator-binary"\n'
-        printf 'executor_binary_path = "/app/executor-binary"\n'
     } > config/validator.local.toml
     # Run validator container
     docker compose -f scripts/validator/compose.local.yml up -d
@@ -638,7 +621,7 @@ local-miner-up:
         printf 'skip_registration = false\n\n'
         printf '[validator_comms]\n'
         printf 'host = "0.0.0.0"\n'
-        printf 'port = 8091\n\n'
+        printf 'port = 8080\n\n'
         printf '[node_management]\n'
         printf 'nodes = [\n'
         printf '  { host = "69.19.137.104", port = 22, username = "shadeform" },\n'

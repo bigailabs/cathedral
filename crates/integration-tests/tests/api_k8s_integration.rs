@@ -230,8 +230,12 @@ async fn test_rentals_api_list() -> Result<()> {
     println!("✓ Both test rentals found in list");
 
     // Clean up
-    client.delete_rental(&ctx.namespace, "rental-list-1").await?;
-    client.delete_rental(&ctx.namespace, "rental-list-2").await?;
+    client
+        .delete_rental(&ctx.namespace, "rental-list-1")
+        .await?;
+    client
+        .delete_rental(&ctx.namespace, "rental-list-2")
+        .await?;
 
     Ok(())
 }
@@ -330,9 +334,7 @@ async fn test_rentals_api_with_fixture() -> Result<()> {
                 .unwrap_or("512Mi")
                 .to_string(),
             gpus: GpuSpec {
-                count: fixture["resources"]["gpus"]["count"]
-                    .as_u64()
-                    .unwrap_or(0) as u32,
+                count: fixture["resources"]["gpus"]["count"].as_u64().unwrap_or(0) as u32,
                 model: vec![],
             },
         },
@@ -461,8 +463,8 @@ async fn test_api_resource_specs() -> Result<()> {
         args: vec![],
         env: vec![],
         resources: Resources {
-            cpu: "2".to_string(),       // 2 cores
-            memory: "4Gi".to_string(),   // 4 GiB
+            cpu: "2".to_string(),      // 2 cores
+            memory: "4Gi".to_string(), // 4 GiB
             gpus: GpuSpec {
                 count: 0,
                 model: vec![],
@@ -516,7 +518,9 @@ async fn test_api_job_commands_args() -> Result<()> {
         ttl_seconds: 300,
     };
 
-    let job_id = client.create_job(&ctx.namespace, "cmd-test-job", spec).await?;
+    let job_id = client
+        .create_job(&ctx.namespace, "cmd-test-job", spec)
+        .await?;
 
     println!("✓ Created job with custom command and args");
 

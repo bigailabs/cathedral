@@ -6,15 +6,6 @@ services:
     container_name: basilica-validator-local
     restart: unless-stopped
 
-    # Enable GPU access for validation server
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
     environment:
       - RUST_LOG=debug
       - RUST_BACKTRACE=1
@@ -38,8 +29,6 @@ services:
       - ../../Cargo.toml:/app/Cargo.toml:ro
       - ../../Cargo.lock:/app/Cargo.lock:ro
       - ./entrypoint.local.sh:/app/validator-entrypoint.sh:ro
-      - ../../bin/validator-binary/validator-binary:/app/validator-binary:ro  # Validation server binary
-      - ../../bin/executor-binary/executor-binary:/app/executor-binary:ro  # Executor binary for upload
 
     ports:
       - "8080:8080"     # Server/API port

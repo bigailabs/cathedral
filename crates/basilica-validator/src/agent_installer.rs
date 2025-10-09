@@ -41,7 +41,6 @@ pub fn build_install_commands(cfg: &K3sAgentConfig) -> Vec<String> {
     let mut cmds = Vec::new();
     // Ensure curl and system tools (best-effort, distro-agnostic attempt)
     cmds.push("which curl || (which apt && sudo apt update && sudo apt install -y curl) || (which yum && sudo yum install -y curl) || true".to_string());
-
     // Compose installer envs
     let mut envs = vec![
         format!("K3S_URL={}", cfg.server_url),
@@ -51,26 +50,25 @@ pub fn build_install_commands(cfg: &K3sAgentConfig) -> Vec<String> {
         envs.push(format!("INSTALL_K3S_CHANNEL={}", ch));
     }
 
-    // Set K3S_NODE_NAME via environment variable (more reliable than --node-name)
+    // Additional agent args
+    let mut agent_args: Vec<String> = Vec::new();
     if let Some(n) = &cfg.node_name {
-        envs.push(format!("K3S_NODE_NAME={}", shell_quote(n)));
+        agent_args.push(format!("--node-name {}", shell_quote(n)));
     }
-
-    // Build INSTALL_K3S_EXEC with agent args
-    let mut exec_args: Vec<String> = Vec::new();
     if !cfg.extra_args.is_empty() {
-        exec_args.extend(cfg.extra_args.iter().cloned());
-    }
-
-    if !exec_args.is_empty() {
-        let exec_string = exec_args.join(" ");
-        envs.push(format!("INSTALL_K3S_EXEC={}", shell_quote(&exec_string)));
+        agent_args.extend(cfg.extra_args.iter().cloned());
     }
 
     // Use upstream installer with agent subcommand
+    let arg_tail = if agent_args.is_empty() {
+        "".into()
+    } else {
+        format!(" -- {}", agent_args.join(" "))
+    };
     cmds.push(format!(
-        "curl -sfL https://get.k3s.io | {} sh -s - agent",
-        envs.join(" ")
+        "curl -sfL https://get.k3s.io | {} sh -s - agent{} <(true)",
+        envs.join(" "),
+        arg_tail
     ));
 
     // Ensure enabled and started
@@ -156,9 +154,7 @@ mod tests {
         assert!(all.contains("K3S_URL=https://10.0.0.1:6443"));
         assert!(all.contains("K3S_TOKEN=TOKEN123"));
         assert!(all.contains("INSTALL_K3S_CHANNEL=v1.29"));
-        assert!(all.contains("K3S_NODE_NAME=gpu-node-01"));
-        assert!(all.contains("INSTALL_K3S_EXEC="));
-        assert!(all.contains("--node-taint basilica.ai/workloads-only=true:NoSchedule"));
+        assert!(all.contains("agent -- --node-name gpu-node-01 --node-taint basilica.ai/workloads-only=true:NoSchedule"));
         assert!(all.contains("systemctl enable k3s-agent"));
         assert!(all.contains("systemctl restart k3s-agent"));
     }

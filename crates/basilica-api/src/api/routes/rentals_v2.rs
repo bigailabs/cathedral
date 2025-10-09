@@ -115,7 +115,11 @@ pub async fn create_rental(
     let ns = user_namespace(&auth.user_id);
 
     // Map environment
-    let container_env: Vec<(String, String)> = req.environment.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let container_env: Vec<(String, String)> = req
+        .environment
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     // Map ports to container ports and network ingress
     let mut container_ports: Vec<crate::k8s_client::RentalPortDto> = Vec::new();
@@ -652,6 +656,10 @@ mod tests {
             },
             name: Some("rent-logs".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -724,6 +732,10 @@ mod tests {
             },
             name: Some("rent-follow".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -797,6 +809,10 @@ mod tests {
             },
             name: Some("rent-v2".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let create = super::create_rental(
             State(state.clone()),
@@ -845,6 +861,10 @@ mod tests {
             },
             name: Some("rent-v2-exec".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -906,6 +926,10 @@ mod tests {
             },
             name: Some("rent-v2-exec-tty".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -973,6 +997,10 @@ mod tests {
             },
             name: Some("rent-v2-exec-stderr".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -1040,6 +1068,10 @@ mod tests {
             },
             name: Some("rent-v2-extend".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -1079,6 +1111,10 @@ mod tests {
             },
             name: Some("rent-a".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
@@ -1099,6 +1135,10 @@ mod tests {
             },
             name: Some("rent-b".into()),
             namespace: Some("default".into()),
+            command: vec![],
+            environment: std::collections::HashMap::new(),
+            ports: vec![],
+            network: None,
         };
         let _ = super::create_rental(
             State(state.clone()),
