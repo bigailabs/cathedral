@@ -28,17 +28,41 @@ pub struct ContainerClient {
 
 impl ContainerClient {
     /// Parse SSH connection string to extract components
-    /// Handles formats like "user@host:port" or "user@host"
+    /// Handles formats like "user@host:port", "user@host", "user@[ipv6]:port", "user@[ipv6]"
     fn parse_ssh_connection(connection: &str) -> Result<(String, String, u16)> {
         let (username, host_port) = connection
             .split_once('@')
             .ok_or_else(|| anyhow::anyhow!("Invalid SSH connection format: missing '@'"))?;
 
-        let (host, port) = if let Some((h, p)) = host_port.split_once(':') {
-            let port_num = p
-                .parse::<u16>()
-                .map_err(|_| anyhow::anyhow!("Invalid port number: {}", p))?;
-            (h.to_string(), port_num)
+        let (host, port) = if host_port.starts_with('[') {
+            let closing_bracket = host_port
+                .find(']')
+                .ok_or_else(|| anyhow::anyhow!("Invalid IPv6 format: missing closing bracket"))?;
+
+            let host = &host_port[1..closing_bracket];
+
+            let port = match host_port.get(closing_bracket + 1..) {
+                Some(rest) if rest.starts_with(':') && rest.len() > 1 => {
+                    rest[1..].parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("Invalid port number: {}", &rest[1..]))?
+                }
+                Some("") | None => 22,
+                Some(rest) => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid IPv6 format: unexpected characters after closing bracket: '{}'", rest
+                    ))
+                }
+            };
+
+            (host.to_string(), port)
+        } else if let Some((h, p)) = host_port.rsplit_once(':') {
+            if h.contains(':') {
+                (host_port.to_string(), 22)
+            } else {
+                let port_num = p.parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("Invalid port number: {}", p))?;
+                (h.to_string(), port_num)
+            }
         } else {
             (host_port.to_string(), 22)
         };
@@ -641,5 +665,213 @@ impl ContainerClient {
         };
 
         (num * multiplier as f64) as i64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ssh_connection_ipv4_with_port() {
+        let result = ContainerClient::parse_ssh_connection("user@192.168.1.100:2222");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "192.168.1.100");
+        assert_eq!(port, 2222);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv4_default_port() {
+        let result = ContainerClient::parse_ssh_connection("user@192.168.1.100");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "192.168.1.100");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_hostname_with_port() {
+        let result = ContainerClient::parse_ssh_connection("admin@example.com:3000");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "admin");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_hostname_default_port() {
+        let result = ContainerClient::parse_ssh_connection("admin@example.com");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "admin");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bracketed_with_port() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]:2222");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 2222);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bracketed_default_port() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_full_address_bracketed() {
+        let result = ContainerClient::parse_ssh_connection("root@[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "root");
+        assert_eq!(host, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bare_default_port() {
+        let result = ContainerClient::parse_ssh_connection("user@2001:db8::1");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_localhost_bracketed() {
+        let result = ContainerClient::parse_ssh_connection("user@[::1]:3000");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_missing_at_sign() {
+        let result = ContainerClient::parse_ssh_connection("user-example.com:2222");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing '@'"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_invalid_port() {
+        let result = ContainerClient::parse_ssh_connection("user@example.com:abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_port_out_of_range() {
+        let result = ContainerClient::parse_ssh_connection("user@example.com:99999");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_missing_closing_bracket() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1:2222");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing closing bracket"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_invalid_characters_after_bracket() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unexpected characters after closing bracket"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bracketed_invalid_port() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]:invalid");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_hostname_with_invalid_port() {
+        let result = ContainerClient::parse_ssh_connection("user@host:name");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_validate_container_id_valid() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new(
+            "user@example.com".to_string(),
+            Some(key_path),
+        ).unwrap();
+
+        let result = client.validate_container_id("abc123def456");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "abc123def456");
+    }
+
+    #[test]
+    fn test_validate_container_id_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new(
+            "user@example.com".to_string(),
+            Some(key_path),
+        ).unwrap();
+
+        let result = client.validate_container_id("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_container_id_invalid_characters() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new(
+            "user@example.com".to_string(),
+            Some(key_path),
+        ).unwrap();
+
+        let result = client.validate_container_id("abc-123");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid container ID format"));
+    }
+
+    #[test]
+    fn test_sanitize_rental_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new(
+            "user@example.com".to_string(),
+            Some(key_path),
+        ).unwrap();
+
+        assert_eq!(client.sanitize_rental_id("rental-123"), "rental-123");
+        assert_eq!(client.sanitize_rental_id("rental@#$123"), "rental123");
+        assert_eq!(client.sanitize_rental_id("a".repeat(40).as_str()), "a".repeat(32));
     }
 }
