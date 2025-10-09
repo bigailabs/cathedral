@@ -31,6 +31,7 @@ services:
       - RUST_LOG='basilica_api=debug'
       - RUST_BACKTRACE=1
       - BASILICA_API_DATABASE__URL=postgres://api:api_dev_password@postgres:5432/basilica_api
+      - TENANT_NAMESPACE=u-test
     
     volumes:
       - ./dummy_wallet:/home/basilica/.bittensor:ro

@@ -175,7 +175,8 @@ test_perm "$API_SA" "get" "pods/log" "$TENANT_NS" "API can get pod logs in tenan
 
 # Note: kubectl auth can-i has issues testing pods/exec subresource
 # Verify with: kubectl auth can-i --list --as=system:serviceaccount:basilica-system:basilica-api -n u-test | grep exec
-if kubectl auth can-i --list --as="$API_SA" -n "$TENANT_NS" 2>/dev/null | grep -q "pods/exec.*\[create\]"; then
+# Use grep with flexible pattern to match various output formats
+if kubectl auth can-i --list --as="$API_SA" -n "$TENANT_NS" 2>/dev/null | grep -E "pods/exec.*create" | grep -q create; then
   log "✓ API can exec into pods in tenant namespace (verified via --list)"
 elif kubectl auth can-i create pods/exec --as="$API_SA" -n "$TENANT_NS" &>/dev/null; then
   log "✓ API can exec into pods in tenant namespace"

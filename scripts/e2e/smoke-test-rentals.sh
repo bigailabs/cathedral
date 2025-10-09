@@ -129,7 +129,7 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
     continue
   fi
 
-  STATUS=$(echo "$BODY" | jq -r '.status // .state // empty' | tr '[:upper:]' '[:lower:]')
+  STATUS=$(echo "$BODY" | jq -r '.status.state // .state // empty' | tr '[:upper:]' '[:lower:]')
   log "  Current status: $STATUS (attempt $ATTEMPT/$MAX_ATTEMPTS)"
 
   if [ "$STATUS" = "active" ]; then

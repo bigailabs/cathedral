@@ -516,9 +516,46 @@ local-api-down:
 local-validator-up:
     #!/usr/bin/env bash
     set -euo pipefail
+
+    # Stop existing validator if running
+    echo "🛑 Stopping existing validator..."
+    docker compose -f scripts/validator/compose.local.yml down -v || true
+
+    # Rebuild validator Docker image with latest code
+    echo "🔨 Rebuilding validator Docker image..."
+    docker compose -f scripts/validator/compose.local.yml build --no-cache
+    echo "✅ Validator image rebuilt"
+
     # Detect external IP
     EXTERNAL_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "127.0.0.1")
     echo "Detected external IP: $EXTERNAL_IP"
+
+    # Ensure build directory exists
+    mkdir -p build
+
+    # Check for K3s configuration and set environment variables
+    if [ -f build/k3s.yaml ] && [ -f build/k3s-node-token.txt ]; then
+        echo "✅ K3s configuration found - enabling node onboarding"
+        export BASILICA_ENABLE_K3S_JOIN=true
+        # Extract K3s server URL from kubeconfig
+        export BASILICA_K3S_URL=$(grep -oP 'server:\s*\K[^\s]+' build/k3s.yaml | head -1)
+        export BASILICA_K3S_TOKEN=$(cat build/k3s-node-token.txt)
+        export BASILICA_K3S_CHANNEL=stable
+        export BASILICA_TAINT_EXCLUSIVE=false
+        export BASILICA_NAMESPACE=default
+        echo "   K3s URL: $BASILICA_K3S_URL"
+        echo "   Token length: ${#BASILICA_K3S_TOKEN} chars"
+    else
+        echo "ℹ️  No K3s configuration found - node onboarding disabled"
+        echo "   To enable: run 'just e2e-apply' to fetch K3s token"
+        export BASILICA_ENABLE_K3S_JOIN=false
+        export BASILICA_K3S_URL=""
+        export BASILICA_K3S_TOKEN=""
+        # Create placeholder kubeconfig if it doesn't exist (for docker volume mount)
+        if [ ! -f build/k3s.yaml ]; then
+            echo "# Placeholder kubeconfig - run 'just e2e-apply' to fetch real config" > build/k3s.yaml
+        fi
+    fi
 
     # Always regenerate validator.local.toml with current external IP
     echo "Creating config/validator.local.toml for local validator..."
@@ -558,6 +595,13 @@ local-validator-up:
         printf 'A100 = { weight = 50.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
         printf 'H100 = { weight = 30.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
         printf 'B200 = { weight = 20.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+        printf '\n[verification]\n'
+        printf 'netuid = 2  # Local subnet\n'
+        printf 'node_validation_interval = { secs = 60 }  # 60 seconds for E2E testing\n\n'
+        printf '[verification.binary_validation]\n'
+        printf 'enabled = true  # Enabled - validator has GPU access\n'
+        printf 'validator_binary_path = "/app/validator-binary"\n'
+        printf 'executor_binary_path = "/app/executor-binary"\n'
     } > config/validator.local.toml
     # Run validator container
     docker compose -f scripts/validator/compose.local.yml up -d
@@ -594,7 +638,7 @@ local-miner-up:
         printf 'skip_registration = false\n\n'
         printf '[validator_comms]\n'
         printf 'host = "0.0.0.0"\n'
-        printf 'port = 8080\n\n'
+        printf 'port = 8091\n\n'
         printf '[node_management]\n'
         printf 'nodes = [\n'
         printf '  { host = "69.19.137.104", port = 22, username = "shadeform" },\n'

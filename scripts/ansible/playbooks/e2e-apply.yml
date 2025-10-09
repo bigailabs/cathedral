@@ -858,9 +858,34 @@
         backrefs: true
       tags: ["kubeconfig"]
 
+    # ----------------------------------------------------------------------------
+    # Fetch K3s node token securely for validator node onboarding
+    # ----------------------------------------------------------------------------
+    - name: Read K3s node token from server
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: k3s_node_token_raw
+      tags: ["k3s_token", "kubeconfig"]
 
+    - name: Write K3s token to local build directory
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.copy:
+        dest: "{{ repo_root_final }}/build/k3s-node-token.txt"
+        content: "{{ k3s_node_token_raw.content | b64decode | trim }}"
+        mode: '0600'  # Readable only by owner
+      tags: ["k3s_token", "kubeconfig"]
 
-    - name: Show local kubectl usage
+    - name: Ensure build/ is in .gitignore
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.lineinfile:
+        path: "{{ repo_root_final }}/.gitignore"
+        line: "build/"
+        create: no
+      tags: ["k3s_token", "kubeconfig"]
+
+    - name: Show local kubectl and K3s token usage
       delegate_to: localhost
       run_once: true
       ansible.builtin.debug:
@@ -869,4 +894,16 @@
           Use it with your kubeconfig:
             export KUBECONFIG={{ repo_root_final }}/build/k3s.yaml
             {{ ansible_env.HOME }}/.local/bin/kubectl get nodes -o wide
+
+          K3s node token saved to: {{ repo_root_final }}/build/k3s-node-token.txt
+
+          To enable validator node onboarding, set:
+            export BASILICA_ENABLE_K3S_JOIN=true
+            export BASILICA_K3S_URL=https://{{ kubeconfig_server_effective }}:6443
+            export BASILICA_K3S_TOKEN=$(cat {{ repo_root_final }}/build/k3s-node-token.txt)
+
+          Or create a Kubernetes secret for production:
+            kubectl create secret generic k3s-join-token \
+              --from-file=token={{ repo_root_final }}/build/k3s-node-token.txt \
+              -n basilica-validators
       tags: ["kubeconfig"]

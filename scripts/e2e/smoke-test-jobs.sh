@@ -64,24 +64,26 @@ cleanup() {
   if [ -n "$JOB_ID" ]; then
     log "Cleaning up job $JOB_ID..."
     curl -s -X DELETE -H "Authorization: Bearer ${API_TOKEN}" \
-      "${API_URL}/api/v1/jobs/${JOB_ID}" || true
+      "${API_URL}/jobs/${JOB_ID}" || true
   fi
 }
 trap cleanup EXIT
 
 # 1. Create job
 log "Step 1/7: Creating simple echo job..."
-JOB_RESP=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/api/v1/jobs" \
+JOB_RESP=$(curl -s -w "\n%{http_code}" -X POST "${API_URL}/jobs" \
   -H "Authorization: Bearer ${API_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{
-    "image": "busybox:latest",
-    "command": ["sh", "-c", "echo hello-from-job && echo line2 && sleep 3 && echo done"],
-    "resources": {
-      "cpu": "0.25",
-      "memory": "128Mi"
-    }
-  }')
+  -d "{
+    \"image\": \"busybox:latest\",
+    \"command\": [\"sh\", \"-c\", \"echo hello-from-job && echo line2 && sleep 3 && echo done\"],
+    \"resources\": {
+      \"cpu\": \"0.25\",
+      \"memory\": \"128Mi\",
+      \"gpus\": {\"count\": 0, \"model\": []}
+    },
+    \"namespace\": \"${NAMESPACE}\"
+  }")
 
 HTTP_CODE=$(echo "$JOB_RESP" | tail -n1)
 BODY=$(echo "$JOB_RESP" | head -n-1)
@@ -113,7 +115,7 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
 
   GET_RESP=$(curl -s -w "\n%{http_code}" \
     -H "Authorization: Bearer ${API_TOKEN}" \
-    "${API_URL}/api/v1/jobs/${JOB_ID}")
+    "${API_URL}/jobs/${JOB_ID}")
 
   HTTP_CODE=$(echo "$GET_RESP" | tail -n1)
   BODY=$(echo "$GET_RESP" | head -n-1)
@@ -124,7 +126,7 @@ while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
     continue
   fi
 
-  STATUS=$(echo "$BODY" | jq -r '.status // .phase // empty' | tr '[:upper:]' '[:lower:]')
+  STATUS=$(echo "$BODY" | jq -r '.status.phase // .phase // empty' | tr '[:upper:]' '[:lower:]')
   log "  Current status: $STATUS (attempt $ATTEMPT/$MAX_ATTEMPTS)"
 
   # Break on terminal states
@@ -137,7 +139,7 @@ done
 
 if [[ ! "$STATUS" =~ ^(running|succeeded|completed)$ ]]; then
   error "Job did not reach expected state within timeout. Last status: $STATUS"
-  curl -s -H "Authorization: Bearer ${API_TOKEN}" "${API_URL}/api/v1/jobs/${JOB_ID}" | jq .
+  curl -s -H "Authorization: Bearer ${API_TOKEN}" "${API_URL}/jobs/${JOB_ID}" | jq .
   exit 1
 fi
 
@@ -152,7 +154,7 @@ if [ "$STATUS" = "running" ]; then
 
     GET_RESP=$(curl -s -w "\n%{http_code}" \
       -H "Authorization: Bearer ${API_TOKEN}" \
-      "${API_URL}/api/v1/jobs/${JOB_ID}")
+      "${API_URL}/jobs/${JOB_ID}")
 
     HTTP_CODE=$(echo "$GET_RESP" | tail -n1)
     BODY=$(echo "$GET_RESP" | head -n-1)
@@ -163,7 +165,7 @@ if [ "$STATUS" = "running" ]; then
       continue
     fi
 
-    STATUS=$(echo "$BODY" | jq -r '.status // .phase // empty' | tr '[:upper:]' '[:lower:]')
+    STATUS=$(echo "$BODY" | jq -r '.status.phase // .phase // empty' | tr '[:upper:]' '[:lower:]')
     log "  Current status: $STATUS (attempt $ATTEMPT/$MAX_ATTEMPTS)"
 
     if [[ "$STATUS" =~ ^(succeeded|completed)$ ]]; then
@@ -207,7 +209,7 @@ fi
 log "Step 5/7: Fetching job logs..."
 LOG_RESP=$(curl -s -w "\n%{http_code}" \
   -H "Authorization: Bearer ${API_TOKEN}" \
-  "${API_URL}/api/v1/jobs/${JOB_ID}/logs")
+  "${API_URL}/jobs/${JOB_ID}/logs")
 
 HTTP_CODE=$(echo "$LOG_RESP" | tail -n1)
 LOGS=$(echo "$LOG_RESP" | head -n-1)
@@ -233,7 +235,7 @@ echo "$LOGS" | head -n5 | sed 's/^/    /'
 log "Step 6/7: Listing jobs..."
 LIST_RESP=$(curl -s -w "\n%{http_code}" \
   -H "Authorization: Bearer ${API_TOKEN}" \
-  "${API_URL}/api/v1/jobs")
+  "${API_URL}/jobs")
 
 HTTP_CODE=$(echo "$LIST_RESP" | tail -n1)
 BODY=$(echo "$LIST_RESP" | head -n-1)
@@ -253,7 +255,7 @@ fi
 log "Step 7/7: Deleting job..."
 DEL_RESP=$(curl -s -w "\n%{http_code}" -X DELETE \
   -H "Authorization: Bearer ${API_TOKEN}" \
-  "${API_URL}/api/v1/jobs/${JOB_ID}")
+  "${API_URL}/jobs/${JOB_ID}")
 
 HTTP_CODE=$(echo "$DEL_RESP" | tail -n1)
 
