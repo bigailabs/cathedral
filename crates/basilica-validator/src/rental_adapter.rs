@@ -54,7 +54,7 @@ pub fn rental_spec_to_gpurental_cr(name: &str, namespace: &str, spec: &RentalSpe
     });
 
     let cr = json!({
-        "apiVersion": "basilica.io/v1",
+        "apiVersion": "basilica.ai/v1",
         "kind": "GpuRental",
         "metadata": { "name": name, "namespace": namespace },
         "spec": {
@@ -183,7 +183,7 @@ mod tests {
         let out = sink.lock().unwrap();
         assert_eq!(out.len(), 1);
         let cr = &out[0];
-        assert_eq!(cr["apiVersion"], "basilica.io/v1");
+        assert_eq!(cr["apiVersion"], "basilica.ai/v1");
         assert_eq!(cr["kind"], "GpuRental");
         assert_eq!(cr["metadata"]["name"], "r1");
         assert_eq!(cr["metadata"]["namespace"], "ns1");

@@ -90,10 +90,10 @@ impl K8sMetricsProvider {
         ann: &std::collections::BTreeMap<String, String>,
     ) -> (Option<f64>, Option<f64>) {
         let gpu = ann
-            .get("basilica.io/gpu-peak-utilization")
+            .get("basilica.ai/gpu-peak-utilization")
             .and_then(|s| s.parse::<f64>().ok());
         let bw = ann
-            .get("basilica.io/bandwidth-gbps")
+            .get("basilica.ai/bandwidth-gbps")
             .and_then(|s| s.parse::<f64>().ok());
         (gpu, bw)
     }
@@ -161,7 +161,7 @@ impl K8sMetricsProvider {
     fn build_sidecar_metrics_url(pod: &Pod) -> Option<String> {
         // Prefer explicit URL via annotation
         if let Some(ann) = &pod.metadata.annotations {
-            if let Some(url) = ann.get("basilica.io/metrics-url").filter(|s| !s.is_empty()) {
+            if let Some(url) = ann.get("basilica.ai/metrics-url").filter(|s| !s.is_empty()) {
                 return Some(url.clone());
             }
         }
@@ -172,19 +172,19 @@ impl K8sMetricsProvider {
         let mut path = "/metrics".to_string();
         if let Some(ann) = &pod.metadata.annotations {
             if let Some(v) = ann
-                .get("basilica.io/metrics-scheme")
+                .get("basilica.ai/metrics-scheme")
                 .filter(|s| !s.is_empty())
             {
                 scheme = v.clone();
             }
             if let Some(v) = ann
-                .get("basilica.io/metrics-port")
+                .get("basilica.ai/metrics-port")
                 .and_then(|s| s.parse::<u16>().ok())
             {
                 port = v;
             }
             if let Some(v) = ann
-                .get("basilica.io/metrics-path")
+                .get("basilica.ai/metrics-path")
                 .filter(|s| !s.is_empty())
             {
                 path = v.clone();
@@ -277,8 +277,8 @@ mod tests {
     #[test]
     fn parses_annotation_metrics() {
         let mut ann = std::collections::BTreeMap::new();
-        ann.insert("basilica.io/gpu-peak-utilization".into(), "0.91".into());
-        ann.insert("basilica.io/bandwidth-gbps".into(), "1.5".into());
+        ann.insert("basilica.ai/gpu-peak-utilization".into(), "0.91".into());
+        ann.insert("basilica.ai/bandwidth-gbps".into(), "1.5".into());
         let (gpu, bw) = K8sMetricsProvider::parse_annotation_metrics(&ann);
         assert_eq!(gpu.unwrap(), 0.91);
         assert_eq!(bw.unwrap(), 1.5);

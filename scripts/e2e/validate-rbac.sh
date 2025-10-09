@@ -144,8 +144,12 @@ test_perm "$OPERATOR_SA" "patch" "basilicajobs/status" "$TENANT_NS" "Operator ca
 test_perm "$OPERATOR_SA" "get" "basilicanodeprofiles" "" "Operator can get BasilicaNodeProfiles (cluster-scoped)"
 test_perm "$OPERATOR_SA" "patch" "basilicanodeprofiles/status" "" "Operator can patch BasilicaNodeProfile status"
 
-# Gateway API (if using)
-test_perm "$OPERATOR_SA" "create" "httproutes" "$TENANT_NS" "Operator can create HTTPRoutes in tenant namespace"
+# Gateway API (if CRDs installed)
+if kubectl api-resources | grep -q httproutes; then
+  test_perm "$OPERATOR_SA" "create" "httproutes" "$TENANT_NS" "Operator can create HTTPRoutes in tenant namespace"
+else
+  warn "⊘ HTTPRoutes CRD not installed (Gateway API feature - optional)"
+fi
 
 log ""
 
@@ -168,7 +172,17 @@ test_perm "$API_SA" "delete" "basilicajobs" "$TENANT_NS" "API can delete Basilic
 
 # Pod logs and exec
 test_perm "$API_SA" "get" "pods/log" "$TENANT_NS" "API can get pod logs in tenant namespace"
-test_perm "$API_SA" "create" "pods/exec" "$TENANT_NS" "API can exec into pods in tenant namespace"
+
+# Note: kubectl auth can-i has issues testing pods/exec subresource
+# Verify with: kubectl auth can-i --list --as=system:serviceaccount:basilica-system:basilica-api -n u-test | grep exec
+if kubectl auth can-i --list --as="$API_SA" -n "$TENANT_NS" 2>/dev/null | grep -q "pods/exec.*\[create\]"; then
+  log "✓ API can exec into pods in tenant namespace (verified via --list)"
+elif kubectl auth can-i create pods/exec --as="$API_SA" -n "$TENANT_NS" &>/dev/null; then
+  log "✓ API can exec into pods in tenant namespace"
+else
+  error "✗ API can exec into pods in tenant namespace"
+  FAILURES=$((FAILURES + 1))
+fi
 
 # Pod listing (for resolving rental -> pod)
 test_perm "$API_SA" "get" "pods" "$TENANT_NS" "API can get pods in tenant namespace"
@@ -186,7 +200,17 @@ log ""
 # NodeProfile management
 test_perm "$VALIDATOR_SA" "create" "basilicanodeprofiles" "" "Validator can create BasilicaNodeProfiles (cluster-scoped)"
 test_perm "$VALIDATOR_SA" "get" "basilicanodeprofiles" "" "Validator can get BasilicaNodeProfiles (cluster-scoped)"
-test_perm "$VALIDATOR_SA" "patch" "basilicanodeprofiles/status" "" "Validator can patch BasilicaNodeProfile status"
+
+# Note: kubectl auth can-i has issues testing status subresources
+# Verify with: kubectl auth can-i --list --as=system:serviceaccount:basilica-validators:basilica-validator | grep status
+if kubectl auth can-i --list --as="$VALIDATOR_SA" 2>/dev/null | grep -q "basilicanodeprofiles/status.*\[patch\|update\]"; then
+  log "✓ Validator can patch BasilicaNodeProfile status (verified via --list)"
+elif kubectl auth can-i patch basilicanodeprofiles/status --as="$VALIDATOR_SA" &>/dev/null; then
+  log "✓ Validator can patch BasilicaNodeProfile status"
+else
+  error "✗ Validator can patch BasilicaNodeProfile status"
+  FAILURES=$((FAILURES + 1))
+fi
 
 # Node label/taint patching (optional, for node profile publisher)
 # Note: This may not be required if validator only creates NodeProfiles and operator patches nodes

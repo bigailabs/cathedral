@@ -453,9 +453,9 @@ impl ApiK8sClient for K8sClient {
     async fn create_job(&self, ns: &str, name: &str, spec: JobSpecDto) -> Result<String> {
         use kube::api::PostParams;
         use serde_json::json;
-        let api = self.cr_api(ns, "basilica.io", "v1", "BasilicaJob");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "BasilicaJob");
         let obj = json!({
-            "apiVersion": "basilica.io/v1",
+            "apiVersion": "basilica.ai/v1",
             "kind": "BasilicaJob",
             "metadata": {"name": name, "namespace": ns},
             "spec": {
@@ -483,7 +483,7 @@ impl ApiK8sClient for K8sClient {
 
     async fn get_job_status(&self, ns: &str, name: &str) -> Result<JobStatusDto> {
         use serde_json::Value;
-        let api = self.cr_api(ns, "basilica.io", "v1", "BasilicaJob");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "BasilicaJob");
         let obj = api.get(name).await.map_err(|e| ApiError::NotFound {
             message: format!("job not found: {e}"),
         })?;
@@ -506,7 +506,7 @@ impl ApiK8sClient for K8sClient {
 
     async fn delete_job(&self, ns: &str, name: &str) -> Result<()> {
         use kube::api::DeleteParams;
-        let api = self.cr_api(ns, "basilica.io", "v1", "BasilicaJob");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "BasilicaJob");
         let _ = api
             .delete(name, &DeleteParams::default())
             .await
@@ -518,7 +518,7 @@ impl ApiK8sClient for K8sClient {
 
     async fn get_job_logs(&self, ns: &str, name: &str) -> Result<String> {
         use kube::api::{Api, LogParams};
-        if let Some(pod) = self.get_pod_by_label(ns, "basilica.io/job", name).await? {
+        if let Some(pod) = self.get_pod_by_label(ns, "basilica.ai/job", name).await? {
             let pods: Api<k8s_openapi::api::core::v1::Pod> =
                 Api::namespaced(self.client.clone(), ns);
             let lp = LogParams {
@@ -544,14 +544,14 @@ impl ApiK8sClient for K8sClient {
     async fn create_rental(&self, ns: &str, name: &str, spec: RentalSpecDto) -> Result<String> {
         use kube::api::PostParams;
         use serde_json::json;
-        let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "GpuRental");
         let env_objs: Vec<serde_json::Value> = spec
             .container_env
             .iter()
             .map(|(k, v)| json!({"name": k, "value": v}))
             .collect();
         let obj = json!({
-            "apiVersion": "basilica.io/v1",
+            "apiVersion": "basilica.ai/v1",
             "kind": "GpuRental",
             "metadata": {
                 "name": name,
@@ -569,7 +569,7 @@ impl ApiK8sClient for K8sClient {
                     "resources": {"cpu": spec.resources.cpu, "memory": spec.resources.memory, "gpus": {"count": spec.resources.gpus.count, "model": spec.resources.gpus.model}},
                 },
                 "duration": {"hours": 0, "autoExtend": false, "maxExtensions": 0},
-                "accessType": "Ssh",
+                "accessType": "ssh",
                 "network": {"ingress": spec.network_ingress, "egressPolicy": "restricted", "allowedEgress": [], "publicIpRequired": false },
                 "ssh": spec.ssh,
                 "ttlSeconds": 0
@@ -590,7 +590,7 @@ impl ApiK8sClient for K8sClient {
 
     async fn get_rental_status(&self, ns: &str, name: &str) -> Result<RentalStatusDto> {
         use serde_json::Value;
-        let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "GpuRental");
         let obj = api.get(name).await.map_err(|e| ApiError::NotFound {
             message: format!("rental not found: {e}"),
         })?;
@@ -618,7 +618,7 @@ impl ApiK8sClient for K8sClient {
 
     async fn delete_rental(&self, ns: &str, name: &str) -> Result<()> {
         use kube::api::DeleteParams;
-        let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "GpuRental");
         let _ = api
             .delete(name, &DeleteParams::default())
             .await
@@ -637,7 +637,7 @@ impl ApiK8sClient for K8sClient {
     ) -> Result<String> {
         use kube::api::{Api, LogParams};
         if let Some(pod) = self
-            .get_pod_by_label(ns, "basilica.io/rental", name)
+            .get_pod_by_label(ns, "basilica.ai/rental", name)
             .await?
         {
             let pods: Api<k8s_openapi::api::core::v1::Pod> =
@@ -676,7 +676,7 @@ impl ApiK8sClient for K8sClient {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // Find the first pod for the rental
         let pod = self
-            .get_pod_by_label(ns, "basilica.io/rental", name)
+            .get_pod_by_label(ns, "basilica.ai/rental", name)
             .await?
             .ok_or_else(|| ApiError::NotFound {
                 message: "pod not found".into(),
@@ -787,7 +787,7 @@ impl ApiK8sClient for K8sClient {
     async fn list_rentals(&self, ns: &str) -> Result<Vec<RentalListItemDto>> {
         use kube::api::ListParams;
         use serde_json::Value;
-        let api = self.cr_api(ns, "basilica.io", "v1", "GpuRental");
+        let api = self.cr_api(ns, "basilica.ai", "v1", "GpuRental");
         let list = api
             .list(&ListParams::default())
             .await

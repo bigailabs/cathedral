@@ -74,21 +74,21 @@ pub fn labels_from_validation(
     region: &str,
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
-    labels.insert("basilica.io/validated".into(), "true".into());
-    labels.insert("basilica.io/provider".into(), provider.to_string());
-    labels.insert("basilica.io/region".into(), region.to_string());
+    labels.insert("basilica.ai/validated".into(), "true".into());
+    labels.insert("basilica.ai/provider".into(), provider.to_string());
+    labels.insert("basilica.ai/region".into(), region.to_string());
     let model = nr
         .gpu_infos
         .first()
         .map(|g| g.gpu_name.clone())
         .unwrap_or_else(|| nr.gpu_name.clone());
-    labels.insert("basilica.io/gpu-model".into(), model);
+    labels.insert("basilica.ai/gpu-model".into(), model);
     labels.insert(
-        "basilica.io/gpu-count".into(),
+        "basilica.ai/gpu-count".into(),
         nr.gpu_infos.len().to_string(),
     );
     labels.insert(
-        "basilica.io/gpu-mem".into(),
+        "basilica.ai/gpu-mem".into(),
         nr.gpu_infos
             .first()
             .map(|g| g.gpu_memory_gb as u32)
@@ -100,7 +100,7 @@ pub fn labels_from_validation(
 
 /// Suggested taint when node is not validated.
 pub fn taint_for_non_validated() -> (&'static str, &'static str) {
-    ("basilica.io/validated", "NoSchedule")
+    ("basilica.ai/validated", "NoSchedule")
 }
 
 #[cfg(test)]
@@ -193,11 +193,11 @@ mod tests {
     fn produces_k8s_labels() {
         let nr = sample_node_result();
         let labels = labels_from_validation(&nr, "onprem", "us-east-1");
-        assert_eq!(labels.get("basilica.io/provider").unwrap(), "onprem");
-        assert_eq!(labels.get("basilica.io/region").unwrap(), "us-east-1");
-        assert_eq!(labels.get("basilica.io/gpu-model").unwrap(), "NVIDIA A100");
-        assert_eq!(labels.get("basilica.io/gpu-count").unwrap(), "1");
-        assert_eq!(labels.get("basilica.io/gpu-mem").unwrap(), "80");
-        assert_eq!(labels.get("basilica.io/validated").unwrap(), "true");
+        assert_eq!(labels.get("basilica.ai/provider").unwrap(), "onprem");
+        assert_eq!(labels.get("basilica.ai/region").unwrap(), "us-east-1");
+        assert_eq!(labels.get("basilica.ai/gpu-model").unwrap(), "NVIDIA A100");
+        assert_eq!(labels.get("basilica.ai/gpu-count").unwrap(), "1");
+        assert_eq!(labels.get("basilica.ai/gpu-mem").unwrap(), "80");
+        assert_eq!(labels.get("basilica.ai/validated").unwrap(), "true");
     }
 }

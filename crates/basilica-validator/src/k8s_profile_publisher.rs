@@ -35,7 +35,7 @@ impl K8sNodeProfilePublisher {
     }
 
     fn cr_api(&self, ns: &str) -> Api<DynamicObject> {
-        let gvk = GroupVersionKind::gvk("basilica.io", "v1", "BasilicaNodeProfile");
+        let gvk = GroupVersionKind::gvk("basilica.ai", "v1", "BasilicaNodeProfile");
         let ar = ApiResource::from_gvk(&gvk);
         Api::namespaced_with(self.client.clone(), ns, &ar)
     }
@@ -49,7 +49,7 @@ impl K8sNodeProfilePublisher {
         health: Option<&str>,
     ) -> anyhow::Result<DynamicObject> {
         let val = serde_json::json!({
-            "apiVersion": "basilica.io/v1",
+            "apiVersion": "basilica.ai/v1",
             "kind": "BasilicaNodeProfile",
             "metadata": {"name": name, "namespace": ns},
             "spec": {
@@ -208,8 +208,8 @@ mod tests {
     #[test]
     fn builds_label_merge_patch() {
         let labels = BTreeMap::from([
-            ("basilica.io/validated".into(), "true".into()),
-            ("basilica.io/gpu-model".into(), "A100".into()),
+            ("basilica.ai/validated".into(), "true".into()),
+            ("basilica.ai/gpu-model".into(), "A100".into()),
         ]);
         let patch = K8sNodeProfilePublisher::build_label_merge_patch(&labels);
         assert_eq!(
@@ -218,7 +218,7 @@ mod tests {
                 .unwrap()
                 .get("labels")
                 .unwrap()
-                .get("basilica.io/validated")
+                .get("basilica.ai/validated")
                 .and_then(|v| v.as_str())
                 .unwrap(),
             "true"

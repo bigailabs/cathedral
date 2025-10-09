@@ -12,18 +12,20 @@ set -euo pipefail
 #   - Exports BASILICA_API_TOKEN for use in scripts
 #
 # Prerequisites:
-#   - cargo (to build gen_api_key binary)
+#   - cargo (to build gen-api-key binary)
 #   - kubectl with access to cluster
 #   - Postgres deployed in cluster
 
-USER="e2e-test"
+USER="test"
 KEY_NAME="smoke-test"
 SCOPES="rentals:* jobs:*"
-NAMESPACE="${POSTGRES_NAMESPACE:-basilica-system}"
-POSTGRES_SVC="${POSTGRES_SERVICE:-basilica-postgres}"
-POSTGRES_USER="${POSTGRES_USER:-basilica}"
-POSTGRES_DB="${POSTGRES_DB:-basilica}"
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-devpassword}"
+
+# Local API Postgres (Docker Compose)
+POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"
+POSTGRES_USER="${POSTGRES_USER:-api}"
+POSTGRES_DB="${POSTGRES_DB:-basilica_api}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-api_dev_password}"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -49,11 +51,11 @@ while [[ $# -gt 0 ]]; do
       echo "  --scopes SCOPES  Space-separated scopes (default: 'rentals:* jobs:*')"
       echo ""
       echo "Environment Variables:"
-      echo "  POSTGRES_NAMESPACE  Namespace for Postgres (default: basilica-system)"
-      echo "  POSTGRES_SERVICE    Postgres service name (default: basilica-postgres)"
-      echo "  POSTGRES_USER       Postgres username (default: basilica)"
-      echo "  POSTGRES_DB         Postgres database (default: basilica)"
-      echo "  POSTGRES_PASSWORD   Postgres password (default: devpassword)"
+      echo "  POSTGRES_HOST       Postgres host (default: localhost)"
+      echo "  POSTGRES_PORT       Postgres port (default: 5432)"
+      echo "  POSTGRES_USER       Postgres username (default: api)"
+      echo "  POSTGRES_DB         Postgres database (default: basilica_api)"
+      echo "  POSTGRES_PASSWORD   Postgres password (default: api_dev_password)"
       exit 0
       ;;
     *)
@@ -67,9 +69,11 @@ done
 echo "[bootstrap] Generating API key for user='$USER' name='$KEY_NAME' scopes='$SCOPES'" >&2
 
 # Build gen-api-key if not already built
-if [ ! -f target/release/gen_api_key ]; then
-  echo "[bootstrap] Building gen_api_key binary..." >&2
-  cargo build -p basilica-api --bin gen_api_key --release --quiet
+if [ ! -f target/release/gen-api-key ]; then
+  echo "[bootstrap] Building gen-api-key binary..." >&2
+  cargo build -p basilica-api --bin gen-api-key --release
+else
+  echo "[bootstrap] Using existing gen-api-key binary" >&2
 fi
 
 # Run gen-api-key with scopes
@@ -79,7 +83,7 @@ fi
 #   Key ID: <uuid>
 #
 #   INSERT INTO api_keys ...;
-echo "[bootstrap] Running gen_api_key..." >&2
+echo "[bootstrap] Running gen-api-key..." >&2
 
 # Convert scopes to --scopes arguments
 SCOPE_ARGS=""
@@ -87,26 +91,29 @@ for scope in $SCOPES; do
   SCOPE_ARGS="$SCOPE_ARGS --scopes $scope"
 done
 
-OUTPUT=$(cargo run -p basilica-api --bin gen_api_key --release --quiet -- \
+OUTPUT=$(timeout 30 ./target/release/gen-api-key \
   --user "$USER" \
   --name "$KEY_NAME" \
-  $SCOPE_ARGS 2>&1)
+  $SCOPE_ARGS 2>&1 || {
+    echo "[bootstrap] ERROR: gen-api-key timed out or failed" >&2
+    exit 1
+  })
 
-# Extract token (line starting with "Token:")
-TOKEN=$(echo "$OUTPUT" | grep "^Token:" | awk '{print $2}' || echo "")
+# Extract token (line containing "Token (Authorization): Bearer")
+TOKEN=$(echo "$OUTPUT" | grep "Token (Authorization):" | sed 's/.*Bearer //' | tr -d ' ' || echo "")
 
 if [ -z "$TOKEN" ]; then
-  echo "[bootstrap] ERROR: Failed to extract token from gen_api_key output" >&2
+  echo "[bootstrap] ERROR: Failed to extract token from gen-api-key output" >&2
   echo "[bootstrap] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
 fi
 
-# Extract SQL (all lines from INSERT to semicolon)
-SQL=$(echo "$OUTPUT" | sed -n '/^INSERT INTO/,/;$/p')
+# Extract SQL (line starting with INSERT INTO and ending with semicolon)
+SQL=$(echo "$OUTPUT" | grep "^INSERT INTO" || echo "")
 
 if [ -z "$SQL" ]; then
-  echo "[bootstrap] ERROR: Failed to extract SQL from gen_api_key output" >&2
+  echo "[bootstrap] ERROR: Failed to extract SQL from gen-api-key output" >&2
   echo "[bootstrap] Output was:" >&2
   echo "$OUTPUT" >&2
   exit 1
@@ -117,36 +124,31 @@ echo "[bootstrap] SQL:" >&2
 echo "$SQL" >&2
 
 # Insert into database
-echo "[bootstrap] Connecting to Postgres..." >&2
+echo "[bootstrap] Connecting to local Postgres..." >&2
 
-# Check if we can reach Postgres service
-if ! kubectl get svc -n "$NAMESPACE" "$POSTGRES_SVC" &>/dev/null; then
-  echo "[bootstrap] WARNING: Postgres service $POSTGRES_SVC not found in namespace $NAMESPACE" >&2
-  echo "[bootstrap] Skipping database insertion. Run SQL manually:" >&2
+# Find the postgres container from the API docker compose
+POSTGRES_CONTAINER=$(docker ps --filter "name=postgres" --format "{{.Names}}" | head -1)
+
+if [ -z "$POSTGRES_CONTAINER" ]; then
+  echo "[bootstrap] WARNING: Postgres container not found." >&2
+  echo "[bootstrap] Make sure local API is running: just local-api-up" >&2
+  echo "[bootstrap] Run SQL manually:" >&2
   echo "$SQL" >&2
 else
-  # Port-forward Postgres
-  echo "[bootstrap] Port-forwarding Postgres on 5432..." >&2
-  kubectl port-forward -n "$NAMESPACE" "svc/$POSTGRES_SVC" 5432:5432 >/dev/null 2>&1 &
-  PF_PID=$!
+  # Delete existing key with same user_id and name (if exists)
+  echo "[bootstrap] Using container: $POSTGRES_CONTAINER" >&2
+  echo "[bootstrap] Deleting existing key (if any)..." >&2
+  docker exec "$POSTGRES_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+    "DELETE FROM api_keys WHERE user_id = '$USER' AND name = '$KEY_NAME';" > /dev/null 2>&1 || true
 
-  # Wait for port-forward to be ready
-  sleep 3
-
-  # Insert SQL
+  # Insert new key
   echo "[bootstrap] Inserting API key into database..." >&2
-  export PGPASSWORD="$POSTGRES_PASSWORD"
-
-  if echo "$SQL" | psql -h localhost -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" 2>&1 | grep -q "ERROR"; then
-    echo "[bootstrap] WARNING: SQL insertion may have failed. Check manually." >&2
-    # Don't exit on error - key might already exist
+  if docker exec "$POSTGRES_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$SQL" 2>&1 | grep -q "ERROR"; then
+    echo "[bootstrap] ERROR: SQL insertion failed" >&2
+    exit 1
   else
     echo "[bootstrap] ✅ API key inserted successfully" >&2
   fi
-
-  # Kill port-forward
-  kill $PF_PID 2>/dev/null || true
-  wait $PF_PID 2>/dev/null || true
 fi
 
 # Output token for easy export

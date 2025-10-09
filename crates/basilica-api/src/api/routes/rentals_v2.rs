@@ -163,16 +163,16 @@ pub async fn create_rental_compat(
     let mut annotations = std::collections::BTreeMap::new();
     // Encode preferred node if specified
     if let NodeSelection::NodeId { node_id } = &req.node_selection {
-        annotations.insert("basilica.io/preferred-node".to_string(), node_id.clone());
+        annotations.insert("basilica.ai/preferred-node".to_string(), node_id.clone());
         labels.insert(
-            "basilica.io/has-preferred-node".to_string(),
+            "basilica.ai/has-preferred-node".to_string(),
             "true".to_string(),
         );
     }
     // Encode GPU model preferences (also already passed via resources.gpus.model)
     if !req.resources.gpu_types.is_empty() {
         annotations.insert(
-            "basilica.io/gpu-model-preferences".to_string(),
+            "basilica.ai/gpu-model-preferences".to_string(),
             req.resources.gpu_types.join(","),
         );
     }

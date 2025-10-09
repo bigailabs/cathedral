@@ -61,7 +61,7 @@ fn build_env(env: &[crate::crd::basilica_job::EnvVar]) -> Vec<EnvVar> {
 
 fn build_tolerations() -> Vec<Toleration> {
     vec![Toleration {
-        key: Some("basilica.io/workloads-only".into()),
+        key: Some("basilica.ai/workloads-only".into()),
         operator: Some("Equal".into()),
         value: Some("true".into()),
         effect: Some("NoSchedule".into()),
@@ -74,7 +74,7 @@ fn build_node_affinity(gpu: &JobGpuSpec) -> Option<Affinity> {
         return None;
     }
     let expr = NodeSelectorRequirement {
-        key: "basilica.io/gpu-model".into(),
+        key: "basilica.ai/gpu-model".into(),
         operator: "In".into(),
         values: Some(gpu.model.clone()),
     };
@@ -209,13 +209,13 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     };
 
     let mut labels_map: std::collections::BTreeMap<String, String> = vec![
-        ("basilica.io/type".to_string(), "job".to_string()),
-        ("basilica.io/job".to_string(), name.to_string()),
+        ("basilica.ai/type".to_string(), "job".to_string()),
+        ("basilica.ai/job".to_string(), name.to_string()),
     ]
     .into_iter()
     .collect();
     let gpu_bound = (spec.resources.gpus.count > 0).to_string();
-    labels_map.insert("basilica.io/gpu-bound".to_string(), gpu_bound);
+    labels_map.insert("basilica.ai/gpu-bound".to_string(), gpu_bound);
     let template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
             labels: Some(labels_map.clone()),
@@ -289,7 +289,7 @@ impl<C: K8sClient> JobController<C> {
                 // Count running job pods in namespace
                 let pods = self
                     .client
-                    .list_pods_with_label(ns, "basilica.io/type", "job")
+                    .list_pods_with_label(ns, "basilica.ai/type", "job")
                     .await?;
                 let running = pods
                     .iter()
@@ -333,7 +333,7 @@ impl<C: K8sClient> JobController<C> {
         // Derive status from Pods with our label
         let pods = self
             .client
-            .list_pods_with_label(ns, "basilica.io/job", &name)
+            .list_pods_with_label(ns, "basilica.ai/job", &name)
             .await?;
 
         let (phase, pod_name) = compute_phase_from_pods(&pods);
@@ -502,7 +502,7 @@ mod tests {
         let t = pod.tolerations.as_ref().unwrap();
         assert!(t
             .iter()
-            .any(|x| x.key.as_deref() == Some("basilica.io/workloads-only")));
+            .any(|x| x.key.as_deref() == Some("basilica.ai/workloads-only")));
         // Affinity
         let aff = pod.affinity.as_ref().unwrap();
         let node_aff = aff.node_affinity.as_ref().unwrap();
@@ -515,7 +515,7 @@ mod tests {
             .as_ref()
             .unwrap()[0]
             .clone();
-        assert_eq!(req.key, "basilica.io/gpu-model");
+        assert_eq!(req.key, "basilica.ai/gpu-model");
         assert_eq!(req.operator, "In");
         assert_eq!(req.values.unwrap()[0], "A100");
     }
@@ -570,7 +570,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("pod1".into()),
                 labels: Some(
-                    vec![("basilica.io/job".into(), "bj1".into())]
+                    vec![("basilica.ai/job".into(), "bj1".into())]
                         .into_iter()
                         .collect(),
                 ),

@@ -1011,10 +1011,10 @@ impl VerificationEngine {
         let mut cfg = K3sAgentConfig::new(url, token);
         cfg.node_name = Some(node_id.to_string());
         cfg.extra_args
-            .push("--node-taint basilica.io/workloads-only=true:NoSchedule".into());
+            .push("--node-taint basilica.ai/workloads-only=true:NoSchedule".into());
         if exclusive {
             cfg.extra_args
-                .push("--node-taint basilica.io/rental-exclusive=true:NoSchedule".into());
+                .push("--node-taint basilica.ai/rental-exclusive=true:NoSchedule".into());
         }
         cfg.channel = channel;
 
@@ -1119,16 +1119,16 @@ impl VerificationEngine {
             .await
         {
             labels.insert(
-                "basilica.io/docker-active".into(),
+                "basilica.ai/docker-active".into(),
                 service_active.to_string(),
             );
             if let Some(ver) = docker_version {
-                labels.insert("basilica.io/docker-version".into(), ver);
+                labels.insert("basilica.ai/docker-version".into(), ver);
             }
-            labels.insert("basilica.io/dind".into(), dind_supported.to_string());
+            labels.insert("basilica.ai/dind".into(), dind_supported.to_string());
             if let Some(err) = validation_error {
                 if !err.is_empty() {
-                    labels.insert("basilica.io/docker-error".into(), err);
+                    labels.insert("basilica.ai/docker-error".into(), err);
                 }
             }
         }
@@ -2051,9 +2051,9 @@ mod node_profile_wiring_tests {
         // Assert labels
         let (node_name, labels) = maybe_labels.expect("labels present");
         assert_eq!(node_name, "kube-node-1");
-        assert_eq!(labels.get("basilica.io/region").unwrap(), "us-east-1");
-        assert_eq!(labels.get("basilica.io/provider").unwrap(), "aws");
-        assert_eq!(labels.get("basilica.io/gpu-model").unwrap(), "NVIDIA A100");
+        assert_eq!(labels.get("basilica.ai/region").unwrap(), "us-east-1");
+        assert_eq!(labels.get("basilica.ai/provider").unwrap(), "aws");
+        assert_eq!(labels.get("basilica.ai/gpu-model").unwrap(), "NVIDIA A100");
 
         // Seed docker profile then re-run to assert docker labels
         persistence
@@ -2072,9 +2072,9 @@ mod node_profile_wiring_tests {
             .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
             .await?;
         let (_node2, labels2) = maybe_labels2.expect("labels present");
-        assert_eq!(labels2.get("basilica.io/docker-active").unwrap(), "true");
-        assert_eq!(labels2.get("basilica.io/docker-version").unwrap(), "24.0.7");
-        assert_eq!(labels2.get("basilica.io/dind").unwrap(), "true");
+        assert_eq!(labels2.get("basilica.ai/docker-active").unwrap(), "true");
+        assert_eq!(labels2.get("basilica.ai/docker-version").unwrap(), "24.0.7");
+        assert_eq!(labels2.get("basilica.ai/dind").unwrap(), "true");
 
         Ok(())
     }

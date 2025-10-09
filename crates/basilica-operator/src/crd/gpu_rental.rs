@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
-#[kube(group = "basilica.io", version = "v1", kind = "GpuRental", namespaced)]
+#[kube(group = "basilica.ai", version = "v1", kind = "GpuRental", namespaced)]
 #[kube(status = "GpuRentalStatus")]
 #[serde(rename_all = "camelCase")]
 pub struct GpuRentalSpec {
@@ -235,8 +235,8 @@ mod tests {
     fn crd_metadata_is_correct() {
         let crd = GpuRental::crd();
         let name = crd.metadata.name.unwrap();
-        assert_eq!(name, "gpurentals.basilica.io");
-        assert_eq!(crd.spec.group, "basilica.io");
+        assert_eq!(name, "gpurentals.basilica.ai");
+        assert_eq!(crd.spec.group, "basilica.ai");
         assert_eq!(crd.spec.names.kind, "GpuRental");
         assert_eq!(crd.spec.scope, "Namespaced");
     }

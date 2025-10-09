@@ -100,7 +100,7 @@ fn build_env(env: &[crate::crd::gpu_rental::EnvVar]) -> Vec<EnvVar> {
 
 fn build_tolerations() -> Vec<Toleration> {
     vec![Toleration {
-        key: Some("basilica.io/workloads-only".into()),
+        key: Some("basilica.ai/workloads-only".into()),
         operator: Some("Equal".into()),
         value: Some("true".into()),
         effect: Some("NoSchedule".into()),
@@ -113,7 +113,7 @@ fn build_node_affinity(gpu: &GpuSpec) -> Option<Affinity> {
         return None;
     }
     let expr = NodeSelectorRequirement {
-        key: "basilica.io/gpu-model".into(),
+        key: "basilica.ai/gpu-model".into(),
         operator: "In".into(),
         values: Some(gpu.model.clone()),
     };
@@ -363,13 +363,13 @@ pub fn render_rental_pod(
     }
 
     let mut base_labels: std::collections::BTreeMap<String, String> = vec![
-        ("basilica.io/type".to_string(), "rental".to_string()),
-        ("basilica.io/rental".to_string(), name.to_string()),
+        ("basilica.ai/type".to_string(), "rental".to_string()),
+        ("basilica.ai/rental".to_string(), name.to_string()),
     ]
     .into_iter()
     .collect();
     let gpu_bound = (spec.container.resources.gpus.count > 0).to_string();
-    base_labels.insert("basilica.io/gpu-bound".to_string(), gpu_bound);
+    base_labels.insert("basilica.ai/gpu-bound".to_string(), gpu_bound);
     let labels = Some(merge_labels(
         base_labels.into_iter().collect(),
         extra_labels.clone(),
@@ -378,7 +378,7 @@ pub fn render_rental_pod(
     let mut tolerations = build_tolerations();
     if spec.exclusive {
         tolerations.push(Toleration {
-            key: Some("basilica.io/rental-exclusive".into()),
+            key: Some("basilica.ai/rental-exclusive".into()),
             operator: Some("Equal".into()),
             value: Some("true".into()),
             effect: Some("NoSchedule".into()),
@@ -437,7 +437,7 @@ pub fn render_rental_service(name: &str, spec: &GpuRentalSpec) -> Option<Service
         })
         .collect();
     let selector = Some(
-        vec![("basilica.io/rental".to_string(), name.to_string())]
+        vec![("basilica.ai/rental".to_string(), name.to_string())]
             .into_iter()
             .collect(),
     );
@@ -445,7 +445,7 @@ pub fn render_rental_service(name: &str, spec: &GpuRentalSpec) -> Option<Service
         metadata: ObjectMeta {
             name: Some(format!("rental-svc-{}", name)),
             labels: Some(
-                vec![("basilica.io/rental".into(), name.into())]
+                vec![("basilica.ai/rental".into(), name.into())]
                     .into_iter()
                     .collect(),
             ),
@@ -498,10 +498,10 @@ pub fn render_discovery_headless_service(group: &str, ports: &[(u16, &str)]) -> 
         .collect();
     let labels = vec![
         (
-            "basilica.io/type".to_string(),
+            "basilica.ai/type".to_string(),
             "rental-discovery".to_string(),
         ),
-        ("basilica.io/discovery-group".to_string(), group.to_string()),
+        ("basilica.ai/discovery-group".to_string(), group.to_string()),
     ]
     .into_iter()
     .collect();
@@ -514,7 +514,7 @@ pub fn render_discovery_headless_service(group: &str, ports: &[(u16, &str)]) -> 
         spec: Some(ServiceSpec {
             cluster_ip: Some("None".into()),
             selector: Some(
-                vec![("basilica.io/discovery-group".to_string(), group.to_string())]
+                vec![("basilica.ai/discovery-group".to_string(), group.to_string())]
                     .into_iter()
                     .collect(),
             ),
@@ -559,7 +559,7 @@ fn render_http_route(
 
 pub fn render_network_policies(name: &str, spec: &GpuRentalSpec) -> Vec<NetworkPolicy> {
     let pod_selector = Some(
-        vec![("basilica.io/rental".to_string(), name.to_string())]
+        vec![("basilica.ai/rental".to_string(), name.to_string())]
             .into_iter()
             .collect(),
     );
@@ -656,7 +656,7 @@ pub fn render_network_policies(name: &str, spec: &GpuRentalSpec) -> Vec<NetworkP
             spec: Some(NetworkPolicySpec {
                 pod_selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
                     match_labels: Some(
-                        vec![("basilica.io/rental".into(), name.into())]
+                        vec![("basilica.ai/rental".into(), name.into())]
                             .into_iter()
                             .collect(),
                     ),
@@ -769,7 +769,7 @@ impl<C: K8sClient> RentalController<C> {
                 // Count Running + Pending rental pods in namespace
                 let pods = self
                     .client
-                    .list_pods_with_label(ns, "basilica.io/type", "rental")
+                    .list_pods_with_label(ns, "basilica.ai/type", "rental")
                     .await
                     .unwrap_or_default();
                 let running_or_pending = pods
@@ -832,7 +832,7 @@ impl<C: K8sClient> RentalController<C> {
                                         for term in &req.node_selector_terms {
                                             if let Some(exprs) = &term.match_expressions {
                                                 for expr in exprs {
-                                                    if expr.key == "basilica.io/gpu-model" {
+                                                    if expr.key == "basilica.ai/gpu-model" {
                                                         if let Some(values) = &expr.values {
                                                             if pod_gpu_count > 0 {
                                                                 for m in values {
@@ -928,10 +928,10 @@ impl<C: K8sClient> RentalController<C> {
             .metadata
             .labels
             .as_ref()
-            .and_then(|m| m.get("basilica.io/discovery-group").cloned());
+            .and_then(|m| m.get("basilica.ai/discovery-group").cloned());
         let extra_labels = discovery_label
             .as_ref()
-            .map(|g| vec![("basilica.io/discovery-group".to_string(), g.clone())]);
+            .map(|g| vec![("basilica.ai/discovery-group".to_string(), g.clone())]);
 
         let pod = render_rental_pod(&name, &spec, extra_labels.clone());
         // Create or replace
@@ -957,7 +957,7 @@ impl<C: K8sClient> RentalController<C> {
 
         // Auto-generate HTTPRoute when annotation is present
         if let Some(ann) = cr.metadata.annotations.as_ref() {
-            if let Some(hosts_str) = ann.get("basilica.io/route-host") {
+            if let Some(hosts_str) = ann.get("basilica.ai/route-host") {
                 let hostnames: Vec<String> = hosts_str
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -965,11 +965,11 @@ impl<C: K8sClient> RentalController<C> {
                     .collect();
                 if !hostnames.is_empty() {
                     let gw_name = ann
-                        .get("basilica.io/route-gateway")
+                        .get("basilica.ai/route-gateway")
                         .cloned()
                         .unwrap_or_else(|| "basilica-gw".to_string());
                     let port: u16 = ann
-                        .get("basilica.io/route-port")
+                        .get("basilica.ai/route-port")
                         .and_then(|v| v.parse::<u16>().ok())
                         .or_else(|| spec.network.ingress.first().map(|r| r.port))
                         .or_else(|| spec.container.ports.first().map(|p| p.container_port))
@@ -994,7 +994,7 @@ impl<C: K8sClient> RentalController<C> {
         // Derive status and enforce pay-as-you-go billing policy
         let pods = self
             .client
-            .list_pods_with_label(ns, "basilica.io/rental", &name)
+            .list_pods_with_label(ns, "basilica.ai/rental", &name)
             .await?;
         let (state, pod_name) = compute_rental_state_from_pods(&pods);
         let mut start_time_str = prev_status.start_time.clone();
@@ -1006,7 +1006,7 @@ impl<C: K8sClient> RentalController<C> {
         let mut endpoints: Option<Vec<String>> = None;
         let services = self
             .client
-            .list_services_with_label(ns, "basilica.io/rental", &name)
+            .list_services_with_label(ns, "basilica.ai/rental", &name)
             .await
             .unwrap_or_default();
         if !services.is_empty() {
@@ -1242,7 +1242,7 @@ mod tests {
                 .labels
                 .as_ref()
                 .unwrap()
-                .get("basilica.io/rental")
+                .get("basilica.ai/rental")
                 .unwrap(),
             "r1"
         );
@@ -1447,7 +1447,7 @@ mod tests {
         let tols = pod.spec.as_ref().unwrap().tolerations.as_ref().unwrap();
         assert!(tols
             .iter()
-            .any(|t| t.key.as_deref() == Some("basilica.io/rental-exclusive")
+            .any(|t| t.key.as_deref() == Some("basilica.ai/rental-exclusive")
                 && t.value.as_deref() == Some("true")));
     }
 
@@ -1486,7 +1486,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p1".into()),
                 labels: Some(
-                    vec![("basilica.io/rental".into(), "rent1".into())]
+                    vec![("basilica.ai/rental".into(), "rent1".into())]
                         .into_iter()
                         .collect(),
                 ),
@@ -1516,7 +1516,7 @@ mod tests {
         // Service should exist
         let svcs = controller
             .client
-            .list_services_with_label("ns", "basilica.io/rental", "rent1")
+            .list_services_with_label("ns", "basilica.ai/rental", "rent1")
             .await
             .unwrap();
         assert!(!svcs.is_empty());
@@ -1603,7 +1603,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p-exist".into()),
                 labels: Some(
-                    vec![("basilica.io/type".into(), "rental".into())]
+                    vec![("basilica.ai/type".into(), "rental".into())]
                         .into_iter()
                         .collect(),
                 ),
@@ -1685,7 +1685,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p-a100".into()),
                 labels: Some(
-                    vec![("basilica.io/type".into(), "rental".into())]
+                    vec![("basilica.ai/type".into(), "rental".into())]
                         .into_iter()
                         .collect(),
                 ),
@@ -1742,7 +1742,7 @@ mod tests {
         let mut cr = GpuRental::new("rent-route", spec);
         let mut annotations = std::collections::BTreeMap::new();
         annotations.insert(
-            "basilica.io/route-host".to_string(),
+            "basilica.ai/route-host".to_string(),
             "demo.u-test.local".to_string(),
         );
         cr.metadata.annotations = Some(annotations);
@@ -1813,7 +1813,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p-gpu".into()),
                 labels: Some(
-                    vec![("basilica.io/type".into(), "rental".into())]
+                    vec![("basilica.ai/type".into(), "rental".into())]
                         .into_iter()
                         .collect(),
                 ),
@@ -1899,7 +1899,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p-a100-0gpu".into()),
                 labels: Some(
-                    vec![("basilica.io/type".into(), "rental".into())]
+                    vec![("basilica.ai/type".into(), "rental".into())]
                         .into_iter()
                         .collect(),
                 ),
@@ -1953,7 +1953,7 @@ mod tests {
         let mut cr = GpuRental::new("rent-disc", spec);
         let mut labels = std::collections::BTreeMap::new();
         labels.insert(
-            "basilica.io/discovery-group".to_string(),
+            "basilica.ai/discovery-group".to_string(),
             "team-1".to_string(),
         );
         cr.metadata.labels = Some(labels);
@@ -1974,7 +1974,7 @@ mod tests {
         let pod_labels = pod.metadata.labels.unwrap_or_default();
         assert_eq!(
             pod_labels
-                .get("basilica.io/discovery-group")
+                .get("basilica.ai/discovery-group")
                 .map(|s| s.as_str()),
             Some("team-1")
         );
@@ -1982,7 +1982,7 @@ mod tests {
         // A headless discovery service should exist for the group
         let svcs = controller
             .client
-            .list_services_with_label("ns", "basilica.io/discovery-group", "team-1")
+            .list_services_with_label("ns", "basilica.ai/discovery-group", "team-1")
             .await
             .unwrap();
         assert!(
@@ -2034,7 +2034,7 @@ mod tests {
             metadata: ObjectMeta {
                 name: Some("p2".into()),
                 labels: Some(
-                    vec![("basilica.io/rental".into(), "rent2".into())]
+                    vec![("basilica.ai/rental".into(), "rent2".into())]
                         .into_iter()
                         .collect(),
                 ),

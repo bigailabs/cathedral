@@ -120,6 +120,29 @@ docker-build-gpu-attestor:
 # Build all Docker images
 docker-build: docker-build-executor docker-build-gpu-attestor
 
+# Build operator Docker image locally
+docker-build-operator TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/operator/build.sh
+    echo "Building operator image with tag: {{TAG}}"
+    ./scripts/operator/build.sh --image-name ghcr.io/one-covenant/basilica-operator --image-tag {{TAG}}
+    echo "✅ Operator image built: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+    echo ""
+    echo "To push to registry, run:"
+    echo "  docker push ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+
+# Build and push operator Docker image
+docker-push-operator TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Build first
+    just docker-build-operator {{TAG}}
+    # Push
+    echo "Pushing operator image to registry..."
+    docker push ghcr.io/one-covenant/basilica-operator:{{TAG}}
+    echo "✅ Operator image pushed: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+
 # =============================================================================
 # DEPLOYMENT COMMANDS
 # =============================================================================
@@ -377,6 +400,12 @@ local-subtensor-up:
     set -euo pipefail
     ./scripts/subtensor-local/start.sh
 
+# Stop local Subtensor
+local-subtensor-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/subtensor-local/docker-compose.yml down -v
+
 # Setup remote K3s cluster via Ansible (run ONCE to provision the cluster)
 k3s-provision TAG="k3_test":
     #!/usr/bin/env bash
@@ -531,6 +560,60 @@ local-validator-down:
     #!/usr/bin/env bash
     set -euo pipefail
     docker compose -f scripts/validator/compose.local.yml down -v
+
+# Start local Miner against local Subtensor (uses Alice/M1 hotkey)
+local-miner-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Detect external IP
+    EXTERNAL_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "127.0.0.1")
+    echo "Detected external IP: $EXTERNAL_IP"
+
+    # Always regenerate miner.local.toml with current external IP
+    echo "Creating config/miner.local.toml for local miner..."
+    {
+        printf '[database]\n'
+        printf 'url = "sqlite:/app/data/miner.db?mode=rwc"\n'
+        printf 'max_connections = 10\n'
+        printf 'run_migrations = true\n\n'
+        printf '[bittensor]\n'
+        printf 'wallet_name = "Alice"\n'
+        printf 'hotkey_name = "M1"\n'
+        printf 'network = "local"\n'
+        printf 'netuid = 2\n'
+        printf 'chain_endpoint = "wss://host.docker.internal:9944"\n'
+        printf 'weight_interval_secs = 300\n'
+        printf 'axon_port = 8091\n'
+        printf 'external_ip = "%s"\n' "$EXTERNAL_IP"
+        printf 'skip_registration = false\n\n'
+        printf '[validator_comms]\n'
+        printf 'host = "0.0.0.0"\n'
+        printf 'port = 8080\n\n'
+        printf '[node_management]\n'
+        printf 'nodes = [\n'
+        printf '  { host = "69.19.137.104", port = 22, username = "shadeform" },\n'
+        printf ']\n\n'
+        printf '[ssh_session]\n'
+        printf 'miner_node_key_path = "/root/.ssh/tplr"\n'
+        printf 'default_node_username = "shadeform"\n\n'
+        printf '[security]\n'
+        printf 'verify_signatures = false\n\n'
+        printf '[metrics]\n'
+        printf 'enabled = true\n\n'
+        printf '[metrics.prometheus]\n'
+        printf 'host = "0.0.0.0"\n'
+        printf 'port = 9090\n\n'
+        printf '[validator_assignment]\n'
+        printf 'strategy = "fixed_assignment"\n'
+        printf 'validator_hotkey = "5DJBmrfyRqe6eUUHLaWSho3Wgr5i8gDTWKxxWEmXvFhHvWTM"\n'
+    } > config/miner.local.toml
+    # Run miner container
+    docker compose -f scripts/miner/compose.local.yml up -d
+
+local-miner-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/miner/compose.local.yml down -v
 
 # Start local Subtensor + API together
 local-dev-up TAG="k3_test":
@@ -1152,8 +1235,12 @@ e2e-up TAG="k3_test":
     just k3s-provision {{TAG}}
 
     # 3. Start local validator
-    echo "🔍 Starting local validator..."
+    echo "🔍 Starting local validator (Alice/default)..."
     just local-validator-up
+
+    # 3.5. Start local miner
+    echo "⛏️  Starting local miner (Alice/M1)..."
+    just local-miner-up
 
     # 4. Start local API (connects to remote K3s and local Subtensor)
     echo "🌐 Starting local API..."
@@ -1166,7 +1253,8 @@ e2e-up TAG="k3_test":
     echo "  - Remote K3s cluster: see build/k3s.yaml"
     echo "  - Operator image: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
     echo "  - API image: ghcr.io/one-covenant/basilica-api:{{TAG}}"
-    echo "  - Local Validator: running"
+    echo "  - Local Validator (Alice/default): running on port 8080"
+    echo "  - Local Miner (Alice/M1): running on port 8081"
     echo "  - Local API: http://localhost:8000"
     echo ""
     echo "Run 'just e2e-status' to check all components"
@@ -1187,11 +1275,15 @@ e2e-down:
     echo "🛑 Stopping local API..."
     just local-api-down || true
 
-    # 3. Stop local validator
+    # 3. Stop local miner
+    echo "🛑 Stopping local miner..."
+    just local-miner-down || true
+
+    # 4. Stop local validator
     echo "🛑 Stopping local validator..."
     just local-validator-down || true
 
-    # 4. Stop local Subtensor
+    # 5. Stop local Subtensor
     echo "🛑 Stopping local Subtensor..."
     cd scripts/subtensor-local && docker compose down -v || true
     cd ../..
@@ -1279,9 +1371,20 @@ e2e-status:
     fi
 
     # Local Validator
-    echo "🔍 Local Validator:"
+    echo "🔍 Local Validator (Alice/default):"
     if docker ps --filter "name=basilica-validator" --format "{{{{.Names}}}}" | grep -q validator; then
         docker ps --filter "name=basilica-validator" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+        echo "  Port: 8080"
+    else
+        echo "  ❌ Not running"
+    fi
+    echo ""
+
+    # Local Miner
+    echo "⛏️  Local Miner (Alice/M1):"
+    if docker ps --filter "name=basilica-miner" --format "{{{{.Names}}}}" | grep -q miner; then
+        docker ps --filter "name=basilica-miner" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+        echo "  Port: 8081"
     else
         echo "  ❌ Not running"
     fi
@@ -1295,6 +1398,13 @@ e2e-status:
     else
         echo "  ❌ Not running"
     fi
+
+# Run complete E2E validation test suite (RBAC + API key + smoke tests)
+e2e-validate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/e2e/run-validation.sh
+    ./scripts/e2e/run-validation.sh
 
 # =============================================================================
 # SHOW HELP

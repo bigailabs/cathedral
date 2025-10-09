@@ -147,14 +147,14 @@ mod tests {
     fn install_commands_include_server_token_and_args() {
         let mut cfg = K3sAgentConfig::new("https://10.0.0.1:6443", "TOKEN123");
         cfg.node_name = Some("gpu-node-01".into());
-        cfg.extra_args = vec!["--node-taint basilica.io/workloads-only=true:NoSchedule".into()];
+        cfg.extra_args = vec!["--node-taint basilica.ai/workloads-only=true:NoSchedule".into()];
         cfg.channel = Some("v1.29".into());
         let cmds = build_install_commands(&cfg);
         let all = cmds.join("\n");
         assert!(all.contains("K3S_URL=https://10.0.0.1:6443"));
         assert!(all.contains("K3S_TOKEN=TOKEN123"));
         assert!(all.contains("INSTALL_K3S_CHANNEL=v1.29"));
-        assert!(all.contains("agent -- --node-name gpu-node-01 --node-taint basilica.io/workloads-only=true:NoSchedule"));
+        assert!(all.contains("agent -- --node-name gpu-node-01 --node-taint basilica.ai/workloads-only=true:NoSchedule"));
         assert!(all.contains("systemctl enable k3s-agent"));
         assert!(all.contains("systemctl restart k3s-agent"));
     }

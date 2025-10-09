@@ -84,7 +84,7 @@ fn get_required_scope(req: &Request) -> Option<String> {
     let method = req.method();
 
     match (method, path) {
-        // Rental endpoints
+        // Rental endpoints (v1)
         (&Method::GET, "/rentals") => Some("rentals:list".to_string()),
         (&Method::POST, "/rentals") => Some("rentals:create".to_string()),
         (&Method::DELETE, p) if p.starts_with("/rentals/") && !p.contains("/logs") => {
@@ -94,6 +94,24 @@ fn get_required_scope(req: &Request) -> Option<String> {
             Some("rentals:logs".to_string())
         }
         (&Method::GET, p) if p.starts_with("/rentals/") => Some("rentals:view".to_string()),
+
+        // Rental endpoints (v2)
+        (&Method::GET, "/v2/rentals") => Some("rentals:list".to_string()),
+        (&Method::POST, "/v2/rentals") => Some("rentals:create".to_string()),
+        (&Method::POST, "/v2/rentals-compat") => Some("rentals:create".to_string()),
+        (&Method::DELETE, p) if p.starts_with("/v2/rentals/") && !p.contains("/logs") && !p.contains("/exec") && !p.contains("/extend") => {
+            Some("rentals:stop".to_string())
+        }
+        (&Method::GET, p) if p.starts_with("/v2/rentals/") && p.ends_with("/logs") => {
+            Some("rentals:logs".to_string())
+        }
+        (&Method::POST, p) if p.starts_with("/v2/rentals/") && p.ends_with("/exec") => {
+            Some("rentals:exec".to_string())
+        }
+        (&Method::POST, p) if p.starts_with("/v2/rentals/") && p.ends_with("/extend") => {
+            Some("rentals:extend".to_string())
+        }
+        (&Method::GET, p) if p.starts_with("/v2/rentals/") => Some("rentals:view".to_string()),
 
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),

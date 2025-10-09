@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
-    group = "basilica.io",
+    group = "basilica.ai",
     version = "v1",
     kind = "BasilicaJob",
     namespaced
@@ -96,8 +96,8 @@ mod tests {
     fn crd_metadata_is_correct() {
         let crd = BasilicaJob::crd();
         let name = crd.metadata.name.unwrap();
-        assert_eq!(name, "basilicajobs.basilica.io");
-        assert_eq!(crd.spec.group, "basilica.io");
+        assert_eq!(name, "basilicajobs.basilica.ai");
+        assert_eq!(crd.spec.group, "basilica.ai");
         assert_eq!(crd.spec.names.kind, "BasilicaJob");
         assert_eq!(crd.spec.scope, "Namespaced");
     }

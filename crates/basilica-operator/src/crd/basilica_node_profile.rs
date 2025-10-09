@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
-    group = "basilica.io",
+    group = "basilica.ai",
     version = "v1",
     kind = "BasilicaNodeProfile",
     namespaced
