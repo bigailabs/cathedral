@@ -130,5 +130,5 @@ crates/basilica-sdk-python/python/basilica/*.so
 **/*.pyo
 **/*.pyd
 crates/basilica-sdk-python/.venv/
-docs/
-build/
+# docs/
+# build/

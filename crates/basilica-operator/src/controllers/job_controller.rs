@@ -291,10 +291,10 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
                     ..Default::default()
                 }]);
 
-                // Phase 3.4: Storage daemon with AWS SDK (bypasses credential validation)
+                // Phase 3.5: Storage daemon with AWS SDK and fixed account ID extraction
                 let storage_sidecar = Container {
                     name: format!("basilica-storage-{}", name),
-                    image: Some("ghcr.io/one-covenant/basilica/storage-daemon:k3_aws_sdk".into()),
+                    image: Some("ghcr.io/one-covenant/basilica/storage-daemon:k3_sdk_fix".into()),
                     command: Some(vec!["/usr/local/bin/basilica-storage-daemon".into()]),
                     args: None, // No --allow-other args needed
                     env: Some(env),
@@ -792,7 +792,7 @@ mod tests {
             .iter()
             .find(|c| c.name.starts_with("basilica-storage-"))
             .expect("Storage sidecar should exist");
-        assert_eq!(sidecar.image.as_ref().unwrap(), "ghcr.io/one-covenant/basilica/storage-daemon:k3_aws_sdk");
+        assert_eq!(sidecar.image.as_ref().unwrap(), "ghcr.io/one-covenant/basilica/storage-daemon:k3_sdk_fix");
 
         // Verify env vars
         let envs = sidecar.env.as_ref().unwrap();

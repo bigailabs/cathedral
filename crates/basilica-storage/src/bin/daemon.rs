@@ -94,9 +94,18 @@ async fn main() -> Result<()> {
     // Create storage backend
     let config = match args.backend.as_str() {
         "r2" => {
+            // Extract account_id from endpoint URL
+            // Expected format: https://<account_id>.r2.cloudflarestorage.com
             let account_id = args.endpoint
                 .as_ref()
-                .and_then(|e| e.split('.').next())
+                .and_then(|e| {
+                    // Remove https:// or http:// prefix
+                    let url_without_scheme = e.strip_prefix("https://")
+                        .or_else(|| e.strip_prefix("http://"))
+                        .unwrap_or(e);
+                    // Split by '.' and take first part (account_id)
+                    url_without_scheme.split('.').next()
+                })
                 .context("R2 requires account_id from endpoint")?;
 
             let access_key = args.access_key_id.context("R2 requires access_key_id")?;
