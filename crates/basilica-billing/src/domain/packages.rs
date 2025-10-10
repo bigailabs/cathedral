@@ -84,32 +84,9 @@ impl BillingPackage {
     }
 }
 
-/// Pricing constants and business rules
-pub struct PricingRules;
-
-impl PricingRules {
-    pub const H100_HOURLY_RATE: f64 = 3.5;
-    pub const H200_HOURLY_RATE: f64 = 5.0;
-    pub const CUSTOM_HOURLY_RATE: f64 = 0.0;
-    pub const DEFAULT_PACKAGE_ID: &'static str = "h100";
-    pub const MINIMUM_BILLABLE_HOURS: f64 = 1.0;
-
-    /// Validate if a price is within acceptable range
-    pub fn is_valid_price(price: f64) -> bool {
-        (0.0..=10000.0).contains(&price)
-    }
-
-    /// Calculate discount percentage based on usage
-    pub fn calculate_volume_discount(gpu_hours: Decimal) -> Decimal {
-        if gpu_hours > Decimal::from(1000) {
-            Decimal::from_str_exact("0.10").unwrap() // 10% discount
-        } else if gpu_hours > Decimal::from(500) {
-            Decimal::from_str_exact("0.05").unwrap() // 5% discount
-        } else {
-            Decimal::ZERO
-        }
-    }
-}
+// Pricing business rules - currently empty as all pricing comes from database
+// Package assignment happens automatically via GPU model detection in
+// PackageId::from_gpu_model() and find_package_for_gpu_model() repository method
 
 use async_trait::async_trait;
 
@@ -174,7 +151,6 @@ impl PackageService for RepositoryPackageService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_decimal::prelude::FromStr;
 
     #[test]
     fn test_package_creation() {
@@ -211,17 +187,5 @@ mod tests {
 
         let cost = package.calculate_cost(&usage);
         assert_eq!(cost.total_cost, CreditBalance::from_f64(35.0).unwrap());
-    }
-
-    #[test]
-    fn test_volume_discount() {
-        let no_discount = PricingRules::calculate_volume_discount(Decimal::from(100));
-        assert_eq!(no_discount, Decimal::ZERO);
-
-        let small_discount = PricingRules::calculate_volume_discount(Decimal::from(600));
-        assert_eq!(small_discount, Decimal::from_str("0.05").unwrap());
-
-        let large_discount = PricingRules::calculate_volume_discount(Decimal::from(1500));
-        assert_eq!(large_discount, Decimal::from_str("0.10").unwrap());
     }
 }

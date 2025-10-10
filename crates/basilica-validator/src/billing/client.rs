@@ -46,12 +46,15 @@ impl BillingClient {
             .timeout(Duration::from_secs(config.timeout_secs));
 
         if config.use_tls {
-            let host = config.billing_endpoint
+            let host = config
+                .billing_endpoint
                 .trim_start_matches("https://")
                 .trim_start_matches("http://")
                 .split([':', '/'].as_ref())
                 .next()
-                .ok_or_else(|| anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint)
+                })?;
             endpoint = endpoint
                 .tls_config(ClientTlsConfig::new().domain_name(host))
                 .with_context(|| "Failed to configure TLS for billing endpoint")?;

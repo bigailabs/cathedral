@@ -110,7 +110,10 @@ async fn get_balance(
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
     let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!("Invalid user_id format for {}: {}. User ID must be a valid UUID.", auth.user_id, e);
+        error!(
+            "Invalid user_id format for {}: {}. User ID must be a valid UUID.",
+            auth.user_id, e
+        );
         ApiError::BadRequest {
             message: "User ID must be a valid UUID for billing operations".to_string(),
         }
@@ -151,7 +154,10 @@ async fn get_packages(
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
     let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!("Invalid user_id format for {}: {}. User ID must be a valid UUID.", auth.user_id, e);
+        error!(
+            "Invalid user_id format for {}: {}. User ID must be a valid UUID.",
+            auth.user_id, e
+        );
         ApiError::BadRequest {
             message: "User ID must be a valid UUID for billing operations".to_string(),
         }
@@ -218,7 +224,10 @@ async fn get_usage_history(
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
     let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!("Invalid user_id format for {}: {}. User ID must be a valid UUID.", auth.user_id, e);
+        error!(
+            "Invalid user_id format for {}: {}. User ID must be a valid UUID.",
+            auth.user_id, e
+        );
         ApiError::BadRequest {
             message: "User ID must be a valid UUID for billing operations".to_string(),
         }

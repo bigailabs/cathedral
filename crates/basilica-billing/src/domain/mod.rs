@@ -12,7 +12,7 @@ pub use aggregations::AggregationJobs;
 pub use billing_handlers::BillingEventHandlers;
 pub use credits::{CreditManager, CreditOperations, Reservation};
 pub use events::{EventStore, EventStoreOperations};
-pub use packages::{BillingPackage, PackageService, PricingRules, RepositoryPackageService};
+pub use packages::{BillingPackage, PackageService, RepositoryPackageService};
 pub use processor::{EventHandlers, EventProcessor, UsageAggregation};
 pub use rentals::{Rental, RentalManager, RentalOperations};
 pub use rules_engine::{BillingRule, RulesEngine, RulesEvaluator};

@@ -1122,16 +1122,15 @@ impl BillingService for BillingServiceImpl {
 
         let billing_packages = packages.into_iter().map(|p| p.to_proto()).collect();
 
-        // Get the user's current package preference
+        // Get the user's current package preference (empty string if none set)
+        // Package assignment happens automatically based on GPU model when creating rentals
         let current_package_id = match self
             .user_preferences_repository
             .get_user_package(&user_id)
             .await
         {
             Ok(Some(pref)) => pref.package_id.to_string(),
-            Ok(None) | Err(_) => {
-                crate::domain::packages::PricingRules::DEFAULT_PACKAGE_ID.to_string()
-            }
+            Ok(None) | Err(_) => String::new(), // No preference set
         };
 
         let response = GetBillingPackagesResponse {
