@@ -46,10 +46,10 @@ variable "additional_target_groups" {
 variable "additional_listener_rules" {
   description = "Additional listener rules to create"
   type = map(object({
-    priority           = number
-    target_group_key   = string
-    listener_protocol  = string
-    path_patterns      = list(string)
+    priority          = number
+    target_group_key  = string
+    listener_protocol = string
+    path_patterns     = list(string)
   }))
   default = {}
 }
@@ -70,4 +70,10 @@ variable "idle_timeout" {
   description = "The time in seconds that the connection is allowed to be idle"
   type        = number
   default     = 60
+}
+
+variable "validator_allowed_ips" {
+  description = "List of validator IP addresses/CIDR blocks allowed to access billing gRPC endpoint"
+  type        = list(string)
+  default     = []
 }

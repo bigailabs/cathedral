@@ -1,0 +1,47 @@
+# Example Terraform variables configuration
+# Copy this file to terraform.tfvars and update with your actual values
+
+# Required: Docker images for services
+billing_image       = "ghcr.io/one-covenant/basilica/basilica-billing:latest"
+payments_image      = "ghcr.io/one-covenant/basilica/basilica-payments:latest"
+basilica_api_image  = "ghcr.io/one-covenant/basilica/basilica-api:latest"
+
+# Required: Basilica API Bittensor configuration
+basilica_api_validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+
+# Optional: AWS region (default: us-east-2)
+aws_region = "us-east-2"
+
+# Optional: Project name (default: basilica)
+project_name = "basilica"
+
+# Required: ACM certificate ARN for HTTPS/TLS
+certificate_arn = "arn:aws:acm:us-east-2:ACCOUNT_ID:certificate/CERTIFICATE_ID"
+
+# Optional: Bittensor network configuration
+basilica_api_network = "finney"
+basilica_api_netuid  = 39
+
+# Optional: Auth0 configuration
+basilica_auth0_domain   = "tenant.auth0.com"
+basilica_auth0_client_id = "auth0-client-id"
+basilica_auth0_audience  = "https://api.basilica.ai/"
+basilica_auth0_issuer    = "https://tenant.auth0.com/"
+
+# Validator IP Whitelisting for Billing gRPC Endpoint
+# List of validator IP addresses/CIDR blocks allowed to access billing.basilica.ai
+# Leave empty [] to allow all traffic (not recommended for production)
+validator_allowed_ips = [
+  "203.0.113.10/32",     # Validator 1
+  "203.0.113.20/32",     # Validator 2
+  "198.51.100.0/24",     # Validator subnet
+]
+
+# Route53 DNS Management (Optional)
+# Leave empty "" if using external DNS provider
+# You'll manually create CNAME record using terraform output billing_grpc_endpoint
+route53_zone_id = ""
+
+# Example with Route53 enabled:
+# route53_zone_id = "Z1234567890ABC"
+# This will create an A record: billing.basilica.ai -> Internal ALB

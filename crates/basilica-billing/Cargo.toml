@@ -58,6 +58,9 @@ clap-verbosity-flag = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
 [dev-dependencies]
 
 [[bin]]

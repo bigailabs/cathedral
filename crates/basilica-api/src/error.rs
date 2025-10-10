@@ -48,6 +48,14 @@ pub enum ApiError {
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
+    /// Insufficient balance
+    #[error("Insufficient balance: {message}")]
+    InsufficientBalance {
+        message: String,
+        current_balance: String,
+        required: String,
+    },
+
     /// Invalid request
     #[error("Invalid request: {message}")]
     InvalidRequest { message: String },
@@ -111,6 +119,7 @@ impl ApiError {
             ApiError::Authentication { .. } => "BASILICA_API_AUTH_ERROR",
             ApiError::Authorization { .. } => "BASILICA_API_AUTHZ_ERROR",
             ApiError::RateLimitExceeded => "BASILICA_API_RATE_LIMIT",
+            ApiError::InsufficientBalance { .. } => "BASILICA_API_INSUFFICIENT_BALANCE",
             ApiError::InvalidRequest { .. } => "BASILICA_API_INVALID_REQUEST",
             ApiError::Aggregation { .. } => "BASILICA_API_AGGREGATION_ERROR",
             ApiError::Cache { .. } => "BASILICA_API_CACHE_ERROR",
@@ -167,6 +176,17 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Please try again later.".to_string(),
             ),
+            ApiError::InsufficientBalance {
+                message,
+                current_balance,
+                required,
+            } => {
+                let detailed_message = format!(
+                    "{}. Current balance: {}, Required minimum: {}",
+                    message, current_balance, required
+                );
+                (StatusCode::PAYMENT_REQUIRED, detailed_message)
+            }
             ApiError::InvalidRequest { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
             ApiError::Aggregation { .. } => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             ApiError::Cache { .. } => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),

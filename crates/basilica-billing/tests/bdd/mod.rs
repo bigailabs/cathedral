@@ -115,7 +115,7 @@ impl TestContext {
             "TRUNCATE TABLE billing.user_preferences CASCADE",
             "TRUNCATE TABLE billing.credits CASCADE",
             "TRUNCATE TABLE billing.users CASCADE",
-            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'a100', 'rtx4090', 'custom')",
+            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'h200', 'a100', 'custom')",
         ];
 
         for query in queries {
@@ -124,45 +124,50 @@ impl TestContext {
     }
 
     async fn seed_test_data(pool: &Pool<Postgres>) {
+        // Test packages matching production pricing from migration 005_billing_packages.sql
+        // h100: $3.50/hour (production default)
+        // h200: $5.00/hour (production)
+        // custom: $0.00/hour (production - for custom deals)
+        // a100: Test-only package for additional coverage
         let packages = vec![
             (
                 "h100",
                 "NVIDIA H100",
                 "80",
-                "8.0",
-                "1.0",
-                "0.5",
-                "0.05",
+                "3.5", // Matches production pricing
+                "0.0",
+                "0.0",
+                "0.0",
+                true,
+            ),
+            (
+                "h200",
+                "NVIDIA H200",
+                "141",
+                "5.0", // Matches production pricing
+                "0.0",
+                "0.0",
+                "0.0",
                 true,
             ),
             (
                 "a100",
                 "NVIDIA A100",
                 "40",
-                "5.0",
-                "0.8",
-                "0.4",
-                "0.04",
-                true,
-            ),
-            (
-                "rtx4090",
-                "NVIDIA RTX 4090",
-                "24",
-                "3.0",
-                "0.6",
-                "0.3",
-                "0.03",
+                "2.5", // Test-only package for coverage
+                "0.0",
+                "0.0",
+                "0.0",
                 true,
             ),
             (
                 "custom",
                 "Custom Configuration",
                 "0",
-                "1.0",
-                "0.5",
-                "0.2",
-                "0.02",
+                "0.0", // Matches production pricing (free/custom deals)
+                "0.0",
+                "0.0",
+                "0.0",
                 true,
             ),
         ];

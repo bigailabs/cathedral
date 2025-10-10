@@ -39,9 +39,10 @@ use crate::{
     auth::TokenManager,
     error::{ApiError, ErrorResponse, Result},
     types::{
-        ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, CreateApiKeyRequest,
-        HealthCheckResponse, ListAvailableNodesQuery, ListRentalsQuery,
-        RentalStatusWithSshResponse,
+        ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
+        CreateDepositAccountResponse, DepositAccountResponse, HealthCheckResponse,
+        ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
+        PackagesResponse, RentalStatusWithSshResponse, RentalUsageResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -224,6 +225,83 @@ impl BasilicaClient {
         } else {
             self.handle_error_response(response).await
         }
+    }
+
+    // ===== Payment Management =====
+
+    /// Get deposit account for the authenticated user
+    pub async fn get_deposit_account(&self) -> Result<DepositAccountResponse> {
+        self.get("/payments/deposit-account").await
+    }
+
+    /// Create a deposit account for the authenticated user
+    pub async fn create_deposit_account(&self) -> Result<CreateDepositAccountResponse> {
+        self.post("/payments/deposit-account", &serde_json::json!({}))
+            .await
+    }
+
+    /// List deposits for the authenticated user
+    pub async fn list_deposits(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<ListDepositsResponse> {
+        let query = ListDepositsQuery {
+            limit: limit.unwrap_or(50),
+            offset: offset.unwrap_or(0),
+        };
+
+        let url = format!("{}/payments/deposits", self.base_url);
+        let mut request = self.http_client.get(&url);
+        request = request.query(&query);
+
+        let request = self.apply_auth(request).await?;
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    // ===== Billing Management =====
+
+    /// Get balance for the authenticated user
+    pub async fn get_balance(&self) -> Result<BalanceResponse> {
+        self.get("/billing/balance").await
+    }
+
+    /// Get available billing packages
+    pub async fn get_packages(&self) -> Result<PackagesResponse> {
+        self.get("/billing/packages").await
+    }
+
+    /// List usage history for authenticated user
+    pub async fn list_usage_history(
+        &self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<UsageHistoryResponse> {
+        let mut params = Vec::new();
+        if let Some(limit) = limit {
+            params.push(("limit", limit.to_string()));
+        }
+        if let Some(offset) = offset {
+            params.push(("offset", offset.to_string()));
+        }
+
+        let url = format!("{}/billing/usage", self.base_url);
+        let mut request = self.http_client.get(&url);
+
+        if !params.is_empty() {
+            request = request.query(&params);
+        }
+
+        let request = self.apply_auth(request).await?;
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    /// Get detailed usage for a specific rental
+    pub async fn get_rental_usage(&self, rental_id: &str) -> Result<RentalUsageResponse> {
+        let path = format!("/billing/usage/{}", rental_id);
+        self.get(&path).await
     }
 
     // ===== Private Helper Methods =====

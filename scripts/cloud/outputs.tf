@@ -1,5 +1,11 @@
 output "alb_dns_name" {
-  value = module.alb.alb_dns_name
+  description = "Internal ALB DNS name (use this for Cloudflare CNAME: billing.basilica.ai)"
+  value       = module.alb.alb_dns_name
+}
+
+output "billing_grpc_endpoint" {
+  description = "Billing gRPC endpoint for Cloudflare DNS configuration - Create CNAME: billing.basilica.ai -> this value"
+  value       = module.alb.alb_dns_name
 }
 
 output "ecs_cluster_name" {

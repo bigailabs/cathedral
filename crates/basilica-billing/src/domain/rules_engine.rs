@@ -1,9 +1,15 @@
 use crate::domain::packages::BillingPackage;
-use crate::domain::types::{CostBreakdown, CreditBalance, PackageId, UsageMetrics};
+use crate::domain::types::{
+    CostBreakdown, CreditBalance, DiscountType, PackageId, UsageMetrics, UserId,
+};
 use crate::error::Result;
-use crate::storage::{PackageRepository, RulesRepository};
+use crate::metrics::BillingMetrics;
+use crate::storage::{
+    PackageRepository, PromoCodeRepository, RulesRepository, UserMetadataRepository,
+};
 use async_trait::async_trait;
 use chrono::Timelike;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -101,8 +107,10 @@ pub enum RuleAction {
 pub trait RulesEvaluator: Send + Sync {
     async fn evaluate_package(
         &self,
+        user_id: &UserId,
         package_id: &PackageId,
         usage: &UsageMetrics,
+        promo_code: Option<&str>,
         metadata: &HashMap<String, String>,
     ) -> Result<CostBreakdown>;
 
@@ -128,17 +136,152 @@ pub trait RulesEvaluator: Send + Sync {
 pub struct RulesEngine {
     package_repository: Arc<dyn PackageRepository>,
     rules_repository: Arc<dyn RulesRepository>,
+    user_metadata_repository: Arc<dyn UserMetadataRepository>,
+    promo_code_repository: Arc<dyn PromoCodeRepository>,
+    metrics: Option<Arc<BillingMetrics>>,
 }
 
 impl RulesEngine {
     pub fn new(
         package_repository: Arc<dyn PackageRepository>,
         rules_repository: Arc<dyn RulesRepository>,
+        user_metadata_repository: Arc<dyn UserMetadataRepository>,
+        promo_code_repository: Arc<dyn PromoCodeRepository>,
     ) -> Self {
         Self {
             package_repository,
             rules_repository,
+            user_metadata_repository,
+            promo_code_repository,
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<BillingMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    async fn apply_automatic_discounts(
+        &self,
+        user_id: &UserId,
+        package_id: &PackageId,
+        promo_code: Option<&str>,
+        mut cost: CostBreakdown,
+    ) -> Result<CostBreakdown> {
+        let user_metadata = self
+            .user_metadata_repository
+            .get_user_metadata(user_id)
+            .await?;
+        let tier_discount = user_metadata.effective_discount_percentage();
+
+        let mut best_discount_percentage = tier_discount;
+        let mut fixed_discount_amount = CreditBalance::zero();
+        let mut promo_applied = false;
+
+        if let Some(code) = promo_code {
+            match self.promo_code_repository.validate_and_get(code).await {
+                Ok(promo) => {
+                    if promo.applicable_packages.is_empty()
+                        || promo
+                            .applicable_packages
+                            .iter()
+                            .any(|p| p.as_str() == package_id.as_str())
+                    {
+                        if let Some(ref metrics) = self.metrics {
+                            metrics
+                                .record_promo_code_validation(code, true, "valid")
+                                .await;
+                        }
+
+                        match promo.discount_type {
+                            DiscountType::Percentage => {
+                                if promo.discount_value > best_discount_percentage {
+                                    best_discount_percentage = promo.discount_value;
+                                    promo_applied = true;
+                                }
+                            }
+                            DiscountType::FixedAmount => {
+                                fixed_discount_amount =
+                                    CreditBalance::from_decimal(promo.discount_value);
+                                promo_applied = true;
+                            }
+                        }
+
+                        let _ = self.promo_code_repository.increment_usage(code).await;
+
+                        if promo_applied {
+                            if let Some(ref metrics) = self.metrics {
+                                let discount_type = match promo.discount_type {
+                                    DiscountType::Percentage => "percentage",
+                                    DiscountType::FixedAmount => "fixed_amount",
+                                };
+                                let amount = if promo.discount_type == DiscountType::Percentage {
+                                    let subtotal = cost.base_cost.add(cost.usage_cost);
+                                    subtotal.multiply(promo.discount_value).as_decimal()
+                                } else {
+                                    promo.discount_value
+                                };
+                                let amount_f64 = amount.to_f64().unwrap_or(0.0);
+                                metrics
+                                    .record_promo_code_applied(code, discount_type, amount_f64)
+                                    .await;
+                            }
+                        }
+                    } else if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .record_promo_code_validation(code, false, "package_not_applicable")
+                            .await;
+                    }
+                }
+                Err(_) => {
+                    if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .record_promo_code_validation(code, false, "validation_failed")
+                            .await;
+                    }
+                }
+            }
+        }
+
+        // Choose the single best discount (no stacking)
+        let subtotal = cost.base_cost.add(cost.usage_cost);
+        let percentage_discount = if best_discount_percentage > Decimal::ZERO {
+            subtotal.multiply(best_discount_percentage)
+        } else {
+            CreditBalance::zero()
+        };
+
+        let chosen_discount =
+            if fixed_discount_amount.as_decimal() > percentage_discount.as_decimal() {
+                fixed_discount_amount
+            } else {
+                percentage_discount
+            };
+
+        if chosen_discount.as_decimal() > Decimal::ZERO {
+            cost.discounts = cost.discounts.add(chosen_discount);
+
+            // Record tier discount metrics only if tier discount was chosen
+            if !promo_applied
+                && best_discount_percentage == tier_discount
+                && chosen_discount == percentage_discount
+            {
+                if let Some(ref metrics) = self.metrics {
+                    let amount = percentage_discount.as_decimal().to_f64().unwrap_or(0.0);
+                    metrics
+                        .record_tier_discount_applied(&user_metadata.user_tier.to_string(), amount)
+                        .await;
+                }
+            }
+        }
+
+        cost.total_cost = cost.calculate_total();
+        // Clamp total to zero if negative
+        if cost.total_cost.as_decimal().is_sign_negative() {
+            cost.total_cost = CreditBalance::zero();
+        }
+        Ok(cost)
     }
 
     fn apply_rule_actions(&self, mut cost: CostBreakdown, rules: &[BillingRule]) -> CostBreakdown {
@@ -174,15 +317,20 @@ impl RulesEngine {
 impl RulesEvaluator for RulesEngine {
     async fn evaluate_package(
         &self,
+        user_id: &UserId,
         package_id: &PackageId,
         usage: &UsageMetrics,
+        promo_code: Option<&str>,
         metadata: &HashMap<String, String>,
     ) -> Result<CostBreakdown> {
         let package = self.package_repository.get_package(package_id).await?;
 
         let mut cost_breakdown = package.calculate_cost(usage);
 
-        // Apply custom rules for discounts
+        cost_breakdown = self
+            .apply_automatic_discounts(user_id, package_id, promo_code, cost_breakdown)
+            .await?;
+
         let rules = self.evaluate_rules(usage, metadata).await?;
         cost_breakdown = self.apply_rule_actions(cost_breakdown, &rules);
 

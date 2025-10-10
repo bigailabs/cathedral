@@ -58,3 +58,15 @@ variable "basilica_auth0_issuer" {
   type    = string
   default = "your-auth0-issuer"
 }
+
+variable "validator_allowed_ips" {
+  type        = list(string)
+  description = "List of validator IP addresses/CIDR blocks allowed to access billing gRPC endpoint"
+  default     = []
+}
+
+variable "route53_zone_id" {
+  type        = string
+  description = "Route53 hosted zone ID for DNS records (optional, leave empty to skip DNS management)"
+  default     = ""
+}

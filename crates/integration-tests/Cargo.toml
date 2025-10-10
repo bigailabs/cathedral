@@ -17,10 +17,13 @@ basilica-validator = { path = "../basilica-validator" }
 basilica-miner = { path = "../basilica-miner" }
 basilica-protocol = { path = "../basilica-protocol" }
 basilica-common = { path = "../basilica-common" }
+basilica-billing = { path = "../basilica-billing" }
 uuid = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true, features = ["tls", "tls-roots"] }
 sqlx = { workspace = true }
+rust_decimal = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 

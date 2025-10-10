@@ -16,6 +16,7 @@ pub mod api;
 pub mod config;
 pub mod country_mapping;
 pub mod error;
+pub mod metrics;
 pub mod server;
 
 // Re-export commonly used types

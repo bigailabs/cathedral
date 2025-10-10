@@ -3,13 +3,14 @@ use basilica_payments::{
     config::PaymentsConfig,
     domain::price::PriceConverter,
     grpc::payments_service::PaymentsServer as GrpcPaymentsServer,
+    metrics::PaymentsMetricsSystem,
     price_oracle::{PriceOracle, PriceOracleConfig},
     processor::{billing_client::GrpcBillingClient, dispatcher::OutboxDispatcher},
     server::PaymentsServer,
     storage::PgRepos,
 };
 
-use basilica_common::crypto::Aead;
+use basilica_common::{config::types::MetricsConfig, crypto::Aead};
 
 use anyhow::{Context, Result};
 use basilica_protocol::payments::payments_service_server::PaymentsServiceServer;
@@ -130,6 +131,21 @@ async fn main() -> Result<()> {
 
     let repos = PgRepos::new(pool.clone());
 
+    let metrics_system = if cfg.service.metrics_enabled {
+        let metrics_config = MetricsConfig::default();
+        let metrics = Arc::new(
+            PaymentsMetricsSystem::new(metrics_config.clone())
+                .context("Failed to initialize metrics system")?,
+        );
+        metrics
+            .start_collection()
+            .await
+            .context("Failed to start metrics collection")?;
+        Some(metrics)
+    } else {
+        None
+    };
+
     let aead = Arc::new(
         Aead::new(&cfg.treasury.aead_key_hex).context("Failed to initialize AEAD encryption")?,
     );
@@ -155,8 +171,10 @@ async fn main() -> Result<()> {
 
     let price = PriceConverter::new(oracle, cfg.treasury.tao_decimals);
 
-    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead).into_service();
-    let dispatcher = OutboxDispatcher::new(repos.clone(), billing, price);
+    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead, metrics_system.clone())
+        .into_service();
+
+    let dispatcher = OutboxDispatcher::new(repos.clone(), billing, price, metrics_system.clone());
 
     info!(
         "Connecting to substrate node at: {}",
@@ -164,7 +182,8 @@ async fn main() -> Result<()> {
     );
     let mut endpoints = vec![cfg.blockchain.websocket_url.clone()];
     endpoints.extend(cfg.blockchain.fallback_websocket_urls.clone());
-    let monitor = ChainMonitor::new(repos.clone(), endpoints)
+
+    let monitor = ChainMonitor::new(repos.clone(), endpoints, metrics_system.clone())
         .await
         .context("Failed to initialize blockchain monitor")?;
 
@@ -180,7 +199,7 @@ async fn main() -> Result<()> {
     info!("Starting gRPC server on {}", grpc_bind);
 
     // Start HTTP server
-    let http_server = PaymentsServer::new(cfg.clone(), Arc::new(pool));
+    let http_server = PaymentsServer::new(cfg.clone(), Arc::new(pool), metrics_system.clone());
     let http_handle = tokio::spawn(async move { http_server.serve(shutdown_signal()).await });
 
     tokio::select! {

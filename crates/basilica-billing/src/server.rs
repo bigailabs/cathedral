@@ -1,5 +1,6 @@
 use crate::config::BillingConfig;
 use crate::grpc::BillingServiceImpl;
+use crate::metrics::BillingMetricsSystem;
 use crate::storage::rds::RdsConnection;
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 
@@ -20,6 +21,7 @@ use tracing::{error, info};
 pub struct BillingServer {
     config: BillingConfig,
     rds_connection: Arc<RdsConnection>,
+    metrics: Option<Arc<BillingMetricsSystem>>,
 }
 
 impl BillingServer {
@@ -27,10 +29,14 @@ impl BillingServer {
         Self {
             config: BillingConfig::default(),
             rds_connection,
+            metrics: None,
         }
     }
 
-    pub async fn new_with_config(config: BillingConfig) -> anyhow::Result<Self> {
+    pub async fn new_with_config(
+        config: BillingConfig,
+        metrics: Option<Arc<BillingMetricsSystem>>,
+    ) -> anyhow::Result<Self> {
         // Only load AWS config if we're actually using AWS services
         let rds_connection = if config.aws.secrets_manager_enabled
             && config.aws.secret_name.is_some()
@@ -54,6 +60,7 @@ impl BillingServer {
         Ok(Self {
             config,
             rds_connection,
+            metrics,
         })
     }
 
@@ -91,12 +98,87 @@ impl BillingServer {
             self.rds_connection.clone(),
             telemetry_ingester.clone(),
             telemetry_processor.clone(),
+            self.metrics.clone(),
         );
 
         let processor = telemetry_processor.clone();
         let telemetry_handle = tokio::spawn(async move {
             Self::telemetry_consumer_loop(telemetry_receiver, processor).await;
         });
+
+        use crate::domain::billing_handlers::BillingEventHandlers;
+        use crate::domain::processor::EventProcessor;
+        use crate::storage::{SqlCreditRepository, SqlPackageRepository, SqlRentalRepository};
+
+        let event_repository = Arc::new(crate::storage::events::SqlEventRepository::new(
+            self.rds_connection.clone(),
+        ));
+        let batch_repository = Arc::new(crate::storage::events::SqlBatchRepository::new(
+            self.rds_connection.clone(),
+        ));
+        let event_store = Arc::new(crate::domain::events::EventStore::new(
+            event_repository.clone(),
+            batch_repository,
+            1000,
+            90,
+        ));
+
+        let rental_repository = Arc::new(SqlRentalRepository::new(self.rds_connection.clone()));
+        let credit_repository = Arc::new(SqlCreditRepository::new(self.rds_connection.clone()));
+        let usage_repository = Arc::new(crate::storage::SqlUsageRepository::new(
+            self.rds_connection.clone(),
+        ));
+        let package_repository = Arc::new(SqlPackageRepository::new(
+            self.rds_connection.pool().clone(),
+        ));
+
+        let billing_handlers: Arc<dyn crate::domain::processor::EventHandlers + Send + Sync> =
+            Arc::new(BillingEventHandlers::new(
+                rental_repository,
+                credit_repository,
+                usage_repository,
+                package_repository,
+                event_repository.clone(),
+            ));
+
+        let batch_size = Some(self.config.aggregator.batch_size as i64);
+        let processing_interval = self.config.processing_interval();
+
+        let event_processor = Arc::new(EventProcessor::new(
+            event_store,
+            billing_handlers,
+            batch_size,
+            processing_interval,
+            self.metrics.clone(),
+        ));
+
+        event_processor
+            .start()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to start event processor: {}", e))?;
+
+        info!("Event processor started successfully");
+
+        use crate::domain::aggregations::AggregationJobs;
+
+        let aggregation_jobs = AggregationJobs::new(
+            self.rds_connection.clone(),
+            event_repository.clone(),
+            self.metrics.clone(),
+            self.config.aggregator.retention_days,
+        );
+
+        aggregation_jobs.start_hourly_aggregation(3600).await; // Run every hour
+        aggregation_jobs.start_daily_aggregation(86400).await; // Run every day
+        aggregation_jobs.start_monthly_aggregation(86400).await; // Run every day (checks for new month)
+        aggregation_jobs
+            .start_rental_sync(self.config.aggregator.processing_interval_seconds)
+            .await;
+        aggregation_jobs
+            .start_cleanup_job(self.config.aggregator.batch_timeout_seconds)
+            .await;
+
+        info!("Aggregation jobs started successfully");
 
         let mut server_builder = Server::builder();
 
@@ -128,6 +210,11 @@ impl BillingServer {
             })
             .await
             .map_err(|e| anyhow::anyhow!("gRPC server error: {}", e))?;
+
+        info!("Stopping event processor");
+        if let Err(e) = event_processor.stop().await {
+            error!("Error stopping event processor: {}", e);
+        }
 
         info!("Stopping telemetry consumer task");
         telemetry_handle.abort();
@@ -168,10 +255,11 @@ impl BillingServer {
         let (http_tx, http_rx) = tokio::sync::oneshot::channel();
 
         let rds_connection = self.rds_connection.clone();
+        let metrics = self.metrics.clone();
 
         // Start HTTP server
         let http_handle = tokio::spawn(async move {
-            Self::start_http_server(http_listener, http_rx, rds_connection).await
+            Self::start_http_server(http_listener, http_rx, rds_connection, metrics).await
         });
 
         // Start gRPC server
@@ -222,6 +310,7 @@ impl BillingServer {
         listener: tokio::net::TcpListener,
         shutdown_signal: tokio::sync::oneshot::Receiver<()>,
         rds_connection: Arc<RdsConnection>,
+        metrics: Option<Arc<BillingMetricsSystem>>,
     ) -> anyhow::Result<()> {
         let addr = listener.local_addr()?;
         info!("Starting billing HTTP server on {}", addr);
@@ -234,7 +323,10 @@ impl BillingServer {
                     .layer(CorsLayer::permissive())
                     .into_inner(),
             )
-            .with_state(AppState { rds_connection });
+            .with_state(AppState {
+                rds_connection,
+                metrics,
+            });
 
         let server = axum::serve(listener, app);
 
@@ -253,6 +345,7 @@ impl BillingServer {
 #[derive(Clone)]
 struct AppState {
     rds_connection: Arc<RdsConnection>,
+    metrics: Option<Arc<BillingMetricsSystem>>,
 }
 
 async fn health_check(
@@ -273,6 +366,11 @@ async fn health_check(
     }
 }
 
-async fn metrics_handler() -> Result<String, StatusCode> {
-    Ok("# Billing service metrics endpoint\n".to_string())
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<String, StatusCode> {
+    match state.metrics {
+        Some(metrics) => Ok(metrics.render_prometheus()),
+        None => Ok("# Metrics collection disabled\n".to_string()),
+    }
 }

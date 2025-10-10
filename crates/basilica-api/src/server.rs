@@ -7,6 +7,8 @@ use crate::{
     error::{ApiError, Result},
 };
 use axum::Router;
+use basilica_billing::BillingClient;
+use basilica_payments::client::PaymentsClient;
 use basilica_validator::{api::types::RentalStatus, ValidatorClient};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
@@ -48,6 +50,15 @@ pub struct AppState {
 
     /// Database pool for user rental tracking
     pub db: PgPool,
+
+    /// Payments service client
+    pub payments_client: Option<Arc<PaymentsClient>>,
+
+    /// Billing service client
+    pub billing_client: Option<Arc<BillingClient>>,
+
+    /// Metrics system
+    pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
 }
 
 /// Process health check for a single rental
@@ -205,6 +216,75 @@ impl Server {
                 message: format!("Failed to run migrations: {}", e),
             })?;
 
+        // Initialize payments service client if enabled
+        let payments_client = if config.payments.enabled {
+            info!(
+                "Initializing payments service client at {}",
+                config.payments.endpoint
+            );
+            match PaymentsClient::new(&config.payments.endpoint).await {
+                Ok(client) => {
+                    info!("Successfully connected to payments service");
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to connect to payments service: {}. Payments features will be disabled.",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            info!("Payments service integration is disabled");
+            None
+        };
+
+        // Initialize billing service client if enabled
+        let billing_client = if config.billing.enabled {
+            info!(
+                "Initializing billing service client at {}",
+                config.billing.endpoint
+            );
+            match BillingClient::new(&config.billing.endpoint).await {
+                Ok(client) => {
+                    info!("Successfully connected to billing service");
+                    Some(Arc::new(client))
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to connect to billing service: {}. Billing features will be disabled.",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            info!("Billing service integration is disabled");
+            None
+        };
+
+        // Initialize metrics system if enabled
+        let metrics = if config.metrics.enabled {
+            info!("Initializing metrics system");
+            match crate::metrics::ApiMetricsSystem::new(config.metrics.clone()) {
+                Ok(system) => {
+                    info!("Successfully initialized metrics system");
+                    Some(Arc::new(system))
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to initialize metrics system: {}. Metrics will be disabled.",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            info!("Metrics collection is disabled");
+            None
+        };
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -214,6 +294,9 @@ impl Server {
             validator_hotkey: config.bittensor.validator_hotkey.clone(),
             http_client: http_client.clone(),
             db,
+            payments_client,
+            billing_client,
+            metrics,
         };
 
         // Start optional health check task using HTTP client

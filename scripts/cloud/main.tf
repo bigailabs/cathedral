@@ -142,6 +142,8 @@ module "alb" {
     }
   }
 
+  validator_allowed_ips = var.validator_allowed_ips
+
   tags = local.common_tags
 }
 
@@ -190,4 +192,18 @@ module "basilica_api_alb" {
   }
 
   tags = local.common_tags
+}
+
+# Route53 DNS record for billing gRPC endpoint
+resource "aws_route53_record" "billing_grpc" {
+  count   = var.route53_zone_id != "" ? 1 : 0
+  zone_id = var.route53_zone_id
+  name    = "billing"
+  type    = "A"
+
+  alias {
+    name                   = module.alb.alb_dns_name
+    zone_id                = module.alb.alb_zone_id
+    evaluate_target_health = true
+  }
 }

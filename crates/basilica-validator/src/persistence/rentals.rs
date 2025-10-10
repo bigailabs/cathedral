@@ -3,10 +3,12 @@ use sqlx::{QueryBuilder, Row};
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::persistence::types::RentalFilter;
+use crate::persistence::ValidatorPersistence;
+use crate::rental::{RentalInfo, RentalState};
+
 use crate::persistence::entities::{Rental, RentalStatus};
 use crate::persistence::simple_persistence::SimplePersistence;
-use crate::persistence::types::RentalFilter;
-use crate::rental::{RentalInfo, RentalState};
 
 impl SimplePersistence {
     pub async fn create_rental(&self, rental: &Rental) -> Result<(), anyhow::Error> {
@@ -161,12 +163,18 @@ impl SimplePersistence {
     ) -> Result<RentalInfo, anyhow::Error> {
         let state_str: String = row.get("state");
         let created_at_str: String = row.get("created_at");
+        let updated_at_str: Option<String> = row.try_get("updated_at").ok();
         let container_spec_str: String = row.get("container_spec");
         let rental_id: String = row.get("id");
         let node_id: String = row.get("node_id");
         let metadata: String = row.get("metadata");
 
         let state = Self::parse_rental_state(&state_str, &rental_id);
+        let created_at = DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc);
+        let updated_at = updated_at_str
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(created_at);
 
         Ok(RentalInfo {
             rental_id,
@@ -176,7 +184,8 @@ impl SimplePersistence {
             ssh_session_id: row.get("ssh_session_id"),
             ssh_credentials: row.get("ssh_credentials"),
             state,
-            created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),
+            created_at,
+            updated_at,
             container_spec: serde_json::from_str(&container_spec_str)?,
             miner_id: row.get::<String, _>("miner_id"),
             node_details,
@@ -304,5 +313,87 @@ impl SimplePersistence {
             termination_reason: row.get("termination_reason"),
             total_cost: row.get("total_cost"),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl ValidatorPersistence for SimplePersistence {
+    async fn save_rental(&self, rental: &RentalInfo) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO rentals (
+                id, validator_hotkey, node_id, container_id, ssh_session_id,
+                ssh_credentials, state, created_at, updated_at, container_spec, miner_id, metadata
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                state = excluded.state,
+                container_id = excluded.container_id,
+                ssh_session_id = excluded.ssh_session_id,
+                ssh_credentials = excluded.ssh_credentials,
+                miner_id = excluded.miner_id,
+                updated_at = excluded.updated_at,
+                metadata = excluded.metadata",
+        )
+        .bind(&rental.rental_id)
+        .bind(&rental.validator_hotkey)
+        .bind(&rental.node_id)
+        .bind(&rental.container_id)
+        .bind(&rental.ssh_session_id)
+        .bind(&rental.ssh_credentials)
+        .bind(match &rental.state {
+            RentalState::Provisioning => "provisioning",
+            RentalState::Active => "active",
+            RentalState::Stopping => "stopping",
+            RentalState::Stopped => "stopped",
+            RentalState::Failed => "failed",
+        })
+        .bind(rental.created_at.to_rfc3339())
+        .bind(rental.updated_at.to_rfc3339())
+        .bind(serde_json::to_string(&rental.container_spec)?)
+        .bind(&rental.miner_id)
+        .bind(serde_json::to_string(&rental.metadata)?)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn load_rental(&self, rental_id: &str) -> anyhow::Result<Option<RentalInfo>> {
+        let filter = RentalFilter {
+            rental_id: Some(rental_id.to_string()),
+            ..Default::default()
+        };
+        self.query_rentals(filter)
+            .await
+            .map(|mut rentals| rentals.pop())
+    }
+
+    async fn list_validator_rentals(
+        &self,
+        validator_hotkey: &str,
+    ) -> anyhow::Result<Vec<RentalInfo>> {
+        let filter = RentalFilter {
+            validator_hotkey: Some(validator_hotkey.to_string()),
+            order_by_created_desc: true,
+            ..Default::default()
+        };
+        self.query_rentals(filter).await
+    }
+
+    async fn query_non_terminated_rentals(&self) -> anyhow::Result<Vec<RentalInfo>> {
+        let filter = RentalFilter {
+            exclude_states: Some(vec![RentalState::Stopped, RentalState::Failed]),
+            order_by_created_desc: true,
+            ..Default::default()
+        };
+        self.query_rentals(filter).await
+    }
+
+    async fn delete_rental(&self, rental_id: &str) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM rentals WHERE id = ?")
+            .bind(rental_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
     }
 }

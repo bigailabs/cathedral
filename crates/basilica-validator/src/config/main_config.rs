@@ -74,6 +74,10 @@ pub struct ValidatorConfig {
     /// Database cleanup configuration
     #[serde(default)]
     pub cleanup: crate::persistence::cleanup_task::CleanupConfig,
+
+    /// Billing telemetry streaming configuration
+    #[serde(default)]
+    pub billing: BillingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +493,88 @@ fn default_rental_session_duration() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingConfig {
+    /// Enable billing telemetry streaming
+    #[serde(default = "default_billing_enabled")]
+    pub enabled: bool,
+
+    /// Billing service gRPC endpoint
+    #[serde(default = "default_billing_endpoint")]
+    pub billing_endpoint: String,
+
+    /// Request timeout in seconds
+    #[serde(default = "default_billing_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Use TLS for billing connection
+    #[serde(default = "default_billing_use_tls")]
+    pub use_tls: bool,
+
+    /// Maximum telemetry batch size
+    #[serde(default = "default_billing_batch_size")]
+    pub batch_size: usize,
+
+    /// Billing telemetry collection interval in seconds
+    #[serde(default = "default_billing_collection_interval_secs")]
+    pub collection_interval_secs: u64,
+
+    /// Telemetry flush interval in seconds
+    #[serde(default = "default_billing_flush_interval_secs")]
+    pub flush_interval_secs: u64,
+
+    /// Maximum retry attempts for failed telemetry
+    #[serde(default = "default_billing_max_retries")]
+    pub max_retries: u32,
+}
+
+fn default_billing_enabled() -> bool {
+    false
+}
+
+fn default_billing_endpoint() -> String {
+    "http://127.0.0.1:50051".to_string()
+}
+
+fn default_billing_timeout_secs() -> u64 {
+    30
+}
+
+fn default_billing_use_tls() -> bool {
+    false
+}
+
+fn default_billing_batch_size() -> usize {
+    100
+}
+
+fn default_billing_collection_interval_secs() -> u64 {
+    30
+}
+
+fn default_billing_flush_interval_secs() -> u64 {
+    30
+}
+
+fn default_billing_max_retries() -> u32 {
+    3
+}
+
+impl Default for BillingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_billing_enabled(),
+            billing_endpoint: default_billing_endpoint(),
+            timeout_secs: default_billing_timeout_secs(),
+            use_tls: default_billing_use_tls(),
+            batch_size: default_billing_batch_size(),
+            collection_interval_secs: default_billing_collection_interval_secs(),
+            flush_interval_secs: default_billing_flush_interval_secs(),
+            max_retries: default_billing_max_retries(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// Storage directory path
     pub data_dir: String,
@@ -676,6 +762,7 @@ impl Default for ValidatorConfig {
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
+            billing: BillingConfig::default(),
         }
     }
 }
@@ -748,6 +835,49 @@ impl ConfigValidation for ValidatorConfig {
                 value: "emission_config".to_string(),
                 reason: e.to_string(),
             });
+        }
+
+        // Validate billing configuration
+        if self.billing.enabled {
+            if self.billing.billing_endpoint.is_empty() {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.billing_endpoint".to_string(),
+                    value: self.billing.billing_endpoint.clone(),
+                    reason: "Billing endpoint cannot be empty when billing is enabled".to_string(),
+                });
+            }
+
+            if self.billing.timeout_secs == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.timeout_secs".to_string(),
+                    value: self.billing.timeout_secs.to_string(),
+                    reason: "Timeout must be greater than 0".to_string(),
+                });
+            }
+
+            if self.billing.batch_size == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.batch_size".to_string(),
+                    value: self.billing.batch_size.to_string(),
+                    reason: "Batch size must be greater than 0".to_string(),
+                });
+            }
+
+            if self.billing.collection_interval_secs == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.collection_interval_secs".to_string(),
+                    value: self.billing.collection_interval_secs.to_string(),
+                    reason: "Collection interval must be greater than 0".to_string(),
+                });
+            }
+
+            if self.billing.flush_interval_secs == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.flush_interval_secs".to_string(),
+                    value: self.billing.flush_interval_secs.to_string(),
+                    reason: "Flush interval must be greater than 0".to_string(),
+                });
+            }
         }
 
         Ok(())

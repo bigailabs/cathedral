@@ -358,6 +358,100 @@ impl CostBreakdown {
     }
 }
 
+/// User tier for discount eligibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserTier {
+    Standard,
+    Student,
+    Enterprise,
+    Custom,
+}
+
+impl UserTier {
+    pub fn default_discount_percentage(&self) -> Option<Decimal> {
+        match self {
+            UserTier::Standard => None,
+            UserTier::Student => Decimal::from_str("0.20").ok(),
+            UserTier::Enterprise => Decimal::from_str("0.15").ok(),
+            UserTier::Custom => None,
+        }
+    }
+}
+
+impl fmt::Display for UserTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UserTier::Standard => write!(f, "standard"),
+            UserTier::Student => write!(f, "student"),
+            UserTier::Enterprise => write!(f, "enterprise"),
+            UserTier::Custom => write!(f, "custom"),
+        }
+    }
+}
+
+impl FromStr for UserTier {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "standard" => Ok(UserTier::Standard),
+            "student" => Ok(UserTier::Student),
+            "enterprise" => Ok(UserTier::Enterprise),
+            "custom" => Ok(UserTier::Custom),
+            _ => Err(format!("Invalid user tier: {}", s)),
+        }
+    }
+}
+
+/// User metadata for pricing and discounts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserMetadata {
+    pub user_id: UserId,
+    pub user_tier: UserTier,
+    pub discount_percentage: Option<Decimal>,
+    pub promo_codes: Vec<String>,
+    pub tier_updated_at: DateTime<Utc>,
+    pub custom_attributes: std::collections::HashMap<String, String>,
+}
+
+impl UserMetadata {
+    pub fn effective_discount_percentage(&self) -> Decimal {
+        self.discount_percentage
+            .or_else(|| self.user_tier.default_discount_percentage())
+            .unwrap_or(Decimal::ZERO)
+    }
+}
+
+/// Discount type for promotional codes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscountType {
+    Percentage,
+    FixedAmount,
+}
+
+impl fmt::Display for DiscountType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DiscountType::Percentage => write!(f, "percentage"),
+            DiscountType::FixedAmount => write!(f, "fixed_amount"),
+        }
+    }
+}
+
+impl FromStr for DiscountType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "percentage" => Ok(DiscountType::Percentage),
+            "fixed_amount" | "fixedamount" => Ok(DiscountType::FixedAmount),
+            _ => Err(format!("Invalid discount type: {}", s)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -36,12 +36,12 @@ async fn test_get_billing_packages_returns_all_available_packages() {
         "Should contain h100 package"
     );
     assert!(
-        package_ids.contains(&"a100".to_string()),
-        "Should contain a100 package"
+        package_ids.contains(&"h200".to_string()),
+        "Should contain h200 package"
     );
     assert!(
-        package_ids.contains(&"rtx4090".to_string()),
-        "Should contain rtx4090 package"
+        package_ids.contains(&"a100".to_string()),
+        "Should contain a100 package"
     );
     assert!(
         package_ids.contains(&"custom".to_string()),
@@ -113,7 +113,7 @@ async fn test_set_user_package_updates_user_preference() {
 
     let request = SetUserPackageRequest {
         user_id: user_id.to_string(),
-        package_id: "rtx4090".to_string(),
+        package_id: "a100".to_string(),
         effective_from: None,
     };
 
@@ -126,14 +126,14 @@ async fn test_set_user_package_updates_user_preference() {
 
     assert!(response.success, "Setting package should succeed");
     assert_eq!(
-        response.new_package_id, "rtx4090",
-        "New package should be rtx4090"
+        response.new_package_id, "a100",
+        "New package should be a100"
     );
 
     let updated_package = context.get_user_package(user_id).await;
     assert_eq!(
         updated_package,
-        Some("rtx4090".to_string()),
+        Some("a100".to_string()),
         "Package should be updated in database"
     );
 
