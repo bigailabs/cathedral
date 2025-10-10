@@ -13,3 +13,11 @@ netuid = 387
 chain_endpoint = "wss://test.finney.opentensor.ai:443"
 validator_hotkey = "5Dvs1D21nUF9GLH67ZF3kMcGwLQEoD4LbMQ9hycGMGvviGCe"  # Replace with actual validator hotkey
 discovery_interval = 30
+
+# Billing service configuration
+[billing]
+enabled = true
+endpoint = "http://localhost:50051"
+# Shadow mode: balance checks are performed and logged but rentals proceed regardless
+# Set to true to enforce balance requirements (block insufficient balance rentals)
+enforce_balance_checks = false

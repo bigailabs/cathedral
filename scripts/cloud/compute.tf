@@ -356,6 +356,11 @@ module "basilica_api_service" {
     BASILICA_API_PAYMENTS__ENABLED  = "true"
     BASILICA_API_PAYMENTS__ENDPOINT = "http://payments-v3.${aws_service_discovery_private_dns_namespace.main.name}:50061"
 
+    # Billing Service Integration
+    BASILICA_API_BILLING__ENABLED                = "true"
+    BASILICA_API_BILLING__ENDPOINT               = "http://billing-v3.${aws_service_discovery_private_dns_namespace.main.name}:50051"
+    BASILICA_API_BILLING__ENFORCE_BALANCE_CHECKS = "false"
+
     # Logging
     RUST_LOG = "basilica_api=info,basilica_protocol=info"
   }
