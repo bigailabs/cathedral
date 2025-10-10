@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive examples demonstrating common use cases:
   - `quickstart.py` - Minimal getting started example
   - `start_rental.py` - Complete rental workflow
-  - `list_executors.py` - Finding available GPU resources
+  - `list_nodes.py` - Finding available GPU resources
   - `health_check.py` - API health monitoring
   - `ssh_utils.py` - SSH credential handling
 - Type hints via `.pyi` stub files for IDE support
