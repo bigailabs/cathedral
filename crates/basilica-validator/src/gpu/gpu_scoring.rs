@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::categorization::{GpuCategory, MinerGpuProfile, NodeValidationResult};
 use crate::config::emission::EmissionConfig;
@@ -239,7 +239,7 @@ impl GpuScoringEngine {
                 multiplier
             }
             Err(e) => {
-                warn!(
+                error!(
                     miner_uid = miner_uid.as_u16(),
                     node_id = %node_id,
                     error = %e,
