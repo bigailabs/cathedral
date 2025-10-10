@@ -1,0 +1,17 @@
+# Ansible Vault password file (NEVER COMMIT!)
+.vault_password
+*.vault_password
+
+# Ansible retry files
+*.retry
+
+# Ansible facts cache
+.ansible_facts/
+
+# Ansible roles downloaded from Galaxy
+roles/external/
+
+# Temporary files
+*.tmp
+*.bak
+*~

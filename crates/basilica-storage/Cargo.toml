@@ -17,8 +17,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
-# Object storage
-object_store = { version = "0.11", features = ["aws", "gcp"] }
+# Object storage - AWS SDK for R2 compatibility
+aws-config = "1.1"
+aws-sdk-s3 = "1.15"
+aws-smithy-runtime-api = "1.1"
 bytes = "1.5"
 
 # FUSE filesystem

@@ -3,6 +3,8 @@
   become: true
   vars_files:
     - ../group_vars/all.yml
+    - ../group_vars/all/r2.yml
+    - ../group_vars/all/vault.yml
   vars:
     # Autodetect repo root on control host if not provided
     # playbook_dir = <repo>/scripts/ansible/playbooks
@@ -182,6 +184,25 @@
 
     - name: Apply CRDs
       ansible.builtin.command: kubectl apply -f /opt/basilica/basilica-crds.yaml
+
+    - name: Check if R2 vault credentials exist (control machine)
+      delegate_to: localhost
+      run_once: true
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/../group_vars/all/vault.yml"
+      register: vault_file_check_raw
+      tags: ["basilica_storage", "always"]
+
+    - name: Set vault file existence fact for all hosts
+      ansible.builtin.set_fact:
+        vault_file_exists: "{{ vault_file_check_raw.stat.exists | default(false) }}"
+      tags: ["basilica_storage", "always"]
+
+    - name: Deploy R2 credentials for persistent storage
+      import_role:
+        name: basilica-storage
+      when: vault_file_exists | default(false)
+      tags: ["basilica_storage"]
 
     - name: Taint control plane nodes to prevent workload scheduling
       ansible.builtin.shell: |

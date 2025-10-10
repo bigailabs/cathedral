@@ -1,7 +1,5 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use object_store::{aws::AmazonS3Builder, path::Path as ObjectPath, ObjectStore};
-use std::sync::Arc;
 
 use crate::{config::StorageConfig, error::{Result, StorageError}};
 
@@ -24,55 +22,66 @@ pub trait StorageBackend: Send + Sync {
     async fn list(&self, prefix: &str) -> Result<Vec<String>>;
 }
 
-/// Object storage backend using the `object_store` crate
-/// Supports S3, R2, GCS, and other S3-compatible services
-pub struct ObjectStoreBackend {
-    store: Arc<dyn ObjectStore>,
+/// S3/R2 backend using the AWS SDK
+/// Uses static credentials compatible with Cloudflare R2
+pub struct S3Backend {
+    client: aws_sdk_s3::Client,
+    bucket: String,
     prefix: String,
 }
 
-impl ObjectStoreBackend {
-    /// Create a new object store backend from configuration
-    pub fn from_config(config: &StorageConfig) -> Result<Self> {
+impl S3Backend {
+    /// Create a new S3/R2 backend from configuration
+    pub async fn from_config(config: &StorageConfig) -> Result<Self> {
         let bucket = config
             .bucket
             .as_ref()
-            .ok_or_else(|| StorageError::InvalidConfig("bucket is required".to_string()))?;
+            .ok_or_else(|| StorageError::InvalidConfig("bucket is required".to_string()))?
+            .clone();
 
         let credentials = config
             .credentials
             .as_ref()
             .ok_or_else(|| StorageError::InvalidConfig("credentials are required".to_string()))?;
 
-        let store: Arc<dyn ObjectStore> = match config.backend.as_str() {
+        let client = match config.backend.as_str() {
             "s3" | "r2" => {
-                // Both S3 and R2 use the S3 API
-                let mut builder = AmazonS3Builder::new()
-                    .with_bucket_name(bucket);
+                // Get credentials
+                let access_key_id = credentials
+                    .get("access_key_id")
+                    .ok_or_else(|| StorageError::InvalidConfig("access_key_id is required".to_string()))?;
 
-                // Set credentials
-                if let Some(access_key) = credentials.get("access_key_id") {
-                    builder = builder.with_access_key_id(access_key);
-                }
-                if let Some(secret_key) = credentials.get("secret_access_key") {
-                    builder = builder.with_secret_access_key(secret_key);
-                }
+                let secret_access_key = credentials
+                    .get("secret_access_key")
+                    .ok_or_else(|| StorageError::InvalidConfig("secret_access_key is required".to_string()))?;
 
-                // For R2, set custom endpoint
+                let region = credentials
+                    .get("region")
+                    .map(|s| s.as_str())
+                    .unwrap_or("auto");
+
+                // Build AWS config with static credentials (no validation)
+                let aws_creds = aws_sdk_s3::config::Credentials::new(
+                    access_key_id,
+                    secret_access_key,
+                    None, // session token not used with R2/S3 static credentials
+                    None, // expiry
+                    "basilica-storage", // provider name
+                );
+
+                let mut config_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .credentials_provider(aws_creds)
+                    .region(aws_sdk_s3::config::Region::new(region.to_string()));
+
+                // For R2 or custom S3 endpoints, set endpoint URL
                 if let Some(endpoint) = credentials.get("endpoint") {
-                    builder = builder.with_endpoint(endpoint);
+                    config_builder = config_builder.endpoint_url(endpoint);
                 }
 
-                // For S3, set region
-                if let Some(region) = credentials.get("region") {
-                    builder = builder.with_region(region);
-                }
-
-                Arc::new(builder.build()?)
+                let aws_config = config_builder.load().await;
+                aws_sdk_s3::Client::new(&aws_config)
             }
             "gcs" => {
-                // GCS support - would use GoogleCloudStorageBuilder
-                // For now, return an error as we're focusing on R2/S3
                 return Err(StorageError::InvalidConfig(
                     "GCS backend not yet implemented".to_string(),
                 ));
@@ -87,64 +96,123 @@ impl ObjectStoreBackend {
 
         let prefix = config.prefix.clone().unwrap_or_default();
 
-        Ok(Self { store, prefix })
+        Ok(Self {
+            client,
+            bucket,
+            prefix,
+        })
     }
 
-    /// Get the full object path with prefix
-    fn object_path(&self, key: &str) -> ObjectPath {
+    /// Get the full object key with prefix
+    fn object_key(&self, key: &str) -> String {
         if self.prefix.is_empty() {
-            ObjectPath::from(key)
+            key.to_string()
         } else {
-            ObjectPath::from(format!("{}/{}", self.prefix, key))
+            format!("{}/{}", self.prefix, key)
         }
     }
 }
 
 #[async_trait]
-impl StorageBackend for ObjectStoreBackend {
+impl StorageBackend for S3Backend {
     async fn put(&self, key: &str, data: Bytes) -> Result<()> {
-        let path = self.object_path(key);
-        self.store.put(&path, data.into()).await?;
+        let object_key = self.object_key(key);
+
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&object_key)
+            .body(data.into())
+            .send()
+            .await
+            .map_err(|e| StorageError::BackendError(format!("Failed to put object: {}", e)))?;
+
         Ok(())
     }
 
     async fn get(&self, key: &str) -> Result<Bytes> {
-        let path = self.object_path(key);
-        let result = self.store.get(&path).await?;
-        let bytes = result.bytes().await?;
-        Ok(bytes)
+        let object_key = self.object_key(key);
+
+        let resp = self.client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&object_key)
+            .send()
+            .await
+            .map_err(|e| StorageError::BackendError(format!("Failed to get object: {}", e)))?;
+
+        let data = resp
+            .body
+            .collect()
+            .await
+            .map_err(|e| StorageError::BackendError(format!("Failed to read object body: {}", e)))?;
+
+        Ok(Bytes::from(data.into_bytes()))
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {
-        let path = self.object_path(key);
-        match self.store.head(&path).await {
+        let object_key = self.object_key(key);
+
+        match self.client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&object_key)
+            .send()
+            .await
+        {
             Ok(_) => Ok(true),
-            Err(object_store::Error::NotFound { .. }) => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                // Check if it's a not-found error
+                let err_str = format!("{:?}", e);
+                if err_str.contains("NotFound") || err_str.contains("404") {
+                    Ok(false)
+                } else {
+                    Err(StorageError::BackendError(format!("Failed to check object existence: {}", e)))
+                }
+            }
         }
     }
 
     async fn delete(&self, key: &str) -> Result<()> {
-        let path = self.object_path(key);
-        self.store.delete(&path).await?;
+        let object_key = self.object_key(key);
+
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(&object_key)
+            .send()
+            .await
+            .map_err(|e| StorageError::BackendError(format!("Failed to delete object: {}", e)))?;
+
         Ok(())
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        use futures::stream::StreamExt;
+        let object_prefix = self.object_key(prefix);
 
-        let path = self.object_path(prefix);
-        let mut list_stream = self.store.list(Some(&path));
+        let resp = self.client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .prefix(&object_prefix)
+            .send()
+            .await
+            .map_err(|e| StorageError::BackendError(format!("Failed to list objects: {}", e)))?;
 
-        let mut keys = Vec::new();
-        while let Some(meta) = list_stream.next().await {
-            let meta = meta?;
-            if let Some(key) = meta.location.as_ref().strip_prefix(&self.prefix) {
-                keys.push(key.trim_start_matches('/').to_string());
-            } else {
-                keys.push(meta.location.to_string());
-            }
-        }
+        let keys = resp
+            .contents()
+            .iter()
+            .filter_map(|obj| {
+                obj.key().and_then(|key| {
+                    // Strip the prefix to return relative keys
+                    if !self.prefix.is_empty() {
+                        key.strip_prefix(&format!("{}/", self.prefix))
+                            .map(|s| s.to_string())
+                    } else {
+                        Some(key.to_string())
+                    }
+                })
+            })
+            .collect();
 
         Ok(keys)
     }

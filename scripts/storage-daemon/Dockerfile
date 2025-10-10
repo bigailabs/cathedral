@@ -62,6 +62,12 @@ RUN chmod +x /usr/local/bin/basilica-storage-daemon
 # Create mount point
 RUN mkdir -p /data && chmod 755 /data
 
+# Create /etc/mtab symlink (fusermount3 needs this)
+RUN ln -sf /proc/self/mounts /etc/mtab
+
+# Create a user for fusermount3 (it checks username)
+RUN useradd -u 1000 -m -s /bin/bash basilica
+
 # Expose any needed ports (none for FUSE daemon)
 
 # Default command

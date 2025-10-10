@@ -22,7 +22,7 @@ pub mod error;
 pub mod fuse;
 pub mod snapshot;
 
-pub use backend::{ObjectStoreBackend, StorageBackend};
+pub use backend::{S3Backend, StorageBackend};
 pub use config::StorageConfig;
 pub use error::{Result, StorageError};
 pub use fuse::{BasilicaFS, DirtyPageTracker, PageCache, SyncWorker};

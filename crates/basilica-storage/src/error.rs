@@ -4,8 +4,8 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 
 #[derive(Error, Debug)]
 pub enum StorageError {
-    #[error("Object store error: {0}")]
-    ObjectStore(#[from] object_store::Error),
+    #[error("Backend error: {0}")]
+    BackendError(String),
 
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

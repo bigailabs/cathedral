@@ -23,6 +23,8 @@ impl StorageConfig {
         let mut credentials = HashMap::new();
         credentials.insert("access_key_id".to_string(), access_key.to_string());
         credentials.insert("secret_access_key".to_string(), secret_key.to_string());
+        // R2 requires us-east-1 as the region for S3 API compatibility
+        credentials.insert("region".to_string(), "us-east-1".to_string());
         credentials.insert(
             "endpoint".to_string(),
             format!("https://{}.r2.cloudflarestorage.com", account_id),

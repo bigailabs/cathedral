@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use basilica_storage::{
-    backend::{ObjectStoreBackend, StorageBackend},
+    backend::{S3Backend, StorageBackend},
     config::StorageConfig,
     fuse::BasilicaFS,
 };
@@ -65,7 +65,7 @@ struct Args {
     allow_other: bool,
 
     /// Automatically unmount on process exit
-    #[arg(long, default_value = "true")]
+    #[arg(long, default_value = "false")]
     auto_unmount: bool,
 }
 
@@ -117,7 +117,8 @@ async fn main() -> Result<()> {
     };
 
     let storage: Arc<dyn StorageBackend> = Arc::new(
-        ObjectStoreBackend::from_config(&config)
+        S3Backend::from_config(&config)
+            .await
             .context("Failed to create storage backend")?,
     );
 
@@ -163,6 +164,15 @@ async fn main() -> Result<()> {
         .context("Failed to mount filesystem")?;
 
     info!("Filesystem mounted successfully");
+
+    // Create readiness marker file to signal main container
+    let ready_file = args.mount_point.join(".fuse_ready");
+    if let Err(e) = std::fs::write(&ready_file, "ready") {
+        eprintln!("Warning: Failed to create readiness marker: {}", e);
+    } else {
+        info!("Created readiness marker at: {}", ready_file.display());
+    }
+
     info!("Press Ctrl+C to unmount and exit");
 
     // Wait for Ctrl+C
