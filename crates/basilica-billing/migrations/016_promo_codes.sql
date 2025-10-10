@@ -31,14 +31,13 @@ CREATE INDEX idx_promo_codes_valid ON billing.promo_codes (valid_from, valid_unt
 WHERE
   active = true;
 
-CREATE
-OR REPLACE FUNCTION billing.update_promo_codes_updated_at() RETURNS TRIGGER AS $ $ BEGIN NEW.updated_at = NOW();
-
-RETURN NEW;
-
+CREATE OR REPLACE FUNCTION billing.update_promo_codes_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
 END;
-
-$ $ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trigger_promo_codes_updated_at BEFORE
 UPDATE

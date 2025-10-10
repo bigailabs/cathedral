@@ -19,14 +19,13 @@ CREATE INDEX idx_user_metadata_tier ON billing.user_metadata (user_tier);
 
 CREATE INDEX idx_user_metadata_updated ON billing.user_metadata (updated_at);
 
-CREATE
-OR REPLACE FUNCTION billing.update_user_metadata_updated_at() RETURNS TRIGGER AS $ $ BEGIN NEW.updated_at = NOW();
-
-RETURN NEW;
-
+CREATE OR REPLACE FUNCTION billing.update_user_metadata_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
 END;
-
-$ $ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trigger_user_metadata_updated_at BEFORE
 UPDATE

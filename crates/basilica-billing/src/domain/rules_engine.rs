@@ -9,6 +9,7 @@ use crate::storage::{
 };
 use async_trait::async_trait;
 use chrono::Timelike;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -221,12 +222,9 @@ impl RulesEngine {
                                 } else {
                                     promo.discount_value
                                 };
+                                let amount_f64 = amount.to_f64().unwrap_or(0.0);
                                 metrics
-                                    .record_promo_code_applied(
-                                        code,
-                                        discount_type,
-                                        amount.to_string().parse().unwrap_or(0.0),
-                                    )
+                                    .record_promo_code_applied(code, discount_type, amount_f64)
                                     .await;
                             }
                         }
@@ -246,32 +244,43 @@ impl RulesEngine {
             }
         }
 
-        if best_discount_percentage > Decimal::ZERO {
-            let subtotal = cost.base_cost.add(cost.usage_cost);
-            let percentage_discount = subtotal.multiply(best_discount_percentage);
-            cost.discounts = cost.discounts.add(percentage_discount);
+        // Choose the single best discount (no stacking)
+        let subtotal = cost.base_cost.add(cost.usage_cost);
+        let percentage_discount = if best_discount_percentage > Decimal::ZERO {
+            subtotal.multiply(best_discount_percentage)
+        } else {
+            CreditBalance::zero()
+        };
 
-            if !promo_applied && best_discount_percentage == tier_discount {
+        let chosen_discount =
+            if fixed_discount_amount.as_decimal() > percentage_discount.as_decimal() {
+                fixed_discount_amount
+            } else {
+                percentage_discount
+            };
+
+        if chosen_discount.as_decimal() > Decimal::ZERO {
+            cost.discounts = cost.discounts.add(chosen_discount);
+
+            // Record tier discount metrics only if tier discount was chosen
+            if !promo_applied
+                && best_discount_percentage == tier_discount
+                && chosen_discount == percentage_discount
+            {
                 if let Some(ref metrics) = self.metrics {
+                    let amount = percentage_discount.as_decimal().to_f64().unwrap_or(0.0);
                     metrics
-                        .record_tier_discount_applied(
-                            &user_metadata.user_tier.to_string(),
-                            percentage_discount
-                                .as_decimal()
-                                .to_string()
-                                .parse()
-                                .unwrap_or(0.0),
-                        )
+                        .record_tier_discount_applied(&user_metadata.user_tier.to_string(), amount)
                         .await;
                 }
             }
         }
 
-        if fixed_discount_amount.as_decimal() > Decimal::ZERO {
-            cost.discounts = cost.discounts.add(fixed_discount_amount);
-        }
-
         cost.total_cost = cost.calculate_total();
+        // Clamp total to zero if negative
+        if cost.total_cost.as_decimal().is_sign_negative() {
+            cost.total_cost = CreditBalance::zero();
+        }
         Ok(cost)
     }
 
