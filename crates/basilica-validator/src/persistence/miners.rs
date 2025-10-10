@@ -900,14 +900,14 @@ impl SimplePersistence {
     }
 
     /// Calculate node uptime multiplier based on verification history
-    /// Returns value between 0.0 and 1.0:
-    /// - 0.0 = node just registered or all verifications failed
-    /// - 1.0 = node has 14+ days of uptime
+    /// Returns tuple of (uptime_minutes, multiplier):
+    /// - uptime_minutes: Total continuous uptime in minutes
+    /// - multiplier: Value between 0.0 and 1.0 (0.0 = new node, 1.0 = 14+ days uptime)
     pub async fn calculate_node_uptime_multiplier(
         &self,
         miner_id: &str,
         node_id: &str,
-    ) -> Result<f64> {
+    ) -> Result<(f64, f64)> {
         // Step 1: Get node registration time
         let node_query = r#"
             SELECT created_at
@@ -945,9 +945,9 @@ impl SimplePersistence {
                 debug!(
                     miner_id = %miner_id,
                     node_id = %node_id,
-                    "No GPU UUID found for node, returning 0.0 multiplier"
+                    "No GPU UUID found for node, returning (0.0, 0.0)"
                 );
-                return Ok(0.0);
+                return Ok((0.0, 0.0));
             }
         };
 
@@ -973,9 +973,9 @@ impl SimplePersistence {
             debug!(
                 miner_id = %miner_id,
                 node_id = %node_id,
-                "No full validation logs found, returning 0.0 multiplier"
+                "No full validation logs found, returning (0.0, 0.0)"
             );
-            return Ok(0.0);
+            return Ok((0.0, 0.0));
         }
 
         // Step 4: Find start of current continuous success period
@@ -1021,6 +1021,6 @@ impl SimplePersistence {
             "Calculated node uptime multiplier"
         );
 
-        Ok(multiplier)
+        Ok((total_uptime_minutes, multiplier))
     }
 }

@@ -217,13 +217,25 @@ impl GpuScoringEngine {
             .calculate_node_uptime_multiplier(&miner_id, node_id)
             .await
         {
-            Ok(multiplier) => {
+            Ok((uptime_minutes, multiplier)) => {
                 debug!(
                     miner_uid = miner_uid.as_u16(),
                     node_id = %node_id,
+                    uptime_minutes = uptime_minutes,
                     multiplier = multiplier,
                     "Applied uptime multiplication factor"
                 );
+
+                // Emit Prometheus metrics
+                if let Some(metrics) = &self.metrics {
+                    metrics.prometheus().record_node_uptime_metrics(
+                        miner_uid.as_u16(),
+                        node_id,
+                        uptime_minutes,
+                        multiplier,
+                    );
+                }
+
                 multiplier
             }
             Err(e) => {
@@ -1460,12 +1472,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Should get 0.0 multiplier (no GPU UUID assigned)
-        let multiplier = persistence
+        // Should get (0.0, 0.0) - no uptime and no multiplier (no GPU UUID assigned)
+        let (uptime_minutes, multiplier) = persistence
             .calculate_node_uptime_multiplier(miner_id, node_id)
             .await
             .unwrap();
 
+        assert_eq!(
+            uptime_minutes, 0.0,
+            "New node without GPU UUID should get 0.0 uptime minutes"
+        );
         assert_eq!(
             multiplier, 0.0,
             "New node without GPU UUID should get 0.0 multiplier"
@@ -1500,7 +1516,7 @@ mod tests {
             .unwrap();
 
         // Should get ~0.5 multiplier (7 days out of 14)
-        let multiplier = persistence
+        let (_uptime_minutes, multiplier) = persistence
             .calculate_node_uptime_multiplier(miner_id, node_id)
             .await
             .unwrap();
@@ -1552,7 +1568,7 @@ mod tests {
             .unwrap();
 
         // Should get ~0.071 multiplier (1 day out of 14, ~7.14%)
-        let multiplier = persistence
+        let (_uptime_minutes, multiplier) = persistence
             .calculate_node_uptime_multiplier(miner_id, node_id)
             .await
             .unwrap();
