@@ -115,7 +115,7 @@ impl TestContext {
             "TRUNCATE TABLE billing.user_preferences CASCADE",
             "TRUNCATE TABLE billing.credits CASCADE",
             "TRUNCATE TABLE billing.users CASCADE",
-            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'a100', 'rtx4090', 'custom')",
+            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'h200', 'a100', 'custom')",
         ];
 
         for query in queries {
