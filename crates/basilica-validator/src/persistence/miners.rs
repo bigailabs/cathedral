@@ -922,36 +922,8 @@ impl SimplePersistence {
             .await?;
 
         let created_at_str: String = node_row.get("created_at");
-        let _created_at = Self::parse_datetime(&created_at_str)?;
 
-        // Step 2: Get a GPU UUID for this node (all GPUs have same uptime)
-        let gpu_query = r#"
-            SELECT gpu_uuid
-            FROM gpu_uuid_assignments
-            WHERE miner_id = ? AND node_id = ?
-            LIMIT 1
-        "#;
-
-        let gpu_row = sqlx::query(gpu_query)
-            .bind(miner_id)
-            .bind(node_id)
-            .fetch_optional(self.pool())
-            .await?;
-
-        let _gpu_uuid = match gpu_row {
-            Some(row) => row.get::<String, _>("gpu_uuid"),
-            None => {
-                // No GPU UUID assigned yet, node just registered
-                debug!(
-                    miner_id = %miner_id,
-                    node_id = %node_id,
-                    "No GPU UUID found for node, returning (0.0, 0.0)"
-                );
-                return Ok((0.0, 0.0));
-            }
-        };
-
-        // Step 3: Get FULL validation logs since registration
+        // Step 2: Get FULL validation logs since registration
         // IMPORTANT: Only consider full validations (last_binary_validation IS NOT NULL)
         let logs_query = r#"
             SELECT timestamp, success
@@ -978,7 +950,7 @@ impl SimplePersistence {
             return Ok((0.0, 0.0));
         }
 
-        // Step 4: Find start of current continuous success period
+        // Step 3: Find start of current continuous success period
         // Only the current uninterrupted success period counts toward uptime
         let mut current_success_start: Option<DateTime<Utc>> = None;
 
