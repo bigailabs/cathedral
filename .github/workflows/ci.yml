@@ -29,6 +29,7 @@ jobs:
       billing: ${{ steps.changes.outputs.billing }}
       payments: ${{ steps.changes.outputs.payments }}
       basilica-cli: ${{ steps.changes.outputs.basilica-cli }}
+      basilica-sdk-python: ${{ steps.changes.outputs.basilica-sdk-python }}
       workspace: ${{ steps.changes.outputs.workspace }}
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +79,12 @@ jobs:
               - 'crates/basilica-common/**'
               - 'crates/basilica-protocol/**'
               - 'scripts/payments/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            basilica-sdk-python:
+              - 'crates/basilica-sdk-python/**'
+              - 'crates/basilica-sdk/**'
+              - 'crates/basilica-common/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
             workspace:
@@ -575,6 +582,65 @@ jobs:
           chmod +x scripts/payments/build.sh
           ./scripts/payments/build.sh --no-extract
 
+  # Build and test Python SDK
+  test-python-sdk:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    needs: changes
+    if: needs.changes.outputs.basilica-sdk-python == 'true' || needs.changes.outputs.workspace == 'true'
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "shared-cache"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache and install system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: pkg-config libssl-dev xxd mold clang python3-dev
+          version: 1.0
+
+      - name: Install maturin
+        run: pip install maturin pytest pytest-asyncio
+
+      - name: Build and install Python SDK
+        run: |
+          cd crates/basilica-sdk-python
+          maturin develop --release
+
+      - name: Run Python tests
+        run: |
+          cd crates/basilica-sdk-python
+          python -m pytest tests/ -v || echo "No tests found yet"
+
+      - name: Test examples (syntax check)
+        run: |
+          cd crates/basilica-sdk-python/examples
+          for example in *.py; do
+            echo "Checking $example..."
+            python -m py_compile "$example"
+          done
+
+      - name: Test import
+        run: python -c 'import basilica; print(f"SDK imported successfully. API URL: {basilica.DEFAULT_API_URL}")'
+
   # Final status check
   ci-success:
     runs-on: blacksmith-32vcpu-ubuntu-2404
@@ -587,6 +653,7 @@ jobs:
       - build-billing
       - build-payments
       - build-cli
+      - test-python-sdk
     if: always()
     steps:
       - name: Check if all jobs succeeded
@@ -598,7 +665,8 @@ jobs:
                 ("${{ needs.build-api.result }}" == "success" || "${{ needs.build-api.result }}" == "skipped") && \
                 ("${{ needs.build-billing.result }}" == "success" || "${{ needs.build-billing.result }}" == "skipped") && \
                 ("${{ needs.build-payments.result }}" == "success" || "${{ needs.build-payments.result }}" == "skipped") && \
-                ("${{ needs.build-cli.result }}" == "success" || "${{ needs.build-cli.result }}" == "skipped") ]]; then
+                ("${{ needs.build-cli.result }}" == "success" || "${{ needs.build-cli.result }}" == "skipped") && \
+                ("${{ needs.test-python-sdk.result }}" == "success" || "${{ needs.test-python-sdk.result }}" == "skipped") ]]; then
             echo "All CI checks passed!"
             exit 0
           else

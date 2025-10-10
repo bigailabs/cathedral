@@ -4,6 +4,12 @@ Python bindings for the Basilica GPU rental network SDK.
 
 ## Installation
 
+### From PyPI (Recommended)
+
+```bash
+pip install basilica-sdk
+```
+
 ### From Source
 
 ```bash
@@ -16,10 +22,10 @@ cd crates/basilica-sdk-python
 maturin develop
 ```
 
-### From PyPI (when published)
+## Upgrading
 
 ```bash
-pip install basilica
+pip install --upgrade basilica-sdk
 ```
 
 ## Quick Start

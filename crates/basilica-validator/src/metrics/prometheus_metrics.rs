@@ -156,6 +156,16 @@ impl ValidatorPrometheusMetrics {
             "GPU profiles for miners"
         );
 
+        // Node uptime metrics
+        describe_gauge!(
+            "basilica_node_uptime_minutes",
+            "Node uptime in minutes for ramp-up calculation"
+        );
+        describe_gauge!(
+            "basilica_node_uptime_multiplier",
+            "Node uptime-based reward multiplier (0.0-1.0)"
+        );
+
         // Rental metrics
         describe_gauge!(
             "basilica_validator_node_rental_status",
@@ -338,6 +348,27 @@ impl ValidatorPrometheusMetrics {
             "node_id" => node_id.to_string()
         )
         .set(count as f64);
+    }
+
+    /// Record node uptime metrics for ramp-up tracking
+    pub fn record_node_uptime_metrics(
+        &self,
+        miner_uid: u16,
+        node_id: &str,
+        uptime_minutes: f64,
+        multiplier: f64,
+    ) {
+        gauge!("basilica_node_uptime_minutes",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(uptime_minutes);
+
+        gauge!("basilica_node_uptime_multiplier",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(multiplier);
     }
 
     /// Record node rental status
