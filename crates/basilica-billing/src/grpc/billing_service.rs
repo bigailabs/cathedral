@@ -70,6 +70,12 @@ impl BillingServiceImpl {
         let usage_repository = Arc::new(crate::storage::SqlUsageRepository::new(
             rds_connection.clone(),
         ));
+        let user_metadata_repository = Arc::new(crate::storage::SqlUserMetadataRepository::new(
+            rds_connection.pool().clone(),
+        ));
+        let promo_code_repository = Arc::new(crate::storage::SqlPromoCodeRepository::new(
+            rds_connection.pool().clone(),
+        ));
 
         // Create event repositories using proper pattern
         let event_repository = Arc::new(crate::storage::events::SqlEventRepository::new(
@@ -91,6 +97,8 @@ impl BillingServiceImpl {
             rules_engine: Arc::new(RulesEngine::new(
                 package_repository.clone(),
                 rules_repository,
+                user_metadata_repository,
+                promo_code_repository,
             )),
             telemetry_processor,
             telemetry_ingester,
@@ -747,7 +755,13 @@ impl BillingService for BillingServiceImpl {
 
             let cost_breakdown = self
                 .rules_engine
-                .evaluate_package(&rental.package_id, &usage_metrics, &metadata)
+                .evaluate_package(
+                    &rental.user_id,
+                    &rental.package_id,
+                    &usage_metrics,
+                    None,
+                    &metadata,
+                )
                 .await
                 .map_err(|e| {
                     Status::internal(format!("Failed to evaluate billing rules: {}", e))

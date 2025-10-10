@@ -19,6 +19,18 @@ pub struct BillingPackage {
     pub priority: u32,
     pub active: bool,
     pub metadata: HashMap<String, String>,
+
+    pub storage_rate_per_gb_hour: CreditBalance,
+    pub network_rate_per_gb: CreditBalance,
+    pub disk_io_rate_per_gb: CreditBalance,
+    pub cpu_rate_per_core_hour: CreditBalance,
+    pub memory_rate_per_gb_hour: CreditBalance,
+
+    pub included_storage_gb_hours: Decimal,
+    pub included_network_gb: Decimal,
+    pub included_disk_io_gb: Decimal,
+    pub included_cpu_core_hours: Decimal,
+    pub included_memory_gb_hours: Decimal,
 }
 
 impl BillingPackage {
@@ -39,20 +51,67 @@ impl BillingPackage {
             priority: 100,
             active: true,
             metadata: HashMap::new(),
+
+            storage_rate_per_gb_hour: CreditBalance::zero(),
+            network_rate_per_gb: CreditBalance::zero(),
+            disk_io_rate_per_gb: CreditBalance::zero(),
+            cpu_rate_per_core_hour: CreditBalance::zero(),
+            memory_rate_per_gb_hour: CreditBalance::zero(),
+
+            included_storage_gb_hours: Decimal::ZERO,
+            included_network_gb: Decimal::ZERO,
+            included_disk_io_gb: Decimal::ZERO,
+            included_cpu_core_hours: Decimal::ZERO,
+            included_memory_gb_hours: Decimal::ZERO,
         }
     }
 
     /// Calculate cost for given usage
     pub fn calculate_cost(&self, usage: &UsageMetrics) -> CostBreakdown {
-        let total_hours = usage.gpu_hours.max(Decimal::ONE);
-        let total_cost = self.hourly_rate.multiply(total_hours);
+        let gpu_hours = usage.gpu_hours.max(Decimal::ONE);
+        let base_cost = self.hourly_rate.multiply(gpu_hours);
+
+        let storage_overage = usage
+            .storage_gb_hours
+            .saturating_sub(self.included_storage_gb_hours)
+            .max(Decimal::ZERO);
+        let network_overage = usage
+            .network_gb
+            .saturating_sub(self.included_network_gb)
+            .max(Decimal::ZERO);
+        let disk_io_overage = usage
+            .disk_io_gb
+            .saturating_sub(self.included_disk_io_gb)
+            .max(Decimal::ZERO);
+        let cpu_overage = usage
+            .cpu_hours
+            .saturating_sub(self.included_cpu_core_hours)
+            .max(Decimal::ZERO);
+        let memory_overage = usage
+            .memory_gb_hours
+            .saturating_sub(self.included_memory_gb_hours)
+            .max(Decimal::ZERO);
+
+        let storage_cost = self.storage_rate_per_gb_hour.multiply(storage_overage);
+        let network_cost = self.network_rate_per_gb.multiply(network_overage);
+        let disk_io_cost = self.disk_io_rate_per_gb.multiply(disk_io_overage);
+        let cpu_cost = self.cpu_rate_per_core_hour.multiply(cpu_overage);
+        let memory_cost = self.memory_rate_per_gb_hour.multiply(memory_overage);
+
+        let usage_cost = storage_cost
+            .add(network_cost)
+            .add(disk_io_cost)
+            .add(cpu_cost)
+            .add(memory_cost);
+
+        let subtotal = base_cost.add(usage_cost);
 
         CostBreakdown {
-            base_cost: total_cost,
-            usage_cost: CreditBalance::zero(),
+            base_cost,
+            usage_cost,
             discounts: CreditBalance::zero(),
             overage_charges: CreditBalance::zero(),
-            total_cost,
+            total_cost: subtotal,
         }
     }
 
@@ -187,5 +246,266 @@ mod tests {
 
         let cost = package.calculate_cost(&usage);
         assert_eq!(cost.total_cost, CreditBalance::from_f64(35.0).unwrap());
+    }
+
+    #[test]
+    fn test_extras_calculation_with_overages() {
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.network_rate_per_gb = CreditBalance::from_f64(0.05).unwrap();
+        package.disk_io_rate_per_gb = CreditBalance::from_f64(0.03).unwrap();
+        package.cpu_rate_per_core_hour = CreditBalance::from_f64(0.02).unwrap();
+        package.memory_rate_per_gb_hour = CreditBalance::from_f64(0.01).unwrap();
+
+        package.included_storage_gb_hours = Decimal::from(100);
+        package.included_network_gb = Decimal::from(50);
+        package.included_disk_io_gb = Decimal::from(50);
+        package.included_cpu_core_hours = Decimal::from(80);
+        package.included_memory_gb_hours = Decimal::from(320);
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from(10),
+            cpu_hours: Decimal::from(100),
+            memory_gb_hours: Decimal::from(400),
+            storage_gb_hours: Decimal::from(150),
+            network_gb: Decimal::from(75),
+            disk_io_gb: Decimal::from(60),
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        let expected_base = CreditBalance::from_f64(35.0).unwrap();
+        let expected_storage = CreditBalance::from_f64(5.0).unwrap();
+        let expected_network = CreditBalance::from_f64(1.25).unwrap();
+        let expected_disk_io = CreditBalance::from_f64(0.30).unwrap();
+        let expected_cpu = CreditBalance::from_f64(0.40).unwrap();
+        let expected_memory = CreditBalance::from_f64(0.80).unwrap();
+
+        assert_eq!(cost.base_cost, expected_base);
+
+        let expected_usage = expected_storage
+            .add(expected_network)
+            .add(expected_disk_io)
+            .add(expected_cpu)
+            .add(expected_memory);
+
+        assert_eq!(cost.usage_cost, expected_usage);
+        assert_eq!(cost.total_cost, expected_base.add(expected_usage));
+    }
+
+    #[test]
+    fn test_extras_calculation_within_included_allowances() {
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.network_rate_per_gb = CreditBalance::from_f64(0.05).unwrap();
+        package.disk_io_rate_per_gb = CreditBalance::from_f64(0.03).unwrap();
+        package.cpu_rate_per_core_hour = CreditBalance::from_f64(0.02).unwrap();
+        package.memory_rate_per_gb_hour = CreditBalance::from_f64(0.01).unwrap();
+
+        package.included_storage_gb_hours = Decimal::from(200);
+        package.included_network_gb = Decimal::from(100);
+        package.included_disk_io_gb = Decimal::from(100);
+        package.included_cpu_core_hours = Decimal::from(100);
+        package.included_memory_gb_hours = Decimal::from(500);
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from(10),
+            cpu_hours: Decimal::from(50),
+            memory_gb_hours: Decimal::from(300),
+            storage_gb_hours: Decimal::from(100),
+            network_gb: Decimal::from(50),
+            disk_io_gb: Decimal::from(50),
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        let expected_base = CreditBalance::from_f64(35.0).unwrap();
+        assert_eq!(cost.base_cost, expected_base);
+        assert_eq!(cost.usage_cost, CreditBalance::zero());
+        assert_eq!(cost.total_cost, expected_base);
+    }
+
+    #[test]
+    fn test_extras_calculation_zero_rates() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from(10),
+            cpu_hours: Decimal::from(100),
+            memory_gb_hours: Decimal::from(400),
+            storage_gb_hours: Decimal::from(150),
+            network_gb: Decimal::from(75),
+            disk_io_gb: Decimal::from(60),
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        let expected_base = CreditBalance::from_f64(35.0).unwrap();
+        assert_eq!(cost.base_cost, expected_base);
+        assert_eq!(cost.usage_cost, CreditBalance::zero());
+        assert_eq!(cost.total_cost, expected_base);
+    }
+
+    #[test]
+    fn test_extras_calculation_negative_prevention() {
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.included_storage_gb_hours = Decimal::from(200);
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from(10),
+            cpu_hours: Decimal::ZERO,
+            memory_gb_hours: Decimal::ZERO,
+            storage_gb_hours: Decimal::from(50),
+            network_gb: Decimal::ZERO,
+            disk_io_gb: Decimal::ZERO,
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        assert_eq!(cost.usage_cost, CreditBalance::zero());
+    }
+
+    #[test]
+    fn test_extras_calculation_partial_overages() {
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.network_rate_per_gb = CreditBalance::from_f64(0.05).unwrap();
+        package.included_storage_gb_hours = Decimal::from(100);
+        package.included_network_gb = Decimal::from(50);
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from(10),
+            cpu_hours: Decimal::ZERO,
+            memory_gb_hours: Decimal::ZERO,
+            storage_gb_hours: Decimal::from(110),
+            network_gb: Decimal::from(40),
+            disk_io_gb: Decimal::ZERO,
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        let expected_base = CreditBalance::from_f64(35.0).unwrap();
+        let expected_storage = CreditBalance::from_f64(1.0).unwrap();
+
+        assert_eq!(cost.base_cost, expected_base);
+        assert_eq!(cost.usage_cost, expected_storage);
+        assert_eq!(cost.total_cost, expected_base.add(expected_storage));
+    }
+
+    #[test]
+    fn test_extras_calculation_minimum_gpu_hours() {
+        use rust_decimal::prelude::FromStr;
+
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.included_storage_gb_hours = Decimal::from(100);
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from_str("0.5").unwrap(),
+            cpu_hours: Decimal::ZERO,
+            memory_gb_hours: Decimal::ZERO,
+            storage_gb_hours: Decimal::from(110),
+            network_gb: Decimal::ZERO,
+            disk_io_gb: Decimal::ZERO,
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        let expected_base = CreditBalance::from_f64(3.5).unwrap();
+        assert_eq!(cost.base_cost, expected_base);
+    }
+
+    #[test]
+    fn test_extras_calculation_realistic_scenario() {
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100 GPU instances with extras".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.network_rate_per_gb = CreditBalance::from_f64(0.05).unwrap();
+        package.disk_io_rate_per_gb = CreditBalance::from_f64(0.03).unwrap();
+        package.cpu_rate_per_core_hour = CreditBalance::from_f64(0.02).unwrap();
+        package.memory_rate_per_gb_hour = CreditBalance::from_f64(0.01).unwrap();
+
+        package.included_storage_gb_hours = Decimal::from(1000);
+        package.included_network_gb = Decimal::from(500);
+        package.included_disk_io_gb = Decimal::from(500);
+        package.included_cpu_core_hours = Decimal::from(800);
+        package.included_memory_gb_hours = Decimal::from(3200);
+
+        let usage = UsageMetrics {
+            gpu_hours: Decimal::from(100),
+            cpu_hours: Decimal::from(850),
+            memory_gb_hours: Decimal::from(3500),
+            storage_gb_hours: Decimal::from(1200),
+            network_gb: Decimal::from(600),
+            disk_io_gb: Decimal::from(550),
+        };
+
+        let cost = package.calculate_cost(&usage);
+
+        let expected_base = CreditBalance::from_f64(350.0).unwrap();
+        let expected_storage = CreditBalance::from_f64(20.0).unwrap();
+        let expected_network = CreditBalance::from_f64(5.0).unwrap();
+        let expected_disk_io = CreditBalance::from_f64(1.5).unwrap();
+        let expected_cpu = CreditBalance::from_f64(1.0).unwrap();
+        let expected_memory = CreditBalance::from_f64(3.0).unwrap();
+
+        assert_eq!(cost.base_cost, expected_base);
+
+        let expected_usage = expected_storage
+            .add(expected_network)
+            .add(expected_disk_io)
+            .add(expected_cpu)
+            .add(expected_memory);
+
+        assert_eq!(cost.usage_cost, expected_usage);
+        assert_eq!(cost.total_cost, expected_base.add(expected_usage));
     }
 }

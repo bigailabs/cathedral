@@ -6544,6 +6544,8 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "basilica-billing",
  "basilica-common",
  "basilica-miner",
  "basilica-protocol",
@@ -6551,6 +6553,7 @@ dependencies = [
  "chrono",
  "hex",
  "prost",
+ "rust_decimal",
  "sqlx",
  "tokio",
  "tonic",
