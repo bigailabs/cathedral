@@ -542,6 +542,119 @@ mod tests {
         }
     }
 
+    /// Helper function to insert a test miner
+    async fn insert_test_miner(
+        persistence: &SimplePersistence,
+        miner_id: &str,
+        hotkey: &str,
+        registered_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(miner_id)
+        .bind(hotkey)
+        .bind("127.0.0.1:8080")
+        .bind(now.to_rfc3339())
+        .bind(registered_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind("{}")
+        .execute(persistence.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Helper function to insert a test miner node
+    async fn insert_test_miner_node(
+        persistence: &SimplePersistence,
+        miner_id: &str,
+        node_id: &str,
+        gpu_count: i64,
+        created_at: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(format!("{}:{}", miner_id, node_id))
+        .bind(miner_id)
+        .bind(node_id)
+        .bind("127.0.0.1:8080")
+        .bind(gpu_count)
+        .bind("online")
+        .bind(created_at.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Helper function to insert a test GPU UUID assignment
+    async fn insert_test_gpu_uuid(
+        persistence: &SimplePersistence,
+        miner_id: &str,
+        node_id: &str,
+        gpu_name: &str,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now();
+        let gpu_uuid = format!("test-gpu-uuid-{}-{}", miner_id, node_id);
+        sqlx::query(
+            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
+             VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(gpu_uuid)
+        .bind(0i32)
+        .bind(node_id)
+        .bind(miner_id)
+        .bind(gpu_name)
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Helper function to insert a test verification log
+    async fn insert_test_verification_log(
+        persistence: &SimplePersistence,
+        node_id: &str,
+        timestamp: DateTime<Utc>,
+        success: bool,
+        with_binary_validation: bool,
+    ) -> anyhow::Result<()> {
+        let now = Utc::now();
+        let log_id = uuid::Uuid::new_v4().to_string();
+        let score = if success { 1.0 } else { 0.0 };
+        let success_int = if success { 1i32 } else { 0i32 };
+        let binary_validation = if with_binary_validation {
+            Some("binary_validation_data")
+        } else {
+            None
+        };
+
+        sqlx::query(
+            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(log_id)
+        .bind(node_id)
+        .bind("test_validator_hotkey")
+        .bind("gpu_validation")
+        .bind(timestamp.to_rfc3339())
+        .bind(score)
+        .bind(success_int)
+        .bind("{}")
+        .bind(1000i64)
+        .bind(binary_validation)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(persistence.pool())
+        .await?;
+        Ok(())
+    }
+
     /// Helper function to seed all required data for GPU profile tests
     async fn seed_test_data(
         persistence: &SimplePersistence,
@@ -1340,36 +1453,12 @@ mod tests {
         let now = Utc::now();
 
         // Create miner and node without any verification logs
-        sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(miner_id)
-        .bind("hotkey_999")
-        .bind("127.0.0.1:8080")
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind("{}")
-        .execute(persistence.pool())
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(format!("{}:{}", miner_id, node_id))
-        .bind(miner_id)
-        .bind(node_id)
-        .bind("127.0.0.1:8080")
-        .bind(1i64)
-        .bind("online")
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_miner(&persistence, miner_id, "hotkey_999", now)
+            .await
+            .unwrap();
+        insert_test_miner_node(&persistence, miner_id, node_id, 1, now)
+            .await
+            .unwrap();
 
         // Should get 0.0 multiplier (no GPU UUID assigned)
         let multiplier = persistence
@@ -1393,72 +1482,22 @@ mod tests {
         let seven_days_ago = now - chrono::Duration::days(7);
 
         // Create miner and node
-        sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(miner_id)
-        .bind("hotkey_1000")
-        .bind("127.0.0.1:8080")
-        .bind(now.to_rfc3339())
-        .bind(seven_days_ago.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind("{}")
-        .execute(persistence.pool())
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(format!("{}:{}", miner_id, node_id))
-        .bind(miner_id)
-        .bind(node_id)
-        .bind("127.0.0.1:8080")
-        .bind(1i64)
-        .bind("online")
-        .bind(seven_days_ago.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_miner(&persistence, miner_id, "hotkey_1000", seven_days_ago)
+            .await
+            .unwrap();
+        insert_test_miner_node(&persistence, miner_id, node_id, 1, seven_days_ago)
+            .await
+            .unwrap();
 
         // Add GPU UUID
-        sqlx::query(
-            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
-             VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind("test-gpu-uuid-1000")
-        .bind(0i32)
-        .bind(node_id)
-        .bind(miner_id)
-        .bind("A100")
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_gpu_uuid(&persistence, miner_id, node_id, "A100")
+            .await
+            .unwrap();
 
         // Add verification logs showing 7 days of continuous success
-        sqlx::query(
-            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind("log-1")
-        .bind(node_id)
-        .bind("validator_hotkey")
-        .bind("gpu_validation")
-        .bind(seven_days_ago.to_rfc3339())
-        .bind(1.0)
-        .bind(1i32) // success
-        .bind("{}")
-        .bind(1000i64)
-        .bind("binary_validation_data") // last_binary_validation IS NOT NULL
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_verification_log(&persistence, node_id, seven_days_ago, true, true)
+            .await
+            .unwrap();
 
         // Should get ~0.5 multiplier (7 days out of 14)
         let multiplier = persistence
@@ -1480,119 +1519,37 @@ mod tests {
         let node_id = "test_node_failure";
         let now = Utc::now();
         let seven_days_ago = now - chrono::Duration::days(7);
+        let two_days_ago = now - chrono::Duration::days(2);
         let one_day_ago = now - chrono::Duration::days(1);
 
         // Create miner and node
-        sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(miner_id)
-        .bind("hotkey_1001")
-        .bind("127.0.0.1:8080")
-        .bind(now.to_rfc3339())
-        .bind(seven_days_ago.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind("{}")
-        .execute(persistence.pool())
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(format!("{}:{}", miner_id, node_id))
-        .bind(miner_id)
-        .bind(node_id)
-        .bind("127.0.0.1:8080")
-        .bind(1i64)
-        .bind("online")
-        .bind(seven_days_ago.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_miner(&persistence, miner_id, "hotkey_1001", seven_days_ago)
+            .await
+            .unwrap();
+        insert_test_miner_node(&persistence, miner_id, node_id, 1, seven_days_ago)
+            .await
+            .unwrap();
 
         // Add GPU UUID
-        sqlx::query(
-            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
-             VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind("test-gpu-uuid-1001")
-        .bind(0i32)
-        .bind(node_id)
-        .bind(miner_id)
-        .bind("A100")
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_gpu_uuid(&persistence, miner_id, node_id, "A100")
+            .await
+            .unwrap();
 
         // Add verification logs: success 7 days ago, failure 2 days ago, success 1 day ago
         // Only the last success period (1 day) should count
-        sqlx::query(
-            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind("log-1")
-        .bind(node_id)
-        .bind("validator_hotkey")
-        .bind("gpu_validation")
-        .bind(seven_days_ago.to_rfc3339())
-        .bind(1.0)
-        .bind(1i32) // success
-        .bind("{}")
-        .bind(1000i64)
-        .bind("binary_validation_data")
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_verification_log(&persistence, node_id, seven_days_ago, true, true)
+            .await
+            .unwrap();
 
         // Failure 2 days ago - this resets uptime
-        let two_days_ago = now - chrono::Duration::days(2);
-        sqlx::query(
-            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind("log-2")
-        .bind(node_id)
-        .bind("validator_hotkey")
-        .bind("gpu_validation")
-        .bind(two_days_ago.to_rfc3339())
-        .bind(0.0)
-        .bind(0i32) // failure
-        .bind("{}")
-        .bind(1000i64)
-        .bind("binary_validation_data")
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_verification_log(&persistence, node_id, two_days_ago, false, true)
+            .await
+            .unwrap();
 
         // Success 1 day ago - starts new uptime period
-        sqlx::query(
-            "INSERT INTO verification_logs (id, node_id, validator_hotkey, verification_type, timestamp, score, success, details, duration_ms, last_binary_validation, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind("log-3")
-        .bind(node_id)
-        .bind("validator_hotkey")
-        .bind("gpu_validation")
-        .bind(one_day_ago.to_rfc3339())
-        .bind(1.0)
-        .bind(1i32) // success
-        .bind("{}")
-        .bind(1000i64)
-        .bind("binary_validation_data")
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(persistence.pool())
-        .await
-        .unwrap();
+        insert_test_verification_log(&persistence, node_id, one_day_ago, true, true)
+            .await
+            .unwrap();
 
         // Should get ~0.071 multiplier (1 day out of 14, ~7.14%)
         let multiplier = persistence
