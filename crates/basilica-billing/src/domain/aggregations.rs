@@ -561,18 +561,18 @@ impl AggregationJobs {
             r#"
             UPDATE billing.rentals r
             SET
-                actual_cost = COALESCE(agg.total_cost, r.actual_cost),
-                last_updated = NOW()
+                total_cost = COALESCE(agg.total_cost, r.total_cost),
+                updated_at = NOW()
             FROM (
                 SELECT
                     rental_id,
                     SUM(cost_for_period) as total_cost
-                FROM billing.usage_aggregations
+                FROM billing.usage_aggregation_facts
                 GROUP BY rental_id
             ) agg
             WHERE r.rental_id = agg.rental_id
-              AND r.state IN ('active', 'completed')
-              AND (r.actual_cost = 0 OR r.actual_cost < agg.total_cost)
+              AND r.status IN ('active', 'completed')
+              AND (r.total_cost IS NULL OR r.total_cost < agg.total_cost)
             "#,
         )
         .execute(pool)
