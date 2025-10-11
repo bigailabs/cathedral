@@ -40,28 +40,42 @@ This ratio represents the miner's availability and reliability. High availabilit
 
 ### For Each Miner in a Category
 
-Within each GPU category, the miner's score is weighted by their GPU count and uptime:
+Within each GPU category, the miner's score is weighted by their effective (uptime-adjusted) GPU count:
 
 ```text
-category_score = validation_ratio × (gpu_count × uptime_multiplier)
+category_score = validation_ratio × effective_gpu_count
 ```
 
 Where:
-- `validation_ratio` = successful_validations / total_validations
-- `gpu_count` = number of GPUs aggregated across all machines in this category
-- `uptime_multiplier` = node uptime factor (0.0 to 1.0, based on continuous uptime - see [Node Uptime Ramp-up](#node-uptime-ramp-up-incentives-ramp-up))
+- `validation_ratio` = successful_validations / total_validations across all nodes in this category
+- `effective_gpu_count` = SUM(gpu_count_n × uptime_multiplier_n) for all nodes n in this category
 
-The GPU count is aggregated across all machines the miner operates within that category, with each node's GPU count multiplied by its individual uptime multiplier.
+For a single node, the contribution to effective GPU count is:
+```text
+effective_gpu_count_n = gpu_count_n × uptime_multiplier_n
+```
+
+Where:
+- `gpu_count_n` = raw number of GPUs on node n
+- `uptime_multiplier_n` = node uptime factor (0.0 to 1.0, based on continuous uptime - see [Node Uptime Ramp-up](#node-uptime-ramp-up-incentives-ramp-up))
+
+The effective GPU count is aggregated across all machines the miner operates within that category, with each node's GPU count multiplied by its individual uptime multiplier.
 
 ### Category Competition
 
-For each category C, the total score is:
+For each category C, the total score is calculated using effective (uptime-adjusted) GPU counts:
 
 ```text
-total_category_score = SUM(validation_ratio_i × gpu_count_i) for all miners i in C
+total_category_score = SUM(validation_ratio_i × effective_gpu_count_i) for all miners i in C
 ```
 
-Miners compete locally within their category. The more populated a category is, the more competition exists for that category's weight pool.
+Where `effective_gpu_count_i` is the sum of all uptime-adjusted GPU counts across all nodes that miner i operates in category C:
+
+```text
+effective_gpu_count_i = SUM(gpu_count_n × uptime_multiplier_n) for all nodes n of miner i in C
+```
+
+Miners compete locally within their category. The more populated a category is (measured by total effective GPU count), the more competition exists for that category's weight pool.
 
 ### Weight Distribution Within Category
 
@@ -158,15 +172,21 @@ Day 30 (720+ hours)      1.000                 1.000         100.00% (capped)
 **Setup:**
 - GPU Category: H100
 - Category weight pool: 40% of available emissions
-- Existing miner: 1 H100 node, 14 days uptime (multiplier = 1.0)
-- New miner: 1 H100 node, just joined (multiplier = 0.0)
+- Existing miner: 1 H100 node, 14 days uptime (multiplier = 1.0), 100% validation success
+- New miner: 1 H100 node, just joined (multiplier = 0.0), 100% validation success
 
-**Calculations:**
+**Calculations (Day 0):**
 
 ```
-Existing miner effective count = 1 GPU × 1.0 = 1.0
-New miner effective count      = 1 GPU × 0.0 = 0.0
-Total effective GPUs           = 1.0
+Existing miner:
+  effective_gpu_count = 1 GPU × 1.0 = 1.0
+  category_score = 1.0 (validation_ratio) × 1.0 (effective_gpu_count) = 1.0
+
+New miner:
+  effective_gpu_count = 1 GPU × 0.0 = 0.0
+  category_score = 1.0 (validation_ratio) × 0.0 (effective_gpu_count) = 0.0
+
+total_category_score = 1.0 + 0.0 = 1.0
 
 Existing miner share = 1.0 / 1.0 = 100% of H100 pool
 New miner share      = 0.0 / 1.0 = 0% of H100 pool
@@ -176,9 +196,15 @@ New miner share      = 0.0 / 1.0 = 0% of H100 pool
 
 **After 7 days:**
 ```
-Existing miner effective count = 1 GPU × 1.0 = 1.0
-New miner effective count      = 1 GPU × 0.5 = 0.5
-Total effective GPUs           = 1.5
+Existing miner:
+  effective_gpu_count = 1 GPU × 1.0 = 1.0
+  category_score = 1.0 × 1.0 = 1.0
+
+New miner:
+  effective_gpu_count = 1 GPU × 0.5 = 0.5
+  category_score = 1.0 × 0.5 = 0.5
+
+total_category_score = 1.0 + 0.5 = 1.5
 
 Existing miner share = 1.0 / 1.5 = 66.7% of H100 pool
 New miner share      = 0.5 / 1.5 = 33.3% of H100 pool
@@ -186,9 +212,15 @@ New miner share      = 0.5 / 1.5 = 33.3% of H100 pool
 
 **After 14 days:**
 ```
-Existing miner effective count = 1 GPU × 1.0 = 1.0
-New miner effective count      = 1 GPU × 1.0 = 1.0
-Total effective GPUs           = 2.0
+Existing miner:
+  effective_gpu_count = 1 GPU × 1.0 = 1.0
+  category_score = 1.0 × 1.0 = 1.0
+
+New miner:
+  effective_gpu_count = 1 GPU × 1.0 = 1.0
+  category_score = 1.0 × 1.0 = 1.0
+
+total_category_score = 1.0 + 1.0 = 2.0
 
 Existing miner share = 1.0 / 2.0 = 50% of H100 pool
 New miner share      = 1.0 / 2.0 = 50% of H100 pool
@@ -200,17 +232,20 @@ New miner share      = 1.0 / 2.0 = 50% of H100 pool
 - Miner with 1 H100 node
 - Node has been online for 7 days (multiplier = 0.5, receiving 50% rewards)
 - Node goes offline or fails validation
+- Assume 100% validation success rate when online
 
 **Before failure:**
 ```
-Effective GPU count = 1 × 0.5 = 0.5
-Reward share = 0.5 / total_effective_gpus
+effective_gpu_count = 1 × 0.5 = 0.5
+category_score = 1.0 (validation_ratio) × 0.5 (effective_gpu_count) = 0.5
+Reward share = 0.5 / total_category_score
 ```
 
 **Immediately after failure:**
 ```
-Effective GPU count = 1 × 0.0 = 0.0 (RESET!)
-Reward share = 0.0 / total_effective_gpus = 0%
+effective_gpu_count = 1 × 0.0 = 0.0 (RESET!)
+category_score = 1.0 × 0.0 = 0.0
+Reward share = 0.0 / total_category_score = 0%
 ```
 
 **Impact:** The 7 days of built-up uptime is lost. The miner must start over from 0% and build back up over another 14 days.
@@ -218,20 +253,24 @@ Reward share = 0.0 / total_effective_gpus = 0%
 #### Scenario 3: Multiple Nodes with Different Uptimes
 
 **Setup:**
-- Miner with 3 H100 nodes:
-  - Node A: 14 days uptime (multiplier = 1.0)
-  - Node B: 7 days uptime (multiplier = 0.5)
-  - Node C: 3 days uptime (multiplier = 0.214)
+- Miner with 3 H100 nodes (100% validation success):
+  - Node A: 1 GPU, 14 days uptime (multiplier = 1.0)
+  - Node B: 1 GPU, 7 days uptime (multiplier = 0.5)
+  - Node C: 1 GPU, 3 days uptime (multiplier = 0.214)
 
 **Calculation:**
 ```
-Node A effective count = 1 × 1.000 = 1.000
-Node B effective count = 1 × 0.500 = 0.500
-Node C effective count = 1 × 0.214 = 0.214
-─────────────────────────────────────
-Total effective count  = 2.714 GPUs
+Node A: effective_gpu_count = 1 × 1.000 = 1.000
+Node B: effective_gpu_count = 1 × 0.500 = 0.500
+Node C: effective_gpu_count = 1 × 0.214 = 0.214
+────────────────────────────────────────────────
+Miner's total effective_gpu_count = 2.714 GPUs
 
-vs. theoretical maximum = 3.000 GPUs (all at 100%)
+category_score = 1.0 (validation_ratio) × 2.714 (effective_gpu_count) = 2.714
+
+vs. theoretical maximum:
+  effective_gpu_count = 3.000 GPUs (all at 100%)
+  category_score = 1.0 × 3.000 = 3.000
 ```
 
 **Current efficiency:** 2.714 / 3.0 = 90.47% of maximum possible rewards
@@ -314,8 +353,9 @@ Validators expose Prometheus metrics that miners can monitor to track their upti
 The system maintains GPU profiles for each miner that track:
 
 - Primary GPU model
-- GPU count distribution across models
-- Total validation score
+- GPU count distribution across models (raw counts)
+- Node uptime multipliers (per-node basis)
+- Total validation score (calculated using effective GPU counts)
 - Verification count
 - Last update timestamp
 
@@ -339,5 +379,5 @@ Miners must meet several criteria to receive weights:
 A single miner can appear in multiple categories if they operate different GPU types:
 
 - Miners with both H100 and H200 GPUs compete in both categories
-- Scores are calculated proportionally based on GPU distribution
+- Scores are calculated proportionally based on effective GPU count distribution (uptime-adjusted)
 - Final weight is the sum of weights earned in each category
