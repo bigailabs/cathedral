@@ -10,7 +10,6 @@ use axum::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info};
-use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
 pub struct BalanceResponse {
@@ -109,22 +108,15 @@ async fn get_balance(
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
-    let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!(
-            "Invalid user_id format for {}: {}. User ID must be a valid UUID.",
-            auth.user_id, e
-        );
-        ApiError::BadRequest {
-            message: "User ID must be a valid UUID for billing operations".to_string(),
-        }
-    })?;
-
-    let response = billing_client.get_balance(user_uuid).await.map_err(|e| {
-        error!("Failed to get balance: {}", e);
-        ApiError::Internal {
-            message: format!("Failed to get balance: {}", e),
-        }
-    })?;
+    let response = billing_client
+        .get_balance(&auth.user_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get balance: {}", e);
+            ApiError::Internal {
+                message: format!("Failed to get balance: {}", e),
+            }
+        })?;
 
     let last_updated = if let Some(timestamp) = response.last_updated {
         DateTime::<Utc>::from_timestamp(timestamp.seconds, timestamp.nanos as u32)
@@ -153,18 +145,8 @@ async fn get_packages(
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
-    let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!(
-            "Invalid user_id format for {}: {}. User ID must be a valid UUID.",
-            auth.user_id, e
-        );
-        ApiError::BadRequest {
-            message: "User ID must be a valid UUID for billing operations".to_string(),
-        }
-    })?;
-
     let response = billing_client
-        .get_billing_packages(user_uuid)
+        .get_billing_packages(&auth.user_id)
         .await
         .map_err(|e| {
             error!("Failed to get billing packages: {}", e);
@@ -223,18 +205,8 @@ async fn get_usage_history(
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
-    let user_uuid = Uuid::parse_str(&auth.user_id).map_err(|e| {
-        error!(
-            "Invalid user_id format for {}: {}. User ID must be a valid UUID.",
-            auth.user_id, e
-        );
-        ApiError::BadRequest {
-            message: "User ID must be a valid UUID for billing operations".to_string(),
-        }
-    })?;
-
     let response = billing_client
-        .get_active_rentals_for_user(user_uuid, Some(params.limit), Some(params.offset))
+        .get_active_rentals_for_user(&auth.user_id, Some(params.limit), Some(params.offset))
         .await
         .map_err(|e| {
             error!("Failed to get usage history: {}", e);

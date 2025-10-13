@@ -72,19 +72,19 @@ impl TelemetryProcessor {
             })?;
 
         let usage_metrics = if let Some(ref usage) = data.resource_usage {
+            let gpu_count = usage.gpu_usage.len() as u32;
+
+            let collection_interval_seconds = 60;
+            let gpu_hours = Decimal::from(collection_interval_seconds) / Decimal::from(3600);
+
             UsageMetrics {
+                gpu_hours,
+                gpu_count,
                 cpu_hours: Decimal::from_f64(usage.cpu_percent / 100.0).unwrap_or(Decimal::ZERO),
                 memory_gb_hours: Decimal::from(usage.memory_mb) / Decimal::from(1024),
-                gpu_hours: usage
-                    .gpu_usage
-                    .iter()
-                    .map(|gpu| {
-                        Decimal::from_f64(gpu.utilization_percent / 100.0).unwrap_or(Decimal::ZERO)
-                    })
-                    .sum(),
                 network_gb: (Decimal::from(usage.network_rx_bytes + usage.network_tx_bytes))
                     / Decimal::from(1_073_741_824u64),
-                storage_gb_hours: Decimal::ZERO, // Not tracked yet
+                storage_gb_hours: Decimal::ZERO,
                 disk_io_gb: (Decimal::from(usage.disk_read_bytes + usage.disk_write_bytes))
                     / Decimal::from(1_073_741_824u64),
             }
@@ -156,6 +156,7 @@ impl TelemetryProcessor {
             })?;
 
         let mut total_metrics = UsageMetrics::zero();
+        let mut max_gpu_count = 0u32;
 
         for event in events {
             if event.event_type == "telemetry_update" {
@@ -175,9 +176,17 @@ impl TelemetryProcessor {
                     total_metrics.network_gb +=
                         Decimal::from_f64(data["network_gb"].as_f64().unwrap_or(0.0))
                             .unwrap_or(Decimal::ZERO);
+
+                    if let Some(gpu_metrics) = data.get("gpu_metrics") {
+                        if let Some(gpu_count) = gpu_metrics["gpu_count"].as_u64() {
+                            max_gpu_count = max_gpu_count.max(gpu_count as u32);
+                        }
+                    }
                 }
             }
         }
+
+        total_metrics.gpu_count = max_gpu_count;
 
         Ok(total_metrics)
     }

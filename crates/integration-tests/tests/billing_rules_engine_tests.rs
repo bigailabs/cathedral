@@ -261,6 +261,7 @@ fn create_test_package() -> BillingPackage {
 fn create_test_usage() -> UsageMetrics {
     UsageMetrics {
         gpu_hours: Decimal::from(10),
+        gpu_count: 1,
         cpu_hours: Decimal::ZERO,
         memory_gb_hours: Decimal::ZERO,
         storage_gb_hours: Decimal::ZERO,

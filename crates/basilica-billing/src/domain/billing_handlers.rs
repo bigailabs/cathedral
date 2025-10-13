@@ -64,25 +64,33 @@ impl BillingEventHandlers {
 
     /// Convert telemetry data to usage metrics
     fn telemetry_to_usage_metrics(telemetry: &TelemetryData) -> UsageMetrics {
+        let gpu_count = telemetry
+            .gpu_metrics
+            .as_ref()
+            .and_then(|m| m.get("gpu_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32;
+
         UsageMetrics {
-            cpu_hours: telemetry.cpu_percent.unwrap_or(Decimal::ZERO) / Decimal::from(100),
-            memory_gb_hours: telemetry
-                .memory_mb
-                .map(|mb| Decimal::from(mb) / Decimal::from(1024))
-                .unwrap_or(Decimal::ZERO),
             gpu_hours: telemetry
                 .gpu_metrics
                 .as_ref()
                 .and_then(|m| m.get("utilization"))
                 .and_then(|v| v.as_f64())
                 .map(|v| Decimal::from_f64_retain(v / 100.0).unwrap_or(Decimal::ZERO))
-                .unwrap_or(Decimal::ONE), // Assume full GPU usage if no metrics
+                .unwrap_or(Decimal::ONE),
+            gpu_count,
+            cpu_hours: telemetry.cpu_percent.unwrap_or(Decimal::ZERO) / Decimal::from(100),
+            memory_gb_hours: telemetry
+                .memory_mb
+                .map(|mb| Decimal::from(mb) / Decimal::from(1024))
+                .unwrap_or(Decimal::ZERO),
             network_gb: (telemetry.network_rx_bytes.unwrap_or(0)
                 + telemetry.network_tx_bytes.unwrap_or(0))
             .checked_div(1_073_741_824)
             .map(Decimal::from)
             .unwrap_or(Decimal::ZERO),
-            storage_gb_hours: Decimal::ZERO, // Not tracked in telemetry yet
+            storage_gb_hours: Decimal::ZERO,
             disk_io_gb: (telemetry.disk_read_bytes.unwrap_or(0)
                 + telemetry.disk_write_bytes.unwrap_or(0))
             .checked_div(1_073_741_824)
@@ -149,7 +157,8 @@ impl EventHandlers for BillingEventHandlers {
             .get_package(&rental.package_id)
             .await?;
 
-        let cost_breakdown = package.calculate_cost(&usage_metrics);
+        let cost_breakdown =
+            package.calculate_cost_with_gpu_count(&usage_metrics, usage_metrics.gpu_count);
 
         let user_id = UserId::new(event.user_id.clone());
         self.usage_repository
@@ -241,7 +250,7 @@ impl EventHandlers for BillingEventHandlers {
                     .get_package(&rental.package_id)
                     .await?;
 
-                let final_cost = package.calculate_cost(&usage);
+                let final_cost = package.calculate_cost_with_gpu_count(&usage, usage.gpu_count);
                 rental.actual_cost = final_cost.total_cost;
 
                 if let Err(e) = self
@@ -366,6 +375,7 @@ impl EventHandlers for BillingEventHandlers {
 
         let estimated_usage = UsageMetrics {
             gpu_hours: Decimal::ONE,
+            gpu_count: 1,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::ZERO,
@@ -373,7 +383,9 @@ impl EventHandlers for BillingEventHandlers {
             disk_io_gb: Decimal::ZERO,
         };
 
-        let estimated_cost = package.calculate_cost(&estimated_usage).total_cost;
+        let estimated_cost = package
+            .calculate_cost_with_gpu_count(&estimated_usage, estimated_usage.gpu_count)
+            .total_cost;
 
         let reservation = self
             .credit_repository
@@ -470,7 +482,7 @@ impl EventHandlers for BillingEventHandlers {
             .get_package(&rental.package_id)
             .await?;
 
-        let cost_breakdown = package.calculate_cost(&usage);
+        let cost_breakdown = package.calculate_cost_with_gpu_count(&usage, usage.gpu_count);
         let computed_cost = cost_breakdown.total_cost;
 
         let client_provided_cost = CreditBalance::from_decimal(end_data.final_cost);

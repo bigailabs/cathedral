@@ -8,7 +8,6 @@ use basilica_protocol::billing::{
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
-use uuid::Uuid;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: u32 = 3;
@@ -108,9 +107,10 @@ impl BillingClient {
         }
     }
 
-    pub async fn get_balance(&self, user_id: Uuid) -> Result<GetBalanceResponse> {
+    pub async fn get_balance(&self, user_id: impl Into<String>) -> Result<GetBalanceResponse> {
+        let user_id = user_id.into();
         let request = GetBalanceRequest {
-            user_id: user_id.to_string(),
+            user_id: user_id.clone(),
         };
 
         debug!("Fetching balance for user: {}", user_id);
@@ -124,9 +124,13 @@ impl BillingClient {
         Ok(response.into_inner())
     }
 
-    pub async fn get_billing_packages(&self, user_id: Uuid) -> Result<GetBillingPackagesResponse> {
+    pub async fn get_billing_packages(
+        &self,
+        user_id: impl Into<String>,
+    ) -> Result<GetBillingPackagesResponse> {
+        let user_id = user_id.into();
         let request = GetBillingPackagesRequest {
-            user_id: user_id.to_string(),
+            user_id: user_id.clone(),
         };
 
         debug!("Fetching billing packages for user: {}", user_id);
@@ -167,14 +171,13 @@ impl BillingClient {
 
     pub async fn get_active_rentals_for_user(
         &self,
-        user_id: Uuid,
+        user_id: impl Into<String>,
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> Result<GetActiveRentalsResponse> {
+        let user_id = user_id.into();
         let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::UserId(
-                user_id.to_string(),
-            )),
+            filter: Some(get_active_rentals_request::Filter::UserId(user_id.clone())),
             limit: limit.unwrap_or(50),
             offset: offset.unwrap_or(0),
         };

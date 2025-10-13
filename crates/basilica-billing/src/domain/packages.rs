@@ -7,6 +7,7 @@ use basilica_protocol::billing::{
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingPackage {
@@ -66,10 +67,32 @@ impl BillingPackage {
         }
     }
 
-    /// Calculate cost for given usage
-    pub fn calculate_cost(&self, usage: &UsageMetrics) -> CostBreakdown {
+    /// Calculate cost with GPU count multiplier and volume discount
+    ///
+    /// Business rule: final_cost = (hourly_rate × gpu_hours × gpu_count × volume_discount_multiplier) + extras - discounts
+    /// where: volume_discount_multiplier = 0.9 (10% discount) if gpu_count > 1, else 1.0
+    pub fn calculate_cost_with_gpu_count(
+        &self,
+        usage: &UsageMetrics,
+        gpu_count: u32,
+    ) -> CostBreakdown {
+        let effective_gpu_count = gpu_count.max(1);
         let gpu_hours = usage.gpu_hours.max(Decimal::ONE);
-        let base_cost = self.hourly_rate.multiply(gpu_hours);
+
+        let raw_gpu_cost = self
+            .hourly_rate
+            .multiply(gpu_hours)
+            .multiply(Decimal::from(effective_gpu_count));
+
+        let volume_discount = if gpu_count > 1 {
+            raw_gpu_cost.multiply(Decimal::from_str("0.10").unwrap())
+        } else {
+            CreditBalance::zero()
+        };
+
+        let base_cost_after_volume = raw_gpu_cost
+            .subtract(volume_discount)
+            .unwrap_or(raw_gpu_cost);
 
         let storage_overage = usage
             .storage_gb_hours
@@ -104,15 +127,24 @@ impl BillingPackage {
             .add(cpu_cost)
             .add(memory_cost);
 
-        let subtotal = base_cost.add(usage_cost);
+        let subtotal = base_cost_after_volume.add(usage_cost);
 
         CostBreakdown {
-            base_cost,
+            base_cost: raw_gpu_cost,
             usage_cost,
+            volume_discount,
             discounts: CreditBalance::zero(),
             overage_charges: CreditBalance::zero(),
             total_cost: subtotal,
         }
+    }
+
+    /// Calculate cost for given usage (backward compatibility)
+    ///
+    /// DEPRECATED: Use calculate_cost_with_gpu_count instead.
+    /// This method assumes gpu_count from usage metrics or defaults to 1.
+    pub fn calculate_cost(&self, usage: &UsageMetrics) -> CostBreakdown {
+        self.calculate_cost_with_gpu_count(usage, usage.gpu_count.max(1))
     }
 
     /// Convert to protobuf format for gRPC
@@ -237,6 +269,7 @@ mod tests {
         );
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(10),
+            gpu_count: 1,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::ZERO,
@@ -272,6 +305,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(10),
+            gpu_count: 1,
             cpu_hours: Decimal::from(100),
             memory_gb_hours: Decimal::from(400),
             storage_gb_hours: Decimal::from(150),
@@ -324,6 +358,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(10),
+            gpu_count: 1,
             cpu_hours: Decimal::from(50),
             memory_gb_hours: Decimal::from(300),
             storage_gb_hours: Decimal::from(100),
@@ -351,6 +386,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(10),
+            gpu_count: 1,
             cpu_hours: Decimal::from(100),
             memory_gb_hours: Decimal::from(400),
             storage_gb_hours: Decimal::from(150),
@@ -381,6 +417,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(10),
+            gpu_count: 1,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::from(50),
@@ -410,6 +447,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(10),
+            gpu_count: 1,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::from(110),
@@ -444,6 +482,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from_str("0.5").unwrap(),
+            gpu_count: 1,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::from(110),
@@ -455,6 +494,169 @@ mod tests {
 
         let expected_base = CreditBalance::from_f64(3.5).unwrap();
         assert_eq!(cost.base_cost, expected_base);
+    }
+
+    #[test]
+    fn test_single_gpu_no_volume_discount() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+        usage.gpu_count = 1;
+
+        let breakdown = package.calculate_cost_with_gpu_count(&usage, 1);
+
+        assert_eq!(breakdown.volume_discount, CreditBalance::zero());
+        assert_eq!(breakdown.base_cost, CreditBalance::from_f64(3.5).unwrap());
+        assert_eq!(breakdown.total_cost, CreditBalance::from_f64(3.5).unwrap());
+    }
+
+    #[test]
+    fn test_two_gpu_volume_discount() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+
+        let breakdown = package.calculate_cost_with_gpu_count(&usage, 2);
+
+        let expected_raw = CreditBalance::from_f64(7.0).unwrap();
+        let expected_discount = CreditBalance::from_f64(0.7).unwrap();
+
+        assert_eq!(breakdown.base_cost, expected_raw);
+        assert_eq!(breakdown.volume_discount, expected_discount);
+        assert_eq!(breakdown.total_cost, CreditBalance::from_f64(6.3).unwrap());
+    }
+
+    #[test]
+    fn test_four_gpu_volume_discount() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+
+        let breakdown = package.calculate_cost_with_gpu_count(&usage, 4);
+
+        let expected_raw = CreditBalance::from_f64(14.0).unwrap();
+        let expected_discount = CreditBalance::from_f64(1.4).unwrap();
+
+        assert_eq!(breakdown.base_cost, expected_raw);
+        assert_eq!(breakdown.volume_discount, expected_discount);
+        assert_eq!(breakdown.total_cost, CreditBalance::from_f64(12.6).unwrap());
+    }
+
+    #[test]
+    fn test_eight_gpu_volume_discount() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+
+        let breakdown = package.calculate_cost_with_gpu_count(&usage, 8);
+
+        let expected_raw = CreditBalance::from_f64(28.0).unwrap();
+        let expected_discount = CreditBalance::from_f64(2.8).unwrap();
+
+        assert_eq!(breakdown.base_cost, expected_raw);
+        assert_eq!(breakdown.volume_discount, expected_discount);
+        assert_eq!(breakdown.total_cost, CreditBalance::from_f64(25.2).unwrap());
+    }
+
+    #[test]
+    fn test_multi_gpu_with_extras_cost() {
+        let mut package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        package.storage_rate_per_gb_hour = CreditBalance::from_f64(0.10).unwrap();
+        package.included_storage_gb_hours = Decimal::from(100);
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+        usage.storage_gb_hours = Decimal::from(150);
+
+        let breakdown = package.calculate_cost_with_gpu_count(&usage, 4);
+
+        let expected_raw = CreditBalance::from_f64(14.0).unwrap();
+        let expected_discount = CreditBalance::from_f64(1.4).unwrap();
+        let expected_storage = CreditBalance::from_f64(5.0).unwrap();
+        let expected_total = CreditBalance::from_f64(17.6).unwrap();
+
+        assert_eq!(breakdown.base_cost, expected_raw);
+        assert_eq!(breakdown.volume_discount, expected_discount);
+        assert_eq!(breakdown.usage_cost, expected_storage);
+        assert_eq!(breakdown.total_cost, expected_total);
+    }
+
+    #[test]
+    fn test_zero_gpu_count() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+
+        let breakdown = package.calculate_cost_with_gpu_count(&usage, 0);
+
+        assert_eq!(breakdown.volume_discount, CreditBalance::zero());
+        assert_eq!(breakdown.base_cost, CreditBalance::from_f64(3.5).unwrap());
+    }
+
+    #[test]
+    fn test_no_double_counting() {
+        let package = BillingPackage::new(
+            PackageId::h100(),
+            "H100 GPU".to_string(),
+            "NVIDIA H100".to_string(),
+            CreditBalance::from_f64(3.5).unwrap(),
+            "H100".to_string(),
+        );
+
+        let mut usage = UsageMetrics::zero();
+        usage.gpu_hours = Decimal::from(1);
+
+        let breakdown_8gpu = package.calculate_cost_with_gpu_count(&usage, 8);
+        let breakdown_1gpu = package.calculate_cost_with_gpu_count(&usage, 1);
+
+        let expected_raw_8gpu = CreditBalance::from_f64(28.0).unwrap();
+        let expected_discount_8gpu = CreditBalance::from_f64(2.8).unwrap();
+
+        assert_eq!(breakdown_8gpu.base_cost, expected_raw_8gpu);
+        assert_eq!(breakdown_8gpu.volume_discount, expected_discount_8gpu);
+        assert_eq!(breakdown_1gpu.volume_discount, CreditBalance::zero());
     }
 
     #[test]
@@ -481,6 +683,7 @@ mod tests {
 
         let usage = UsageMetrics {
             gpu_hours: Decimal::from(100),
+            gpu_count: 1,
             cpu_hours: Decimal::from(850),
             memory_gb_hours: Decimal::from(3500),
             storage_gb_hours: Decimal::from(1200),

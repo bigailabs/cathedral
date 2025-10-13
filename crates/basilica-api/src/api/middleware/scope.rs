@@ -109,6 +109,13 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::POST, "/payments/deposit-account") => Some(String::new()),
         (&Method::GET, "/payments/deposits") => Some(String::new()),
 
+        // Billing endpoints - require authentication but no specific scope
+        // All authenticated users should be able to access their own billing information
+        (&Method::GET, "/billing/balance") => Some(String::new()),
+        (&Method::GET, "/billing/packages") => Some(String::new()),
+        (&Method::GET, "/billing/usage") => Some(String::new()),
+        (&Method::GET, p) if p.starts_with("/billing/usage/") => Some(String::new()),
+
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"
         (&Method::GET, "/health") => Some(String::new()),
@@ -195,6 +202,35 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/payments/deposits")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test billing endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/billing/balance")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/billing/packages")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/billing/usage")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/billing/usage/rental-123")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));

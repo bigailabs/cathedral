@@ -325,7 +325,7 @@ impl RulesEvaluator for RulesEngine {
     ) -> Result<CostBreakdown> {
         let package = self.package_repository.get_package(package_id).await?;
 
-        let mut cost_breakdown = package.calculate_cost(usage);
+        let mut cost_breakdown = package.calculate_cost_with_gpu_count(usage, usage.gpu_count);
 
         cost_breakdown = self
             .apply_automatic_discounts(user_id, package_id, promo_code, cost_breakdown)

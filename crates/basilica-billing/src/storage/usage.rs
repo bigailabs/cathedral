@@ -53,6 +53,7 @@ impl UsageRepository for SqlUsageRepository {
             r#"
             SELECT
                 COALESCE(SUM((event_data->>'gpu_hours')::decimal), 0) as gpu_hours,
+                COALESCE(MAX((event_data->'gpu_metrics'->>'gpu_count')::int), 1) as gpu_count,
                 COALESCE(SUM((event_data->>'cpu_hours')::decimal), 0) as cpu_hours,
                 COALESCE(SUM((event_data->>'memory_gb_hours')::decimal), 0) as memory_gb_hours,
                 COALESCE(SUM((event_data->>'storage_gb_hours')::decimal), 0) as storage_gb_hours,
@@ -71,11 +72,12 @@ impl UsageRepository for SqlUsageRepository {
 
         Ok(UsageMetrics {
             gpu_hours: row.get("gpu_hours"),
+            gpu_count: row.try_get::<i32, _>("gpu_count").unwrap_or(1) as u32,
             cpu_hours: row.get("cpu_hours"),
             memory_gb_hours: row.get("memory_gb_hours"),
             storage_gb_hours: row.get("storage_gb_hours"),
             network_gb: row.get("network_gb"),
-            disk_io_gb: Decimal::ZERO, // Not tracked in this query yet
+            disk_io_gb: Decimal::ZERO,
         })
     }
 
@@ -89,6 +91,7 @@ impl UsageRepository for SqlUsageRepository {
             r#"
             SELECT
                 COALESCE(SUM((ue.event_data->>'gpu_hours')::decimal), 0) as gpu_hours,
+                COALESCE(MAX((ue.event_data->'gpu_metrics'->>'gpu_count')::int), 1) as gpu_count,
                 COALESCE(SUM((ue.event_data->>'cpu_hours')::decimal), 0) as cpu_hours,
                 COALESCE(SUM((ue.event_data->>'memory_gb_hours')::decimal), 0) as memory_gb_hours,
                 COALESCE(SUM((ue.event_data->>'storage_gb_hours')::decimal), 0) as storage_gb_hours,
@@ -113,6 +116,7 @@ impl UsageRepository for SqlUsageRepository {
 
         Ok(UsageMetrics {
             gpu_hours: row.get("gpu_hours"),
+            gpu_count: row.try_get::<i32, _>("gpu_count").unwrap_or(1) as u32,
             cpu_hours: row.get("cpu_hours"),
             memory_gb_hours: row.get("memory_gb_hours"),
             storage_gb_hours: row.get("storage_gb_hours"),

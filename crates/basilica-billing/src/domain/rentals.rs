@@ -59,6 +59,7 @@ impl Rental {
             cost_breakdown: CostBreakdown {
                 base_cost: CreditBalance::zero(),
                 usage_cost: CreditBalance::zero(),
+                volume_discount: CreditBalance::zero(),
                 discounts: CreditBalance::zero(),
                 overage_charges: CreditBalance::zero(),
                 total_cost: CreditBalance::zero(),
