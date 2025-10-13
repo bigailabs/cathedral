@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use super::container_client::ContainerClient;
 use crate::billing::{resource_usage_to_telemetry, BillingClient};
@@ -120,10 +121,34 @@ impl RentalBillingMonitor {
             Some(validator_private_key_path),
         )?;
 
-        let usage = container_client
+        let mut usage = container_client
             .get_resource_usage(&rental.container_id)
             .await
             .context("Failed to get resource usage")?;
+
+        let rental_id = Uuid::parse_str(&rental.rental_id)
+            .context("Failed to parse rental_id as UUID")?;
+
+        let gpu_count = self
+            .persistence
+            .get_active_rental_gpu_count(&rental_id)
+            .await
+            .context("Failed to query GPU count from database")?;
+
+        usage.gpu_usage = (0..gpu_count)
+            .map(|index| crate::rental::types::GpuUsage {
+                gpu_index: index,
+                utilization_percent: 0.0,
+                memory_mb: 0,
+                temperature_celsius: 0.0,
+            })
+            .collect();
+
+        debug!(
+            rental_id = %rental.rental_id,
+            gpu_count = gpu_count,
+            "Injected GPU count from database into telemetry"
+        );
 
         let telemetry =
             resource_usage_to_telemetry(rental.rental_id.clone(), rental.node_id.clone(), usage)
