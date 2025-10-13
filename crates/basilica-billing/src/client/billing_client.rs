@@ -124,7 +124,10 @@ impl BillingClient {
         Ok(response.into_inner())
     }
 
-    pub async fn get_billing_packages(&self, user_id: impl Into<String>) -> Result<GetBillingPackagesResponse> {
+    pub async fn get_billing_packages(
+        &self,
+        user_id: impl Into<String>,
+    ) -> Result<GetBillingPackagesResponse> {
         let user_id = user_id.into();
         let request = GetBillingPackagesRequest {
             user_id: user_id.clone(),
@@ -174,9 +177,7 @@ impl BillingClient {
     ) -> Result<GetActiveRentalsResponse> {
         let user_id = user_id.into();
         let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::UserId(
-                user_id.clone(),
-            )),
+            filter: Some(get_active_rentals_request::Filter::UserId(user_id.clone())),
             limit: limit.unwrap_or(50),
             offset: offset.unwrap_or(0),
         };

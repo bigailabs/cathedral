@@ -29,51 +29,49 @@ pub async fn balance_validation_middleware(
 
     if let Some(billing_client) = &state.billing_client {
         match billing_client.get_balance(&auth_context.user_id).await {
-            Ok(balance_response) => {
-                match Decimal::from_str(&balance_response.available_balance) {
-                    Ok(available_balance) => {
-                        let min_balance =
-                            Decimal::from_f64_retain(MIN_BALANCE_USD).unwrap_or(Decimal::ZERO);
+            Ok(balance_response) => match Decimal::from_str(&balance_response.available_balance) {
+                Ok(available_balance) => {
+                    let min_balance =
+                        Decimal::from_f64_retain(MIN_BALANCE_USD).unwrap_or(Decimal::ZERO);
 
-                        if available_balance < min_balance {
-                            if state.config.billing.enforce_balance_checks {
-                                tracing::warn!(
+                    if available_balance < min_balance {
+                        if state.config.billing.enforce_balance_checks {
+                            tracing::warn!(
                                     "ENFORCED: Blocking rental for user {} with insufficient balance: {} < {}",
                                     auth_context.user_id,
                                     available_balance,
                                     min_balance
                                 );
-                                return Err(ApiError::InsufficientBalance {
+                            return Err(ApiError::InsufficientBalance {
                                     message: "Your account balance is below the minimum required to create rentals".to_string(),
                                     current_balance: balance_response.available_balance.clone(),
                                     required: MIN_BALANCE_USD.to_string(),
                                 }
                                 .into_response());
-                            } else {
-                                tracing::warn!(
+                        } else {
+                            tracing::warn!(
                                     "SHADOW MODE: User {} has insufficient balance ({} < {}) but rental is allowed to proceed. Enforcement disabled.",
                                     auth_context.user_id,
                                     available_balance,
                                     min_balance
                                 );
-                            }
-                        } else {
-                            tracing::debug!(
-                                "User {} has sufficient balance: {} >= {}",
-                                auth_context.user_id,
-                                available_balance,
-                                min_balance
-                            );
                         }
+                    } else {
+                        tracing::debug!(
+                            "User {} has sufficient balance: {} >= {}",
+                            auth_context.user_id,
+                            available_balance,
+                            min_balance
+                        );
                     }
-                    Err(e) => {
-                        tracing::warn!(
+                }
+                Err(e) => {
+                    tracing::warn!(
                         "Failed to parse balance as Decimal: {}. Allowing request to proceed.",
                         e
                     );
-                    }
                 }
-            }
+            },
             Err(e) => {
                 tracing::warn!(
                     "Balance check failed for user {}: {}. Allowing request to proceed (graceful degradation).",

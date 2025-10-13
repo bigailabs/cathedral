@@ -108,12 +108,15 @@ async fn get_balance(
         .as_ref()
         .ok_or_else(|| ApiError::ServiceUnavailable)?;
 
-    let response = billing_client.get_balance(&auth.user_id).await.map_err(|e| {
-        error!("Failed to get balance: {}", e);
-        ApiError::Internal {
-            message: format!("Failed to get balance: {}", e),
-        }
-    })?;
+    let response = billing_client
+        .get_balance(&auth.user_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get balance: {}", e);
+            ApiError::Internal {
+                message: format!("Failed to get balance: {}", e),
+            }
+        })?;
 
     let last_updated = if let Some(timestamp) = response.last_updated {
         DateTime::<Utc>::from_timestamp(timestamp.seconds, timestamp.nanos as u32)
