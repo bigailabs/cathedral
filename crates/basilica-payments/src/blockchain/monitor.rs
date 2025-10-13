@@ -1,6 +1,6 @@
 use crate::{
     metrics::PaymentsMetricsSystem,
-    storage::{DepositAccountsRepo, ObservedDepositsRepo, OutboxRepo, PgRepos},
+    storage::{DepositAccountsRepo, MonitorStateRepo, ObservedDepositsRepo, OutboxRepo, PgRepos},
 };
 use anyhow::Result;
 use basilica_common::distributed::postgres_lock::{LeaderElection, LockKey};
@@ -154,88 +154,140 @@ impl ChainMonitor {
                         m.business_metrics().set_blockchain_connected(true).await;
                     }
 
-                    // Get initial block number
-                    let mut last_block = monitor
+                    // Get initial block number from database or blockchain
+                    let current_chain_block = monitor
                         .get_current_block()
                         .await
                         .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?;
 
-                    info!("Starting from block: {}", last_block);
+                    let last_scanned = repos
+                        .get_last_scanned_block("payments_monitor")
+                        .await
+                        .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?;
+
+                    let mut next_block = match last_scanned {
+                        Some(block) if block > 0 => {
+                            info!("Resuming from last scanned block: {}", block);
+                            block + 1
+                        }
+                        _ => {
+                            info!(
+                                "No previous scan state, starting from current block: {}",
+                                current_chain_block
+                            );
+                            current_chain_block
+                        }
+                    };
+
+                    // Load known accounts once at startup
+                    let mut known_accounts: HashSet<String> = repos
+                        .list_account_hexes()
+                        .await
+                        .map_err(|e| Box::<dyn StdError>::from(e.to_string()))?
+                        .into_iter()
+                        .collect();
+
+                    info!(
+                        "Monitoring {} deposit accounts for incoming transfers",
+                        known_accounts.len()
+                    );
 
                     // Main monitoring loop
                     let scan_interval = tokio::time::Duration::from_secs(12);
                     let mut ticker = tokio::time::interval(scan_interval);
+                    let mut account_reload_counter = 0;
 
                     loop {
                         ticker.tick().await;
 
-                        match monitor.get_current_block().await {
-                            Ok(current_block) => {
-                                if current_block > last_block {
-                                    // Get transfers from latest block
-                                    match monitor.get_latest_transfers().await {
-                                        Ok(transfers) => {
-                                            if !transfers.is_empty() {
-                                                info!(
-                                                    "Found {} transfers in block {}",
-                                                    transfers.len(),
-                                                    current_block
-                                                );
+                        // Reload known accounts every 10 ticks (2 minutes)
+                        account_reload_counter += 1;
+                        if account_reload_counter >= 10 {
+                            match repos.list_account_hexes().await {
+                                Ok(accounts) => {
+                                    known_accounts = accounts.into_iter().collect();
+                                    info!("Reloaded {} deposit accounts", known_accounts.len());
+                                }
+                                Err(e) => error!("Failed to reload accounts: {}", e),
+                            }
+                            account_reload_counter = 0;
+                        }
 
-                                                // Debug: Log all transfers
-                                                for t in &transfers {
-                                                    info!(
-                                                        "  Transfer: {} -> {}",
-                                                        &t.from[0..8],
-                                                        &t.to[0..8]
-                                                    );
-                                                }
+                        // Get current blockchain height
+                        let current_chain_block = match monitor.get_current_block().await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                error!("Failed to get current block: {}", e);
+                                continue;
+                            }
+                        };
 
-                                                // Load known accounts
-                                                match repos.list_account_hexes().await {
-                                                    Ok(accounts) => {
-                                                        let known_accounts: HashSet<String> =
-                                                            accounts.into_iter().collect();
-                                                        info!(
-                                                            "Checking against {} known accounts",
-                                                            known_accounts.len()
-                                                        );
+                        // Scan all blocks sequentially from next_block up to current
+                        while next_block <= current_chain_block {
+                            info!("Scanning block {}", next_block);
 
-                                                        // Process transfers
-                                                        if let Err(e) = process_transfers(
-                                                            &repos,
-                                                            transfers,
-                                                            &known_accounts,
-                                                            metrics.as_ref(),
-                                                        )
-                                                        .await
-                                                        {
-                                                            error!(
-                                                                "Failed to process transfers: {}",
-                                                                e
-                                                            );
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        error!("Failed to load accounts: {}", e)
-                                                    }
-                                                }
-                                            }
+                            match monitor.get_transfers_at_block(next_block).await {
+                                Ok(transfers) => {
+                                    if !transfers.is_empty() {
+                                        info!(
+                                            "Found {} transfers in block {}",
+                                            transfers.len(),
+                                            next_block
+                                        );
 
-                                            // Update metrics
-                                            if let Some(ref m) = metrics {
-                                                m.business_metrics()
-                                                    .set_block_height(current_block as u64)
-                                                    .await;
-                                            }
-
-                                            last_block = current_block;
+                                        for t in &transfers {
+                                            info!(
+                                                "  Transfer: {} -> {} (amount: {})",
+                                                &t.from[0..8],
+                                                &t.to[0..8],
+                                                &t.amount
+                                            );
                                         }
-                                        Err(e) => error!("Failed to get transfers: {}", e),
+
+                                        if let Err(e) = process_transfers(
+                                            &repos,
+                                            transfers,
+                                            &known_accounts,
+                                            metrics.as_ref(),
+                                        )
+                                        .await
+                                        {
+                                            error!("Failed to process transfers: {}", e);
+                                        }
                                     }
+
+                                    // Persist progress after each block
+                                    if let Err(e) = repos
+                                        .update_last_scanned_block("payments_monitor", next_block)
+                                        .await
+                                    {
+                                        error!("Failed to persist scan progress: {}", e);
+                                    }
+
+                                    // Update metrics
+                                    if let Some(ref m) = metrics {
+                                        m.business_metrics()
+                                            .set_block_height(next_block as u64)
+                                            .await;
+                                    }
+
+                                    next_block += 1;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to get transfers for block {}: {}",
+                                        next_block, e
+                                    );
+                                    // Don't increment next_block, retry on next tick
+                                    break;
                                 }
                             }
-                            Err(e) => error!("Failed to get current block: {}", e),
+
+                            // Catch up quickly through old blocks
+                            if next_block < current_chain_block {
+                                continue;
+                            }
+                            break;
                         }
                     }
 

@@ -19,13 +19,17 @@ pub struct TransferInfo {
 /// Simple blockchain monitor for Bittensor transfers
 pub struct BlockchainMonitor {
     client: OnlineClient<PolkadotConfig>,
+    endpoint: String,
 }
 
 impl BlockchainMonitor {
     /// Connect to blockchain endpoint
     pub async fn new(endpoint: &str) -> Result<Self> {
         let client = OnlineClient::<PolkadotConfig>::from_url(endpoint).await?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            endpoint: endpoint.to_string(),
+        })
     }
 
     /// Get current block number
@@ -36,9 +40,32 @@ impl BlockchainMonitor {
 
     /// Get transfers from latest block
     pub async fn get_latest_transfers(&self) -> Result<Vec<TransferInfo>> {
-        let mut transfers = Vec::new();
-
         let block = self.client.blocks().at_latest().await?;
+        self.get_transfers_from_block(block).await
+    }
+
+    /// Get transfers from a specific block number
+    pub async fn get_transfers_at_block(&self, block_number: u32) -> Result<Vec<TransferInfo>> {
+        use subxt::backend::legacy::LegacyRpcMethods;
+        use subxt::backend::rpc::RpcClient;
+
+        let rpc = RpcClient::from_url(&self.endpoint).await?;
+        let rpc_methods = LegacyRpcMethods::<PolkadotConfig>::new(rpc);
+        let block_hash = rpc_methods
+            .chain_get_block_hash(Some(block_number.into()))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
+
+        let block = self.client.blocks().at(block_hash).await?;
+        self.get_transfers_from_block(block).await
+    }
+
+    /// Extract transfers from a block
+    async fn get_transfers_from_block(
+        &self,
+        block: subxt::blocks::Block<PolkadotConfig, OnlineClient<PolkadotConfig>>,
+    ) -> Result<Vec<TransferInfo>> {
+        let mut transfers = Vec::new();
         let block_num = block.number();
         let events = block.events().await?;
 
