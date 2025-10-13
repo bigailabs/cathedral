@@ -411,3 +411,266 @@ async fn test_usage_report_for_nonexistent_rental() {
 
     context.cleanup().await;
 }
+
+#[tokio::test]
+async fn test_single_gpu_rental_cost() {
+    let mut context = TestContext::new().await;
+    let user_id = "test_single_gpu";
+
+    context.create_test_user(user_id, "1000.0").await;
+
+    let rental_id = Uuid::new_v4().to_string();
+    let track_request = TrackRentalRequest {
+        rental_id: rental_id.clone(),
+        user_id: user_id.to_string(),
+        node_id: "node_single_gpu".to_string(),
+        validator_id: "validator_single_gpu".to_string(),
+        hourly_rate: "3.5".to_string(),
+        max_duration: Some(hours_to_duration(10)),
+        start_time: None,
+        metadata: std::collections::HashMap::new(),
+        resource_spec: None,
+    };
+
+    let track_response = context
+        .client
+        .track_rental(track_request)
+        .await
+        .expect("Failed to track rental")
+        .into_inner();
+
+    let rental_uuid =
+        Uuid::parse_str(&track_response.tracking_id).expect("Failed to parse rental UUID");
+
+    sqlx::query(
+        "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())"
+    )
+    .bind(Uuid::new_v4())
+    .bind(rental_uuid)
+    .bind(user_id)
+    .bind("node_single_gpu")
+    .bind("validator_single_gpu")
+    .bind("telemetry")
+    .bind(serde_json::json!({
+        "gpu_hours": 1.0,
+        "gpu_metrics": {
+            "gpu_count": 1
+        }
+    }))
+    .execute(&context.pool)
+    .await
+    .expect("Failed to insert usage event");
+
+    let usage_metrics = context
+        .get_usage_for_rental(&track_response.tracking_id)
+        .await;
+
+    assert_eq!(usage_metrics.gpu_count, 1, "Should have 1 GPU");
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn test_multi_gpu_rental_with_volume_discount() {
+    let mut context = TestContext::new().await;
+    let user_id = "test_multi_gpu";
+
+    context.create_test_user(user_id, "1000.0").await;
+
+    let rental_id = Uuid::new_v4().to_string();
+    let track_request = TrackRentalRequest {
+        rental_id: rental_id.clone(),
+        user_id: user_id.to_string(),
+        node_id: "node_multi_gpu".to_string(),
+        validator_id: "validator_multi_gpu".to_string(),
+        hourly_rate: "3.5".to_string(),
+        max_duration: Some(hours_to_duration(10)),
+        start_time: None,
+        metadata: std::collections::HashMap::new(),
+        resource_spec: None,
+    };
+
+    let track_response = context
+        .client
+        .track_rental(track_request)
+        .await
+        .expect("Failed to track rental")
+        .into_inner();
+
+    let rental_uuid =
+        Uuid::parse_str(&track_response.tracking_id).expect("Failed to parse rental UUID");
+
+    sqlx::query(
+        "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())"
+    )
+    .bind(Uuid::new_v4())
+    .bind(rental_uuid)
+    .bind(user_id)
+    .bind("node_multi_gpu")
+    .bind("validator_multi_gpu")
+    .bind("telemetry")
+    .bind(serde_json::json!({
+        "gpu_hours": 1.0,
+        "gpu_metrics": {
+            "gpu_count": 4
+        }
+    }))
+    .execute(&context.pool)
+    .await
+    .expect("Failed to insert usage event");
+
+    let usage_metrics = context
+        .get_usage_for_rental(&track_response.tracking_id)
+        .await;
+
+    assert_eq!(usage_metrics.gpu_count, 4, "Should have 4 GPUs");
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn test_gpu_count_extracted_from_telemetry() {
+    let mut context = TestContext::new().await;
+    let user_id = "test_gpu_count_telemetry";
+
+    context.create_test_user(user_id, "1000.0").await;
+
+    let rental_id = Uuid::new_v4().to_string();
+    let track_request = TrackRentalRequest {
+        rental_id: rental_id.clone(),
+        user_id: user_id.to_string(),
+        node_id: "node_gpu_count".to_string(),
+        validator_id: "validator_gpu_count".to_string(),
+        hourly_rate: "3.5".to_string(),
+        max_duration: Some(hours_to_duration(10)),
+        start_time: None,
+        metadata: std::collections::HashMap::new(),
+        resource_spec: None,
+    };
+
+    let track_response = context
+        .client
+        .track_rental(track_request)
+        .await
+        .expect("Failed to track rental")
+        .into_inner();
+
+    let rental_uuid =
+        Uuid::parse_str(&track_response.tracking_id).expect("Failed to parse rental UUID");
+
+    sqlx::query(
+        "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())"
+    )
+    .bind(Uuid::new_v4())
+    .bind(rental_uuid)
+    .bind(user_id)
+    .bind("node_gpu_count")
+    .bind("validator_gpu_count")
+    .bind("telemetry")
+    .bind(serde_json::json!({
+        "cpu_percent": 0.8,
+        "memory_gb": 32.0,
+        "network_gb": 1.0,
+        "gpu_hours": 1.0,
+        "gpu_metrics": {
+            "gpu_count": 8
+        },
+        "disk_io_gb": 0.5
+    }))
+    .execute(&context.pool)
+    .await
+    .expect("Failed to insert usage event");
+
+    let usage_metrics = context
+        .get_usage_for_rental(&track_response.tracking_id)
+        .await;
+
+    assert_eq!(
+        usage_metrics.gpu_count, 8,
+        "GPU count should be extracted from telemetry"
+    );
+    assert!(
+        usage_metrics.gpu_hours.is_sign_positive(),
+        "GPU hours should be positive"
+    );
+
+    context.cleanup().await;
+}
+
+#[tokio::test]
+async fn test_cost_breakdown_includes_volume_discount() {
+    let mut context = TestContext::new().await;
+    let user_id = "test_volume_discount_breakdown";
+
+    context.create_test_user(user_id, "1000.0").await;
+
+    let rental_id = Uuid::new_v4().to_string();
+    let track_request = TrackRentalRequest {
+        rental_id: rental_id.clone(),
+        user_id: user_id.to_string(),
+        node_id: "node_discount".to_string(),
+        validator_id: "validator_discount".to_string(),
+        hourly_rate: "3.5".to_string(),
+        max_duration: Some(hours_to_duration(10)),
+        start_time: None,
+        metadata: std::collections::HashMap::new(),
+        resource_spec: None,
+    };
+
+    let track_response = context
+        .client
+        .track_rental(track_request)
+        .await
+        .expect("Failed to track rental")
+        .into_inner();
+
+    let activate_request = UpdateRentalStatusRequest {
+        rental_id: track_response.tracking_id.clone(),
+        status: RentalStatus::Active.into(),
+        timestamp: None,
+        reason: String::new(),
+    };
+
+    context
+        .client
+        .update_rental_status(activate_request)
+        .await
+        .expect("Failed to activate rental");
+
+    let rental_uuid =
+        Uuid::parse_str(&track_response.tracking_id).expect("Failed to parse rental UUID");
+
+    sqlx::query(
+        "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())"
+    )
+    .bind(Uuid::new_v4())
+    .bind(rental_uuid)
+    .bind(user_id)
+    .bind("node_discount")
+    .bind("validator_discount")
+    .bind("telemetry")
+    .bind(serde_json::json!({
+        "gpu_hours": 1.0,
+        "gpu_metrics": {
+            "gpu_count": 2
+        }
+    }))
+    .execute(&context.pool)
+    .await
+    .expect("Failed to insert usage event");
+
+    let usage_metrics = context
+        .get_usage_for_rental(&track_response.tracking_id)
+        .await;
+
+    assert_eq!(
+        usage_metrics.gpu_count, 2,
+        "Should have 2 GPUs for volume discount"
+    );
+
+    context.cleanup().await;
+}

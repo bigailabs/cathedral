@@ -305,6 +305,7 @@ pub struct ResourceSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UsageMetrics {
     pub gpu_hours: Decimal,
+    pub gpu_count: u32,
     pub cpu_hours: Decimal,
     pub memory_gb_hours: Decimal,
     pub storage_gb_hours: Decimal,
@@ -316,6 +317,7 @@ impl UsageMetrics {
     pub fn zero() -> Self {
         Self {
             gpu_hours: Decimal::ZERO,
+            gpu_count: 0,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::ZERO,
@@ -327,6 +329,7 @@ impl UsageMetrics {
     pub fn add(&self, other: &UsageMetrics) -> Self {
         Self {
             gpu_hours: self.gpu_hours + other.gpu_hours,
+            gpu_count: self.gpu_count.max(other.gpu_count),
             cpu_hours: self.cpu_hours + other.cpu_hours,
             memory_gb_hours: self.memory_gb_hours + other.memory_gb_hours,
             storage_gb_hours: self.storage_gb_hours + other.storage_gb_hours,
@@ -341,6 +344,7 @@ impl UsageMetrics {
 pub struct CostBreakdown {
     pub base_cost: CreditBalance,
     pub usage_cost: CreditBalance,
+    pub volume_discount: CreditBalance,
     pub discounts: CreditBalance,
     pub overage_charges: CreditBalance,
     pub total_cost: CreditBalance,
@@ -353,7 +357,8 @@ impl CostBreakdown {
             .add(self.usage_cost)
             .add(self.overage_charges);
         subtotal
-            .subtract(self.discounts)
+            .subtract(self.volume_discount)
+            .and_then(|after_volume| after_volume.subtract(self.discounts))
             .unwrap_or(CreditBalance::zero())
     }
 }

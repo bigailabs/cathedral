@@ -2,7 +2,7 @@ use basilica_billing::server::BillingServer;
 use basilica_billing::storage::rds::RdsConnection;
 use basilica_protocol::billing::billing_service_client::BillingServiceClient;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, Row};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -337,6 +337,42 @@ impl TestContext {
         .fetch_one(&self.pool)
         .await
         .unwrap_or(0)
+    }
+
+    pub async fn get_usage_for_rental(
+        &self,
+        rental_id: &str,
+    ) -> basilica_billing::domain::types::UsageMetrics {
+        use basilica_billing::domain::types::UsageMetrics;
+        use rust_decimal::Decimal;
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COALESCE(SUM((event_data->>'gpu_hours')::decimal), 0) as gpu_hours,
+                COALESCE(MAX((event_data->'gpu_metrics'->>'gpu_count')::int), 1) as gpu_count,
+                COALESCE(SUM((event_data->>'cpu_hours')::decimal), 0) as cpu_hours,
+                COALESCE(SUM((event_data->>'memory_gb_hours')::decimal), 0) as memory_gb_hours,
+                COALESCE(SUM((event_data->>'storage_gb_hours')::decimal), 0) as storage_gb_hours,
+                COALESCE(SUM((event_data->>'network_gb')::decimal), 0) as network_gb
+            FROM billing.usage_events
+            WHERE rental_id = $1::uuid AND event_type = 'telemetry'
+            "#,
+        )
+        .bind(rental_id)
+        .fetch_one(&self.pool)
+        .await
+        .expect("Failed to fetch usage metrics");
+
+        UsageMetrics {
+            gpu_hours: row.get("gpu_hours"),
+            gpu_count: row.try_get::<i32, _>("gpu_count").unwrap_or(1) as u32,
+            cpu_hours: row.get("cpu_hours"),
+            memory_gb_hours: row.get("memory_gb_hours"),
+            storage_gb_hours: row.get("storage_gb_hours"),
+            network_gb: row.get("network_gb"),
+            disk_io_gb: Decimal::ZERO,
+        }
     }
 
     pub async fn cleanup(self) {

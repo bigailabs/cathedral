@@ -76,6 +76,7 @@ impl SqlRentalRepository {
                 CostBreakdown {
                     base_cost: CreditBalance::from_decimal(hourly_rate),
                     usage_cost: CreditBalance::zero(),
+                    volume_discount: CreditBalance::zero(),
                     discounts: CreditBalance::zero(),
                     overage_charges: CreditBalance::zero(),
                     total_cost: CreditBalance::from_decimal(total_cost),
