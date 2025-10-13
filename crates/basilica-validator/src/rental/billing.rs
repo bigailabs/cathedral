@@ -126,8 +126,8 @@ impl RentalBillingMonitor {
             .await
             .context("Failed to get resource usage")?;
 
-        let rental_id = Uuid::parse_str(&rental.rental_id)
-            .context("Failed to parse rental_id as UUID")?;
+        let rental_id =
+            Uuid::parse_str(&rental.rental_id).context("Failed to parse rental_id as UUID")?;
 
         let gpu_count = self
             .persistence

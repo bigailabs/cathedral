@@ -609,7 +609,10 @@ mod tests {
             .await
             .expect("Failed to get GPU count");
 
-        assert_eq!(count, 0, "Expected 0 GPUs for rental with no GPU assignments");
+        assert_eq!(
+            count, 0,
+            "Expected 0 GPUs for rental with no GPU assignments"
+        );
     }
 
     #[tokio::test]
