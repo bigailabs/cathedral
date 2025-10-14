@@ -2,11 +2,6 @@ use clap::Subcommand;
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Service management commands
-    Service {
-        #[command(subcommand)]
-        service_cmd: ServiceCommand,
-    },
     /// Configuration management commands
     Config {
         #[command(subcommand)]
@@ -16,25 +11,6 @@ pub enum Commands {
     Status,
     /// Run database migrations
     Migrate,
-}
-
-/// Service management subcommands
-#[derive(Subcommand, Debug)]
-pub enum ServiceCommand {
-    /// Start the miner service
-    Start,
-
-    /// Stop the miner service
-    Stop,
-
-    /// Restart the miner service
-    Restart,
-
-    /// Show service status
-    Status,
-
-    /// Reload service configuration
-    Reload,
 }
 
 /// Configuration management subcommands

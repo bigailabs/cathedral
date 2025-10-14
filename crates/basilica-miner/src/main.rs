@@ -288,7 +288,6 @@ async fn main() -> Result<()> {
 /// Handle CLI commands
 async fn handle_cli_command(command: Commands, config: &MinerConfig) -> Result<()> {
     match command {
-        Commands::Service { service_cmd } => cli::handle_service_command(service_cmd, config).await,
         Commands::Config { config_cmd } => cli::handle_config_command(config_cmd, config).await,
         Commands::Status => {
             let db = RegistrationDb::new(&config.database).await?;
