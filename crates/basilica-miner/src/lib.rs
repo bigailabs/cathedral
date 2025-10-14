@@ -8,7 +8,6 @@ pub mod config;
 pub mod node_manager;
 pub mod persistence;
 // pub mod request_verification;
-pub mod services;
 pub mod validator_comms;
 pub mod validator_discovery;
 

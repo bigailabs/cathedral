@@ -46,15 +46,9 @@ basilica-protocol = { path = "../basilica-protocol" }
 bittensor = { path = "../bittensor" }
 
 # Miner-specific dependencies
-# HTTP client for external communications
-reqwest = { workspace = true }
-
 # Configuration
 toml = { workspace = true }
 url = { workspace = true }
-
-# JSON Web Tokens for authentication
-jsonwebtoken = { workspace = true }
 
 # Background job processing
 async-trait = { workspace = true }
@@ -68,5 +62,3 @@ futures = { workspace = true }
 
 [features]
 default = []
-# Enable test utilities for node communication
-test-utils = []

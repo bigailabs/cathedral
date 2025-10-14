@@ -18,7 +18,6 @@ mod config;
 mod metrics;
 mod node_manager;
 mod persistence;
-mod services;
 mod validator_comms;
 mod validator_discovery;
 
