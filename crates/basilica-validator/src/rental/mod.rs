@@ -186,7 +186,10 @@ impl RentalManager {
 
         // Create billing monitor if enabled
         let billing = if config.billing.enabled {
-            let billing_client = Arc::new(BillingClient::new(config.billing.clone()).await?);
+            let billing_client = Arc::new(
+                BillingClient::new_with_metrics(config.billing.clone(), Some(metrics.clone()))
+                    .await?,
+            );
             billing_client.clone().start_streaming_task().await;
 
             Some(Arc::new(RentalBillingMonitor::new(

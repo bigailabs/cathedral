@@ -525,6 +525,18 @@ pub struct BillingConfig {
     /// Maximum retry attempts for failed telemetry
     #[serde(default = "default_billing_max_retries")]
     pub max_retries: u32,
+
+    /// Circuit breaker failure threshold
+    #[serde(default = "default_billing_circuit_failure_threshold")]
+    pub circuit_failure_threshold: u32,
+
+    /// Circuit breaker recovery timeout in seconds
+    #[serde(default = "default_billing_circuit_recovery_timeout_secs")]
+    pub circuit_recovery_timeout_secs: u64,
+
+    /// Circuit breaker failure window duration in seconds
+    #[serde(default = "default_billing_circuit_window_duration_secs")]
+    pub circuit_window_duration_secs: u64,
 }
 
 fn default_billing_enabled() -> bool {
@@ -556,7 +568,19 @@ fn default_billing_flush_interval_secs() -> u64 {
 }
 
 fn default_billing_max_retries() -> u32 {
-    3
+    10
+}
+
+fn default_billing_circuit_failure_threshold() -> u32 {
+    5
+}
+
+fn default_billing_circuit_recovery_timeout_secs() -> u64 {
+    30
+}
+
+fn default_billing_circuit_window_duration_secs() -> u64 {
+    60
 }
 
 impl Default for BillingConfig {
@@ -570,6 +594,9 @@ impl Default for BillingConfig {
             collection_interval_secs: default_billing_collection_interval_secs(),
             flush_interval_secs: default_billing_flush_interval_secs(),
             max_retries: default_billing_max_retries(),
+            circuit_failure_threshold: default_billing_circuit_failure_threshold(),
+            circuit_recovery_timeout_secs: default_billing_circuit_recovery_timeout_secs(),
+            circuit_window_duration_secs: default_billing_circuit_window_duration_secs(),
         }
     }
 }

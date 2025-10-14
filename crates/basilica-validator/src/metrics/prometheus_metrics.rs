@@ -194,6 +194,40 @@ impl ValidatorPrometheusMetrics {
             "Current validation state of nodes (0=not in state, 1=current, 2=failed)"
         );
 
+        // Billing telemetry metrics
+        describe_counter!(
+            "basilica_validator_billing_telemetry_collected_total",
+            "Total billing telemetry records collected"
+        );
+        describe_counter!(
+            "basilica_validator_billing_telemetry_sent_total",
+            "Total billing telemetry records successfully sent"
+        );
+        describe_counter!(
+            "basilica_validator_billing_telemetry_dropped_total",
+            "Total billing telemetry records dropped"
+        );
+        describe_gauge!(
+            "basilica_validator_billing_queue_depth",
+            "Current depth of billing telemetry queue"
+        );
+        describe_gauge!(
+            "basilica_validator_billing_channel_utilization_percent",
+            "Channel buffer utilization percentage"
+        );
+        describe_gauge!(
+            "basilica_validator_billing_circuit_breaker_state",
+            "Circuit breaker state (0=closed, 1=half_open, 2=open)"
+        );
+        describe_histogram!(
+            "basilica_validator_billing_retry_attempts",
+            "Number of retry attempts before success or final failure"
+        );
+        describe_histogram!(
+            "basilica_validator_billing_telemetry_latency_seconds",
+            "End-to-end latency from collection to successful send"
+        );
+
         Ok(Self {
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
             persistence,
@@ -633,5 +667,50 @@ impl ValidatorPrometheusMetrics {
             )
             .set(0.0);
         }
+    }
+
+    pub fn record_billing_telemetry_collected(&self, rental_id: &str) {
+        counter!("basilica_validator_billing_telemetry_collected_total",
+            "rental_id" => rental_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_billing_telemetry_sent(&self, count: usize) {
+        counter!("basilica_validator_billing_telemetry_sent_total").increment(count as u64);
+    }
+
+    pub fn record_billing_telemetry_dropped(&self, reason: &str, count: usize) {
+        counter!("basilica_validator_billing_telemetry_dropped_total",
+            "reason" => reason.to_string()
+        )
+        .increment(count as u64);
+    }
+
+    pub fn set_billing_queue_depth(&self, depth: usize) {
+        gauge!("basilica_validator_billing_queue_depth").set(depth as f64);
+    }
+
+    pub fn set_billing_channel_utilization(&self, utilization_percent: f64) {
+        gauge!("basilica_validator_billing_channel_utilization_percent").set(utilization_percent);
+    }
+
+    pub fn set_billing_circuit_breaker_state(&self, state: &str) {
+        let state_value = match state {
+            "closed" => 0.0,
+            "half_open" => 1.0,
+            "open" => 2.0,
+            _ => -1.0,
+        };
+        gauge!("basilica_validator_billing_circuit_breaker_state").set(state_value);
+    }
+
+    pub fn record_billing_retry_attempts(&self, attempts: u32) {
+        histogram!("basilica_validator_billing_retry_attempts").record(attempts as f64);
+    }
+
+    pub fn record_billing_telemetry_latency(&self, latency: Duration) {
+        histogram!("basilica_validator_billing_telemetry_latency_seconds")
+            .record(latency.as_secs_f64());
     }
 }
