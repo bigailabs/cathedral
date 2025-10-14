@@ -75,10 +75,6 @@ libc = { workspace = true }
 # SSH key management
 ssh-key = { workspace = true }
 
-# TLS certificate handling
-rustls-native-certs = { workspace = true }
-data-encoding = { workspace = true }
-
 [dev-dependencies]
 tempfile = { workspace = true }
 

@@ -6,7 +6,7 @@ use futures::stream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
 
 use super::circuit_breaker::CircuitBreaker;
@@ -15,32 +15,6 @@ use crate::config::BillingConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 
 const DEFAULT_CHANNEL_BUFFER: usize = 1000;
-
-fn load_native_certs() -> Result<Vec<Certificate>> {
-    let mut certs = Vec::new();
-
-    for cert in rustls_native_certs::load_native_certs()
-        .with_context(|| "Failed to load system certificates")?
-    {
-        let pem = pem_encode_cert(cert.as_ref());
-        certs.push(Certificate::from_pem(pem));
-    }
-
-    Ok(certs)
-}
-
-fn pem_encode_cert(der: &[u8]) -> String {
-    let encoded = data_encoding::BASE64.encode(der);
-    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-
-    for chunk in encoded.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).unwrap());
-        pem.push('\n');
-    }
-
-    pem.push_str("-----END CERTIFICATE-----\n");
-    pem
-}
 
 pub struct BillingClient {
     config: BillingConfig,
@@ -96,13 +70,9 @@ impl BillingClient {
                     anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint)
                 })?;
 
-            let mut tls_config = ClientTlsConfig::new().domain_name(host);
+            info!("Configuring TLS with system root certificates for host: {}", host);
 
-            let ca_certs =
-                load_native_certs().with_context(|| "Failed to load native CA certificates")?;
-            for cert in ca_certs {
-                tls_config = tls_config.ca_certificate(cert);
-            }
+            let tls_config = ClientTlsConfig::new().domain_name(host);
 
             endpoint = endpoint
                 .tls_config(tls_config)
