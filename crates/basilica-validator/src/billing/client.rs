@@ -98,8 +98,8 @@ impl BillingClient {
 
             let mut tls_config = ClientTlsConfig::new().domain_name(host);
 
-            let ca_certs = load_native_certs()
-                .with_context(|| "Failed to load native CA certificates")?;
+            let ca_certs =
+                load_native_certs().with_context(|| "Failed to load native CA certificates")?;
             for cert in ca_certs {
                 tls_config = tls_config.ca_certificate(cert);
             }
