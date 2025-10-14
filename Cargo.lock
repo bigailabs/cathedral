@@ -2386,7 +2386,6 @@ dependencies = [
  "clap",
  "clap-verbosity-flag",
  "collateral-contract",
- "futures",
  "hex",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2397,13 +2396,11 @@ dependencies = [
  "serde_json",
  "serde_with",
  "sqlx",
- "tempfile",
  "tokio",
  "toml 0.8.23",
  "tonic",
  "tonic-health",
  "tracing",
- "url",
  "uuid",
 ]
 

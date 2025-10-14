@@ -48,17 +48,12 @@ bittensor = { path = "../bittensor" }
 # Miner-specific dependencies
 # Configuration
 toml = { workspace = true }
-url = { workspace = true }
 
 # Background job processing
 async-trait = { workspace = true }
 
 # Random number generation
 rand = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-futures = { workspace = true }
 
 [features]
 default = []
