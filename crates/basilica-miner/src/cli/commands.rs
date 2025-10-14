@@ -7,11 +7,6 @@ pub enum Commands {
         #[command(subcommand)]
         service_cmd: ServiceCommand,
     },
-    /// Database management commands
-    Database {
-        #[command(subcommand)]
-        database_cmd: DatabaseCommand,
-    },
     /// Configuration management commands
     Config {
         #[command(subcommand)]
@@ -40,31 +35,6 @@ pub enum ServiceCommand {
 
     /// Reload service configuration
     Reload,
-}
-
-/// Database management subcommands
-#[derive(Subcommand, Debug)]
-pub enum DatabaseCommand {
-    /// Backup the database
-    Backup {
-        /// Backup file path
-        path: String,
-    },
-
-    /// Restore database from backup
-    Restore {
-        /// Backup file path to restore from
-        path: String,
-    },
-
-    /// Show database statistics
-    Stats,
-
-    /// Vacuum database to reclaim space
-    Vacuum,
-
-    /// Check database integrity
-    Integrity,
 }
 
 /// Configuration management subcommands

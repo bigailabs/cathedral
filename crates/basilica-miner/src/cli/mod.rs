@@ -1,7 +1,7 @@
 //! # CLI Module
 //!
 //! Complete command-line interface for miner operations with production-ready
-//! operational commands for service management, database operations, and configuration.
+//! operational commands for service management and configuration.
 
 use anyhow::Result;
 use tracing::error;
@@ -27,19 +27,6 @@ pub async fn handle_service_command(command: ServiceCommand, config: &MinerConfi
     };
 
     handlers::handle_service_command(operation, config).await
-}
-
-/// Handle database management commands
-pub async fn handle_database_command(command: DatabaseCommand, config: &MinerConfig) -> Result<()> {
-    let operation = match command {
-        DatabaseCommand::Backup { path } => handlers::DatabaseOperation::Backup { path },
-        DatabaseCommand::Restore { path } => handlers::DatabaseOperation::Restore { path },
-        DatabaseCommand::Stats => handlers::DatabaseOperation::Stats,
-        DatabaseCommand::Vacuum => handlers::DatabaseOperation::Vacuum,
-        DatabaseCommand::Integrity => handlers::DatabaseOperation::Integrity,
-    };
-
-    handlers::handle_database_command(operation, config).await
 }
 
 /// Handle configuration management commands
