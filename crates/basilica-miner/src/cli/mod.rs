@@ -1,7 +1,6 @@
 //! # CLI Module
 //!
-//! Complete command-line interface for miner operations with production-ready
-//! operational commands for service management and configuration.
+//! Complete command-line interface for miner operations focused on configuration tasks.
 
 use anyhow::Result;
 use tracing::error;
@@ -16,38 +15,12 @@ pub mod handlers;
 pub use args::*;
 pub use commands::*;
 
-/// Handle service management commands
-pub async fn handle_service_command(command: ServiceCommand, config: &MinerConfig) -> Result<()> {
-    let operation = match command {
-        ServiceCommand::Start => handlers::ServiceOperation::Start,
-        ServiceCommand::Stop => handlers::ServiceOperation::Stop,
-        ServiceCommand::Restart => handlers::ServiceOperation::Restart,
-        ServiceCommand::Status => handlers::ServiceOperation::Status,
-        ServiceCommand::Reload => handlers::ServiceOperation::Reload,
-    };
-
-    handlers::handle_service_command(operation, config).await
-}
-
 /// Handle configuration management commands
 pub async fn handle_config_command(command: ConfigCommand, config: &MinerConfig) -> Result<()> {
     let operation = match command {
         ConfigCommand::Validate { path } => handlers::ConfigOperation::Validate { path },
         ConfigCommand::Show { show_sensitive } => {
             handlers::ConfigOperation::Show { show_sensitive }
-        }
-        ConfigCommand::Reload => handlers::ConfigOperation::Reload,
-        ConfigCommand::Diff { other_path } => handlers::ConfigOperation::Diff { other_path },
-        ConfigCommand::Export { format, path } => {
-            let config_format = match format.as_str() {
-                "json" => handlers::ConfigFormat::Json,
-                "yaml" => handlers::ConfigFormat::Yaml,
-                _ => handlers::ConfigFormat::Toml,
-            };
-            handlers::ConfigOperation::Export {
-                format: config_format,
-                path,
-            }
         }
     };
 

@@ -1,14 +1,10 @@
 //! # Configuration Management Commands
 //!
-//! Handles configuration validation, reloading, display, and management
-//! operations for the miner configuration system.
+//! Handles configuration validation and display operations for the miner configuration system.
 
 use crate::config::MinerConfig;
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{anyhow, Result};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{error, info};
 
@@ -19,17 +15,6 @@ use basilica_common::config::ConfigValidation;
 pub enum ConfigOperation {
     Validate { path: Option<String> },
     Show { show_sensitive: bool },
-    Reload,
-    Diff { other_path: String },
-    Export { format: ConfigFormat, path: String },
-}
-
-/// Configuration export formats
-#[derive(Debug, Clone)]
-pub enum ConfigFormat {
-    Toml,
-    Json,
-    Yaml,
 }
 
 /// Configuration validation result
@@ -50,11 +35,6 @@ pub async fn handle_config_command(
         ConfigOperation::Validate { path } => validate_config(path, current_config).await,
         ConfigOperation::Show { show_sensitive } => {
             show_config(current_config, show_sensitive).await
-        }
-        ConfigOperation::Reload => reload_config(current_config).await,
-        ConfigOperation::Diff { other_path } => diff_config(current_config, &other_path).await,
-        ConfigOperation::Export { format, path } => {
-            export_config(current_config, format, &path).await
         }
     }
 }
@@ -152,112 +132,6 @@ async fn show_config(config: &MinerConfig, show_sensitive: bool) -> Result<()> {
             println!("   Warning: {warning}");
         }
     }
-
-    Ok(())
-}
-
-/// Reload configuration (simulate)
-async fn reload_config(current_config: &MinerConfig) -> Result<()> {
-    info!("Simulating configuration reload");
-    println!("🔄 Testing configuration reload...");
-
-    // In a real implementation, this would signal the running service
-    // For now, we validate that the current config file can be reloaded
-
-    // Try to load the configuration again
-    let reloaded_config = MinerConfig::load()?;
-
-    // Validate the reloaded configuration
-    let validation_result = perform_comprehensive_validation(&reloaded_config).await?;
-
-    if !validation_result.is_valid {
-        println!("ERROR: Configuration reload would fail due to validation errors:");
-        for error in &validation_result.errors {
-            println!("   Error: {error}");
-        }
-        return Err(anyhow!("Configuration reload validation failed"));
-    }
-
-    // Check for differences that would require restart
-    let requires_restart = check_restart_required(current_config, &reloaded_config);
-
-    if requires_restart {
-        println!("WARNING: Configuration changes detected that require service restart:");
-        print_config_differences(current_config, &reloaded_config);
-    } else {
-        println!("Configuration can be reloaded without restart");
-    }
-
-    println!("INFO: Note: This is a simulation. Actual reload requires service integration.");
-    Ok(())
-}
-
-/// Compare configurations and show differences
-async fn diff_config(current_config: &MinerConfig, other_path: &str) -> Result<()> {
-    println!("Comparing configurations...");
-    println!("Current config vs: {other_path}");
-
-    if !Path::new(other_path).exists() {
-        return Err(anyhow!("Comparison file not found: {}", other_path));
-    }
-
-    // Load the other configuration
-    let other_config = MinerConfig::load_from_file(&PathBuf::from(other_path))?;
-
-    // Perform detailed comparison
-    let differences = compare_configurations(current_config, &other_config)?;
-
-    if differences.is_empty() {
-        println!("Configurations are identical");
-        return Ok(());
-    }
-
-    println!("\n=== Configuration Differences ===");
-    for (key, (current_val, other_val)) in differences {
-        println!("🔸 {key}");
-        println!("   Current: {}", format_config_value(&current_val));
-        println!("   Other:   {}", format_config_value(&other_val));
-        println!();
-    }
-
-    Ok(())
-}
-
-/// Export configuration in different formats
-async fn export_config(
-    config: &MinerConfig,
-    format: ConfigFormat,
-    output_path: &str,
-) -> Result<()> {
-    info!(
-        "Exporting configuration to: {} (format: {:?})",
-        output_path, format
-    );
-    println!("📤 Exporting configuration to: {output_path} ({format:?})");
-
-    // Create a clean version without sensitive data
-    let mut export_config = config.clone();
-    mask_sensitive_fields(&mut export_config);
-
-    let exported_content = match format {
-        ConfigFormat::Toml => toml::to_string_pretty(&export_config)
-            .map_err(|e| anyhow!("Failed to serialize to TOML: {}", e))?,
-        ConfigFormat::Json => serde_json::to_string_pretty(&export_config)
-            .map_err(|e| anyhow!("Failed to serialize to JSON: {}", e))?,
-        ConfigFormat::Yaml => {
-            // For now, fallback to JSON since serde_yaml might not be available
-            serde_json::to_string_pretty(&export_config)
-                .map_err(|e| anyhow!("Failed to serialize to YAML (using JSON): {}", e))?
-        }
-    };
-
-    // Write to file
-    fs::write(output_path, exported_content)
-        .map_err(|e| anyhow!("Failed to write configuration file: {}", e))?;
-
-    println!("Configuration exported successfully");
-    println!("   Size: {} bytes", fs::metadata(output_path)?.len());
-    println!("   Note: Sensitive fields have been masked for security");
 
     Ok(())
 }
@@ -488,98 +362,5 @@ fn mask_sensitive_fields(config: &mut MinerConfig) {
             .next()
             .unwrap_or("****MASKED****")
             .to_string();
-    }
-}
-
-/// Check if configuration changes require restart
-fn check_restart_required(current: &MinerConfig, new: &MinerConfig) -> bool {
-    // Changes that require restart
-    current.validator_comms.port != new.validator_comms.port
-        || current.validator_comms.host != new.validator_comms.host
-        || current.database.url != new.database.url
-        || current.bittensor.common.netuid != new.bittensor.common.netuid
-        || current.bittensor.axon_port != new.bittensor.axon_port
-}
-
-/// Print configuration differences that require restart
-fn print_config_differences(current: &MinerConfig, new: &MinerConfig) {
-    if current.validator_comms.port != new.validator_comms.port {
-        println!(
-            "   • Validator comms port: {} → {}",
-            current.validator_comms.port, new.validator_comms.port
-        );
-    }
-    if current.validator_comms.host != new.validator_comms.host {
-        println!(
-            "   • Validator comms host: {} → {}",
-            current.validator_comms.host, new.validator_comms.host
-        );
-    }
-    if current.database.url != new.database.url {
-        println!("   • Database URL changed");
-    }
-}
-
-/// Compare two configurations and return differences
-fn compare_configurations(
-    current: &MinerConfig,
-    other: &MinerConfig,
-) -> Result<HashMap<String, (Value, Value)>> {
-    let current_json = serde_json::to_value(current)?;
-    let other_json = serde_json::to_value(other)?;
-
-    let mut differences = HashMap::new();
-    compare_json_values("", &current_json, &other_json, &mut differences);
-
-    Ok(differences)
-}
-
-/// Recursively compare JSON values
-fn compare_json_values(
-    prefix: &str,
-    current: &Value,
-    other: &Value,
-    differences: &mut HashMap<String, (Value, Value)>,
-) {
-    match (current, other) {
-        (Value::Object(current_obj), Value::Object(other_obj)) => {
-            // Compare all keys from both objects
-            let mut all_keys = std::collections::HashSet::new();
-            all_keys.extend(current_obj.keys());
-            all_keys.extend(other_obj.keys());
-
-            for key in all_keys {
-                let new_prefix = if prefix.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{prefix}.{key}")
-                };
-
-                match (current_obj.get(key), other_obj.get(key)) {
-                    (Some(c), Some(o)) => compare_json_values(&new_prefix, c, o, differences),
-                    (Some(c), None) => {
-                        differences.insert(new_prefix, (c.clone(), Value::Null));
-                    }
-                    (None, Some(o)) => {
-                        differences.insert(new_prefix, (Value::Null, o.clone()));
-                    }
-                    (None, None) => {}
-                }
-            }
-        }
-        _ => {
-            if current != other {
-                differences.insert(prefix.to_string(), (current.clone(), other.clone()));
-            }
-        }
-    }
-}
-
-/// Format a configuration value for display
-fn format_config_value(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::String(s) => format!("\"{s}\""),
-        _ => value.to_string(),
     }
 }

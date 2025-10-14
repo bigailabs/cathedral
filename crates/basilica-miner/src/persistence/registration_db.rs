@@ -69,86 +69,6 @@ impl RegistrationDb {
         Ok(())
     }
 
-    /// Vacuum database to reclaim space
-    pub async fn vacuum(&self) -> Result<()> {
-        sqlx::query("VACUUM")
-            .execute(&self.pool)
-            .await
-            .context("Database vacuum failed")?;
-        Ok(())
-    }
-
-    /// Vacuum database into a backup file
-    pub async fn vacuum_into(&self, backup_path: &str) -> Result<()> {
-        sqlx::query(&format!("VACUUM INTO '{backup_path}'"))
-            .execute(&self.pool)
-            .await
-            .context("Database vacuum into backup failed")?;
-        Ok(())
-    }
-
-    /// Check database integrity
-    pub async fn integrity_check(&self) -> Result<bool> {
-        let result: (String,) = sqlx::query_as("PRAGMA integrity_check")
-            .fetch_one(&self.pool)
-            .await
-            .context("Database integrity check failed")?;
-
-        Ok(result.0 == "ok")
-    }
-
-    /// Get database statistics
-    pub async fn get_database_stats(&self) -> Result<DatabaseStats> {
-        // Get page count and page size
-        let (page_count,): (i64,) = sqlx::query_as("PRAGMA page_count")
-            .fetch_one(&self.pool)
-            .await?;
-
-        let (page_size,): (i64,) = sqlx::query_as("PRAGMA page_size")
-            .fetch_one(&self.pool)
-            .await?;
-
-        // Get table statistics
-        let table_stats = self.get_table_statistics().await?;
-
-        Ok(DatabaseStats {
-            page_count: page_count as u64,
-            page_size: page_size as u64,
-            vacuum_count: 0, // SQLite doesn't track this directly
-            table_stats,
-        })
-    }
-
-    /// Get statistics for all tables
-    async fn get_table_statistics(&self) -> Result<Vec<TableStatistics>> {
-        let table_names: Vec<(String,)> = sqlx::query_as(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let mut stats = Vec::new();
-
-        for (table_name,) in table_names {
-            let (row_count,): (i64,) =
-                sqlx::query_as(&format!("SELECT COUNT(*) FROM {table_name}"))
-                    .fetch_one(&self.pool)
-                    .await
-                    .unwrap_or((0,));
-
-            // Estimate size (SQLite doesn't provide exact table sizes easily)
-            let size_bytes = (row_count as u64) * 100; // Rough estimate
-
-            stats.push(TableStatistics {
-                table_name,
-                row_count: row_count as u64,
-                size_bytes,
-            });
-        }
-
-        Ok(stats)
-    }
-
     /// Ensure database directory exists
     async fn ensure_database_directory(database_url: &str) -> Result<()> {
         if let Some(path) = database_url.strip_prefix("sqlite:") {
@@ -190,23 +110,6 @@ impl RegistrationDb {
 
         Ok(node_id)
     }
-}
-
-/// Database statistics structure
-#[derive(Debug)]
-pub struct DatabaseStats {
-    pub page_count: u64,
-    pub page_size: u64,
-    pub vacuum_count: u64,
-    pub table_stats: Vec<TableStatistics>,
-}
-
-/// Table statistics structure
-#[derive(Debug)]
-pub struct TableStatistics {
-    pub table_name: String,
-    pub row_count: u64,
-    pub size_bytes: u64,
 }
 
 #[cfg(test)]
@@ -473,10 +376,6 @@ mod tests {
         assert_ne!(ids[0].uuid(), ids[1].uuid());
         assert_ne!(ids[0].uuid(), ids[2].uuid());
         assert_ne!(ids[1].uuid(), ids[2].uuid());
-
-        // Verify database integrity (table exists but empty)
-        let integrity_check = db.integrity_check().await.unwrap();
-        assert!(integrity_check, "Database integrity check should pass");
     }
 
     #[tokio::test]
