@@ -29,5 +29,4 @@ pub enum ConfigCommand {
         #[arg(long)]
         show_sensitive: bool,
     },
-
 }
