@@ -22,19 +22,6 @@ pub async fn handle_config_command(command: ConfigCommand, config: &MinerConfig)
         ConfigCommand::Show { show_sensitive } => {
             handlers::ConfigOperation::Show { show_sensitive }
         }
-        ConfigCommand::Reload => handlers::ConfigOperation::Reload,
-        ConfigCommand::Diff { other_path } => handlers::ConfigOperation::Diff { other_path },
-        ConfigCommand::Export { format, path } => {
-            let config_format = match format.as_str() {
-                "json" => handlers::ConfigFormat::Json,
-                "yaml" => handlers::ConfigFormat::Yaml,
-                _ => handlers::ConfigFormat::Toml,
-            };
-            handlers::ConfigOperation::Export {
-                format: config_format,
-                path,
-            }
-        }
     };
 
     handlers::handle_config_command(operation, config).await

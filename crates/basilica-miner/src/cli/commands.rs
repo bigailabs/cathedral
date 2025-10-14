@@ -30,21 +30,4 @@ pub enum ConfigCommand {
         show_sensitive: bool,
     },
 
-    /// Reload configuration (test only)
-    Reload,
-
-    /// Compare configurations
-    Diff {
-        /// Path to configuration file to compare with
-        other_path: String,
-    },
-
-    /// Export configuration in different formats
-    Export {
-        /// Export format (toml, json, yaml)
-        #[arg(short, long, default_value = "toml")]
-        format: String,
-        /// Output file path
-        path: String,
-    },
 }
