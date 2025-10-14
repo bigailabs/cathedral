@@ -639,7 +639,8 @@ jobs:
           done
 
       - name: Test import
-        run: python -c 'import basilica; print(f"SDK imported successfully. API URL: {basilica.DEFAULT_API_URL}")'
+        run: |
+          python -c 'import basilica; print(f"SDK imported successfully. API URL: {basilica.DEFAULT_API_URL}")'
 
   # Final status check
   ci-success:
