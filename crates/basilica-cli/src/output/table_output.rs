@@ -4,13 +4,19 @@ use crate::error::Result;
 use basilica_api::country_mapping::get_country_name_from_code;
 use basilica_common::LocationProfile;
 use basilica_sdk::{
-    types::{ApiKeyInfo, ApiRentalListItem, GpuSpec, NodeDetails, RentalStatusResponse},
+    types::{
+        ApiKeyInfo, ApiRentalListItem, BalanceResponse, BillingPackageInfo, GpuSpec,
+        ListDepositsResponse, NodeDetails, PackagesResponse, RentalStatusResponse,
+        RentalUsageResponse, UsageHistoryResponse,
+    },
     AvailableNode,
 };
 use basilica_validator::gpu::GpuCategory;
 use chrono::{DateTime, Local};
+use console::style;
+use rust_decimal::Decimal;
 use std::{collections::HashMap, str::FromStr};
-use tabled::{settings::Style, Table, Tabled};
+use tabled::{builder::Builder, settings::Style, Table, Tabled};
 
 /// Format RFC3339 timestamp to YY-MM-DD HH:MM:SS format
 fn format_timestamp(timestamp: &str) -> String {
@@ -677,6 +683,429 @@ pub fn display_available_nodes_detailed(
     }
 
     println!("\nTotal available nodes: {}", nodes.len());
+
+    Ok(())
+}
+
+/// Display deposits history in table format
+pub fn display_deposits(response: &ListDepositsResponse) -> Result<()> {
+    println!();
+    println!("{}", style("# Deposit History").dim());
+    println!();
+
+    let mut builder = Builder::default();
+
+    // Add header
+    builder.push_record(["Date (UTC)", "TAO", "Tx Hash", "Conf", "Block", "Status"]);
+
+    let mut total_tao = 0.0;
+
+    for deposit in &response.deposits {
+        let amount_tao: f64 = deposit.amount_tao.parse().unwrap_or(0.0);
+        total_tao += amount_tao;
+
+        // Format date
+        let date = deposit.observed_at.format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // Format tx hash (truncate to first 8 and last 3 chars)
+        let tx_hash = if deposit.tx_hash.len() > 11 {
+            format!(
+                "{}...{}",
+                &deposit.tx_hash[..8],
+                &deposit.tx_hash[deposit.tx_hash.len() - 3..]
+            )
+        } else {
+            deposit.tx_hash.clone()
+        };
+
+        // Format confirmations (12+ means finalized)
+        let confirmations = if deposit.finalized_at.is_some() {
+            "12+".to_string()
+        } else {
+            "-".to_string()
+        };
+
+        // Format status
+        let status = if deposit.credited_at.is_some() {
+            "Credited"
+        } else if deposit.finalized_at.is_some() {
+            "Finalized"
+        } else {
+            "Pending"
+        };
+
+        builder.push_record([
+            date.as_str(),
+            &format!("{:.3}", amount_tao),
+            tx_hash.as_str(),
+            confirmations.as_str(),
+            &deposit.block_number.to_string(),
+            status,
+        ]);
+    }
+
+    let mut table = builder.build();
+    table.with(Style::modern());
+    println!("{}", table);
+
+    // Display totals
+    println!();
+    println!("{}:", style("Total Deposits").bold());
+    println!("  {} TAO", style(format!("{:.3}", total_tao)).green());
+
+    Ok(())
+}
+
+/// Display pricing table for all GPU types
+pub fn display_pricing_table(
+    packages: &PackagesResponse,
+    balance: Option<&BalanceResponse>,
+) -> Result<()> {
+    if packages.packages.is_empty() {
+        println!();
+        println!("{}", style("No pricing packages available").yellow());
+        println!();
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct PricingRow {
+        #[tabled(rename = "GPU Type")]
+        gpu_type: String,
+        #[tabled(rename = "Hourly Rate")]
+        hourly_rate: String,
+        #[tabled(rename = "8-Hour Cost")]
+        eight_hour: String,
+        #[tabled(rename = "24-Hour Cost")]
+        twenty_four_hour: String,
+        #[tabled(rename = "Hours Available")]
+        hours_available: String,
+    }
+
+    let mut rows: Vec<(Decimal, PricingRow)> = Vec::new();
+
+    // Parse balance once if available
+    let available_balance = balance.and_then(|b| b.available.parse::<Decimal>().ok());
+
+    for package in &packages.packages {
+        if !package.is_active {
+            continue;
+        }
+
+        let hourly_rate = package.hourly_rate.parse::<Decimal>().ok().unwrap_or_default();
+
+        let eight_hour_cost = hourly_rate * Decimal::from(8);
+        let twenty_four_hour_cost = hourly_rate * Decimal::from(24);
+
+        let hours_available = if let Some(balance) = available_balance {
+            if hourly_rate > Decimal::ZERO {
+                let hours = balance / hourly_rate;
+                format!("{:.1}h", hours)
+            } else {
+                "N/A".to_string()
+            }
+        } else {
+            "-".to_string()
+        };
+
+        rows.push((
+            hourly_rate,
+            PricingRow {
+                gpu_type: package.name.clone(),
+                hourly_rate: format!("${:.2}/hr", hourly_rate),
+                eight_hour: format!("${:.2}", eight_hour_cost),
+                twenty_four_hour: format!("${:.2}", twenty_four_hour_cost),
+                hours_available,
+            },
+        ));
+    }
+
+    // Sort by hourly rate ascending (numeric)
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Extract rows after sorting
+    let rows: Vec<PricingRow> = rows.into_iter().map(|(_, r)| r).collect();
+
+    println!();
+    println!("{}", style("GPU Pricing").bold());
+    println!();
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+    println!();
+
+    if let Some(balance) = balance {
+        println!(
+            "{}: {} credits",
+            style("Your Balance").cyan(),
+            style(&balance.available).green().bold()
+        );
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Display pricing for a specific GPU type
+pub fn display_gpu_pricing(
+    package: &BillingPackageInfo,
+    hours: Option<u32>,
+    balance: Option<&BalanceResponse>,
+) -> Result<()> {
+    let hourly_rate = package.hourly_rate.parse::<Decimal>().ok().unwrap_or_default();
+
+    println!();
+    println!("{}", style(&package.name).bold().cyan());
+    println!();
+    println!("  {}: {}", style("Description").dim(), package.description);
+    println!(
+        "  {}: {}",
+        style("Hourly Rate").cyan(),
+        style(format!("${:.2}/hr", hourly_rate)).green().bold()
+    );
+
+    if let Some(hours) = hours {
+        let total_cost = hourly_rate * Decimal::from(hours);
+        println!();
+        println!(
+            "  {}: {} hours",
+            style("Duration").cyan(),
+            style(hours).yellow()
+        );
+        println!(
+            "  {}: {}",
+            style("Estimated Cost").cyan(),
+            style(format!("${:.2}", total_cost)).green().bold()
+        );
+    }
+
+    if let Some(balance) = balance {
+        let available_balance = balance.available.parse::<Decimal>().ok().unwrap_or_default();
+
+        println!();
+        println!(
+            "  {}: {} credits",
+            style("Your Balance").cyan(),
+            style(format!("{:.2}", available_balance)).green()
+        );
+
+        if hourly_rate > Decimal::ZERO {
+            let hours_available = available_balance / hourly_rate;
+            println!(
+                "  {}: {} hours",
+                style("Hours Available").cyan(),
+                style(format!("{:.1}", hours_available)).yellow()
+            );
+
+            if let Some(requested_hours) = hours {
+                let total_cost = hourly_rate * Decimal::from(requested_hours);
+                if total_cost > available_balance {
+                    let shortfall = total_cost - available_balance;
+                    println!();
+                    println!(
+                        "  {}: {} credits",
+                        style("Shortfall").red().bold(),
+                        style(format!("{:.2}", shortfall)).red()
+                    );
+                    println!(
+                        "  {} Run `basilica fund` to add credits",
+                        style("⚠").yellow()
+                    );
+                } else {
+                    let remaining = available_balance - total_cost;
+                    println!(
+                        "  {}: {} credits",
+                        style("Remaining After").dim(),
+                        style(format!("{:.2}", remaining)).dim()
+                    );
+                }
+            }
+        }
+    }
+
+    println!();
+
+    Ok(())
+}
+
+/// Display detailed usage for a specific rental
+pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
+    println!();
+    println!(
+        "{}: {}",
+        style("Rental ID").cyan(),
+        style(&usage.rental_id).bold()
+    );
+    println!(
+        "{}: {}",
+        style("Total Cost").cyan(),
+        style(&usage.total_cost).green().bold()
+    );
+    println!();
+
+    if let Some(summary) = &usage.summary {
+        println!("{}", style("Resource Usage Summary").bold());
+        println!();
+        println!(
+            "  {}: {:.1}%",
+            style("Avg CPU Usage").cyan(),
+            summary.avg_cpu_percent
+        );
+        println!(
+            "  {}: {} MB",
+            style("Avg Memory Usage").cyan(),
+            summary.avg_memory_mb
+        );
+        println!(
+            "  {}: {:.1}%",
+            style("Avg GPU Utilization").cyan(),
+            summary.avg_gpu_utilization
+        );
+        println!(
+            "  {}: {} bytes",
+            style("Total Network I/O").cyan(),
+            summary.total_network_bytes
+        );
+        println!(
+            "  {}: {} bytes",
+            style("Total Disk I/O").cyan(),
+            summary.total_disk_bytes
+        );
+        println!(
+            "  {}: {} seconds ({:.1} hours)",
+            style("Duration").cyan(),
+            summary.duration_secs,
+            summary.duration_secs as f64 / 3600.0
+        );
+        println!();
+    }
+
+    if !usage.data_points.is_empty() {
+        #[derive(Tabled)]
+        struct UsageDataRow {
+            #[tabled(rename = "Timestamp")]
+            timestamp: String,
+            #[tabled(rename = "CPU %")]
+            cpu_percent: String,
+            #[tabled(rename = "Memory (MB)")]
+            memory_mb: String,
+            #[tabled(rename = "Cost")]
+            cost: String,
+        }
+
+        let rows: Vec<UsageDataRow> = usage
+            .data_points
+            .iter()
+            .map(|dp| UsageDataRow {
+                timestamp: dp.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                cpu_percent: format!("{:.1}%", dp.cpu_percent),
+                memory_mb: dp.memory_mb.to_string(),
+                cost: dp.cost.clone(),
+            })
+            .collect();
+
+        println!("{}", style("Usage Data Points").bold());
+        println!();
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+        println!();
+    } else {
+        println!("{}", style("No usage data points available").yellow());
+        println!();
+    }
+
+    Ok(())
+}
+
+/// Display usage history list
+pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
+    if history.rentals.is_empty() {
+        println!();
+        println!("{}", style("No rental usage history found").yellow());
+        println!();
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct UsageHistoryRow {
+        #[tabled(rename = "Rental ID")]
+        rental_id: String,
+        #[tabled(rename = "Node ID")]
+        node_id: String,
+        #[tabled(rename = "Status")]
+        status: String,
+        #[tabled(rename = "Hourly Rate")]
+        hourly_rate: String,
+        #[tabled(rename = "Current Cost")]
+        current_cost: String,
+        #[tabled(rename = "Started")]
+        started: String,
+        #[tabled(rename = "Last Updated")]
+        last_updated: String,
+    }
+
+    let mut rows: Vec<UsageHistoryRow> = history
+        .rentals
+        .iter()
+        .map(|rental| {
+            let hourly_rate = rental
+                .hourly_rate
+                .parse::<Decimal>()
+                .ok()
+                .map(|rate| format!("${:.2}/hr", rate))
+                .unwrap_or_else(|| rental.hourly_rate.clone());
+
+            let current_cost = rental
+                .current_cost
+                .parse::<Decimal>()
+                .ok()
+                .map(|cost| format!("${:.2}", cost))
+                .unwrap_or_else(|| rental.current_cost.clone());
+
+            UsageHistoryRow {
+                rental_id: rental.rental_id.clone(),
+                node_id: rental.node_id.clone(),
+                status: rental.status.clone(),
+                hourly_rate,
+                current_cost,
+                started: rental.start_time.format("%Y-%m-%d %H:%M UTC").to_string(),
+                last_updated: rental.last_updated.format("%Y-%m-%d %H:%M UTC").to_string(),
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+    println!();
+    println!(
+        "{} ({} total)",
+        style("Rental Usage History").bold(),
+        style(history.total_count).cyan()
+    );
+    println!();
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+    println!();
+
+    let total_cost: Decimal = history
+        .rentals
+        .iter()
+        .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
+        .sum();
+
+    println!(
+        "{}: {}",
+        style("Total Cost (All Rentals)").cyan(),
+        style(format!("${:.2}", total_cost)).green().bold()
+    );
+    println!();
+    println!(
+        "{} Run `basilica usage <rental-id>` to see detailed usage for a specific rental",
+        style("Tip:").dim()
+    );
+    println!();
 
     Ok(())
 }

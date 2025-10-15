@@ -4,7 +4,7 @@ use console::style;
 
 use crate::{
     error::CliError,
-    output::{json_output, print_info},
+    output::{json_output, print_info, table_output},
     progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner},
 };
 
@@ -107,84 +107,8 @@ pub async fn handle_list_deposits(
         println!("To fund your account, run:");
         println!("  {}", style("basilica fund").yellow());
     } else {
-        display_deposits_table(&deposits_response)?;
+        table_output::display_deposits(&deposits_response)?;
     }
 
     Ok(())
-}
-
-fn display_deposits_table(
-    response: &basilica_sdk::ListDepositsResponse,
-) -> EyreResult<(), CliError> {
-    use tabled::{builder::Builder, settings::Style};
-
-    println!();
-    println!("{}", style("# Deposit History").dim());
-    println!();
-
-    let mut builder = Builder::default();
-
-    // Add header
-    builder.push_record(["Date (UTC)", "TAO", "Tx Hash", "Conf", "Block", "Status"]);
-
-    let mut total_tao = 0.0;
-
-    for deposit in &response.deposits {
-        let amount_tao: f64 = deposit.amount_tao.parse().unwrap_or(0.0);
-        total_tao += amount_tao;
-
-        // Format date
-        let date = format_datetime(&deposit.observed_at);
-
-        // Format tx hash (truncate to first 8 and last 3 chars)
-        let tx_hash = if deposit.tx_hash.len() > 11 {
-            format!(
-                "{}...{}",
-                &deposit.tx_hash[..8],
-                &deposit.tx_hash[deposit.tx_hash.len() - 3..]
-            )
-        } else {
-            deposit.tx_hash.clone()
-        };
-
-        // Format confirmations (12+ means finalized)
-        let confirmations = if deposit.finalized_at.is_some() {
-            "12+".to_string()
-        } else {
-            "-".to_string()
-        };
-
-        // Format status
-        let status = if deposit.credited_at.is_some() {
-            "Credited"
-        } else if deposit.finalized_at.is_some() {
-            "Finalized"
-        } else {
-            "Pending"
-        };
-
-        builder.push_record([
-            date.as_str(),
-            &format!("{:.3}", amount_tao),
-            tx_hash.as_str(),
-            confirmations.as_str(),
-            &deposit.block_number.to_string(),
-            status,
-        ]);
-    }
-
-    let mut table = builder.build();
-    table.with(Style::blank());
-    println!("{}", table);
-
-    // Display totals
-    println!();
-    println!("{}:", style("Total Deposits").bold());
-    println!("  {} TAO", style(format!("{:.3}", total_tao)).green());
-
-    Ok(())
-}
-
-fn format_datetime(dt: &chrono::DateTime<chrono::Utc>) -> String {
-    dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
