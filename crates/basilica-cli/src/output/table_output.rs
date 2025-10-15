@@ -1,6 +1,6 @@
 //! Table formatting for CLI output
 
-use crate::error::Result;
+use crate::error::{CliError, Result};
 use basilica_api::country_mapping::get_country_name_from_code;
 use basilica_common::LocationProfile;
 use basilica_sdk::{
@@ -13,6 +13,7 @@ use basilica_sdk::{
 };
 use basilica_validator::gpu::GpuCategory;
 use chrono::{DateTime, Local};
+use color_eyre::eyre::eyre;
 use console::style;
 use rust_decimal::Decimal;
 use std::{collections::HashMap, str::FromStr};
@@ -795,8 +796,7 @@ pub fn display_pricing_table(
         let hourly_rate = package
             .hourly_rate
             .parse::<Decimal>()
-            .ok()
-            .unwrap_or_default();
+            .map_err(|e| CliError::Internal(eyre!("Invalid hourly rate format: {}", e)))?;
 
         let eight_hour_cost = hourly_rate * Decimal::from(8);
         let twenty_four_hour_cost = hourly_rate * Decimal::from(24);
@@ -859,8 +859,7 @@ pub fn display_gpu_pricing(
     let hourly_rate = package
         .hourly_rate
         .parse::<Decimal>()
-        .ok()
-        .unwrap_or_default();
+        .map_err(|e| CliError::Internal(eyre!("Invalid hourly rate format: {}", e)))?;
 
     println!();
     println!("{}", style(&package.name).bold().cyan());
@@ -891,8 +890,7 @@ pub fn display_gpu_pricing(
         let available_balance = balance
             .available
             .parse::<Decimal>()
-            .ok()
-            .unwrap_or_default();
+            .map_err(|e| CliError::Internal(eyre!("Invalid balance format: {}", e)))?;
 
         println!();
         println!(
