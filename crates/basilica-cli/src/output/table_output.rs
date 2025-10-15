@@ -792,7 +792,11 @@ pub fn display_pricing_table(
             continue;
         }
 
-        let hourly_rate = package.hourly_rate.parse::<Decimal>().ok().unwrap_or_default();
+        let hourly_rate = package
+            .hourly_rate
+            .parse::<Decimal>()
+            .ok()
+            .unwrap_or_default();
 
         let eight_hour_cost = hourly_rate * Decimal::from(8);
         let twenty_four_hour_cost = hourly_rate * Decimal::from(24);
@@ -852,7 +856,11 @@ pub fn display_gpu_pricing(
     hours: Option<u32>,
     balance: Option<&BalanceResponse>,
 ) -> Result<()> {
-    let hourly_rate = package.hourly_rate.parse::<Decimal>().ok().unwrap_or_default();
+    let hourly_rate = package
+        .hourly_rate
+        .parse::<Decimal>()
+        .ok()
+        .unwrap_or_default();
 
     println!();
     println!("{}", style(&package.name).bold().cyan());
@@ -880,7 +888,11 @@ pub fn display_gpu_pricing(
     }
 
     if let Some(balance) = balance {
-        let available_balance = balance.available.parse::<Decimal>().ok().unwrap_or_default();
+        let available_balance = balance
+            .available
+            .parse::<Decimal>()
+            .ok()
+            .unwrap_or_default();
 
         println!();
         println!(
