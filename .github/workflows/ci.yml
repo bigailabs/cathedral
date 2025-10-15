@@ -617,21 +617,29 @@ jobs:
           packages: pkg-config libssl-dev xxd mold clang python3-dev
           version: 1.0
 
+      - name: Create virtual environment
+        run: python -m venv .venv
+
       - name: Install maturin
-        run: pip install maturin pytest pytest-asyncio
+        run: |
+          source .venv/bin/activate
+          pip install maturin pytest pytest-asyncio
 
       - name: Build and install Python SDK
         run: |
+          source .venv/bin/activate
           cd crates/basilica-sdk-python
           maturin develop --release
 
       - name: Run Python tests
         run: |
+          source .venv/bin/activate
           cd crates/basilica-sdk-python
           python -m pytest tests/ -v || echo "No tests found yet"
 
       - name: Test examples (syntax check)
         run: |
+          source .venv/bin/activate
           cd crates/basilica-sdk-python/examples
           for example in *.py; do
             echo "Checking $example..."
@@ -640,6 +648,7 @@ jobs:
 
       - name: Test import
         run: |
+          source .venv/bin/activate
           python -c 'import basilica; print(f"SDK imported successfully. API URL: {basilica.DEFAULT_API_URL}")'
 
   # Final status check
