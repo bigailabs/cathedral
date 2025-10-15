@@ -68,7 +68,8 @@ impl FromStr for RentalId {
     type Err = uuid::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(Uuid::parse_str(s)?))
+        let uuid_str = s.strip_prefix("rental-").unwrap_or(s);
+        Ok(Self(Uuid::parse_str(uuid_str)?))
     }
 }
 
@@ -491,5 +492,32 @@ mod tests {
 
         assert_eq!(BillingPeriod::Hourly.calculate_periods(start, end), 25);
         assert_eq!(BillingPeriod::Daily.calculate_periods(start, end), 2);
+    }
+
+    #[test]
+    fn test_rental_id_from_str_plain_uuid() {
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let rental_id = RentalId::from_str(uuid_str).unwrap();
+        assert_eq!(rental_id.to_string(), uuid_str);
+    }
+
+    #[test]
+    fn test_rental_id_from_str_with_prefix() {
+        let prefixed_str = "rental-550e8400-e29b-41d4-a716-446655440000";
+        let expected_uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let rental_id = RentalId::from_str(prefixed_str).unwrap();
+        assert_eq!(rental_id.to_string(), expected_uuid);
+    }
+
+    #[test]
+    fn test_rental_id_from_str_invalid() {
+        let invalid_str = "not-a-uuid";
+        assert!(RentalId::from_str(invalid_str).is_err());
+    }
+
+    #[test]
+    fn test_rental_id_from_str_invalid_with_prefix() {
+        let invalid_str = "rental-not-a-uuid";
+        assert!(RentalId::from_str(invalid_str).is_err());
     }
 }

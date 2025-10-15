@@ -341,10 +341,7 @@ impl SimplePersistence {
 
     /// Get GPU count for an active rental only.
     /// Returns the number of GPUs assigned to the node if the rental is in 'active' state.
-    pub async fn get_active_rental_gpu_count(
-        &self,
-        rental_id: &Uuid,
-    ) -> Result<u32, anyhow::Error> {
+    pub async fn get_active_rental_gpu_count(&self, rental_id: &str) -> Result<u32, anyhow::Error> {
         let query = r#"
             SELECT COUNT(*) as gpu_count
             FROM gpu_uuid_assignments AS gua
@@ -354,7 +351,7 @@ impl SimplePersistence {
         "#;
 
         let count: i64 = sqlx::query_scalar(query)
-            .bind(rental_id.to_string())
+            .bind(rental_id)
             .fetch_one(&self.pool)
             .await?;
 
@@ -651,12 +648,12 @@ mod tests {
         }
 
         let active_count = persistence
-            .get_active_rental_gpu_count(&active_rental_id)
+            .get_active_rental_gpu_count(&active_rental_id.to_string())
             .await
             .expect("Failed to get GPU count for active rental");
 
         let stopped_count = persistence
-            .get_active_rental_gpu_count(&stopped_rental_id)
+            .get_active_rental_gpu_count(&stopped_rental_id.to_string())
             .await
             .expect("Failed to get GPU count for stopped rental");
 

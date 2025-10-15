@@ -9,7 +9,6 @@ use std::time::Duration;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
 
 use super::container_client::ContainerClient;
 use crate::billing::{resource_usage_to_telemetry, BillingClient};
@@ -126,12 +125,9 @@ impl RentalBillingMonitor {
             .await
             .context("Failed to get resource usage")?;
 
-        let rental_id =
-            Uuid::parse_str(&rental.rental_id).context("Failed to parse rental_id as UUID")?;
-
         let gpu_count = self
             .persistence
-            .get_active_rental_gpu_count(&rental_id)
+            .get_active_rental_gpu_count(&rental.rental_id)
             .await
             .context("Failed to query GPU count from database")?;
 

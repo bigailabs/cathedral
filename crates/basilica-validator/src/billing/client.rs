@@ -70,7 +70,10 @@ impl BillingClient {
                     anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint)
                 })?;
 
-            info!("Configuring TLS with system root certificates for host: {}", host);
+            info!(
+                "Configuring TLS with system root certificates for host: {}",
+                host
+            );
 
             let tls_config = ClientTlsConfig::new().domain_name(host);
 
