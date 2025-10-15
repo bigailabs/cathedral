@@ -107,12 +107,12 @@ pub async fn handle_list_deposits(
         println!(
             "  {} {}",
             style("basilica fund").yellow().bold(),
-            style("- Create a deposit address and send TAO").dim()
+            style("- Add TAO credits to your account").dim()
         );
         println!(
             "  {} {}",
             style("basilica balance").yellow().bold(),
-            style("- Verify credits after your transfer finalizes").dim()
+            style("- Show your current credit balance").dim()
         );
     } else {
         table_output::display_deposits(&deposits_response)?;

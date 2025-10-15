@@ -1098,12 +1098,12 @@ fn display_ps_quick_start_commands() {
     println!(
         "  {} {}",
         style("basilica status").yellow().bold(),
-        style("- Check detailed status").dim()
+        style("- Check status of a specific rental").dim()
     );
 
     println!(
         "  {} {}",
         style("basilica down").yellow().bold(),
-        style("- Stop this rental").dim()
+        style("- Stop a GPU rental").dim()
     );
 }

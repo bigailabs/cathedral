@@ -50,7 +50,7 @@ pub fn print_command_suggestions() {
     println!(
         "  {} {}",
         style("basilica ssh").yellow().bold(),
-        style("- Connect to your rented GPU").dim()
+        style("- Connect to your rental").dim()
     );
 
     // Stop a rental

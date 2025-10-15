@@ -851,12 +851,12 @@ pub fn display_pricing_table(
     println!(
         "  {} {}",
         style("basilica fund").yellow().bold(),
-        style("- Top up credits before launching rentals").dim()
+        style("- Add TAO credits to your account").dim()
     );
     println!(
         "  {} {}",
         style("basilica up").yellow().bold(),
-        style("- Start a rental using the rates above").dim()
+        style("- Start a GPU rental session").dim()
     );
 
     Ok(())
@@ -950,17 +950,17 @@ pub fn display_gpu_pricing(
     println!(
         "  {} {}",
         style("basilica fund").yellow().bold(),
-        style("- Ensure you have enough credits for this rental").dim()
+        style("- Add TAO credits to your account").dim()
     );
     println!(
         "  {} {}",
         style("basilica up").yellow().bold(),
-        style("- Start a rental with this GPU profile").dim()
+        style("- Start a GPU rental session").dim()
     );
     println!(
         "  {} {}",
         style("basilica ps").yellow().bold(),
-        style("- Monitor active rentals after launch").dim()
+        style("- List active rentals").dim()
     );
 
     Ok(())
@@ -1061,12 +1061,12 @@ pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
     println!(
         "  {} {}",
         style("basilica price").yellow().bold(),
-        style("- Compare pricing before scaling workloads").dim()
+        style("- Review pricing for available GPUs").dim()
     );
     println!(
         "  {} {}",
         style("basilica ps").yellow().bold(),
-        style("- Check status of your active rentals").dim()
+        style("- List active rentals").dim()
     );
 
     Ok(())
@@ -1161,12 +1161,12 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
     println!(
         "  {} {}",
         style("basilica balance").yellow().bold(),
-        style("- Verify credits before launching additional workloads").dim()
+        style("- Show your current credit balance").dim()
     );
     println!(
         "  {} {}",
         style("basilica price").yellow().bold(),
-        style("- Compare pricing as you plan future rentals").dim()
+        style("- Review pricing for available GPUs").dim()
     );
 
     Ok(())
