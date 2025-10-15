@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Account balance management via `basilica balance` to inspect available and reserved compute credits
+- TAO deposit funding with per-user wallet addresses and automatic credit conversion after 12 confirmations
+  - Full deposit history available through `basilica fund list`
+- GPU pricing calculator with `basilica price` showing real-time hourly rates across all GPU types
+  - Adds affordability estimates based on your current balance to project run-time hours
+- Usage tracking and cost monitoring via `basilica usage` for active and completed rentals
+  - Displays resource consumption metrics and accumulated costs across rentals
+
 ## [0.4.1]
 
 ### Added
