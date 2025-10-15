@@ -845,7 +845,7 @@ pub fn display_pricing_table(
     println!("{}", style("Quick Commands:").cyan().bold());
     println!(
         "  {} {}",
-        style("basilica price --gpu <type>").yellow().bold(),
+        style("basilica price <gpu-type>").yellow().bold(),
         style("- Inspect pricing for a specific GPU profile").dim()
     );
     println!(
