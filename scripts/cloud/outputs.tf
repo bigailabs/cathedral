@@ -76,3 +76,8 @@ output "ecs_tasks_security_group_id" {
   description = "Security group ID for ECS tasks"
   value       = module.networking.ecs_tasks_security_group_id
 }
+
+output "nat_gateway_public_ip" {
+  description = "NAT Gateway public IP - Use this to whitelist AWS ECS services on validator server"
+  value       = module.networking.nat_gateway_public_ip
+}
