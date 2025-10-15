@@ -763,9 +763,7 @@ pub fn display_pricing_table(
     balance: Option<&BalanceResponse>,
 ) -> Result<()> {
     if packages.packages.is_empty() {
-        println!();
         println!("{}", style("No pricing packages available").yellow());
-        println!();
         return Ok(());
     }
 
@@ -830,9 +828,6 @@ pub fn display_pricing_table(
     // Extract rows after sorting
     let rows: Vec<PricingRow> = rows.into_iter().map(|(_, r)| r).collect();
 
-    println!();
-    println!("{}", style("GPU Pricing").bold());
-    println!();
     let mut table = Table::new(&rows);
     table.with(Style::modern());
     println!("{}", table);
@@ -844,8 +839,25 @@ pub fn display_pricing_table(
             style("Your Balance").cyan(),
             style(&balance.available).green().bold()
         );
-        println!();
     }
+
+    println!();
+    println!("{}", style("Quick Commands:").cyan().bold());
+    println!(
+        "  {} {}",
+        style("basilica price <gpu-type>").yellow().bold(),
+        style("- Inspect pricing for a specific GPU profile").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica fund").yellow().bold(),
+        style("- Add TAO credits to your account").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica up").yellow().bold(),
+        style("- Start a GPU rental session").dim()
+    );
 
     Ok(())
 }
@@ -861,7 +873,6 @@ pub fn display_gpu_pricing(
         .parse::<Decimal>()
         .map_err(|e| CliError::Internal(eyre!("Invalid hourly rate format: {}", e)))?;
 
-    println!();
     println!("{}", style(&package.name).bold().cyan());
     println!();
     println!("  {}: {}", style("Description").dim(), package.description);
@@ -935,12 +946,28 @@ pub fn display_gpu_pricing(
 
     println!();
 
+    println!("{}", style("Quick Commands:").cyan().bold());
+    println!(
+        "  {} {}",
+        style("basilica fund").yellow().bold(),
+        style("- Add TAO credits to your account").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica up").yellow().bold(),
+        style("- Start a GPU rental session").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica ps").yellow().bold(),
+        style("- List active rentals").dim()
+    );
+
     Ok(())
 }
 
 /// Display detailed usage for a specific rental
 pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
-    println!();
     println!(
         "{}: {}",
         style("Rental ID").cyan(),
@@ -1025,15 +1052,30 @@ pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
         println!();
     }
 
+    println!("{}", style("Quick Commands:").cyan().bold());
+    println!(
+        "  {} {}",
+        style("basilica usage").yellow().bold(),
+        style("- List usage history across all rentals").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica price").yellow().bold(),
+        style("- Review pricing for available GPUs").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica ps").yellow().bold(),
+        style("- List active rentals").dim()
+    );
+
     Ok(())
 }
 
 /// Display usage history list
 pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
     if history.rentals.is_empty() {
-        println!();
         println!("{}", style("No rental usage history found").yellow());
-        println!();
         return Ok(());
     }
 
@@ -1087,7 +1129,6 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
 
     rows.sort_by(|a, b| b.started.cmp(&a.started));
 
-    println!();
     println!(
         "{} ({} total)",
         style("Rental Usage History").bold(),
@@ -1111,11 +1152,22 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
         style(format!("${:.2}", total_cost)).green().bold()
     );
     println!();
+    println!("{}", style("Quick Commands:").cyan().bold());
     println!(
-        "{} Run `basilica usage <rental-id>` to see detailed usage for a specific rental",
-        style("Tip:").dim()
+        "  {} {}",
+        style("basilica usage <rental-id>").yellow().bold(),
+        style("- Drill into resource usage for a particular rental").dim()
     );
-    println!();
+    println!(
+        "  {} {}",
+        style("basilica balance").yellow().bold(),
+        style("- Show your current credit balance").dim()
+    );
+    println!(
+        "  {} {}",
+        style("basilica price").yellow().bold(),
+        style("- Review pricing for available GPUs").dim()
+    );
 
     Ok(())
 }

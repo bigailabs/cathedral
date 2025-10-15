@@ -50,7 +50,6 @@ pub async fn handle_show_deposit_address(
     if json {
         json_output(&account)?;
     } else {
-        println!();
         println!("{}", style("Funding method: Bittensor (TAO)").bold());
         println!();
         println!("Send TAO to your unique deposit address:");
@@ -64,7 +63,7 @@ pub async fn handle_show_deposit_address(
         println!();
         println!(
             "{}",
-            style("Tip: you can send multiple transactions; we'll credit after 12 confs.")
+            style("Tip: you can send multiple transactions; we'll credit after 12 confirmations.")
                 .dim()
                 .italic()
         );
@@ -104,8 +103,17 @@ pub async fn handle_list_deposits(
     } else if deposits_response.deposits.is_empty() {
         print_info("No deposits found for your account");
         println!();
-        println!("To fund your account, run:");
-        println!("  {}", style("basilica fund").yellow());
+        println!("{}", style("Quick Commands:").cyan().bold());
+        println!(
+            "  {} {}",
+            style("basilica fund").yellow().bold(),
+            style("- Add TAO credits to your account").dim()
+        );
+        println!(
+            "  {} {}",
+            style("basilica balance").yellow().bold(),
+            style("- Show your current credit balance").dim()
+        );
     } else {
         table_output::display_deposits(&deposits_response)?;
     }

@@ -1,5 +1,6 @@
 use basilica_sdk::BasilicaClient;
 use color_eyre::{eyre::eyre, Help, Result as EyreResult};
+
 use console::style;
 
 use crate::{
@@ -33,9 +34,7 @@ pub async fn handle_check_balance(client: &BasilicaClient, json: bool) -> EyreRe
 }
 
 fn display_balance(balance: &basilica_sdk::BalanceResponse) {
-    println!();
     println!("{}", style("Account Balance").bold());
-    println!();
     println!(
         "  {}: {} credits",
         style("Available").cyan(),
@@ -57,5 +56,4 @@ fn display_balance(balance: &basilica_sdk::BalanceResponse) {
         style("Last Updated").dim(),
         style(&balance.last_updated).dim()
     );
-    println!();
 }
