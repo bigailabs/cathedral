@@ -172,8 +172,13 @@ async fn main() -> Result<()> {
 
     let price = PriceConverter::new(oracle, cfg.treasury.tao_decimals);
 
-    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead.clone(), metrics_system.clone())
-        .into_service();
+    let grpc_svc = GrpcPaymentsServer::new(
+        repos.clone(),
+        treasury,
+        aead.clone(),
+        metrics_system.clone(),
+    )
+    .into_service();
 
     let dispatcher = OutboxDispatcher::new(repos.clone(), billing, price, metrics_system.clone());
 

@@ -22,7 +22,10 @@ impl DepositAccountsRepo for PgRepos {
         }))
     }
 
-    async fn get_by_account_hex(&self, account_hex: &str) -> Result<Option<(String, String, String, String)>> {
+    async fn get_by_account_hex(
+        &self,
+        account_hex: &str,
+    ) -> Result<Option<(String, String, String, String)>> {
         let row = sqlx::query(
             r#"SELECT address_ss58, account_id_hex, hotkey_public_hex, hotkey_mnemonic_ct
                FROM deposit_accounts WHERE account_id_hex = $1"#,

@@ -450,10 +450,16 @@ impl PackageRepository for SqlPackageRepository {
 
         if let Some(row) = row {
             let package = Self::row_to_billing_package(&row)?;
-            info!("Found matching package {} for GPU model {}", package.id, gpu_model);
+            info!(
+                "Found matching package {} for GPU model {}",
+                package.id, gpu_model
+            );
             Ok(package)
         } else {
-            warn!("No package found for GPU model '{}', falling back to h100 package", gpu_model);
+            warn!(
+                "No package found for GPU model '{}', falling back to h100 package",
+                gpu_model
+            );
             self.get_package(&PackageId::h100()).await
         }
     }
