@@ -35,6 +35,10 @@ tower-http = { workspace = true }
 chrono = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+sp-core = { workspace = true }
+hex = { workspace = true }
+subxt = { workspace = true }
+zeroize = { workspace = true }
 
 [dependencies.basilica-protocol]
 path = "../basilica-protocol"
@@ -45,9 +49,3 @@ features = ["postgres"]
 
 [dependencies.bittensor]
 path = "../bittensor"
-
-[dependencies.sp-core]
-workspace = true
-
-[dependencies.hex]
-workspace = true

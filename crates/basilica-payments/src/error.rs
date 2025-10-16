@@ -23,6 +23,9 @@ pub enum PaymentsError {
     #[error("Treasury error: {0}")]
     Treasury(String),
 
+    #[error("Reconciliation error: {0}")]
+    Reconciliation(String),
+
     #[error("gRPC error: {0}")]
     Grpc(#[from] tonic::Status),
 
