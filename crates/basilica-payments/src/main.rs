@@ -1,11 +1,12 @@
 use basilica_payments::{
-    blockchain::{local_treasury::LocalTreasury, monitor::ChainMonitor},
+    blockchain::{client::BlockchainClient, local_treasury::LocalTreasury, monitor::ChainMonitor},
     config::PaymentsConfig,
     domain::price::PriceConverter,
     grpc::payments_service::PaymentsServer as GrpcPaymentsServer,
     metrics::PaymentsMetricsSystem,
     price_oracle::{PriceOracle, PriceOracleConfig},
     processor::{billing_client::GrpcBillingClient, dispatcher::OutboxDispatcher},
+    reconciliation::service::ReconciliationService,
     server::PaymentsServer,
     storage::PgRepos,
 };
@@ -171,7 +172,7 @@ async fn main() -> Result<()> {
 
     let price = PriceConverter::new(oracle, cfg.treasury.tao_decimals);
 
-    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead, metrics_system.clone())
+    let grpc_svc = GrpcPaymentsServer::new(repos.clone(), treasury, aead.clone(), metrics_system.clone())
         .into_service();
 
     let dispatcher = OutboxDispatcher::new(repos.clone(), billing, price, metrics_system.clone());
@@ -186,6 +187,21 @@ async fn main() -> Result<()> {
     let monitor = ChainMonitor::new(repos.clone(), endpoints, metrics_system.clone())
         .await
         .context("Failed to initialize blockchain monitor")?;
+
+    let blockchain_client = Arc::new(
+        BlockchainClient::new(&cfg.blockchain.websocket_url)
+            .await
+            .context("Failed to create blockchain client for reconciliation")?,
+    );
+
+    let reconciliation = ReconciliationService::new(
+        repos.clone(),
+        blockchain_client,
+        aead.clone(),
+        cfg.reconciliation.clone(),
+        metrics_system.clone(),
+    )
+    .context("Failed to initialize reconciliation service")?;
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
@@ -214,6 +230,9 @@ async fn main() -> Result<()> {
         },
         r = monitor.run() => {
             r.context("Blockchain monitor failed")?;
+        },
+        r = reconciliation.run() => {
+            r
         },
         r = http_handle => {
             r.context("HTTP server task failed")?.context("HTTP server failed")?;

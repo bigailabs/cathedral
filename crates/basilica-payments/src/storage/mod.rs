@@ -4,6 +4,7 @@ pub mod deposit_accounts;
 pub mod monitor_state;
 pub mod observed_deposits;
 pub mod outbox;
+pub mod reconciliation;
 
 pub type PgTx<'a> = Transaction<'a, Postgres>;
 
@@ -12,6 +13,10 @@ pub trait DepositAccountsRepo {
     async fn get_by_user(
         &self,
         user_id: &str,
+    ) -> sqlx::Result<Option<(String, String, String, String)>>;
+    async fn get_by_account_hex(
+        &self,
+        account_hex: &str,
     ) -> sqlx::Result<Option<(String, String, String, String)>>;
     async fn insert_tx(
         &self,
@@ -94,6 +99,8 @@ pub trait MonitorStateRepo {
         block_number: u32,
     ) -> sqlx::Result<()>;
 }
+
+pub use reconciliation::ReconciliationRepo;
 
 #[derive(Clone)]
 pub struct PgRepos {
