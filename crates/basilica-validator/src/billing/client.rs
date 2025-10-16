@@ -69,8 +69,16 @@ impl BillingClient {
                 .ok_or_else(|| {
                     anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint)
                 })?;
+
+            info!(
+                "Configuring TLS with system root certificates for host: {}",
+                host
+            );
+
+            let tls_config = ClientTlsConfig::new().domain_name(host);
+
             endpoint = endpoint
-                .tls_config(ClientTlsConfig::new().domain_name(host))
+                .tls_config(tls_config)
                 .with_context(|| "Failed to configure TLS for billing endpoint")?;
         }
 
