@@ -87,13 +87,19 @@ impl BlockchainClient {
                 {
                     let balance_str = &rest[..end];
                     if let Ok(balance) = balance_str.trim().parse::<u128>() {
-                        debug!("Balance for {} (via fallback): {} plancks", account_preview, balance);
+                        debug!(
+                            "Balance for {} (via fallback): {} plancks",
+                            account_preview, balance
+                        );
                         return Ok(balance);
                     }
                 }
             }
 
-            info!("Failed to parse balance for {}. AccountInfo structure: {:?}", account_preview, value);
+            info!(
+                "Failed to parse balance for {}. AccountInfo structure: {:?}",
+                account_preview, value
+            );
         }
 
         Ok(0)
@@ -112,21 +118,19 @@ impl BlockchainClient {
 
         let dest = subxt::utils::AccountId32(dest_account.0);
 
-        let amount_u64 = u64::try_from(amount_plancks)
-            .map_err(|_| PaymentsError::Blockchain(format!("Amount {} exceeds u64::MAX", amount_plancks)))?;
+        let amount_u64 = u64::try_from(amount_plancks).map_err(|_| {
+            PaymentsError::Blockchain(format!("Amount {} exceeds u64::MAX", amount_plancks))
+        })?;
 
         let dest_multi = subxt::dynamic::Value::unnamed_variant(
             "Id",
-            vec![subxt::dynamic::Value::from_bytes(&dest)]
+            vec![subxt::dynamic::Value::from_bytes(&dest)],
         );
 
         let transfer_tx = subxt::dynamic::tx(
             "Balances",
             "transfer_keep_alive",
-            vec![
-                dest_multi,
-                subxt::dynamic::Value::u128(amount_u64 as u128),
-            ],
+            vec![dest_multi, subxt::dynamic::Value::u128(amount_u64 as u128)],
         );
 
         let signer = subxt::tx::PairSigner::new(keypair.clone());

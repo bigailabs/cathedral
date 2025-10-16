@@ -48,12 +48,12 @@ impl ReconciliationRepo for PgRepos {
         estimated_fee: &str,
         dry_run: bool,
     ) -> Result<i64> {
-        let balance_before_dec = Decimal::from_str(balance_before)
-            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-        let sweep_amount_dec = Decimal::from_str(sweep_amount)
-            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-        let estimated_fee_dec = Decimal::from_str(estimated_fee)
-            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let balance_before_dec =
+            Decimal::from_str(balance_before).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let sweep_amount_dec =
+            Decimal::from_str(sweep_amount).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let estimated_fee_dec =
+            Decimal::from_str(estimated_fee).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
         let row = sqlx::query(
             r#"INSERT INTO reconciliation_sweeps
@@ -88,7 +88,7 @@ impl ReconciliationRepo for PgRepos {
         error_message: Option<&str>,
     ) -> Result<()> {
         let balance_after_dec = balance_after
-            .map(|s| Decimal::from_str(s))
+            .map(Decimal::from_str)
             .transpose()
             .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
