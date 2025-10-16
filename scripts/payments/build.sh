@@ -9,6 +9,7 @@ EXTRACT_BINARY=true
 BUILD_IMAGE=true
 RELEASE_MODE=true
 FEATURES=""
+NO_CACHE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -36,8 +37,12 @@ while [[ $# -gt 0 ]]; do
             FEATURES="$2"
             shift 2
             ;;
+        --no-cache)
+            NO_CACHE=true
+            shift
+            ;;
         --help)
-            echo "Usage: $0 [--image-name NAME] [--image-tag TAG] [--no-extract] [--no-image] [--debug] [--features FEATURES]"
+            echo "Usage: $0 [--image-name NAME] [--image-tag TAG] [--no-extract] [--no-image] [--debug] [--features FEATURES] [--no-cache]"
             echo ""
             echo "Options:"
             echo "  --image-name NAME         Docker image name (default: basilica/payments)"
@@ -46,6 +51,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-image                Skip Docker image creation"
             echo "  --debug                   Build in debug mode"
             echo "  --features FEATURES       Additional cargo features to enable"
+            echo "  --no-cache                Build without using Docker cache"
             echo "  --help                    Show this help message"
             exit 0
             ;;
@@ -90,8 +96,15 @@ fi
 if [[ "$BUILD_IMAGE" == "true" ]]; then
     echo "Building Docker image: $IMAGE_NAME:$IMAGE_TAG"
 
+    CACHE_FLAG=""
+    if [[ "$NO_CACHE" == "true" ]]; then
+        CACHE_FLAG="--no-cache"
+        echo "Building without cache..."
+    fi
+
     docker build \
         --platform linux/amd64 \
+        $CACHE_FLAG \
         $BUILD_ARGS \
         -f scripts/payments/Dockerfile \
         -t "$IMAGE_NAME:$IMAGE_TAG" \
