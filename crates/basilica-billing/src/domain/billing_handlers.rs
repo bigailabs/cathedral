@@ -139,7 +139,7 @@ impl EventHandlers for BillingEventHandlers {
         let usage_metrics = Self::telemetry_to_usage_metrics(&telemetry);
 
         let rental_id = RentalId::from_uuid(event.rental_id);
-        let rental = self
+        let mut rental = self
             .rental_repository
             .get_rental(&rental_id)
             .await?
@@ -147,8 +147,30 @@ impl EventHandlers for BillingEventHandlers {
                 id: rental_id.to_string(),
             })?;
 
-        if rental.state != RentalState::Active {
-            debug!("Skipping telemetry for non-active rental {}", rental_id);
+        if rental.state == RentalState::Pending {
+            info!(
+                "Auto-activating rental {} on first telemetry receipt",
+                rental_id
+            );
+            rental.state = RentalState::Active;
+            rental.actual_start_time = Some(Utc::now());
+            self.rental_repository.update_rental(&rental).await?;
+
+            self.record_billing_event(
+                "rental_auto_activated",
+                &rental_id.to_string(),
+                rental.user_id.as_uuid().ok(),
+                serde_json::json!({
+                    "reason": "first_telemetry_received",
+                    "timestamp": Utc::now(),
+                }),
+            )
+            .await?;
+        } else if rental.state != RentalState::Active {
+            debug!(
+                "Skipping telemetry for rental {} in state {:?}",
+                rental_id, rental.state
+            );
             return Ok(());
         }
 
@@ -160,15 +182,9 @@ impl EventHandlers for BillingEventHandlers {
         let cost_breakdown =
             package.calculate_cost_with_gpu_count(&usage_metrics, usage_metrics.gpu_count);
 
-        let user_id = UserId::new(event.user_id.clone());
-        self.usage_repository
-            .update_usage(
-                &rental_id,
-                &user_id,
-                &usage_metrics,
-                cost_breakdown.total_cost,
-            )
-            .await?;
+        // Note: Usage metrics are already persisted in billing.usage_events table.
+        // The aggregation jobs (AggregationJobs) will periodically process these events
+        // and populate usage_aggregation_facts with properly aggregated statistics.
 
         self.record_billing_event(
             "telemetry_processed",
@@ -416,9 +432,9 @@ impl EventHandlers for BillingEventHandlers {
 
         self.rental_repository.create_rental(&rental).await?;
 
-        self.usage_repository
-            .initialize_rental(&rental_id, &user_id)
-            .await?;
+        // Note: active_rentals_facts is populated by the rental sync job.
+        // usage_aggregation_facts is populated by aggregation jobs.
+        // No manual initialization needed.
 
         self.record_billing_event(
             "rental_started",

@@ -55,15 +55,19 @@ pub struct BillingServiceImpl {
 }
 
 impl BillingServiceImpl {
-    pub fn new(
+    pub async fn new(
         rds_connection: Arc<RdsConnection>,
         telemetry_ingester: Arc<TelemetryIngester>,
         telemetry_processor: Arc<TelemetryProcessor>,
         metrics: Option<Arc<BillingMetricsSystem>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));
         let rental_repository = Arc::new(SqlRentalRepository::new(rds_connection.clone()));
         let package_repository = Arc::new(SqlPackageRepository::new(rds_connection.pool().clone()));
+        package_repository
+            .initialize()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize package repository: {}", e))?;
         let rules_repository = Arc::new(SqlRulesRepository::new(rds_connection.pool().clone()));
         let user_preferences_repository =
             Arc::new(SqlUserPreferencesRepository::new(rds_connection.clone()));
@@ -91,7 +95,7 @@ impl BillingServiceImpl {
             90,
         ));
 
-        Self {
+        Ok(Self {
             credit_manager: Arc::new(CreditManager::new(credit_repository.clone())),
             rental_manager: Arc::new(RentalManager::new(rental_repository.clone())),
             rules_engine: Arc::new(RulesEngine::new(
@@ -108,7 +112,7 @@ impl BillingServiceImpl {
             usage_repository,
             event_store,
             metrics,
-        }
+        })
     }
 
     fn parse_decimal(s: &str) -> crate::error::Result<Decimal> {
@@ -405,14 +409,6 @@ impl BillingService for BillingServiceImpl {
             let rental_id = RentalId::from_str(&req.rental_id)
                 .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
             let user_id = UserId::new(req.user_id);
-            let hourly_rate = Self::parse_decimal(&req.hourly_rate)
-                .map_err(|e| Status::invalid_argument(format!("Invalid hourly rate: {}", e)))?;
-            let credit_rate = CreditBalance::from_decimal(hourly_rate);
-
-            info!(
-                "Tracking rental {} for user {} at {} credits/hour",
-                rental_id, user_id, hourly_rate
-            );
 
             let resource_spec = if let Some(spec) = req.resource_spec {
                 ResourceSpec {
@@ -442,35 +438,97 @@ impl BillingService for BillingServiceImpl {
                 }
             };
 
-            let package_id = if !resource_spec.gpu_specs.is_empty() {
-                PackageId::from_gpu_model(&resource_spec.gpu_specs[0].model)
+            let package = if !resource_spec.gpu_specs.is_empty() {
+                self.package_repository
+                    .find_package_for_gpu_model(&resource_spec.gpu_specs[0].model)
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to retrieve package: {}", e)))?
             } else {
-                PackageId::custom()
+                self.package_repository
+                    .get_package(&PackageId::h100())
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to retrieve package: {}", e)))?
             };
+
+            let package_id = package.id.clone();
+            let credit_rate = package.hourly_rate;
+
+            if !req.hourly_rate.is_empty() {
+                let api_provided_rate = Self::parse_decimal(&req.hourly_rate)
+                    .map_err(|e| Status::invalid_argument(format!("Invalid hourly rate: {}", e)))?;
+                if (api_provided_rate - credit_rate.as_decimal()).abs() > rust_decimal::Decimal::new(1, 2) {
+                    warn!(
+                        "API-provided hourly_rate ({}) differs from package rate ({}) for rental {}",
+                        api_provided_rate, credit_rate, rental_id
+                    );
+                }
+            }
+
+            info!(
+                "Tracking rental {} for user {} at {} credits/hour (package: {})",
+                rental_id, user_id, credit_rate, package_id
+            );
             let package_id_str = package_id.to_string();
             let resource_spec_value =
                 serde_json::to_value(&resource_spec).unwrap_or(serde_json::Value::Null);
             let validator_id = req.validator_id.clone();
             let validator_id_copy = validator_id.clone();
 
-            let rental_id = self
-                .rental_manager
-                .create_rental(
-                    user_id.clone(),
-                    req.node_id.clone(),
-                    validator_id,
-                    package_id,
-                    resource_spec,
-                    None,
-                )
+            // Check if rental already exists (idempotency)
+            if let Ok(Some(_existing)) = self.rental_repository.get_rental(&rental_id).await {
+                info!(
+                    "Rental {} already exists, returning success (idempotent)",
+                    rental_id
+                );
+
+                let response = TrackRentalResponse {
+                    success: true,
+                    tracking_id: rental_id.to_string(),
+                    reservation_id: String::new(),
+                    estimated_cost: "0.00".to_string(),
+                };
+                return Ok(response);
+            }
+
+            // Create rental with the provided ID
+            use crate::domain::rentals::Rental;
+            use crate::domain::types::{CostBreakdown, UsageMetrics};
+
+            let now = chrono::Utc::now();
+            let rental = Rental {
+                id: rental_id,
+                user_id: user_id.clone(),
+                node_id: req.node_id.clone(),
+                validator_id: validator_id.clone(),
+                package_id,
+                reservation_id: None,
+                state: crate::domain::types::RentalState::Pending,
+                resource_spec,
+                usage_metrics: UsageMetrics::zero(),
+                cost_breakdown: CostBreakdown {
+                    base_cost: credit_rate,
+                    usage_cost: CreditBalance::zero(),
+                    volume_discount: CreditBalance::zero(),
+                    discounts: CreditBalance::zero(),
+                    overage_charges: CreditBalance::zero(),
+                    total_cost: CreditBalance::zero(),
+                },
+                started_at: now,
+                updated_at: now,
+                ended_at: None,
+                metadata: Default::default(),
+                created_at: now,
+                last_updated: now,
+                actual_start_time: Some(now),
+                actual_end_time: None,
+                actual_cost: CreditBalance::zero(),
+            };
+
+            // Persist to database
+            self.rental_repository
+                .create_rental(&rental)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
-
-            let _created = self
-                .rental_manager
-                .get_rental(&rental_id)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to get created rental: {}", e)))?;
 
             let proto_duration = req
                 .max_duration
@@ -504,7 +562,7 @@ impl BillingService for BillingServiceImpl {
                 event_type: EventType::RentalStart,
                 event_data: serde_json::json!({
                     "package_id": package_id_str,
-                    "hourly_rate": Self::format_decimal(hourly_rate),
+                    "hourly_rate": Self::format_credit_balance(credit_rate),
                     "resource_spec": resource_spec_value,
                     "estimated_cost": Self::format_credit_balance(estimated_cost),
                     "max_duration_hours": max_duration_hours,

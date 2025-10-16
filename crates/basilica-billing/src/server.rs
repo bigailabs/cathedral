@@ -99,7 +99,8 @@ impl BillingServer {
             telemetry_ingester.clone(),
             telemetry_processor.clone(),
             self.metrics.clone(),
-        );
+        )
+        .await?;
 
         let processor = telemetry_processor.clone();
         let telemetry_handle = tokio::spawn(async move {
@@ -131,6 +132,10 @@ impl BillingServer {
         let package_repository = Arc::new(SqlPackageRepository::new(
             self.rds_connection.pool().clone(),
         ));
+        package_repository
+            .initialize()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize package repository: {}", e))?;
 
         let billing_handlers: Arc<dyn crate::domain::processor::EventHandlers + Send + Sync> =
             Arc::new(BillingEventHandlers::new(

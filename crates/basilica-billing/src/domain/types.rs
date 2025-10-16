@@ -221,7 +221,10 @@ pub enum RentalState {
 
 impl RentalState {
     pub fn is_active(&self) -> bool {
-        matches!(self, RentalState::Active | RentalState::Suspended)
+        matches!(
+            self,
+            RentalState::Active | RentalState::Suspended | RentalState::Pending
+        )
     }
 
     pub fn is_terminal(&self) -> bool {
