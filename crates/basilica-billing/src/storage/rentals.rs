@@ -10,6 +10,7 @@ use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
 use sqlx::Row;
 use std::sync::Arc;
+use tracing::warn;
 
 #[async_trait]
 pub trait RentalRepository: Send + Sync {
@@ -46,6 +47,38 @@ impl SqlRentalRepository {
         let status_str: String = r.get("status");
         let state = Self::parse_rental_state(&status_str);
 
+        let resource_spec: ResourceSpec =
+            serde_json::from_value(r.get("resource_spec")).unwrap_or(ResourceSpec {
+                gpu_specs: vec![],
+                cpu_cores: 0,
+                memory_gb: 0,
+                storage_gb: 0,
+                disk_iops: 0,
+                network_bandwidth_mbps: 0,
+            });
+
+        let package_id = match r.get::<Option<String>, _>("package_id") {
+            Some(pkg_id) => PackageId::new(pkg_id),
+            None => {
+                let rental_id: uuid::Uuid = r.get("rental_id");
+                if !resource_spec.gpu_specs.is_empty() {
+                    let gpu_model = &resource_spec.gpu_specs[0].model;
+                    let inferred_pkg = PackageId::from_gpu_model(gpu_model);
+                    warn!(
+                        "Rental {} has NULL package_id, inferring '{}' from GPU model '{}'",
+                        rental_id, inferred_pkg, gpu_model
+                    );
+                    inferred_pkg
+                } else {
+                    warn!(
+                        "Rental {} has NULL package_id and no GPU specs, defaulting to 'h100'",
+                        rental_id
+                    );
+                    PackageId::h100()
+                }
+            }
+        };
+
         Rental {
             id: RentalId::from_uuid(r.get("rental_id")),
             user_id: UserId::new(r.get("user_id")),
@@ -53,20 +86,10 @@ impl SqlRentalRepository {
             validator_id: r
                 .get::<Option<String>, _>("validator_id")
                 .unwrap_or_default(),
-            package_id: r
-                .get::<Option<String>, _>("package_id")
-                .map(PackageId::new)
-                .unwrap_or_else(PackageId::custom),
+            package_id,
             reservation_id: None, // No reservation_id in rentals table
             state,
-            resource_spec: serde_json::from_value(r.get("resource_spec")).unwrap_or(ResourceSpec {
-                gpu_specs: vec![],
-                cpu_cores: 0,
-                memory_gb: 0,
-                storage_gb: 0,
-                disk_iops: 0,
-                network_bandwidth_mbps: 0,
-            }),
+            resource_spec,
             usage_metrics: UsageMetrics::zero(), // Not stored in rentals table
             cost_breakdown: {
                 let hourly_rate = r.get::<rust_decimal::Decimal, _>("hourly_rate");

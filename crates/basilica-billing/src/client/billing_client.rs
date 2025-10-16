@@ -242,6 +242,70 @@ impl BillingClient {
 
         Ok(response.into_inner())
     }
+
+    pub async fn track_rental(
+        &self,
+        request: basilica_protocol::billing::TrackRentalRequest,
+    ) -> Result<basilica_protocol::billing::TrackRentalResponse> {
+        debug!(
+            "Tracking rental {} for user {}",
+            request.rental_id, request.user_id
+        );
+
+        let mut client = self.client.clone();
+        let response = client.track_rental(request.clone()).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to track rental {} for user {}: gRPC error [code={:?}]: {}",
+                request.rental_id,
+                request.user_id,
+                e.code(),
+                e.message()
+            )
+        })?;
+
+        Ok(response.into_inner())
+    }
+
+    pub async fn update_rental_status(
+        &self,
+        request: basilica_protocol::billing::UpdateRentalStatusRequest,
+    ) -> Result<basilica_protocol::billing::UpdateRentalStatusResponse> {
+        debug!("Updating rental status for: {}", request.rental_id);
+
+        let mut client = self.client.clone();
+        let response = client
+            .update_rental_status(request.clone())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to update rental status for {}: gRPC error [code={:?}]: {}",
+                    request.rental_id,
+                    e.code(),
+                    e.message()
+                )
+            })?;
+
+        Ok(response.into_inner())
+    }
+
+    pub async fn finalize_rental(
+        &self,
+        request: basilica_protocol::billing::FinalizeRentalRequest,
+    ) -> Result<basilica_protocol::billing::FinalizeRentalResponse> {
+        debug!("Finalizing rental: {}", request.rental_id);
+
+        let mut client = self.client.clone();
+        let response = client.finalize_rental(request.clone()).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to finalize rental {}: gRPC error [code={:?}]: {}",
+                request.rental_id,
+                e.code(),
+                e.message()
+            )
+        })?;
+
+        Ok(response.into_inner())
+    }
 }
 
 #[cfg(test)]
