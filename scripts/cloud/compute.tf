@@ -255,6 +255,16 @@ module "payments_service" {
     PAYMENTS_PRICE_ORACLE__MAX_PRICE_AGE_SECONDS   = "600"
     PAYMENTS_PRICE_ORACLE__REQUEST_TIMEOUT_SECONDS = "30"
 
+    # Reconciliation Configuration
+    PAYMENTS_RECONCILIATION__ENABLED                   = tostring(var.payments_reconciliation_enabled)
+    PAYMENTS_RECONCILIATION__SWEEP_INTERVAL_SECONDS    = "300"
+    PAYMENTS_RECONCILIATION__COLDWALLET_ADDRESS_SS58   = var.payments_reconciliation_coldwallet_address
+    PAYMENTS_RECONCILIATION__MINIMUM_THRESHOLD_PLANCKS = "10000000"
+    PAYMENTS_RECONCILIATION__TARGET_BALANCE_PLANCKS    = "5000000"
+    PAYMENTS_RECONCILIATION__ESTIMATED_FEE_PLANCKS     = "1000000"
+    PAYMENTS_RECONCILIATION__DRY_RUN_MODE              = tostring(var.payments_reconciliation_dry_run)
+    PAYMENTS_RECONCILIATION__MAX_RETRIES               = "3"
+
     # Logging
     RUST_LOG = "basilica_payments=info,bittensor=info,basilica_protocol=info"
   }
@@ -359,7 +369,7 @@ module "basilica_api_service" {
     # Billing Service Integration
     BASILICA_API_BILLING__ENABLED                = "true"
     BASILICA_API_BILLING__ENDPOINT               = "http://billing-v3.${aws_service_discovery_private_dns_namespace.main.name}:50051"
-    BASILICA_API_BILLING__ENFORCE_BALANCE_CHECKS = "false"
+    BASILICA_API_BILLING__ENFORCE_BALANCE_CHECKS = "true"
 
     # Logging
     RUST_LOG = "basilica_api=info,basilica_protocol=info"
