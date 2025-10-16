@@ -215,11 +215,13 @@ impl SimplePersistence {
         &self,
         consecutive_failures_threshold: i32,
         gpu_assignment_cleanup_ttl: Option<Duration>,
-    ) -> Result<()> {
+    ) -> Result<Vec<(String, String)>> {
         info!(
             "Running node cleanup - checking for {} consecutive failures",
             consecutive_failures_threshold
         );
+
+        let mut removed_nodes: Vec<(String, String)> = Vec::new();
 
         let offline_with_gpus_query = r#"
             SELECT DISTINCT me.node_id, me.miner_id, COUNT(ga.gpu_uuid) as gpu_count
@@ -450,6 +452,7 @@ impl SimplePersistence {
 
             tx.commit().await?;
             deleted += 1;
+            removed_nodes.push((miner_id.clone(), node_id.clone()));
         }
 
         let stale_delete_query = format!(
@@ -469,11 +472,41 @@ impl SimplePersistence {
             cleanup_minutes
         );
 
-        let stale_result = sqlx::query(&stale_delete_query)
-            .execute(self.pool())
+        let stale_nodes_query = format!(
+            r#"
+            SELECT node_id, miner_id
+            FROM miner_nodes
+            WHERE status = 'offline'
+            AND (
+                last_health_check < datetime('now', '-{} minutes')
+                OR (last_health_check IS NULL AND updated_at < datetime('now', '-{} minutes'))
+            )
+            "#,
+            cleanup_minutes, cleanup_minutes
+        );
+
+        let mut stale_tx = self.pool().begin().await?;
+
+        let stale_rows = sqlx::query(&stale_nodes_query)
+            .fetch_all(&mut *stale_tx)
             .await?;
 
+        let mut stale_pairs = Vec::with_capacity(stale_rows.len());
+        for row in stale_rows {
+            let node_id: String = row.try_get("node_id")?;
+            let miner_id: String = row.try_get("miner_id")?;
+            stale_pairs.push((miner_id, node_id));
+        }
+
+        let stale_result = sqlx::query(&stale_delete_query)
+            .execute(&mut *stale_tx)
+            .await?;
+
+        stale_tx.commit().await?;
+
         let stale_deleted = stale_result.rows_affected();
+
+        removed_nodes.extend(stale_pairs);
 
         let affected_miners_query = r#"
             SELECT DISTINCT miner_uid
@@ -571,7 +604,7 @@ impl SimplePersistence {
             debug!("No nodes needed cleanup in this cycle");
         }
 
-        Ok(())
+        Ok(removed_nodes)
     }
 
     /// Get available nodes for rental (not currently rented)

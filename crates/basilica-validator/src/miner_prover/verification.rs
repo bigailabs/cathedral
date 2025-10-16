@@ -86,6 +86,13 @@ impl VerificationEngine {
         false
     }
 
+    /// Extract miner UID from `miner_###` identifiers
+    fn miner_uid_from_miner_id(miner_id: &str) -> Option<u16> {
+        miner_id
+            .strip_prefix("miner_")
+            .and_then(|uid_str| uid_str.parse::<u16>().ok())
+    }
+
     /// Execute complete automated verification workflow with SSH session management (specs-compliant)
     pub async fn execute_verification_workflow(
         &self,
@@ -1080,12 +1087,28 @@ impl VerificationEngine {
         &self,
         consecutive_failures_threshold: i32,
     ) -> Result<()> {
-        self.persistence
+        let removed_nodes = self
+            .persistence
             .cleanup_failed_nodes_after_failures(
                 consecutive_failures_threshold,
                 self.config.gpu_assignment_cleanup_ttl,
             )
             .await?;
+
+        if let Some(ref metrics) = self.metrics {
+            let prometheus = metrics.prometheus();
+            for (miner_id, node_id) in removed_nodes {
+                if let Some(miner_uid) = Self::miner_uid_from_miner_id(&miner_id) {
+                    prometheus.reset_node_uptime_metrics(miner_uid, &node_id);
+                } else {
+                    debug!(
+                        miner_id = %miner_id,
+                        node_id = %node_id,
+                        "Unable to parse miner UID while resetting uptime metrics after cleanup"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }

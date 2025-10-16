@@ -405,6 +405,27 @@ impl ValidatorPrometheusMetrics {
         .set(multiplier);
     }
 
+    /// Reset node uptime metrics for a node that has been removed
+    pub fn reset_node_uptime_metrics(&self, miner_uid: u16, node_id: &str) {
+        gauge!("basilica_node_uptime_minutes",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(0.0);
+
+        gauge!("basilica_node_uptime_multiplier",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(0.0);
+
+        debug!(
+            miner_uid = miner_uid,
+            node_id = node_id,
+            "Reset node uptime metrics after node removal"
+        );
+    }
+
     /// Record node rental status
     pub fn record_node_rental_status(
         &self,
