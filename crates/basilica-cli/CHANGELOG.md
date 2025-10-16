@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0]
+## [0.5.1]
 
 ### Added
 - Account balance management via `basilica balance` to inspect available and reserved compute credits
@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GPU Pricing Calculator - View real-time hourly rates for all GPU types with `basilica price`, including affordability calculations that show how many hours you can run based on your current balance.
 
 - Usage Tracking & Cost Monitoring - Track rental costs and resource consumption with `basilica usage`, displaying detailed metrics and accumulated costs for all active and completed rentals
+
+## [0.5.0] - skipped release
 
 ## [0.4.1]
 
