@@ -193,7 +193,7 @@ resource "aws_ecs_task_definition" "main" {
         environment = [
           for key, value in var.environment_variables : {
             name  = key
-            value = value
+            value = tostring(value)
           }
         ]
 

@@ -70,3 +70,21 @@ variable "route53_zone_id" {
   description = "Route53 hosted zone ID for DNS records (optional, leave empty to skip DNS management)"
   default     = ""
 }
+
+variable "payments_reconciliation_coldwallet_address" {
+  type        = string
+  description = "SS58 address of the cold wallet for hotwallet reconciliation sweeps"
+  default     = ""
+}
+
+variable "payments_reconciliation_enabled" {
+  type        = bool
+  description = "Enable automatic hotwallet-to-coldwallet reconciliation sweeps"
+  default     = false
+}
+
+variable "payments_reconciliation_dry_run" {
+  type        = bool
+  description = "Run reconciliation in dry-run mode (no actual transfers)"
+  default     = true
+}

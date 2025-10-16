@@ -45,3 +45,32 @@ route53_zone_id = ""
 # Example with Route53 enabled:
 # route53_zone_id = "Z1234567890ABC"
 # This will create an A record: billing.basilica.ai -> Internal ALB
+
+# Cold Wallet Address (Required for reconciliation)
+# This is the SS58 address where swept funds will be sent
+# Example: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+payments_reconciliation_coldwallet_address = ""
+
+# Enable Reconciliation Service
+# Set to true to enable automatic hotwallet sweeps
+# Recommended: Start with false, test in dry-run mode first
+payments_reconciliation_enabled = false
+
+# Dry Run Mode
+# When true, the service logs what it would do without executing transfers
+# Recommended: Keep true until thoroughly tested
+payments_reconciliation_dry_run = true
+
+# =============================================================================
+# RECONCILIATION PARAMETERS (configured in compute.tf)
+# =============================================================================
+# These are set in compute.tf but can be overridden if needed:
+#
+# SWEEP_INTERVAL_SECONDS       = 300        # Check every 5 minutes
+# MINIMUM_THRESHOLD_PLANCKS    = 1000000000 # 1 TAO (sweep when balance > this)
+# TARGET_BALANCE_PLANCKS       = 550000000  # 0.55 TAO (leave this much)
+# ESTIMATED_FEE_PLANCKS        = 50000000   # 0.05 TAO (estimated tx fee)
+# MAX_RETRIES                  = 3          # Retry failed transfers 3 times
+#
+# Formula: sweep_amount = current_balance - (TARGET_BALANCE + ESTIMATED_FEE)
+# Example: If balance is 2.0 TAO, sweep: 2.0 - (0.55 + 0.05) = 1.4 TAO
