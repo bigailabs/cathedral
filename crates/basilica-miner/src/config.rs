@@ -192,7 +192,7 @@ impl Default for NodeSshConfig {
 }
 
 /// Expand tilde (~) in path to HOME environment variable
-fn expand_tilde_in_path(path: &Path) -> PathBuf {
+pub fn expand_tilde_in_path(path: &Path) -> PathBuf {
     if path.starts_with("~") {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(path.to_string_lossy().replacen('~', &home, 1))

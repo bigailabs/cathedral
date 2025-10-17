@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::config::NodeSshConfig;
+use crate::config::{expand_tilde_in_path, NodeSshConfig};
 
 /// Shell command template for securely rewriting authorized_keys
 /// Creates a secure temp file, filters out validator keys, and atomically replaces authorized_keys
@@ -321,18 +321,7 @@ impl NodeManager {
     /// Note: Path existence is validated during config loading, so this method
     /// assumes the path is valid.
     fn get_ssh_key_path(&self) -> PathBuf {
-        let configured_path = &self.ssh_config.miner_node_key_path;
-
-        // Expand tilde if present
-        if configured_path.starts_with("~") {
-            if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(configured_path.to_string_lossy().replacen('~', &home, 1))
-            } else {
-                configured_path.clone()
-            }
-        } else {
-            configured_path.clone()
-        }
+        expand_tilde_in_path(&self.ssh_config.miner_node_key_path)
     }
 
     /// Remove all validator keys from a node's authorized_keys file
