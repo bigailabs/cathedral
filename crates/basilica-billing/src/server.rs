@@ -126,9 +126,6 @@ impl BillingServer {
 
         let rental_repository = Arc::new(SqlRentalRepository::new(self.rds_connection.clone()));
         let credit_repository = Arc::new(SqlCreditRepository::new(self.rds_connection.clone()));
-        let usage_repository = Arc::new(crate::storage::SqlUsageRepository::new(
-            self.rds_connection.clone(),
-        ));
         let package_repository = Arc::new(SqlPackageRepository::new(
             self.rds_connection.pool().clone(),
         ));
@@ -141,7 +138,6 @@ impl BillingServer {
             Arc::new(BillingEventHandlers::new(
                 rental_repository,
                 credit_repository,
-                usage_repository,
                 package_repository,
                 event_repository.clone(),
             ));

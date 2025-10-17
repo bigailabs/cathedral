@@ -237,6 +237,7 @@ pub trait EventHandlers: Send + Sync {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TelemetryData {
+    pub gpu_hours: Option<Decimal>,
     pub cpu_percent: Option<Decimal>,
     pub memory_mb: Option<u64>,
     pub network_rx_bytes: Option<u64>,

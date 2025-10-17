@@ -5,7 +5,7 @@ use crate::storage::rds::RdsConnection;
 use crate::storage::{RentalRepository, SqlRentalRepository};
 
 use basilica_protocol::billing::TelemetryData;
-use chrono;
+use chrono::{self, DateTime, Utc};
 use rust_decimal::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use uuid::Uuid;
 pub struct TelemetryProcessor {
     event_store: Arc<crate::domain::events::EventStore>,
     rental_repository: Arc<dyn RentalRepository + Send + Sync>,
+    rds_connection: Arc<RdsConnection>,
 }
 
 impl TelemetryProcessor {
@@ -36,7 +37,34 @@ impl TelemetryProcessor {
                 30,
             )),
             rental_repository,
+            rds_connection,
         }
+    }
+
+    async fn get_last_telemetry_timestamp(
+        &self,
+        rental_id: &Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let pool = self.rds_connection.pool();
+
+        let row = sqlx::query_scalar::<_, DateTime<Utc>>(
+            r#"
+            SELECT timestamp
+            FROM billing.usage_events
+            WHERE rental_id = $1 AND event_type = 'telemetry'
+            ORDER BY timestamp DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(rental_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "get_last_telemetry_timestamp".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(row)
     }
 
     /// Process a single telemetry data point
@@ -71,11 +99,32 @@ impl TelemetryProcessor {
                 }
             })?;
 
+        let telemetry_timestamp = data
+            .timestamp
+            .as_ref()
+            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32))
+            .unwrap_or_else(chrono::Utc::now);
+
+        let last_timestamp = self
+            .get_last_telemetry_timestamp(&rental_id.as_uuid())
+            .await?;
+
+        let interval_seconds = match last_timestamp {
+            Some(last) => {
+                let elapsed = (telemetry_timestamp - last).num_seconds();
+                elapsed.clamp(1, 300)
+            }
+            None => 60,
+        };
+
+        debug!(
+            "Rental {} telemetry interval: {}s (last: {:?}, current: {})",
+            rental_id, interval_seconds, last_timestamp, telemetry_timestamp
+        );
+
         let usage_metrics = if let Some(ref usage) = data.resource_usage {
             let gpu_count = usage.gpu_usage.len() as u32;
-
-            let collection_interval_seconds = 60;
-            let gpu_hours = Decimal::from(collection_interval_seconds) / Decimal::from(3600);
+            let gpu_hours = Decimal::from(interval_seconds) / Decimal::from(3600);
 
             UsageMetrics {
                 gpu_hours,
@@ -100,6 +149,7 @@ impl TelemetryProcessor {
             validator_id: rental.validator_id.clone(),
             event_type: EventType::Telemetry,
             event_data: json!({
+                "gpu_hours": usage_metrics.gpu_hours.to_f64(),
                 "cpu_percent": usage_metrics.cpu_hours.to_f64(),
                 "memory_mb": data.resource_usage.as_ref().map(|u| u.memory_mb).unwrap_or(0),
                 "network_rx_bytes": data.resource_usage.as_ref().map(|u| u.network_rx_bytes).unwrap_or(0),
@@ -114,7 +164,7 @@ impl TelemetryProcessor {
                     })),
                 "custom_metrics": data.custom_metrics,
             }),
-            timestamp: chrono::Utc::now(),
+            timestamp: telemetry_timestamp,
             processed: false,
             processed_at: None,
             batch_id: None,
