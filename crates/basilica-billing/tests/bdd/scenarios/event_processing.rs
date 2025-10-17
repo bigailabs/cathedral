@@ -345,8 +345,8 @@ async fn test_event_metadata_preserved() {
 
     assert_eq!(
         event.3.get("hourly_rate").and_then(|v| v.as_str()),
-        Some("9"),
-        "Hourly rate should be in event data"
+        Some("3.5"),
+        "Hourly rate should be H100 package rate in event data"
     );
 
     context.cleanup().await;

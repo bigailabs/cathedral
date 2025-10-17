@@ -542,16 +542,28 @@ impl BillingService for BillingServiceImpl {
                     Status::invalid_argument("Invalid duration for cost calculation")
                 })?);
 
-            let reservation_id = self
+            let reservation_id = match self
                 .credit_manager
                 .reserve_credits(&user_id, estimated_cost, max_duration, Some(rental_id))
                 .await
-                .map_err(|e| match e {
-                    BillingError::InsufficientBalance { .. } => {
-                        Status::failed_precondition(format!("Insufficient balance: {}", e))
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    if let Ok(Some(mut failed_rental)) = self.rental_repository.get_rental(&rental_id).await {
+                        failed_rental.state = RentalState::Failed;
+                        failed_rental.last_updated = chrono::Utc::now();
+                        if let Err(update_err) = self.rental_repository.update_rental(&failed_rental).await {
+                            warn!("Failed to mark rental {} as failed after reservation error: {}", rental_id, update_err);
+                        }
                     }
-                    _ => Status::internal(format!("Failed to reserve credits: {}", e)),
-                })?;
+                    return Err(match e {
+                        BillingError::InsufficientBalance { .. } => {
+                            Status::failed_precondition(format!("Insufficient balance: {}", e))
+                        }
+                        _ => Status::internal(format!("Failed to reserve credits: {}", e)),
+                    });
+                }
+            };
 
             let rental_start_event = UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
