@@ -317,13 +317,14 @@ impl NodeManager {
             || public_key.starts_with("ssh-dss ")
     }
 
-    /// Get the SSH private key path from config or environment
+    /// Get the SSH private key path from config with tilde expansion
+    /// Note: Path existence is validated during config loading, so this method
+    /// assumes the path is valid.
     fn get_ssh_key_path(&self) -> PathBuf {
-        // First check if the configured path exists
         let configured_path = &self.ssh_config.miner_node_key_path;
 
         // Expand tilde if present
-        let expanded_path = if configured_path.starts_with("~") {
+        if configured_path.starts_with("~") {
             if let Ok(home) = std::env::var("HOME") {
                 PathBuf::from(configured_path.to_string_lossy().replacen('~', &home, 1))
             } else {
@@ -331,26 +332,6 @@ impl NodeManager {
             }
         } else {
             configured_path.clone()
-        };
-
-        // If the configured path exists, use it
-        if expanded_path.exists() {
-            return expanded_path;
-        }
-
-        // Otherwise, try environment variable
-        if let Ok(env_path) = std::env::var("MINER_SSH_KEY_PATH") {
-            let env_path = PathBuf::from(env_path);
-            if env_path.exists() {
-                return env_path;
-            }
-        }
-
-        // Finally, fall back to default ~/.ssh/id_rsa
-        if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(format!("{}/.ssh/id_rsa", home))
-        } else {
-            PathBuf::from("/root/.ssh/id_rsa")
         }
     }
 
