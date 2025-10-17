@@ -331,8 +331,12 @@ impl ConfigValidation for MinerConfig {
         if !ssh_key_path.is_file() {
             return Err(ConfigurationError::InvalidValue {
                 key: "ssh_session.miner_node_key_path".to_string(),
-                value: ssh_key_path.display().to_string(),
-                reason: "SSH key path exists but is not a file".to_string(),
+                value: self.ssh_session.miner_node_key_path.display().to_string(),
+                reason: format!(
+                    "SSH key path exists but is not a file: {} (expanded to: {})",
+                    self.ssh_session.miner_node_key_path.display(),
+                    ssh_key_path.display()
+                ),
             });
         }
 
