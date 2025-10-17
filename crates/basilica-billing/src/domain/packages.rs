@@ -69,15 +69,17 @@ impl BillingPackage {
 
     /// Calculate cost with GPU count multiplier and volume discount
     ///
-    /// Business rule: final_cost = (hourly_rate × gpu_hours × gpu_count × volume_discount_multiplier) + extras - discounts
+    /// Business rule: final_cost = (hourly_rate × gpu_hours × gpu_count × volume_discount_multiplier)
     /// where: volume_discount_multiplier = 0.9 (10% discount) if gpu_count > 1, else 1.0
+    ///
+    /// NOTE: We only charge for GPU hours. All other resource usage (CPU, memory, network, disk, storage) is NOT billed.
     pub fn calculate_cost_with_gpu_count(
         &self,
         usage: &UsageMetrics,
         gpu_count: u32,
     ) -> CostBreakdown {
         let effective_gpu_count = gpu_count.max(1);
-        let gpu_hours = usage.gpu_hours.max(Decimal::ONE);
+        let gpu_hours = usage.gpu_hours;
 
         let raw_gpu_cost = self
             .hourly_rate
@@ -94,48 +96,13 @@ impl BillingPackage {
             .subtract(volume_discount)
             .unwrap_or(raw_gpu_cost);
 
-        let storage_overage = usage
-            .storage_gb_hours
-            .saturating_sub(self.included_storage_gb_hours)
-            .max(Decimal::ZERO);
-        let network_overage = usage
-            .network_gb
-            .saturating_sub(self.included_network_gb)
-            .max(Decimal::ZERO);
-        let disk_io_overage = usage
-            .disk_io_gb
-            .saturating_sub(self.included_disk_io_gb)
-            .max(Decimal::ZERO);
-        let cpu_overage = usage
-            .cpu_hours
-            .saturating_sub(self.included_cpu_core_hours)
-            .max(Decimal::ZERO);
-        let memory_overage = usage
-            .memory_gb_hours
-            .saturating_sub(self.included_memory_gb_hours)
-            .max(Decimal::ZERO);
-
-        let storage_cost = self.storage_rate_per_gb_hour.multiply(storage_overage);
-        let network_cost = self.network_rate_per_gb.multiply(network_overage);
-        let disk_io_cost = self.disk_io_rate_per_gb.multiply(disk_io_overage);
-        let cpu_cost = self.cpu_rate_per_core_hour.multiply(cpu_overage);
-        let memory_cost = self.memory_rate_per_gb_hour.multiply(memory_overage);
-
-        let usage_cost = storage_cost
-            .add(network_cost)
-            .add(disk_io_cost)
-            .add(cpu_cost)
-            .add(memory_cost);
-
-        let subtotal = base_cost_after_volume.add(usage_cost);
-
         CostBreakdown {
             base_cost: raw_gpu_cost,
-            usage_cost,
+            usage_cost: CreditBalance::zero(),
             volume_discount,
             discounts: CreditBalance::zero(),
             overage_charges: CreditBalance::zero(),
-            total_cost: subtotal,
+            total_cost: base_cost_after_volume,
         }
     }
 
@@ -316,22 +283,10 @@ mod tests {
         let cost = package.calculate_cost(&usage);
 
         let expected_base = CreditBalance::from_f64(35.0).unwrap();
-        let expected_storage = CreditBalance::from_f64(5.0).unwrap();
-        let expected_network = CreditBalance::from_f64(1.25).unwrap();
-        let expected_disk_io = CreditBalance::from_f64(0.30).unwrap();
-        let expected_cpu = CreditBalance::from_f64(0.40).unwrap();
-        let expected_memory = CreditBalance::from_f64(0.80).unwrap();
 
         assert_eq!(cost.base_cost, expected_base);
-
-        let expected_usage = expected_storage
-            .add(expected_network)
-            .add(expected_disk_io)
-            .add(expected_cpu)
-            .add(expected_memory);
-
-        assert_eq!(cost.usage_cost, expected_usage);
-        assert_eq!(cost.total_cost, expected_base.add(expected_usage));
+        assert_eq!(cost.usage_cost, CreditBalance::zero());
+        assert_eq!(cost.total_cost, expected_base);
     }
 
     #[test]
@@ -458,15 +413,14 @@ mod tests {
         let cost = package.calculate_cost(&usage);
 
         let expected_base = CreditBalance::from_f64(35.0).unwrap();
-        let expected_storage = CreditBalance::from_f64(1.0).unwrap();
 
         assert_eq!(cost.base_cost, expected_base);
-        assert_eq!(cost.usage_cost, expected_storage);
-        assert_eq!(cost.total_cost, expected_base.add(expected_storage));
+        assert_eq!(cost.usage_cost, CreditBalance::zero());
+        assert_eq!(cost.total_cost, expected_base);
     }
 
     #[test]
-    fn test_extras_calculation_minimum_gpu_hours() {
+    fn test_extras_calculation_fractional_gpu_hours() {
         use rust_decimal::prelude::FromStr;
 
         let mut package = BillingPackage::new(
@@ -492,7 +446,7 @@ mod tests {
 
         let cost = package.calculate_cost(&usage);
 
-        let expected_base = CreditBalance::from_f64(3.5).unwrap();
+        let expected_base = CreditBalance::from_f64(1.75).unwrap();
         assert_eq!(cost.base_cost, expected_base);
     }
 
@@ -607,12 +561,11 @@ mod tests {
 
         let expected_raw = CreditBalance::from_f64(14.0).unwrap();
         let expected_discount = CreditBalance::from_f64(1.4).unwrap();
-        let expected_storage = CreditBalance::from_f64(5.0).unwrap();
-        let expected_total = CreditBalance::from_f64(17.6).unwrap();
+        let expected_total = CreditBalance::from_f64(12.6).unwrap();
 
         assert_eq!(breakdown.base_cost, expected_raw);
         assert_eq!(breakdown.volume_discount, expected_discount);
-        assert_eq!(breakdown.usage_cost, expected_storage);
+        assert_eq!(breakdown.usage_cost, CreditBalance::zero());
         assert_eq!(breakdown.total_cost, expected_total);
     }
 
@@ -694,21 +647,9 @@ mod tests {
         let cost = package.calculate_cost(&usage);
 
         let expected_base = CreditBalance::from_f64(350.0).unwrap();
-        let expected_storage = CreditBalance::from_f64(20.0).unwrap();
-        let expected_network = CreditBalance::from_f64(5.0).unwrap();
-        let expected_disk_io = CreditBalance::from_f64(1.5).unwrap();
-        let expected_cpu = CreditBalance::from_f64(1.0).unwrap();
-        let expected_memory = CreditBalance::from_f64(3.0).unwrap();
 
         assert_eq!(cost.base_cost, expected_base);
-
-        let expected_usage = expected_storage
-            .add(expected_network)
-            .add(expected_disk_io)
-            .add(expected_cpu)
-            .add(expected_memory);
-
-        assert_eq!(cost.usage_cost, expected_usage);
-        assert_eq!(cost.total_cost, expected_base.add(expected_usage));
+        assert_eq!(cost.usage_cost, CreditBalance::zero());
+        assert_eq!(cost.total_cost, expected_base);
     }
 }
