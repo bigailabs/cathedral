@@ -5,7 +5,7 @@ use console::style;
 
 use crate::{
     error::CliError,
-    output::json_output,
+    output::{format_credits, json_output},
     progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner},
 };
 
@@ -38,17 +38,17 @@ fn display_balance(balance: &basilica_sdk::BalanceResponse) {
     println!(
         "  {}: {} credits",
         style("Available").cyan(),
-        style(&balance.available).green().bold()
+        style(format_credits(&balance.available)).green().bold()
     );
     println!(
         "  {}: {} credits",
         style("Reserved").cyan(),
-        style(&balance.reserved).yellow()
+        style(format_credits(&balance.reserved)).yellow()
     );
     println!(
         "  {}: {} credits",
         style("Total").cyan(),
-        style(&balance.total).bold()
+        style(format_credits(&balance.total)).bold()
     );
     println!();
     println!(
