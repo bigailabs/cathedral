@@ -5,6 +5,7 @@ pub mod table_output;
 
 use color_eyre::eyre::{eyre, Result};
 use console::style;
+use rust_decimal::Decimal;
 use serde::Serialize;
 
 /// Output data as JSON
@@ -49,4 +50,21 @@ pub fn compress_path(path: &std::path::Path) -> String {
         }
     }
     path.display().to_string()
+}
+
+/// Format credit value with 2 decimal places
+///
+/// Parses a string credit value as Decimal and formats it with exactly 2 decimal places.
+/// Falls back to the original string if parsing fails.
+///
+/// # Examples
+/// ```
+/// let formatted = format_credits("1234.56789");
+/// assert_eq!(formatted, "1234.57");
+/// ```
+pub fn format_credits(value: &str) -> String {
+    value
+        .parse::<Decimal>()
+        .map(|d| format!("{:.2}", d))
+        .unwrap_or_else(|_| value.to_string())
 }

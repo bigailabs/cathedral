@@ -1,6 +1,9 @@
 //! Table formatting for CLI output
 
-use crate::error::{CliError, Result};
+use crate::{
+    error::{CliError, Result},
+    output::format_credits,
+};
 use basilica_api::country_mapping::get_country_name_from_code;
 use basilica_common::LocationProfile;
 use basilica_sdk::{
@@ -837,7 +840,7 @@ pub fn display_pricing_table(
         println!(
             "{}: {} credits",
             style("Your Balance").cyan(),
-            style(&balance.available).green().bold()
+            style(format_credits(&balance.available)).green().bold()
         );
     }
 
