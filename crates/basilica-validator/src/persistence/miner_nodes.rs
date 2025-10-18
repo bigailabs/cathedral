@@ -337,8 +337,7 @@ impl SimplePersistence {
 
         let cleanup_minutes = gpu_assignment_cleanup_ttl
             .map(|d| d.as_secs() / 60)
-            .unwrap_or(120)
-            .max(120);
+            .unwrap_or(120);
 
         info!(
             "Cleaning GPU assignments from nodes offline >{} minutes",
