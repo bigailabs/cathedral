@@ -351,8 +351,8 @@ impl SimplePersistence {
             LEFT JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
             WHERE me.status = 'offline'
             AND (
-                me.last_health_check < datetime('now', '-{cleanup_minutes} minutes')
-                OR (me.last_health_check IS NULL AND me.updated_at < datetime('now', '-{cleanup_minutes} minutes'))
+                datetime(me.last_health_check) < datetime('now', '-{cleanup_minutes} minutes')
+                OR (me.last_health_check IS NULL AND datetime(me.updated_at) < datetime('now', '-{cleanup_minutes} minutes'))
             )
             GROUP BY me.node_id, me.miner_id
             "#
@@ -459,8 +459,8 @@ impl SimplePersistence {
             DELETE FROM miner_nodes
             WHERE status = 'offline'
             AND (
-                last_health_check < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND updated_at < datetime('now', '-{} minutes'))
+                datetime(last_health_check) < datetime('now', '-{} minutes')
+                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
             )
             "#,
             cleanup_minutes, cleanup_minutes
@@ -477,8 +477,8 @@ impl SimplePersistence {
             FROM miner_nodes
             WHERE status = 'offline'
             AND (
-                last_health_check < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND updated_at < datetime('now', '-{} minutes'))
+                datetime(last_health_check) < datetime('now', '-{} minutes')
+                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
             )
             "#,
             cleanup_minutes, cleanup_minutes
