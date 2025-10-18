@@ -1030,9 +1030,14 @@ pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
             cost: String,
         }
 
+        const MAX_POINTS: usize = 10;
+        let total_points = usage.data_points.len();
+        let start_index = total_points.saturating_sub(MAX_POINTS);
+
         let rows: Vec<UsageDataRow> = usage
             .data_points
             .iter()
+            .skip(start_index)
             .map(|dp| UsageDataRow {
                 timestamp: dp.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                 cpu_percent: format!("{:.1}%", dp.cpu_percent),
@@ -1046,6 +1051,16 @@ pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
         let mut table = Table::new(&rows);
         table.with(Style::modern());
         println!("{}", table);
+        if total_points > MAX_POINTS {
+            println!(
+                "{}",
+                style(format!(
+                    "Showing last {} of {} data points.",
+                    MAX_POINTS, total_points
+                ))
+                .dim()
+            );
+        }
         println!();
     } else {
         println!("{}", style("No usage data points available").yellow());
