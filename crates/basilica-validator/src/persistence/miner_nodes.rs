@@ -349,7 +349,7 @@ impl SimplePersistence {
             r#"
             SELECT DISTINCT me.node_id, me.miner_id, COUNT(ga.gpu_uuid) as gpu_count
             FROM miner_nodes me
-            INNER JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
+            LEFT JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
             WHERE me.status = 'offline'
             AND (
                 me.last_health_check < datetime('now', '-{cleanup_minutes} minutes')
