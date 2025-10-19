@@ -239,36 +239,10 @@ impl Args {
                 handlers::balance::handle_check_balance(&client, *json).await?;
             }
 
-            // Price check
-            Commands::Price {
-                gpu_type,
-                hours,
-                all,
-                json,
-            } => {
-                use crate::client::create_authenticated_client;
-
-                // Create authenticated client
-                let client = create_authenticated_client(config).await?;
-
-                handlers::price::handle_price(&client, gpu_type.clone(), *hours, *all, *json)
-                    .await?;
-            }
-
-            // Usage history
-            Commands::Usage {
-                rental_id,
-                limit,
-                offset,
-                json,
-            } => {
-                use crate::client::create_authenticated_client;
-
-                // Create authenticated client
-                let client = create_authenticated_client(config).await?;
-
-                handlers::usage::handle_usage(&client, rental_id.clone(), *limit, *offset, *json)
-                    .await?;
+            // Packages listing (debug only)
+            #[cfg(debug_assertions)]
+            Commands::Packages { json } => {
+                handlers::packages::handle_packages(*json, config).await?;
             }
         }
         Ok(())

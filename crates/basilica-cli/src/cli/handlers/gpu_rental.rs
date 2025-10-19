@@ -21,6 +21,7 @@ use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -107,17 +108,39 @@ pub async fn handle_ls(
 
     let spinner = create_spinner("Scanning global GPU availability...");
 
-    let response = api_client
-        .list_available_nodes(Some(query))
-        .await
-        .map_err(|e| -> CliError {
-            complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
-            CliError::Internal(
-                eyre!(e)
-                    .suggestion("Check your internet connection and try again")
-                    .note("If this persists, nodes may be temporarily unavailable"),
-            )
-        })?;
+    // Fetch both available nodes and pricing data in parallel
+    let (response, packages_result) = tokio::join!(
+        api_client.list_available_nodes(Some(query)),
+        api_client.get_packages()
+    );
+
+    let response = response.map_err(|e| -> CliError {
+        complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
+        CliError::Internal(
+            eyre!(e)
+                .suggestion("Check your internet connection and try again")
+                .note("If this persists, nodes may be temporarily unavailable"),
+        )
+    })?;
+
+    // Build pricing map: GPU type -> hourly rate
+    // Package names are like "H100 GPU Package", we need to extract just "h100"
+    let pricing_map: HashMap<String, String> = match packages_result {
+        Ok(packages) => {
+            packages
+                .packages
+                .into_iter()
+                .filter(|p| p.is_active)
+                .filter_map(|p| {
+                    // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
+                    let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
+
+                    gpu_type.map(|t| (t, p.hourly_rate))
+                })
+                .collect()
+        }
+        Err(_e) => HashMap::new(),
+    };
 
     complete_spinner_and_clear(spinner);
 
@@ -127,7 +150,7 @@ pub async fn handle_ls(
         // Use table_output module for consistent styling
         if filters.compact {
             // Compact view: grouped by country and GPU type
-            table_output::display_available_nodes_compact(&response.available_nodes)?;
+            table_output::display_available_nodes_compact(&response.available_nodes, &pricing_map)?;
         } else {
             // Default or detailed view: show individual nodes
             // Detailed view includes node IDs
@@ -135,6 +158,7 @@ pub async fn handle_ls(
                 &response.available_nodes,
                 true,
                 filters.detailed,
+                &pricing_map,
             )?;
         }
     }
@@ -381,10 +405,28 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
         min_gpu_count: filters.min_gpu_count,
     });
 
-    let rentals_list = api_client
-        .list_rentals(query)
-        .await
+    // Fetch rentals and usage history in parallel
+    // Use a reasonable limit for usage history to cover active rentals
+    let (rentals_result, usage_result) = tokio::join!(
+        api_client.list_rentals(query),
+        api_client.list_usage_history(Some(100), None)
+    );
+
+    let rentals_list = rentals_result
         .inspect_err(|_| complete_spinner_error(spinner.clone(), "Failed to load rentals"))?;
+
+    // Build usage map: rental_id -> usage record
+    // If usage fetch fails, continue with empty map (graceful degradation)
+    let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> = usage_result
+        .ok()
+        .map(|usage| {
+            usage
+                .rentals
+                .into_iter()
+                .map(|record| (record.rental_id.clone(), record))
+                .collect()
+        })
+        .unwrap_or_default();
 
     complete_spinner_and_clear(spinner);
 
@@ -395,6 +437,7 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
             &rentals_list.rentals[..],
             !filters.compact,
             filters.detailed,
+            &usage_map,
         )?;
         println!("\nTotal: {} active rentals", rentals_list.rentals.len());
 
