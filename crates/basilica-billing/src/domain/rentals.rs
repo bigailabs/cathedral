@@ -34,6 +34,7 @@ pub struct Rental {
     pub actual_start_time: Option<DateTime<Utc>>,
     pub actual_end_time: Option<DateTime<Utc>>,
     pub actual_cost: CreditBalance,
+    pub max_duration_hours: f64,
 }
 
 impl Rental {
@@ -44,6 +45,7 @@ impl Rental {
         package_id: PackageId,
         resource_spec: ResourceSpec,
         reservation_id: Option<ReservationId>,
+        max_duration_hours: f64,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -73,6 +75,7 @@ impl Rental {
             actual_start_time: None,
             actual_end_time: None,
             actual_cost: CreditBalance::zero(),
+            max_duration_hours,
         }
     }
 
@@ -146,6 +149,7 @@ pub trait RentalOperations: Send + Sync {
         package_id: PackageId,
         resource_spec: ResourceSpec,
         reservation_id: Option<ReservationId>,
+        max_duration_hours: f64,
     ) -> Result<RentalId>;
 
     async fn get_rental(&self, rental_id: &RentalId) -> Result<Rental>;
@@ -192,6 +196,7 @@ impl RentalOperations for RentalManager {
         package_id: PackageId,
         resource_spec: ResourceSpec,
         reservation_id: Option<ReservationId>,
+        max_duration_hours: f64,
     ) -> Result<RentalId> {
         let rental = Rental::new(
             user_id,
@@ -200,6 +205,7 @@ impl RentalOperations for RentalManager {
             package_id,
             resource_spec,
             reservation_id,
+            max_duration_hours,
         );
         let rental_id = rental.id;
 

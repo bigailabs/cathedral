@@ -490,6 +490,15 @@ impl BillingService for BillingServiceImpl {
                 return Ok(response);
             }
 
+            // Calculate max duration first
+            let proto_duration = req
+                .max_duration
+                .ok_or_else(|| Status::invalid_argument("Max duration is required"))?;
+            let max_duration = Duration::seconds(proto_duration.seconds)
+                + Duration::nanoseconds(proto_duration.nanos as i64);
+            let max_duration_hours =
+                max_duration.num_hours() as f64 + (max_duration.num_minutes() % 60) as f64 / 60.0;
+
             // Create rental with the provided ID
             use crate::domain::rentals::Rental;
             use crate::domain::types::{CostBreakdown, UsageMetrics};
@@ -522,6 +531,7 @@ impl BillingService for BillingServiceImpl {
                 actual_start_time: Some(now),
                 actual_end_time: None,
                 actual_cost: CreditBalance::zero(),
+                max_duration_hours,
             };
 
             // Persist to database
@@ -529,14 +539,6 @@ impl BillingService for BillingServiceImpl {
                 .create_rental(&rental)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
-
-            let proto_duration = req
-                .max_duration
-                .ok_or_else(|| Status::invalid_argument("Max duration is required"))?;
-            let max_duration = Duration::seconds(proto_duration.seconds)
-                + Duration::nanoseconds(proto_duration.nanos as i64);
-            let max_duration_hours =
-                max_duration.num_hours() as f64 + (max_duration.num_minutes() % 60) as f64 / 60.0;
             let estimated_cost =
                 credit_rate.multiply(Decimal::from_f64(max_duration_hours).ok_or_else(|| {
                     Status::invalid_argument("Invalid duration for cost calculation")

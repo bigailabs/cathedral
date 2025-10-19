@@ -117,6 +117,10 @@ impl SqlRentalRepository {
                 .get::<Option<rust_decimal::Decimal>, _>("total_cost")
                 .map(CreditBalance::from_decimal)
                 .unwrap_or_else(CreditBalance::zero),
+            max_duration_hours: r
+                .get::<Option<i32>, _>("max_duration_hours")
+                .map(|v| v as f64)
+                .unwrap_or(24.0),
         }
     }
 }
@@ -149,7 +153,7 @@ impl RentalRepository for SqlRentalRepository {
         .bind(resource_spec_json)
         .bind(hourly_rate)
         .bind(rental.started_at)
-        .bind(24i32) // Default max duration
+        .bind(rental.max_duration_hours as i32)
         .bind(metadata_json)
         .execute(self.connection.pool())
         .await
@@ -166,7 +170,7 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at
+                   metadata, created_at, updated_at, max_duration_hours
             FROM billing.rentals
             WHERE rental_id = $1
             "#,
@@ -230,7 +234,7 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at
+                       metadata, created_at, updated_at, max_duration_hours
                 FROM billing.rentals
                 WHERE user_id = $1 AND status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -242,7 +246,7 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at
+                       metadata, created_at, updated_at, max_duration_hours
                 FROM billing.rentals
                 WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -265,7 +269,7 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at
+                   metadata, created_at, updated_at, max_duration_hours
             FROM billing.rentals
             WHERE status = $1
             ORDER BY start_time DESC
