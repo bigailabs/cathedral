@@ -433,9 +433,17 @@ impl EventHandlers for BillingEventHandlers {
             .calculate_cost_with_gpu_count(&estimated_usage, estimated_usage.gpu_count)
             .total_cost;
 
+        let max_duration_hours = event
+            .event_data
+            .get("max_duration_hours")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(24.0);
+
+        let duration = chrono::Duration::seconds((max_duration_hours * 3600.0) as i64);
+
         let reservation = self
             .credit_repository
-            .reserve_credits(&user_id, estimated_cost, &rental_id)
+            .reserve_credits(&user_id, estimated_cost, &rental_id, duration)
             .await?;
 
         let resource_spec = ResourceSpec {
@@ -454,6 +462,7 @@ impl EventHandlers for BillingEventHandlers {
             package_id,
             resource_spec,
             Some(reservation.id),
+            max_duration_hours,
         );
         rental.id = rental_id;
 

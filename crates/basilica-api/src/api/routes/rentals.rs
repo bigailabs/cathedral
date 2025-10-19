@@ -235,9 +235,9 @@ pub async fn start_rental(
             nanos: now.timestamp_subsec_nanos() as i32,
         };
 
-        // Set max duration to 30 days (2592000 seconds)
+        // Set max duration to 1 day (86400 seconds)
         let max_duration = prost_types::Duration {
-            seconds: 2592000,
+            seconds: 86400,
             nanos: 0,
         };
 

@@ -28,6 +28,7 @@ pub trait CreditRepository: Send + Sync {
         user_id: &UserId,
         amount: CreditBalance,
         rental_id: &RentalId,
+        duration: chrono::Duration,
     ) -> Result<Reservation>;
 
     /// Deduct credits from a user's account
@@ -468,6 +469,7 @@ impl CreditRepository for SqlCreditRepository {
         user_id: &UserId,
         amount: CreditBalance,
         rental_id: &RentalId,
+        duration: chrono::Duration,
     ) -> Result<Reservation> {
         let account =
             self.get_account(user_id)
@@ -485,7 +487,6 @@ impl CreditRepository for SqlCreditRepository {
 
         let user_uuid = self.require_user_uuid(user_id).await?;
 
-        let duration = chrono::Duration::hours(1);
         let reservation = Reservation::new(user_id.clone(), amount, duration, Some(*rental_id));
 
         let mut tx =

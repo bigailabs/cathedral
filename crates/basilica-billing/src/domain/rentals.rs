@@ -34,6 +34,7 @@ pub struct Rental {
     pub actual_start_time: Option<DateTime<Utc>>,
     pub actual_end_time: Option<DateTime<Utc>>,
     pub actual_cost: CreditBalance,
+    pub max_duration_hours: f64,
 }
 
 impl Rental {
@@ -44,6 +45,7 @@ impl Rental {
         package_id: PackageId,
         resource_spec: ResourceSpec,
         reservation_id: Option<ReservationId>,
+        max_duration_hours: f64,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -73,6 +75,7 @@ impl Rental {
             actual_start_time: None,
             actual_end_time: None,
             actual_cost: CreditBalance::zero(),
+            max_duration_hours,
         }
     }
 
@@ -135,18 +138,22 @@ pub struct RentalStatistics {
     pub average_duration_hours: f64,
 }
 
+/// Parameters for creating a new rental
+#[derive(Debug, Clone)]
+pub struct CreateRentalParams {
+    pub user_id: UserId,
+    pub node_id: String,
+    pub validator_id: String,
+    pub package_id: PackageId,
+    pub resource_spec: ResourceSpec,
+    pub reservation_id: Option<ReservationId>,
+    pub max_duration_hours: f64,
+}
+
 /// Rental management operations
 #[async_trait]
 pub trait RentalOperations: Send + Sync {
-    async fn create_rental(
-        &self,
-        user_id: UserId,
-        node_id: String,
-        validator_id: String,
-        package_id: PackageId,
-        resource_spec: ResourceSpec,
-        reservation_id: Option<ReservationId>,
-    ) -> Result<RentalId>;
+    async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId>;
 
     async fn get_rental(&self, rental_id: &RentalId) -> Result<Rental>;
 
@@ -184,22 +191,15 @@ impl RentalManager {
 
 #[async_trait]
 impl RentalOperations for RentalManager {
-    async fn create_rental(
-        &self,
-        user_id: UserId,
-        node_id: String,
-        validator_id: String,
-        package_id: PackageId,
-        resource_spec: ResourceSpec,
-        reservation_id: Option<ReservationId>,
-    ) -> Result<RentalId> {
+    async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
         let rental = Rental::new(
-            user_id,
-            node_id,
-            validator_id,
-            package_id,
-            resource_spec,
-            reservation_id,
+            params.user_id,
+            params.node_id,
+            params.validator_id,
+            params.package_id,
+            params.resource_spec,
+            params.reservation_id,
+            params.max_duration_hours,
         );
         let rental_id = rental.id;
 
