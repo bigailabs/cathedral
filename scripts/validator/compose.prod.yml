@@ -79,7 +79,7 @@ services:
       - VALIDATOR_UID=999             # The UID of your validator
       - NETUID=39                     # From [bittensor] netuid
     ports:
-      - "12345:12345"
+      - "12348:12348"
     networks:
       - basilica_network
     depends_on:
@@ -87,6 +87,7 @@ services:
     dns:
       - 1.1.1.1
       - 1.0.0.1
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12348", "/etc/alloy/config.alloy"]
 
 networks:
   basilica_network:
