@@ -773,10 +773,10 @@ pub fn display_available_nodes_compact(
                             // Parse rate and multiply by GPU count for total node price
                             rate.parse::<Decimal>()
                                 .ok()
-                                .and_then(|r| {
+                                .map(|r| {
                                     let gpu_count_decimal = Decimal::from(gpu_count);
                                     let total = r * gpu_count_decimal;
-                                    Some(format!("${:.2}/hr", total))
+                                    format!("${:.2}/hr", total)
                                 })
                                 .unwrap_or_else(|| "-".to_string())
                         })
