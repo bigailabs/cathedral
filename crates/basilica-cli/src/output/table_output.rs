@@ -125,9 +125,29 @@ pub fn display_rental_items(
     // Helper to calculate rate and cost for a rental
     let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
         // First try to get from usage map (has both rate and accumulated cost)
-        if let Some(usage) = usage_map.get(&rental.rental_id) {
-            let rate = format!("${}", usage.hourly_rate);
-            let cost = format!("${}", usage.current_cost);
+        // Strip "rental-" prefix if present to match usage API format
+        let lookup_id = rental
+            .rental_id
+            .strip_prefix("rental-")
+            .unwrap_or(&rental.rental_id);
+
+        if let Some(usage) = usage_map.get(lookup_id) {
+            // Format rate with 2 decimal places
+            let rate = usage
+                .hourly_rate
+                .parse::<Decimal>()
+                .ok()
+                .map(|r| format!("${:.2}/hr", r))
+                .unwrap_or_else(|| format!("${}/hr", usage.hourly_rate));
+
+            // Format cost with 2 decimal places
+            let cost = usage
+                .current_cost
+                .parse::<Decimal>()
+                .ok()
+                .map(|c| format!("${:.2}", c))
+                .unwrap_or_else(|| format!("${}", usage.current_cost));
+
             return (rate, cost);
         }
 
