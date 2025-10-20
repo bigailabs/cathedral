@@ -122,6 +122,7 @@ eventsource-stream = "0.2"
 fastrand = "2.0"
 aws-config = { version = "1.0", features = ["behavior-version-latest"] }
 aws-sdk-secretsmanager = "1.0"
+aws-sdk-pricing = "1.0"
 rust_decimal = { version = "1.33", features = ["serde"] }
 urlencoding = "2.1"
 

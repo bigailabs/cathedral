@@ -32,6 +32,14 @@ pub struct BillingPackage {
     pub included_disk_io_gb: Decimal,
     pub included_cpu_core_hours: Decimal,
     pub included_memory_gb_hours: Decimal,
+
+    // Dynamic pricing fields
+    #[serde(default)]
+    pub use_dynamic_pricing: bool,
+    #[serde(default)]
+    pub last_market_price: Option<Decimal>,
+    #[serde(default)]
+    pub price_last_updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl BillingPackage {
@@ -64,6 +72,10 @@ impl BillingPackage {
             included_disk_io_gb: Decimal::ZERO,
             included_cpu_core_hours: Decimal::ZERO,
             included_memory_gb_hours: Decimal::ZERO,
+
+            use_dynamic_pricing: false,
+            last_market_price: None,
+            price_last_updated_at: None,
         }
     }
 

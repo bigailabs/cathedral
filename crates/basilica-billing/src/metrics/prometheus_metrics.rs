@@ -177,6 +177,73 @@ impl PrometheusMetricsRecorder {
             Unit::Count,
             "Current batch size for event processing"
         );
+
+        // Dynamic Pricing Metrics
+        describe_counter!(
+            "basilca_billing_pricing_sync_total",
+            Unit::Count,
+            "Total successful GPU price syncs"
+        );
+
+        describe_counter!(
+            "basilca_billing_pricing_sync_errors_total",
+            Unit::Count,
+            "Total GPU price sync errors"
+        );
+
+        describe_histogram!(
+            "basilca_billing_pricing_fetch_duration_seconds",
+            Unit::Seconds,
+            "Duration of GPU price fetching per provider"
+        );
+
+        describe_histogram!(
+            "basilca_billing_pricing_sync_duration_seconds",
+            Unit::Seconds,
+            "Duration of complete GPU price sync operations"
+        );
+
+        describe_gauge!(
+            "basilca_billing_pricing_cache_size",
+            Unit::Count,
+            "Number of GPU prices currently cached"
+        );
+
+        describe_gauge!(
+            "basilca_billing_pricing_oldest_cache_age_seconds",
+            Unit::Seconds,
+            "Age of the oldest cached GPU price in seconds"
+        );
+
+        describe_counter!(
+            "basilca_billing_pricing_fallback_to_static_total",
+            Unit::Count,
+            "Total times dynamic pricing fell back to static pricing"
+        );
+
+        describe_counter!(
+            "basilca_billing_pricing_prices_fetched_total",
+            Unit::Count,
+            "Total GPU prices fetched from providers"
+        );
+
+        describe_counter!(
+            "basilca_billing_pricing_provider_errors_total",
+            Unit::Count,
+            "Total provider fetch errors"
+        );
+
+        describe_counter!(
+            "basilca_billing_pricing_cache_hits_total",
+            Unit::Count,
+            "Total cache hits for GPU price lookups"
+        );
+
+        describe_counter!(
+            "basilca_billing_pricing_cache_misses_total",
+            Unit::Count,
+            "Total cache misses for GPU price lookups"
+        );
     }
 
     pub fn render(&self) -> String {

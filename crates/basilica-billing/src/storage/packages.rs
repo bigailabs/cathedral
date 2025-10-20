@@ -1,6 +1,7 @@
 use crate::domain::packages::BillingPackage;
 use crate::domain::types::{BillingPeriod, CostBreakdown, CreditBalance, PackageId, UsageMetrics};
 use crate::error::{BillingError, Result};
+use crate::pricing::service::PricingService;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde_json;
@@ -9,6 +10,7 @@ use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 #[async_trait]
 pub trait PackageRepository: Send + Sync {
@@ -40,6 +42,7 @@ pub trait PackageRepository: Send + Sync {
 pub struct SqlPackageRepository {
     pool: PgPool,
     cache: Arc<RwLock<HashMap<PackageId, BillingPackage>>>,
+    pricing_service: Option<Arc<PricingService>>,
 }
 
 const PACKAGE_SELECT_COLUMNS: &str = r#"
@@ -48,7 +51,8 @@ const PACKAGE_SELECT_COLUMNS: &str = r#"
     storage_rate_per_gb_hour, network_rate_per_gb, disk_io_rate_per_gb,
     cpu_rate_per_core_hour, memory_rate_per_gb_hour,
     included_storage_gb_hours, included_network_gb, included_disk_io_gb,
-    included_cpu_core_hours, included_memory_gb_hours
+    included_cpu_core_hours, included_memory_gb_hours,
+    use_dynamic_pricing, last_market_price, price_last_updated_at
 "#;
 
 impl SqlPackageRepository {
@@ -56,7 +60,14 @@ impl SqlPackageRepository {
         Self {
             pool,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            pricing_service: None,
         }
+    }
+
+    /// Set the pricing service for dynamic pricing integration
+    pub fn with_pricing_service(mut self, pricing_service: Arc<PricingService>) -> Self {
+        self.pricing_service = Some(pricing_service);
+        self
     }
 
     /// Initialize the repository by loading packages into cache
@@ -120,6 +131,10 @@ impl SqlPackageRepository {
             included_memory_gb_hours: row
                 .try_get("included_memory_gb_hours")
                 .unwrap_or(Decimal::ZERO),
+
+            use_dynamic_pricing: row.try_get("use_dynamic_pricing").unwrap_or(false),
+            last_market_price: row.try_get("last_market_price").ok(),
+            price_last_updated_at: row.try_get("price_last_updated_at").ok(),
         })
     }
 
@@ -237,24 +252,65 @@ impl SqlPackageRepository {
 impl PackageRepository for SqlPackageRepository {
     async fn get_package(&self, package_id: &PackageId) -> Result<BillingPackage> {
         // Check cache first
-        {
+        let mut package = {
             let cache = self.cache.read().await;
             if let Some(package) = cache.get(package_id) {
-                return Ok(package.clone());
+                package.clone()
+            } else {
+                // Load from database
+                if let Some(package) = self.load_from_database(package_id).await? {
+                    // Update cache
+                    let mut cache = self.cache.write().await;
+                    cache.insert(package_id.clone(), package.clone());
+                    package
+                } else {
+                    return Err(BillingError::PackageNotFound {
+                        id: package_id.to_string(),
+                    });
+                }
+            }
+        };
+
+        // Apply dynamic pricing if enabled for this package
+        if package.use_dynamic_pricing {
+            debug!(
+                "Package {} has dynamic pricing enabled, fetching current price for {}",
+                package_id, package.gpu_model
+            );
+
+            if let Some(pricing_service) = &self.pricing_service {
+                // Get dynamic price with fallback to static price
+                match pricing_service
+                    .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                    .await
+                {
+                    Ok(dynamic_price) => {
+                        debug!(
+                            "Using dynamic price for {}: ${}/hr (static was ${}/hr)",
+                            package.gpu_model,
+                            dynamic_price,
+                            package.hourly_rate.as_decimal()
+                        );
+                        package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get dynamic price for {}: {}. Using static price ${}/hr",
+                            package.gpu_model,
+                            e,
+                            package.hourly_rate.as_decimal()
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    "Package {} has dynamic pricing enabled but PricingService not configured. Using static price.",
+                    package_id
+                );
             }
         }
 
-        // Load from database
-        if let Some(package) = self.load_from_database(package_id).await? {
-            // Update cache
-            let mut cache = self.cache.write().await;
-            cache.insert(package_id.clone(), package.clone());
-            return Ok(package);
-        }
-
-        Err(BillingError::PackageNotFound {
-            id: package_id.to_string(),
-        })
+        Ok(package)
     }
 
     async fn list_packages(&self) -> Result<Vec<BillingPackage>> {

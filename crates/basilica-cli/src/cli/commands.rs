@@ -148,24 +148,6 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Check GPU rental pricing and calculate costs
-    Price {
-        /// GPU type to check pricing for (e.g., 'h100', 'h200')
-        gpu_type: Option<String>,
-
-        /// Number of hours to calculate cost for
-        #[arg(long)]
-        hours: Option<u32>,
-
-        /// Show pricing for all GPU types
-        #[arg(long)]
-        all: bool,
-
-        /// Output as JSON
-        #[arg(long, global = true)]
-        json: bool,
-    },
-
     /// View rental usage history and costs
     Usage {
         /// Rental ID for detailed usage breakdown
@@ -240,7 +222,6 @@ impl Commands {
             | Commands::Tokens { .. }
             | Commands::Fund { .. }
             | Commands::Balance { .. }
-            | Commands::Price { .. }
             | Commands::Usage { .. } => true,
 
             // Authentication and delegation commands don't require auth

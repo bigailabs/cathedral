@@ -94,6 +94,9 @@ pub enum BillingError {
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
+
+    #[error("External API error from {provider}: {details}")]
+    ExternalApiError { provider: String, details: String },
 }
 
 impl BasilicaError for BillingError {}
