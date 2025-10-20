@@ -6,8 +6,8 @@ pub mod external;
 pub mod fund;
 pub mod gpu_rental;
 pub mod gpu_rental_helpers;
-pub mod price;
+#[cfg(debug_assertions)]
+pub mod packages;
 #[cfg(debug_assertions)]
 pub mod test_auth;
 pub mod tokens;
-pub mod usage;

@@ -148,37 +148,9 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Check GPU rental pricing and calculate costs
-    Price {
-        /// GPU type to check pricing for (e.g., 'h100', 'h200')
-        gpu_type: Option<String>,
-
-        /// Number of hours to calculate cost for
-        #[arg(long)]
-        hours: Option<u32>,
-
-        /// Show pricing for all GPU types
-        #[arg(long)]
-        all: bool,
-
-        /// Output as JSON
-        #[arg(long, global = true)]
-        json: bool,
-    },
-
-    /// View rental usage history and costs
-    Usage {
-        /// Rental ID for detailed usage breakdown
-        rental_id: Option<String>,
-
-        /// Limit number of results (default: 50)
-        #[arg(long)]
-        limit: Option<u32>,
-
-        /// Offset for pagination (default: 0)
-        #[arg(long)]
-        offset: Option<u32>,
-
+    /// List available billing packages and pricing
+    #[cfg(debug_assertions)]
+    Packages {
         /// Output as JSON
         #[arg(long, global = true)]
         json: bool,
@@ -239,9 +211,11 @@ impl Commands {
             | Commands::Cp { .. }
             | Commands::Tokens { .. }
             | Commands::Fund { .. }
-            | Commands::Balance { .. }
-            | Commands::Price { .. }
-            | Commands::Usage { .. } => true,
+            | Commands::Balance { .. } => true,
+
+            // Debug commands require authentication
+            #[cfg(debug_assertions)]
+            Commands::Packages { .. } => true,
 
             // Authentication and delegation commands don't require auth
             Commands::Login { .. }
@@ -374,6 +348,10 @@ pub struct PsFilters {
     /// Use detailed view (shows rental and node IDs)
     #[arg(long)]
     pub detailed: bool,
+
+    /// Show all rental history instead of just active rentals
+    #[arg(long)]
+    pub history: bool,
 }
 
 /// Options for viewing logs
