@@ -771,10 +771,14 @@ pub fn display_available_nodes_compact(
                         .get(&category.to_string().to_lowercase())
                         .map(|rate| {
                             // Parse rate and multiply by GPU count for total node price
-                            rate.parse::<f64>()
+                            rate.parse::<Decimal>()
                                 .ok()
-                                .map(|r| format!("${:.2}", r * gpu_count as f64))
-                                .unwrap_or_else(|| format!("${}", rate))
+                                .and_then(|r| {
+                                    let gpu_count_decimal = Decimal::from(gpu_count);
+                                    let total = r * gpu_count_decimal;
+                                    Some(format!("${:.2}/hr", total))
+                                })
+                                .unwrap_or_else(|| "-".to_string())
                         })
                         .unwrap_or_else(|| "-".to_string())
                 } else {

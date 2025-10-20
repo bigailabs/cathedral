@@ -467,6 +467,10 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
         let active_rental_ids: std::collections::HashSet<String> = rentals_list
             .rentals
             .iter()
+            .filter(|r| {
+                // Only include rentals that are currently active or provisioning
+                matches!(r.state, RentalState::Active | RentalState::Provisioning)
+            })
             .map(|r| {
                 // Strip "rental-" prefix to match usage_map format
                 r.rental_id
