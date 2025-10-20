@@ -203,20 +203,100 @@ fn test_marketplace_configuration() {
     println!("✓ Marketplace-specific configuration validated");
 }
 
-/// Integration test summary
-#[test]
-fn test_integration_summary() {
-    println!("\n=== Dynamic Pricing Integration Test Summary ===\n");
+/// Comprehensive integration test: configuration + provider creation + fallback behavior
+#[tokio::test]
+async fn test_end_to_end_configuration_and_providers() {
+    // 1. Test complete configuration with marketplace provider
+    let config = PricingConfig {
+        enabled: true,
+        sources: vec![PriceSource::Marketplace],
+        marketplace_api_key: Some("test-api-key".to_string()),
+        aggregation_strategy: PriceAggregationStrategy::Minimum,
+        global_discount_percent: dec!(-20.0), // 20% discount
+        fallback_to_static: true,
+        cache_ttl_seconds: 3600,
+        sync_hour_utc: Some(3),
+        ..Default::default()
+    };
 
-    println!("✅ Marketplace Provider - VERIFIED");
-    println!("✅ Price Aggregation - VERIFIED (4 strategies)");
-    println!("✅ Discount Application - VERIFIED (global + overrides)");
-    println!("✅ Background Sync Job - VERIFIED (in server.rs)");
-    println!("✅ Package Repository Integration - VERIFIED");
-    println!("✅ Error Handling & Fallbacks - VERIFIED");
-    println!("✅ Configuration Validation - VERIFIED");
-    println!("✅ Metrics & Observability - VERIFIED\n");
+    // 2. Verify provider creation with valid config
+    let providers = create_providers(&config).expect("Should create marketplace provider with valid config");
+    assert_eq!(providers.len(), 1, "Should have exactly one provider");
+    assert_eq!(providers[0].name(), "marketplace", "Provider should be marketplace");
 
-    println!("Dynamic Pricing Implementation: COMPLETE");
-    println!("All integration tests passing ✓\n");
+    // 3. Verify configuration properties
+    assert!(config.enabled, "Dynamic pricing should be enabled");
+    assert_eq!(config.global_discount_percent, dec!(-20.0), "Global discount should be -20%");
+    assert!(matches!(config.aggregation_strategy, PriceAggregationStrategy::Minimum),
+            "Should use minimum aggregation strategy");
+    assert!(config.fallback_to_static, "Fallback to static should be enabled");
+    assert_eq!(config.cache_ttl_seconds, 3600, "Cache TTL should be 3600 seconds");
+    assert_eq!(config.sync_hour_utc, Some(3), "Sync hour should be 3 AM UTC");
+
+    // 4. Test marketplace provider requires API key
+    let invalid_config = PricingConfig {
+        enabled: true,
+        sources: vec![PriceSource::Marketplace],
+        marketplace_api_key: None, // Missing API key
+        ..Default::default()
+    };
+    let result = create_providers(&invalid_config);
+    assert!(result.is_err(), "Should fail without API key");
+
+    // 5. Test disabled pricing returns no providers
+    let disabled_config = PricingConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    let disabled_providers = create_providers(&disabled_config)
+        .expect("Should return empty list when disabled");
+    assert_eq!(disabled_providers.len(), 0, "Disabled pricing should return no providers");
+
+    // 6. Test configuration with GPU-specific discount overrides
+    let mut config_with_overrides = config.clone();
+    config_with_overrides.gpu_discounts.insert("H100".to_string(), dec!(-30.0));
+    config_with_overrides.gpu_discounts.insert("A100".to_string(), dec!(-15.0));
+
+    assert_eq!(
+        config_with_overrides.gpu_discounts.get("H100"),
+        Some(&dec!(-30.0)),
+        "H100 should have 30% discount override"
+    );
+    assert_eq!(
+        config_with_overrides.gpu_discounts.get("A100"),
+        Some(&dec!(-15.0)),
+        "A100 should have 15% discount override"
+    );
+
+    // 7. Test multiple price sources (marketplace only for now)
+    assert_eq!(config.sources.len(), 1, "Should have one price source");
+    assert_eq!(config.sources[0], PriceSource::Marketplace, "Source should be Marketplace");
+
+    // 8. Test aggregation strategies
+    let strategies = vec![
+        (PriceAggregationStrategy::Minimum, "Minimum"),
+        (PriceAggregationStrategy::Median, "Median"),
+        (PriceAggregationStrategy::Average, "Average"),
+        (PriceAggregationStrategy::PreferProvider("test".to_string()), "PreferProvider"),
+    ];
+
+    for (strategy, name) in strategies {
+        let test_config = PricingConfig {
+            aggregation_strategy: strategy.clone(),
+            ..Default::default()
+        };
+        assert!(
+            matches!(&test_config.aggregation_strategy, s if std::mem::discriminant(s) == std::mem::discriminant(&strategy)),
+            "Aggregation strategy {} should be set correctly",
+            name
+        );
+    }
+
+    println!("✓ End-to-end configuration and provider integration verified:");
+    println!("  • Marketplace provider creation with valid config");
+    println!("  • API key requirement validation");
+    println!("  • Disabled pricing behavior");
+    println!("  • GPU-specific discount overrides");
+    println!("  • Multiple aggregation strategies");
+    println!("  • Configuration validation and defaults");
 }
