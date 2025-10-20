@@ -39,10 +39,12 @@ struct MarketplaceInstanceType {
 struct MarketplaceConfiguration {
     gpu_type: String,
     #[serde(default)]
+    #[allow(dead_code)]
     num_gpus: Option<u32>,
     #[serde(default)]
     vram_per_gpu_in_gb: Option<u32>,
     #[serde(default)]
+    #[allow(dead_code)]
     interconnect: Option<String>,
 }
 
@@ -51,6 +53,7 @@ struct MarketplaceAvailability {
     region: String,
     available: bool,
     #[serde(default)]
+    #[allow(dead_code)]
     display_name: Option<String>,
 }
 
@@ -129,10 +132,7 @@ impl MarketplaceProvider {
                     source: "marketplace".to_string(),
                     provider: instance.cloud.clone(),
                     location: Some(av.region.clone()),
-                    instance_name: Some(format!(
-                        "{}-{}",
-                        instance.shade_instance_type, av.region
-                    )),
+                    instance_name: Some(format!("{}-{}", instance.shade_instance_type, av.region)),
                     updated_at: Utc::now(),
                     is_spot: false,
                 });
@@ -144,10 +144,7 @@ impl MarketplaceProvider {
 
     /// Fetch prices for a specific GPU type
     async fn fetch_gpu_type(&self, gpu_type: &str) -> Result<Vec<GpuPrice>> {
-        let mut params = vec![
-            ("gpu_type", gpu_type),
-            ("sort", "price"),
-        ];
+        let mut params = vec![("gpu_type", gpu_type), ("sort", "price")];
 
         if self.available_only {
             params.push(("available", "true"));
@@ -187,13 +184,14 @@ impl MarketplaceProvider {
             });
         }
 
-        let marketplace_response: MarketplaceResponse = response
-            .json()
-            .await
-            .map_err(|e| BillingError::ExternalApiError {
-                provider: "marketplace".to_string(),
-                details: format!("Failed to parse marketplace response: {}", e),
-            })?;
+        let marketplace_response: MarketplaceResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| BillingError::ExternalApiError {
+                    provider: "marketplace".to_string(),
+                    details: format!("Failed to parse marketplace response: {}", e),
+                })?;
 
         debug!(
             "Received {} instance types from marketplace for {}",
@@ -297,10 +295,7 @@ impl PriceProvider for MarketplaceProvider {
         debug!("Performing health check for marketplace");
 
         // Simple health check: try to fetch H100 prices
-        let url = format!(
-            "{}/instances/types?gpu_type=H100&sort=price",
-            self.api_url
-        );
+        let url = format!("{}/instances/types?gpu_type=H100&sort=price", self.api_url);
 
         match self
             .client
@@ -339,11 +334,8 @@ mod tests {
 
     #[test]
     fn test_marketplace_provider_no_api_key() {
-        let provider = MarketplaceProvider::new(
-            "https://api.test.com".to_string(),
-            "".to_string(),
-            true,
-        );
+        let provider =
+            MarketplaceProvider::new("https://api.test.com".to_string(), "".to_string(), true);
         assert!(provider.is_err());
     }
 

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tonic::transport::Channel;
-use tracing::info;
 
 // Import the test database utilities from parent module
 use crate::common;

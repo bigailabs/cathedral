@@ -37,6 +37,7 @@ struct ListPricesQuery {
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     include_expired: bool,
 }
 
@@ -108,11 +109,12 @@ async fn list_prices(
     );
 
     // Get all cached prices
-    let cached_prices = state
-        .price_cache
-        .get_all()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get cached prices: {}", e)))?;
+    let cached_prices = state.price_cache.get_all().await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to get cached prices: {}", e),
+        )
+    })?;
 
     // Filter by GPU model if specified
     let filtered_prices: Vec<_> = match params.gpu_model {
@@ -162,21 +164,20 @@ async fn get_price(
     info!("HTTP: Get price for GPU: {}", gpu_model);
 
     // Check if pricing service is available
-    let pricing_service = state
-        .pricing_service
-        .as_ref()
-        .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Dynamic pricing is not enabled".to_string(),
-            )
-        })?;
+    let pricing_service = state.pricing_service.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dynamic pricing is not enabled".to_string(),
+        )
+    })?;
 
     // Get price from service
-    let price = pricing_service
-        .get_price(&gpu_model)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get price: {}", e)))?;
+    let price = pricing_service.get_price(&gpu_model).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to get price: {}", e),
+        )
+    })?;
 
     match price {
         Some(price_val) => {
@@ -201,15 +202,12 @@ async fn trigger_sync(
     info!("HTTP: Manual price sync triggered");
 
     // Check if pricing service is available
-    let pricing_service = state
-        .pricing_service
-        .as_ref()
-        .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Dynamic pricing is not enabled".to_string(),
-            )
-        })?;
+    let pricing_service = state.pricing_service.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dynamic pricing is not enabled".to_string(),
+        )
+    })?;
 
     let sync_started_at = chrono::Utc::now();
 
@@ -221,7 +219,8 @@ async fn trigger_sync(
     match result {
         Ok(prices_synced) => {
             // Calculate next scheduled sync
-            let next_scheduled_sync = crate::server::BillingServer::calculate_next_sync_time(Some(2));
+            let next_scheduled_sync =
+                crate::server::BillingServer::calculate_next_sync_time(Some(2));
 
             let response = SyncResponse {
                 success: true,
@@ -233,7 +232,10 @@ async fn trigger_sync(
                 error: None,
             };
 
-            info!("HTTP: Price sync completed: {} prices synced", prices_synced);
+            info!(
+                "HTTP: Price sync completed: {} prices synced",
+                prices_synced
+            );
             Ok(Json(response))
         }
         Err(e) => {
@@ -296,12 +298,23 @@ async fn get_history(
         query.push_str(&format!(" AND provider = ${}", bind_count));
     }
 
-    query.push_str(&format!(" ORDER BY recorded_at DESC LIMIT {}", params.limit));
+    query.push_str(&format!(
+        " ORDER BY recorded_at DESC LIMIT {}",
+        params.limit
+    ));
 
     // Execute query
     let pool = state.price_cache.pool();
-    let mut query_builder =
-        sqlx::query_as::<_, (String, Decimal, String, String, chrono::DateTime<chrono::Utc>)>(&query);
+    let mut query_builder = sqlx::query_as::<
+        _,
+        (
+            String,
+            Decimal,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(&query);
 
     query_builder = query_builder.bind(&params.gpu_model);
 
@@ -317,20 +330,24 @@ async fn get_history(
         query_builder = query_builder.bind(provider);
     }
 
-    let rows = query_builder
-        .fetch_all(pool)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to fetch price history: {}", e)))?;
+    let rows = query_builder.fetch_all(pool).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to fetch price history: {}", e),
+        )
+    })?;
 
     let entries: Vec<HistoryEntry> = rows
         .into_iter()
-        .map(|(gpu_model, price, source, provider, recorded_at)| HistoryEntry {
-            gpu_model,
-            price_per_hour: format_decimal(price),
-            source,
-            provider,
-            recorded_at: recorded_at.to_rfc3339(),
-        })
+        .map(
+            |(gpu_model, price, source, provider, recorded_at)| HistoryEntry {
+                gpu_model,
+                price_per_hour: format_decimal(price),
+                source,
+                provider,
+                recorded_at: recorded_at.to_rfc3339(),
+            },
+        )
         .collect();
 
     info!("HTTP: Returning {} price history entries", entries.len());

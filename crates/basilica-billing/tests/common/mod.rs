@@ -4,4 +4,4 @@
 
 pub mod test_db;
 
-pub use test_db::{get_test_database_url, get_test_pool, init_test_database};
+pub use test_db::{get_test_database_url, get_test_pool};

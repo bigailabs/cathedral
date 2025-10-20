@@ -39,7 +39,6 @@ impl PriceCache {
         &self.pool
     }
 
-
     /// Store prices in cache
     pub async fn store(&self, prices: Vec<GpuPrice>) -> Result<()> {
         info!("Storing {} prices in cache", prices.len());
@@ -53,8 +52,7 @@ impl PriceCache {
 
     /// Store a single price in cache
     async fn store_single(&self, price: GpuPrice) -> Result<()> {
-        let expires_at = price.updated_at
-            + chrono::Duration::seconds(86400); // 24 hours from updated_at
+        let expires_at = price.updated_at + chrono::Duration::seconds(86400); // 24 hours from updated_at
 
         sqlx::query(
             r#"

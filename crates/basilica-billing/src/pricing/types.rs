@@ -63,9 +63,9 @@ impl Default for PricingConfig {
             enabled: false,
             global_discount_percent: Decimal::from(-20), // 20% discount
             gpu_discounts: HashMap::new(),
-            update_interval_seconds: 86400,              // 24 hours (daily)
-            sync_hour_utc: Some(2),                      // Sync at 2:00 AM UTC
-            cache_ttl_seconds: 86400,                    // 24 hours
+            update_interval_seconds: 86400, // 24 hours (daily)
+            sync_hour_utc: Some(2),         // Sync at 2:00 AM UTC
+            cache_ttl_seconds: 86400,       // 24 hours
             fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
             aggregation_strategy: PriceAggregationStrategy::Median,
@@ -223,11 +223,11 @@ mod tests {
         price.apply_discount(Decimal::from(-20));
         assert_eq!(price.discount_percent, Decimal::from(-20));
         assert_eq!(price.discounted_price_per_hour, Decimal::from(80)); // 100 * (1 - (-20/100)) = 100 * 1.2 = 120? No wait...
-        // Actually: 100 * (1 - (-20)/100) = 100 * (1 + 0.20) = 120
-        // Hmm, that's not right. Let me recalculate.
-        // discount_percent = -20 (negative means discount)
-        // discount_multiplier = 1 - (-20/100) = 1 + 0.2 = 1.2
-        // This would be a markup, not a discount!
+                                                                        // Actually: 100 * (1 - (-20)/100) = 100 * (1 + 0.20) = 120
+                                                                        // Hmm, that's not right. Let me recalculate.
+                                                                        // discount_percent = -20 (negative means discount)
+                                                                        // discount_multiplier = 1 - (-20/100) = 1 + 0.2 = 1.2
+                                                                        // This would be a markup, not a discount!
 
         // The formula should be:
         // For discount (negative percent): price * (1 + percent/100) where percent is negative
@@ -368,10 +368,7 @@ mod tests {
         assert!(loaded.enabled);
         assert_eq!(loaded.sources.len(), 1);
         assert_eq!(loaded.sources[0], PriceSource::Marketplace);
-        assert_eq!(
-            loaded.marketplace_api_key,
-            Some("test-key-123".to_string())
-        );
+        assert_eq!(loaded.marketplace_api_key, Some("test-key-123".to_string()));
         assert!(loaded.marketplace_available_only);
         assert_eq!(loaded.marketplace_api_url, "https://api.shadeform.ai/v1");
     }

@@ -2,12 +2,12 @@ use crate::error::Result;
 use crate::pricing::cache::PriceCache;
 use crate::pricing::metrics::PricingMetrics;
 use crate::pricing::providers::PriceProvider;
-use crate::pricing::types::{GpuPrice, PricingConfig, PriceQueryFilter};
+use crate::pricing::types::{GpuPrice, PriceQueryFilter, PricingConfig};
 use futures::future::join_all;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// Core pricing service for fetching, aggregating, and caching GPU prices
 pub struct PricingService {
@@ -187,9 +187,15 @@ impl PricingService {
                     PricingMetrics::record_fallback_to_static(gpu_model);
                     Ok(static_price)
                 } else {
-                    error!("No dynamic price available for {} and fallback disabled", gpu_model);
+                    error!(
+                        "No dynamic price available for {} and fallback disabled",
+                        gpu_model
+                    );
                     Err(crate::error::BillingError::ConfigurationError {
-                        message: format!("Dynamic price not available for {} and fallback disabled", gpu_model),
+                        message: format!(
+                            "Dynamic price not available for {} and fallback disabled",
+                            gpu_model
+                        ),
                     })
                 }
             }
@@ -255,7 +261,10 @@ impl PricingService {
 
         // Record price history (non-fatal if this fails)
         if let Err(e) = self.record_price_history(&aggregated_prices).await {
-            error!("Failed to record price history: {}. Continuing with sync.", e);
+            error!(
+                "Failed to record price history: {}. Continuing with sync.",
+                e
+            );
         }
 
         // Store in cache
@@ -353,8 +362,8 @@ impl PricingService {
 
     /// Aggregate prices from multiple providers by GPU model
     async fn aggregate_prices(&self, all_prices: Vec<GpuPrice>) -> Result<Vec<GpuPrice>> {
-        use std::collections::HashMap;
         use crate::pricing::types::PriceAggregationStrategy;
+        use std::collections::HashMap;
 
         if all_prices.is_empty() {
             return Ok(Vec::new());
@@ -365,7 +374,7 @@ impl PricingService {
         for price in all_prices {
             grouped
                 .entry(price.gpu_model.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(price);
         }
 
@@ -386,24 +395,19 @@ impl PricingService {
             let aggregated_price = match &self.config.aggregation_strategy {
                 PriceAggregationStrategy::Minimum => {
                     // Take the lowest price
-                    prices.sort_by(|a, b| {
-                        a.market_price_per_hour
-                            .cmp(&b.market_price_per_hour)
-                    });
+                    prices.sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
                     prices.into_iter().next().unwrap()
                 }
                 PriceAggregationStrategy::Median => {
                     // Take the median price
-                    prices.sort_by(|a, b| {
-                        a.market_price_per_hour
-                            .cmp(&b.market_price_per_hour)
-                    });
+                    prices.sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
                     let mid = prices.len() / 2;
                     if prices.len() % 2 == 0 && prices.len() > 1 {
                         // Even number: average the two middle values
                         let price1 = &prices[mid - 1];
                         let price2 = &prices[mid];
-                        let avg_price = (price1.market_price_per_hour + price2.market_price_per_hour)
+                        let avg_price = (price1.market_price_per_hour
+                            + price2.market_price_per_hour)
                             / Decimal::from(2);
 
                         let mut median_price = price1.clone();
@@ -418,10 +422,7 @@ impl PricingService {
                 }
                 PriceAggregationStrategy::Average => {
                     // Calculate average price
-                    let sum: Decimal = prices
-                        .iter()
-                        .map(|p| p.market_price_per_hour)
-                        .sum();
+                    let sum: Decimal = prices.iter().map(|p| p.market_price_per_hour).sum();
                     let count = Decimal::from(prices.len());
                     let avg_price = sum / count;
 
@@ -437,20 +438,15 @@ impl PricingService {
                         .iter()
                         .find(|p| p.provider.eq_ignore_ascii_case(preferred))
                     {
-                        debug!(
-                            "Using preferred provider {} for {}",
-                            preferred, gpu_model
-                        );
+                        debug!("Using preferred provider {} for {}", preferred, gpu_model);
                         preferred_price.clone()
                     } else {
                         warn!(
                             "Preferred provider {} not found for {}, using minimum",
                             preferred, gpu_model
                         );
-                        prices.sort_by(|a, b| {
-                            a.market_price_per_hour
-                                .cmp(&b.market_price_per_hour)
-                        });
+                        prices
+                            .sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
                         prices.into_iter().next().unwrap()
                     }
                 }
@@ -458,9 +454,7 @@ impl PricingService {
 
             debug!(
                 "Aggregated {} using {:?} strategy: ${}/hr",
-                gpu_model,
-                self.config.aggregation_strategy,
-                aggregated_price.market_price_per_hour
+                gpu_model, self.config.aggregation_strategy, aggregated_price.market_price_per_hour
             );
 
             aggregated_prices.push(aggregated_price);
@@ -486,10 +480,10 @@ impl PricingService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use chrono::Utc;
     use crate::pricing::types::PriceAggregationStrategy;
+    use chrono::Utc;
     use rust_decimal_macros::dec;
+    use std::collections::HashMap;
 
     /// Helper to create a test GpuPrice
     fn create_test_price(gpu_model: &str, provider: &str, price: Decimal) -> GpuPrice {
@@ -572,8 +566,10 @@ mod tests {
     /// Test minimum aggregation strategy
     #[tokio::test]
     async fn test_aggregate_minimum() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::Minimum;
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Minimum,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -593,8 +589,10 @@ mod tests {
     /// Test median aggregation with odd count
     #[tokio::test]
     async fn test_aggregate_median_odd() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::Median;
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Median,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -613,8 +611,10 @@ mod tests {
     /// Test median aggregation with even count
     #[tokio::test]
     async fn test_aggregate_median_even() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::Median;
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Median,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -635,8 +635,10 @@ mod tests {
     /// Test average aggregation strategy
     #[tokio::test]
     async fn test_aggregate_average() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::Average;
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Average,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -656,8 +658,10 @@ mod tests {
     /// Test PreferProvider strategy with preferred provider available
     #[tokio::test]
     async fn test_aggregate_prefer_provider_found() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::PreferProvider("azure".to_string());
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::PreferProvider("azure".to_string()),
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -677,8 +681,10 @@ mod tests {
     /// Test PreferProvider strategy with fallback to minimum
     #[tokio::test]
     async fn test_aggregate_prefer_provider_fallback() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::PreferProvider("vastai".to_string());
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::PreferProvider("vastai".to_string()),
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -699,8 +705,10 @@ mod tests {
     /// Test aggregation with multiple GPU models
     #[tokio::test]
     async fn test_aggregate_multiple_gpu_models() {
-        let mut config = PricingConfig::default();
-        config.aggregation_strategy = PriceAggregationStrategy::Minimum;
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Minimum,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -752,8 +760,10 @@ mod tests {
     /// Test get_price_with_fallback when dynamic pricing is disabled
     #[tokio::test]
     async fn test_get_price_with_fallback_disabled() {
-        let mut config = PricingConfig::default();
-        config.enabled = false;
+        let config = PricingConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -771,9 +781,11 @@ mod tests {
     /// Test get_price_with_fallback when cache miss and fallback enabled
     #[tokio::test]
     async fn test_get_price_with_fallback_cache_miss() {
-        let mut config = PricingConfig::default();
-        config.enabled = true;
-        config.fallback_to_static = true;
+        let config = PricingConfig {
+            enabled: true,
+            fallback_to_static: true,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
@@ -791,17 +803,17 @@ mod tests {
     /// Test get_price_with_fallback when cache miss and fallback disabled
     #[tokio::test]
     async fn test_get_price_with_fallback_disabled_no_cache() {
-        let mut config = PricingConfig::default();
-        config.enabled = true;
-        config.fallback_to_static = false;
+        let config = PricingConfig {
+            enabled: true,
+            fallback_to_static: false,
+            ..Default::default()
+        };
 
         let cache = Arc::new(PriceCache::new_fake());
         let service = PricingService::new(Vec::new(), cache, config);
 
         let static_price = dec!(100.0);
-        let result = service
-            .get_price_with_fallback("H100", static_price)
-            .await;
+        let result = service.get_price_with_fallback("H100", static_price).await;
 
         // Should return error when no cache and fallback disabled
         assert!(result.is_err());

@@ -269,13 +269,11 @@ impl BillingServer {
         let pricing_service = if self.config.pricing.enabled {
             info!("Dynamic pricing enabled - creating pricing service for HTTP endpoints");
             match crate::pricing::providers::create_providers(&self.config.pricing) {
-                Ok(providers) if !providers.is_empty() => {
-                    Some(Arc::new(PricingService::new(
-                        providers,
-                        price_cache.clone(),
-                        self.config.pricing.clone(),
-                    )))
-                }
+                Ok(providers) if !providers.is_empty() => Some(Arc::new(PricingService::new(
+                    providers,
+                    price_cache.clone(),
+                    self.config.pricing.clone(),
+                ))),
                 Ok(_) => {
                     warn!("No pricing providers configured");
                     None
@@ -332,10 +330,7 @@ impl BillingServer {
     }
 
     /// Start the background price sync job
-    pub async fn start_price_sync_job(
-        rds_connection: Arc<RdsConnection>,
-        config: BillingConfig,
-    ) {
+    pub async fn start_price_sync_job(rds_connection: Arc<RdsConnection>, config: BillingConfig) {
         if !config.pricing.enabled {
             info!("Dynamic pricing is disabled, price sync job will not start");
             return;
@@ -353,7 +348,10 @@ impl BillingServer {
             let providers = match create_providers(&pricing_config) {
                 Ok(p) => p,
                 Err(e) => {
-                    error!("Failed to create price providers: {}. Price sync disabled.", e);
+                    error!(
+                        "Failed to create price providers: {}. Price sync disabled.",
+                        e
+                    );
                     return;
                 }
             };
@@ -363,7 +361,11 @@ impl BillingServer {
                 return;
             }
 
-            let pricing_service = Arc::new(PricingService::new(providers, cache, pricing_config.clone()));
+            let pricing_service = Arc::new(PricingService::new(
+                providers,
+                cache,
+                pricing_config.clone(),
+            ));
 
             info!(
                 "Price sync job configured: sync_hour_utc={:?}, update_interval={}s",
@@ -374,7 +376,9 @@ impl BillingServer {
                 // Calculate next sync time
                 let next_sync = Self::calculate_next_sync_time(pricing_config.sync_hour_utc);
                 let now = chrono::Utc::now();
-                let wait_duration = (next_sync - now).to_std().unwrap_or(std::time::Duration::from_secs(60));
+                let wait_duration = (next_sync - now)
+                    .to_std()
+                    .unwrap_or(std::time::Duration::from_secs(60));
 
                 info!(
                     "Next price sync scheduled for {} (in {} seconds)",
@@ -389,12 +393,17 @@ impl BillingServer {
                 info!("Starting scheduled price sync");
                 match pricing_service.sync_prices().await {
                     Ok(count) => {
-                        info!("Price sync completed successfully: {} GPU prices synced", count);
+                        info!(
+                            "Price sync completed successfully: {} GPU prices synced",
+                            count
+                        );
                     }
                     Err(e) => {
                         error!("Price sync failed: {}", e);
                         if !pricing_config.fallback_to_static {
-                            error!("Fallback to static pricing is disabled. This may impact billing.");
+                            error!(
+                                "Fallback to static pricing is disabled. This may impact billing."
+                            );
                         }
                     }
                 }
@@ -406,7 +415,7 @@ impl BillingServer {
 
     /// Calculate the next sync time based on configured hour (UTC)
     pub fn calculate_next_sync_time(sync_hour_utc: Option<u8>) -> chrono::DateTime<chrono::Utc> {
-        use chrono::{Timelike, Utc};
+        use chrono::Utc;
 
         let now = Utc::now();
         let sync_hour = sync_hour_utc.unwrap_or(2) as u32; // Default to 2 AM UTC
@@ -501,7 +510,9 @@ impl BillingServer {
 struct AppState {
     rds_connection: Arc<RdsConnection>,
     metrics: Option<Arc<BillingMetricsSystem>>,
+    #[allow(dead_code)]
     pricing_service: Option<Arc<PricingService>>,
+    #[allow(dead_code)]
     price_cache: Arc<PriceCache>,
 }
 
@@ -535,7 +546,7 @@ async fn metrics_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Timelike, TimeZone, Utc};
+    use chrono::{Timelike, Utc};
 
     #[test]
     fn test_calculate_next_sync_time_before_sync_hour() {
@@ -619,7 +630,8 @@ mod tests {
     fn test_calculate_next_sync_time_exactly_at_sync_hour() {
         // This tests the edge case where current time might be exactly at sync hour
         // The function should schedule for tomorrow in this case
-        let sync_hour = Some(Utc::now().hour() as u8);
+        let sync_hour_value = Utc::now().hour() as u8;
+        let sync_hour = Some(sync_hour_value);
 
         let next_sync = BillingServer::calculate_next_sync_time(sync_hour);
 
@@ -629,6 +641,6 @@ mod tests {
         assert!(next_sync > now);
 
         // Should be at the correct hour
-        assert_eq!(next_sync.hour(), sync_hour.unwrap() as u32);
+        assert_eq!(next_sync.hour(), sync_hour_value as u32);
     }
 }

@@ -35,12 +35,11 @@ pub fn create_providers(config: &PricingConfig) -> Result<Vec<Box<dyn PriceProvi
             PriceSource::Marketplace => {
                 info!("Enabling Marketplace price provider");
 
-                let api_key = config
-                    .marketplace_api_key
-                    .clone()
-                    .ok_or_else(|| BillingError::ConfigurationError {
+                let api_key = config.marketplace_api_key.clone().ok_or_else(|| {
+                    BillingError::ConfigurationError {
                         message: "Marketplace API key is required".to_string(),
-                    })?;
+                    }
+                })?;
 
                 let provider = MarketplaceProvider::new(
                     config.marketplace_api_url.clone(),
@@ -77,8 +76,10 @@ mod tests {
 
     #[test]
     fn test_create_providers_disabled() {
-        let mut config = PricingConfig::default();
-        config.enabled = false;
+        let config = PricingConfig {
+            enabled: false,
+            ..Default::default()
+        };
 
         let providers = create_providers(&config).unwrap();
         assert_eq!(providers.len(), 0);
@@ -86,10 +87,12 @@ mod tests {
 
     #[test]
     fn test_create_providers_marketplace() {
-        let mut config = PricingConfig::default();
-        config.enabled = true;
-        config.sources = vec![PriceSource::Marketplace];
-        config.marketplace_api_key = Some("test-key".to_string());
+        let config = PricingConfig {
+            enabled: true,
+            sources: vec![PriceSource::Marketplace],
+            marketplace_api_key: Some("test-key".to_string()),
+            ..Default::default()
+        };
 
         let providers = create_providers(&config).unwrap();
         assert_eq!(providers.len(), 1);
@@ -98,10 +101,12 @@ mod tests {
 
     #[test]
     fn test_create_providers_no_api_key() {
-        let mut config = PricingConfig::default();
-        config.enabled = true;
-        config.sources = vec![PriceSource::Marketplace];
-        config.marketplace_api_key = None;
+        let config = PricingConfig {
+            enabled: true,
+            sources: vec![PriceSource::Marketplace],
+            marketplace_api_key: None,
+            ..Default::default()
+        };
 
         let result = create_providers(&config);
         assert!(result.is_err());
@@ -109,9 +114,11 @@ mod tests {
 
     #[test]
     fn test_create_providers_empty_sources_error() {
-        let mut config = PricingConfig::default();
-        config.enabled = true;
-        config.sources = Vec::new();
+        let config = PricingConfig {
+            enabled: true,
+            sources: Vec::new(),
+            ..Default::default()
+        };
 
         let result = create_providers(&config);
         assert!(result.is_err());

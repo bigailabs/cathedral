@@ -266,8 +266,8 @@ static POSTGRES_INSTANCE: Lazy<Arc<Mutex<Option<PostgresContainer>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
 /// Get or create the singleton PostgreSQL container pool
-pub async fn get_test_pool() -> Result<sqlx::Pool<Postgres>, Box<dyn std::error::Error + Send + Sync>>
-{
+pub async fn get_test_pool(
+) -> Result<sqlx::Pool<Postgres>, Box<dyn std::error::Error + Send + Sync>> {
     // Check if we should use an existing database instead of Docker
     if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
         println!("Using existing database from TEST_DATABASE_URL");
@@ -278,9 +278,7 @@ pub async fn get_test_pool() -> Result<sqlx::Pool<Postgres>, Box<dyn std::error:
 
         // Run migrations on existing database
         println!("Running database migrations...");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
         println!("✓ Migrations complete");
 
         return Ok(pool);
@@ -306,8 +304,7 @@ pub async fn get_test_pool() -> Result<sqlx::Pool<Postgres>, Box<dyn std::error:
 }
 
 /// Get the database URL for the singleton container
-pub async fn get_test_database_url(
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+pub async fn get_test_database_url() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // Check if we should use an existing database instead of Docker
     if let Ok(database_url) = std::env::var("TEST_DATABASE_URL") {
         return Ok(database_url);
@@ -326,10 +323,4 @@ pub async fn get_test_database_url(
         let container = instance.as_ref().unwrap();
         Ok(container.database_url().to_string())
     }
-}
-
-/// Initialize the test database (for use in test setup)
-pub async fn init_test_database() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _pool = get_test_pool().await?;
-    Ok(())
 }

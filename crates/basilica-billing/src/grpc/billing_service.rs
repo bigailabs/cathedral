@@ -1465,7 +1465,16 @@ impl BillingService for BillingServiceImpl {
 
         // Execute query
         let pool = self.price_cache.pool();
-        let mut query_builder = sqlx::query_as::<_, (String, rust_decimal::Decimal, String, String, chrono::DateTime<chrono::Utc>)>(&query);
+        let mut query_builder = sqlx::query_as::<
+            _,
+            (
+                String,
+                rust_decimal::Decimal,
+                String,
+                String,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(&query);
 
         query_builder = query_builder.bind(&req.gpu_model);
 

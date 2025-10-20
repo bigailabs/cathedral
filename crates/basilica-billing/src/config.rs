@@ -275,10 +275,7 @@ impl BillingConfig {
             if let Some(hour) = self.pricing.sync_hour_utc {
                 if hour > 23 {
                     return Err(ConfigurationError::ValidationFailed {
-                        details: format!(
-                            "pricing.sync_hour_utc must be 0-23, got {}",
-                            hour
-                        ),
+                        details: format!("pricing.sync_hour_utc must be 0-23, got {}", hour),
                     });
                 }
             }
