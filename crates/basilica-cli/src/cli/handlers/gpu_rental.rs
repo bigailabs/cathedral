@@ -21,6 +21,7 @@ use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
+use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -396,12 +397,20 @@ pub async fn handle_up(
 pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    let spinner = create_spinner("Loading active rentals...");
+    let spinner = if filters.history {
+        create_spinner("Loading rental history...")
+    } else {
+        create_spinner("Loading active rentals...")
+    };
 
     // Build query from filters - default to "active" if no status specified
     let query = Some(ListRentalsQuery {
-        status: filters.status.or(Some(RentalState::Active)),
-        gpu_type: filters.gpu_type,
+        status: if filters.history {
+            None // No filter - get all rentals
+        } else {
+            filters.status.or(Some(RentalState::Active)) // Default to active
+        },
+        gpu_type: filters.gpu_type.clone(),
         min_gpu_count: filters.min_gpu_count,
     });
 
@@ -452,6 +461,44 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
 
     if json {
         json_output(&rentals_list)?;
+    } else if filters.history {
+        // History mode: use usage_map data and filter out active rentals
+        // Create a set of active rental IDs from the current rentals list
+        let active_rental_ids: std::collections::HashSet<String> = rentals_list
+            .rentals
+            .iter()
+            .map(|r| {
+                // Strip "rental-" prefix to match usage_map format
+                r.rental_id
+                    .strip_prefix("rental-")
+                    .unwrap_or(&r.rental_id)
+                    .to_string()
+            })
+            .collect();
+
+        // Filter usage_map to exclude active rentals
+        let historical_rentals: Vec<_> = usage_map
+            .values()
+            .filter(|r| !active_rental_ids.contains(&r.rental_id))
+            .collect();
+
+        table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
+
+        let total_cost: Decimal = historical_rentals
+            .iter()
+            .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
+            .sum();
+
+        println!();
+        println!(
+            "{}: {}",
+            style("Total Cost").cyan(),
+            style(format!("${:.2}", total_cost)).green().bold()
+        );
+
+        println!("\nTotal: {} rentals", historical_rentals.len());
+
+        display_ps_quick_start_commands();
     } else {
         table_output::display_rental_items(
             &rentals_list.rentals[..],
@@ -459,7 +506,9 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
             filters.detailed,
             &usage_map,
             &pricing_map,
+            false,
         )?;
+
         println!("\nTotal: {} active rentals", rentals_list.rentals.len());
 
         display_ps_quick_start_commands();
