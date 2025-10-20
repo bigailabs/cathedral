@@ -405,11 +405,12 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
         min_gpu_count: filters.min_gpu_count,
     });
 
-    // Fetch rentals and usage history in parallel
+    // Fetch rentals, usage history, and pricing packages in parallel
     // Use a reasonable limit for usage history to cover active rentals
-    let (rentals_result, usage_result) = tokio::join!(
+    let (rentals_result, usage_result, packages_result) = tokio::join!(
         api_client.list_rentals(query),
-        api_client.list_usage_history(Some(100), None)
+        api_client.list_usage_history(Some(100), None),
+        api_client.get_packages()
     );
 
     let rentals_list = rentals_result
@@ -428,6 +429,25 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
         })
         .unwrap_or_default();
 
+    // Build pricing map: GPU type -> hourly rate
+    // Package names are like "H100 GPU Package", we need to extract just "h100"
+    let pricing_map: HashMap<String, String> = match packages_result {
+        Ok(packages) => {
+            packages
+                .packages
+                .into_iter()
+                .filter(|p| p.is_active)
+                .filter_map(|p| {
+                    // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
+                    let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
+
+                    gpu_type.map(|t| (t, p.hourly_rate))
+                })
+                .collect()
+        }
+        Err(_e) => HashMap::new(),
+    };
+
     complete_spinner_and_clear(spinner);
 
     if json {
@@ -438,6 +458,7 @@ pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Re
             !filters.compact,
             filters.detailed,
             &usage_map,
+            &pricing_map,
         )?;
         println!("\nTotal: {} active rentals", rentals_list.rentals.len());
 

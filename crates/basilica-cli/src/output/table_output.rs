@@ -120,7 +120,35 @@ pub fn display_rental_items(
     show_standard: bool,
     show_ids: bool,
     usage_map: &HashMap<String, basilica_sdk::types::RentalUsageRecord>,
+    pricing_map: &HashMap<String, String>,
 ) -> Result<()> {
+    // Helper to calculate rate and cost for a rental
+    let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
+        // First try to get from usage map (has both rate and accumulated cost)
+        if let Some(usage) = usage_map.get(&rental.rental_id) {
+            let rate = format!("${}", usage.hourly_rate);
+            let cost = format!("${}", usage.current_cost);
+            return (rate, cost);
+        }
+
+        // If not in usage map, calculate rate from pricing_map based on GPU type
+        if let Some(first_gpu) = rental.gpu_specs.first() {
+            let category = GpuCategory::from_str(&first_gpu.name).unwrap();
+            let gpu_count = rental.gpu_specs.len();
+            let lookup_key = category.to_string().to_lowercase();
+
+            if let Some(rate_str) = pricing_map.get(&lookup_key) {
+                if let Ok(rate) = rate_str.parse::<f64>() {
+                    let total_rate = rate * gpu_count as f64;
+                    return (format!("${:.2}/hr", total_rate), "-".to_string());
+                }
+            }
+        }
+
+        // No data available
+        ("-".to_string(), "-".to_string())
+    };
+
     if show_ids {
         // Detailed view with IDs
         #[derive(Tabled)]
@@ -195,15 +223,8 @@ pub fn display_rental_items(
                 // Format port mappings (show all ports in detailed view)
                 let ports = format_port_mappings(&rental.port_mappings, None);
 
-                // Get usage data for this rental
-                let (rate_per_hour, total_cost) = usage_map
-                    .get(&rental.rental_id)
-                    .map(|usage| {
-                        let rate = format!("${}", usage.hourly_rate);
-                        let cost = format!("${}", usage.current_cost);
-                        (rate, cost)
-                    })
-                    .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+                // Get pricing data for this rental
+                let (rate_per_hour, total_cost) = get_rental_pricing(rental);
 
                 DetailedRentalRowWithIds {
                     rental_id: rental.rental_id.clone(),
@@ -288,15 +309,8 @@ pub fn display_rental_items(
                 // Format port mappings (show up to 2-3 ports)
                 let ports = format_port_mappings(&rental.port_mappings, Some(2));
 
-                // Get usage data for this rental
-                let (rate_per_hour, total_cost) = usage_map
-                    .get(&rental.rental_id)
-                    .map(|usage| {
-                        let rate = format!("${}", usage.hourly_rate);
-                        let cost = format!("${}", usage.current_cost);
-                        (rate, cost)
-                    })
-                    .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+                // Get pricing data for this rental
+                let (rate_per_hour, total_cost) = get_rental_pricing(rental);
 
                 DetailedRentalRow {
                     gpu,
@@ -344,15 +358,8 @@ pub fn display_rental_items(
                 // Format SSH availability
                 let ssh = if rental.has_ssh { "✓" } else { "✗" };
 
-                // Get usage data for this rental
-                let (rate_per_hour, total_cost) = usage_map
-                    .get(&rental.rental_id)
-                    .map(|usage| {
-                        let rate = format!("${}", usage.hourly_rate);
-                        let cost = format!("${}", usage.current_cost);
-                        (rate, cost)
-                    })
-                    .unwrap_or_else(|| ("-".to_string(), "-".to_string()));
+                // Get pricing data for this rental
+                let (rate_per_hour, total_cost) = get_rental_pricing(rental);
 
                 CompactRentalRow {
                     gpu,
