@@ -2,6 +2,8 @@
 //!
 //! Provides a singleton PostgreSQL container for faster test execution.
 
+#![allow(dead_code)]
+
 use bollard::container::{
     Config, CreateContainerOptions, RemoveContainerOptions, StartContainerOptions,
 };

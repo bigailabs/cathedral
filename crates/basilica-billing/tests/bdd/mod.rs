@@ -20,7 +20,7 @@ pub struct TestContext {
 impl TestContext {
     pub async fn new() -> Self {
         // Use the test database pool from the singleton container
-        let pool = common::get_test_pool()
+        let pool = common::test_db::get_test_pool()
             .await
             .expect("Failed to get test database pool");
 
@@ -28,7 +28,7 @@ impl TestContext {
         Self::seed_test_data(&pool).await;
 
         // Get the database URL from the test container
-        let database_url = common::get_test_database_url()
+        let database_url = common::test_db::get_test_database_url()
             .await
             .expect("Failed to get test database URL");
 

@@ -220,18 +220,42 @@ async fn test_end_to_end_configuration_and_providers() {
     };
 
     // 2. Verify provider creation with valid config
-    let providers = create_providers(&config).expect("Should create marketplace provider with valid config");
+    let providers =
+        create_providers(&config).expect("Should create marketplace provider with valid config");
     assert_eq!(providers.len(), 1, "Should have exactly one provider");
-    assert_eq!(providers[0].name(), "marketplace", "Provider should be marketplace");
+    assert_eq!(
+        providers[0].name(),
+        "marketplace",
+        "Provider should be marketplace"
+    );
 
     // 3. Verify configuration properties
     assert!(config.enabled, "Dynamic pricing should be enabled");
-    assert_eq!(config.global_discount_percent, dec!(-20.0), "Global discount should be -20%");
-    assert!(matches!(config.aggregation_strategy, PriceAggregationStrategy::Minimum),
-            "Should use minimum aggregation strategy");
-    assert!(config.fallback_to_static, "Fallback to static should be enabled");
-    assert_eq!(config.cache_ttl_seconds, 3600, "Cache TTL should be 3600 seconds");
-    assert_eq!(config.sync_hour_utc, Some(3), "Sync hour should be 3 AM UTC");
+    assert_eq!(
+        config.global_discount_percent,
+        dec!(-20.0),
+        "Global discount should be -20%"
+    );
+    assert!(
+        matches!(
+            config.aggregation_strategy,
+            PriceAggregationStrategy::Minimum
+        ),
+        "Should use minimum aggregation strategy"
+    );
+    assert!(
+        config.fallback_to_static,
+        "Fallback to static should be enabled"
+    );
+    assert_eq!(
+        config.cache_ttl_seconds, 3600,
+        "Cache TTL should be 3600 seconds"
+    );
+    assert_eq!(
+        config.sync_hour_utc,
+        Some(3),
+        "Sync hour should be 3 AM UTC"
+    );
 
     // 4. Test marketplace provider requires API key
     let invalid_config = PricingConfig {
@@ -248,14 +272,22 @@ async fn test_end_to_end_configuration_and_providers() {
         enabled: false,
         ..Default::default()
     };
-    let disabled_providers = create_providers(&disabled_config)
-        .expect("Should return empty list when disabled");
-    assert_eq!(disabled_providers.len(), 0, "Disabled pricing should return no providers");
+    let disabled_providers =
+        create_providers(&disabled_config).expect("Should return empty list when disabled");
+    assert_eq!(
+        disabled_providers.len(),
+        0,
+        "Disabled pricing should return no providers"
+    );
 
     // 6. Test configuration with GPU-specific discount overrides
     let mut config_with_overrides = config.clone();
-    config_with_overrides.gpu_discounts.insert("H100".to_string(), dec!(-30.0));
-    config_with_overrides.gpu_discounts.insert("A100".to_string(), dec!(-15.0));
+    config_with_overrides
+        .gpu_discounts
+        .insert("H100".to_string(), dec!(-30.0));
+    config_with_overrides
+        .gpu_discounts
+        .insert("A100".to_string(), dec!(-15.0));
 
     assert_eq!(
         config_with_overrides.gpu_discounts.get("H100"),
@@ -270,14 +302,21 @@ async fn test_end_to_end_configuration_and_providers() {
 
     // 7. Test multiple price sources (marketplace only for now)
     assert_eq!(config.sources.len(), 1, "Should have one price source");
-    assert_eq!(config.sources[0], PriceSource::Marketplace, "Source should be Marketplace");
+    assert_eq!(
+        config.sources[0],
+        PriceSource::Marketplace,
+        "Source should be Marketplace"
+    );
 
     // 8. Test aggregation strategies
     let strategies = vec![
         (PriceAggregationStrategy::Minimum, "Minimum"),
         (PriceAggregationStrategy::Median, "Median"),
         (PriceAggregationStrategy::Average, "Average"),
-        (PriceAggregationStrategy::PreferProvider("test".to_string()), "PreferProvider"),
+        (
+            PriceAggregationStrategy::PreferProvider("test".to_string()),
+            "PreferProvider",
+        ),
     ];
 
     for (strategy, name) in strategies {
