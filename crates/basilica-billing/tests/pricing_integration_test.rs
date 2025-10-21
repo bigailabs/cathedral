@@ -339,3 +339,53 @@ async fn test_end_to_end_configuration_and_providers() {
     println!("  • Multiple aggregation strategies");
     println!("  • Configuration validation and defaults");
 }
+
+/// Test cache TTL configuration
+#[test]
+fn test_cache_ttl_configuration() {
+    // Test default TTL (24 hours)
+    let default_config = PricingConfig::default();
+    assert_eq!(
+        default_config.cache_ttl_seconds, 86400,
+        "Default cache TTL should be 86400 seconds (24 hours)"
+    );
+    println!("✓ Default cache TTL is 24 hours (86400 seconds)");
+
+    // Test custom TTL (1 hour)
+    let custom_config = PricingConfig {
+        cache_ttl_seconds: 3600,
+        ..Default::default()
+    };
+    assert_eq!(
+        custom_config.cache_ttl_seconds, 3600,
+        "Custom cache TTL should be 3600 seconds (1 hour)"
+    );
+    println!("✓ Custom cache TTL can be set to 1 hour (3600 seconds)");
+
+    // Test custom TTL (12 hours)
+    let config_12h = PricingConfig {
+        cache_ttl_seconds: 43200,
+        ..Default::default()
+    };
+    assert_eq!(
+        config_12h.cache_ttl_seconds, 43200,
+        "Custom cache TTL should be 43200 seconds (12 hours)"
+    );
+    println!("✓ Custom cache TTL can be set to 12 hours (43200 seconds)");
+
+    // Verify that cache TTL is independent of update interval
+    let config_diff_intervals = PricingConfig {
+        cache_ttl_seconds: 7200,      // 2 hours
+        update_interval_seconds: 3600, // 1 hour
+        ..Default::default()
+    };
+    assert_eq!(
+        config_diff_intervals.cache_ttl_seconds, 7200,
+        "Cache TTL should be configurable independently of update interval"
+    );
+    assert_eq!(
+        config_diff_intervals.update_interval_seconds, 3600,
+        "Update interval should be configurable independently of cache TTL"
+    );
+    println!("✓ Cache TTL and update interval are independently configurable");
+}

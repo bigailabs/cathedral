@@ -40,19 +40,19 @@ impl PriceCache {
     }
 
     /// Store prices in cache
-    pub async fn store(&self, prices: Vec<GpuPrice>) -> Result<()> {
+    pub async fn store(&self, prices: Vec<GpuPrice>, ttl_seconds: u64) -> Result<()> {
         info!("Storing {} prices in cache", prices.len());
 
         for price in prices {
-            self.store_single(price).await?;
+            self.store_single(price, ttl_seconds).await?;
         }
 
         Ok(())
     }
 
     /// Store a single price in cache
-    async fn store_single(&self, price: GpuPrice) -> Result<()> {
-        let expires_at = price.updated_at + chrono::Duration::seconds(86400); // 24 hours from updated_at
+    async fn store_single(&self, price: GpuPrice, ttl_seconds: u64) -> Result<()> {
+        let expires_at = price.updated_at + chrono::Duration::seconds(ttl_seconds as i64);
 
         sqlx::query(
             r#"
@@ -281,5 +281,75 @@ mod tests {
 
         // Just before expiry should not be expired
         assert!(!is_price_expired(&price, 86400));
+    }
+
+    #[test]
+    fn test_is_expired_custom_ttl() {
+        // Test with custom TTL of 3600 seconds (1 hour)
+        let custom_ttl = 3600;
+
+        // Fresh price should not be expired
+        let fresh_price = GpuPrice {
+            gpu_model: "H100".to_string(),
+            vram_gb: Some(80),
+            market_price_per_hour: Decimal::from(100),
+            discounted_price_per_hour: Decimal::from(80),
+            discount_percent: Decimal::from(-20),
+            source: "test".to_string(),
+            provider: "test".to_string(),
+            location: None,
+            instance_name: None,
+            updated_at: Utc::now(),
+            is_spot: false,
+        };
+        assert!(!is_price_expired(&fresh_price, custom_ttl));
+
+        // Price older than custom TTL should be expired
+        let old_price = GpuPrice {
+            gpu_model: "A100".to_string(),
+            vram_gb: Some(40),
+            market_price_per_hour: Decimal::from(50),
+            discounted_price_per_hour: Decimal::from(40),
+            discount_percent: Decimal::from(-20),
+            source: "test".to_string(),
+            provider: "test".to_string(),
+            location: None,
+            instance_name: None,
+            updated_at: Utc::now() - chrono::Duration::seconds(3601),
+            is_spot: false,
+        };
+        assert!(is_price_expired(&old_price, custom_ttl));
+
+        // Price just at the TTL boundary should be expired
+        let boundary_price = GpuPrice {
+            gpu_model: "H200".to_string(),
+            vram_gb: Some(80),
+            market_price_per_hour: Decimal::from(120),
+            discounted_price_per_hour: Decimal::from(96),
+            discount_percent: Decimal::from(-20),
+            source: "test".to_string(),
+            provider: "test".to_string(),
+            location: None,
+            instance_name: None,
+            updated_at: Utc::now() - chrono::Duration::seconds(custom_ttl as i64),
+            is_spot: false,
+        };
+        assert!(is_price_expired(&boundary_price, custom_ttl));
+
+        // Price just before TTL should not be expired
+        let just_before_price = GpuPrice {
+            gpu_model: "A6000".to_string(),
+            vram_gb: Some(48),
+            market_price_per_hour: Decimal::from(40),
+            discounted_price_per_hour: Decimal::from(32),
+            discount_percent: Decimal::from(-20),
+            source: "test".to_string(),
+            provider: "test".to_string(),
+            location: None,
+            instance_name: None,
+            updated_at: Utc::now() - chrono::Duration::seconds((custom_ttl - 1) as i64),
+            is_spot: false,
+        };
+        assert!(!is_price_expired(&just_before_price, custom_ttl));
     }
 }
