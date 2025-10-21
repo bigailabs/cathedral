@@ -119,8 +119,246 @@ pub fn display_rental_items(
     rentals: &[ApiRentalListItem],
     show_standard: bool,
     show_ids: bool,
+    usage_map: &HashMap<String, basilica_sdk::types::RentalUsageRecord>,
+    pricing_map: &HashMap<String, String>,
+    is_history_mode: bool,
 ) -> Result<()> {
-    if show_ids {
+    // Helper to calculate rate and cost for a rental
+    let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
+        // First try to get from usage map (has both rate and accumulated cost)
+        // Strip "rental-" prefix if present to match usage API format
+        let lookup_id = rental
+            .rental_id
+            .strip_prefix("rental-")
+            .unwrap_or(&rental.rental_id);
+
+        if let Some(usage) = usage_map.get(lookup_id) {
+            // Format rate with 2 decimal places
+            let rate = usage
+                .hourly_rate
+                .parse::<Decimal>()
+                .ok()
+                .map(|r| format!("${:.2}/hr", r))
+                .unwrap_or_else(|| format!("${}/hr", usage.hourly_rate));
+
+            // Format cost with 2 decimal places
+            let cost = usage
+                .current_cost
+                .parse::<Decimal>()
+                .ok()
+                .map(|c| format!("${:.2}", c))
+                .unwrap_or_else(|| format!("${}", usage.current_cost));
+
+            return (rate, cost);
+        }
+
+        // If not in usage map, calculate rate from pricing_map based on GPU type
+        if let Some(first_gpu) = rental.gpu_specs.first() {
+            let category = GpuCategory::from_str(&first_gpu.name).unwrap();
+            let gpu_count = rental.gpu_specs.len();
+            let lookup_key = category.to_string().to_lowercase();
+
+            if let Some(rate_str) = pricing_map.get(&lookup_key) {
+                if let Ok(rate) = rate_str.parse::<f64>() {
+                    let total_rate = rate * gpu_count as f64;
+                    return (format!("${:.2}/hr", total_rate), "-".to_string());
+                }
+            }
+        }
+
+        // No data available
+        ("-".to_string(), "-".to_string())
+    };
+
+    // Helper to calculate rental duration
+    let calculate_duration = |rental_id: &str| -> String {
+        let lookup_id = rental_id.strip_prefix("rental-").unwrap_or(rental_id);
+        if let Some(usage) = usage_map.get(lookup_id) {
+            let diff = usage.last_updated.signed_duration_since(usage.start_time);
+            let hours = diff.num_hours();
+            let minutes = diff.num_minutes() % 60;
+            if hours > 0 {
+                format!("{}h {}m", hours, minutes)
+            } else {
+                format!("{}m", minutes)
+            }
+        } else {
+            "-".to_string()
+        }
+    };
+
+    // Helper to format start time
+    let format_start_time = |rental_id: &str| -> String {
+        let lookup_id = rental_id.strip_prefix("rental-").unwrap_or(rental_id);
+        if let Some(usage) = usage_map.get(lookup_id) {
+            usage
+                .start_time
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        } else {
+            "-".to_string()
+        }
+    };
+
+    if is_history_mode {
+        // History mode - show different columns
+        if show_ids {
+            // Detailed history view with IDs
+            #[derive(Tabled)]
+            struct DetailedHistoryRentalRowWithIds {
+                #[tabled(rename = "RENTAL ID")]
+                rental_id: String,
+                #[tabled(rename = "NODE ID")]
+                node_id: String,
+                #[tabled(rename = "GPU")]
+                gpu: String,
+                #[tabled(rename = "State")]
+                state: String,
+                #[tabled(rename = "SSH")]
+                ssh: String,
+                #[tabled(rename = "Ports (Host → Container)")]
+                ports: String,
+                #[tabled(rename = "Image")]
+                image: String,
+                #[tabled(rename = "CPU")]
+                cpu: String,
+                #[tabled(rename = "RAM")]
+                ram: String,
+                #[tabled(rename = "Location")]
+                location: String,
+                #[tabled(rename = "Total Cost")]
+                total_cost: String,
+                #[tabled(rename = "Started")]
+                started: String,
+                #[tabled(rename = "Duration")]
+                duration: String,
+            }
+
+            let rows: Vec<DetailedHistoryRentalRowWithIds> = rentals
+                .iter()
+                .map(|rental| {
+                    let node_id = rental
+                        .node_id
+                        .split_once("__")
+                        .map(|(_, id)| id)
+                        .unwrap_or(&rental.node_id)
+                        .to_string();
+                    let gpu = format_gpu_info(&rental.gpu_specs, true);
+                    let cpu = rental
+                        .cpu_specs
+                        .as_ref()
+                        .map(|cpu| format!("{} ({} cores)", cpu.model, cpu.cores))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let ram = rental
+                        .cpu_specs
+                        .as_ref()
+                        .map(|cpu| format!("{}GB", cpu.memory_gb))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let location = rental
+                        .location
+                        .as_ref()
+                        .and_then(|loc| LocationProfile::from_str(loc).ok())
+                        .map(|profile| profile.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let ssh = if rental.has_ssh { "✓" } else { "✗" };
+                    let ports = format_port_mappings(&rental.port_mappings, None);
+                    let (_, total_cost) = get_rental_pricing(rental);
+
+                    DetailedHistoryRentalRowWithIds {
+                        rental_id: rental.rental_id.clone(),
+                        node_id,
+                        gpu,
+                        state: rental.state.to_string(),
+                        ssh: ssh.to_string(),
+                        ports,
+                        image: rental.container_image.clone(),
+                        cpu,
+                        ram,
+                        location,
+                        total_cost,
+                        started: format_start_time(&rental.rental_id),
+                        duration: calculate_duration(&rental.rental_id),
+                    }
+                })
+                .collect();
+
+            let mut table = Table::new(rows);
+            table.with(Style::modern());
+            println!("{table}");
+        } else {
+            // Standard history view without IDs
+            #[derive(Tabled)]
+            struct HistoryRentalRow {
+                #[tabled(rename = "GPU")]
+                gpu: String,
+                #[tabled(rename = "State")]
+                state: String,
+                #[tabled(rename = "SSH")]
+                ssh: String,
+                #[tabled(rename = "Ports (Host → Container)")]
+                ports: String,
+                #[tabled(rename = "Image")]
+                image: String,
+                #[tabled(rename = "CPU")]
+                cpu: String,
+                #[tabled(rename = "RAM")]
+                ram: String,
+                #[tabled(rename = "Location")]
+                location: String,
+                #[tabled(rename = "Total Cost")]
+                total_cost: String,
+                #[tabled(rename = "Started")]
+                started: String,
+                #[tabled(rename = "Duration")]
+                duration: String,
+            }
+
+            let rows: Vec<HistoryRentalRow> = rentals
+                .iter()
+                .map(|rental| {
+                    let gpu = format_gpu_info(&rental.gpu_specs, true);
+                    let cpu = rental
+                        .cpu_specs
+                        .as_ref()
+                        .map(|cpu| format!("{} ({} cores)", cpu.model, cpu.cores))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let ram = rental
+                        .cpu_specs
+                        .as_ref()
+                        .map(|cpu| format!("{}GB", cpu.memory_gb))
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let location = rental
+                        .location
+                        .as_ref()
+                        .and_then(|loc| LocationProfile::from_str(loc).ok())
+                        .map(|profile| profile.to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    let ssh = if rental.has_ssh { "✓" } else { "✗" };
+                    let ports = format_port_mappings(&rental.port_mappings, Some(2));
+                    let (_, total_cost) = get_rental_pricing(rental);
+
+                    HistoryRentalRow {
+                        gpu,
+                        state: rental.state.to_string(),
+                        ssh: ssh.to_string(),
+                        ports,
+                        image: rental.container_image.clone(),
+                        cpu,
+                        ram,
+                        location,
+                        total_cost,
+                        started: format_start_time(&rental.rental_id),
+                        duration: calculate_duration(&rental.rental_id),
+                    }
+                })
+                .collect();
+
+            let mut table = Table::new(rows);
+            table.with(Style::modern());
+            println!("{table}");
+        }
+    } else if show_ids {
         // Detailed view with IDs
         #[derive(Tabled)]
         struct DetailedRentalRowWithIds {
@@ -144,6 +382,10 @@ pub fn display_rental_items(
             ram: String,
             #[tabled(rename = "Location")]
             location: String,
+            #[tabled(rename = "Rate/hr")]
+            rate_per_hour: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
             #[tabled(rename = "Created")]
             created: String,
         }
@@ -190,6 +432,9 @@ pub fn display_rental_items(
                 // Format port mappings (show all ports in detailed view)
                 let ports = format_port_mappings(&rental.port_mappings, None);
 
+                // Get pricing data for this rental
+                let (rate_per_hour, total_cost) = get_rental_pricing(rental);
+
                 DetailedRentalRowWithIds {
                     rental_id: rental.rental_id.clone(),
                     node_id,
@@ -201,6 +446,8 @@ pub fn display_rental_items(
                     cpu,
                     ram,
                     location,
+                    rate_per_hour,
+                    total_cost,
                     created: format_timestamp(&rental.created_at),
                 }
             })
@@ -229,6 +476,10 @@ pub fn display_rental_items(
             ram: String,
             #[tabled(rename = "Location")]
             location: String,
+            #[tabled(rename = "Rate/hr")]
+            rate_per_hour: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
             #[tabled(rename = "Created")]
             created: String,
         }
@@ -267,6 +518,9 @@ pub fn display_rental_items(
                 // Format port mappings (show up to 2-3 ports)
                 let ports = format_port_mappings(&rental.port_mappings, Some(2));
 
+                // Get pricing data for this rental
+                let (rate_per_hour, total_cost) = get_rental_pricing(rental);
+
                 DetailedRentalRow {
                     gpu,
                     state: rental.state.to_string(),
@@ -276,6 +530,8 @@ pub fn display_rental_items(
                     cpu,
                     ram,
                     location,
+                    rate_per_hour,
+                    total_cost,
                     created: format_timestamp(&rental.created_at),
                 }
             })
@@ -294,6 +550,10 @@ pub fn display_rental_items(
             state: String,
             #[tabled(rename = "SSH")]
             ssh: String,
+            #[tabled(rename = "Rate/hr")]
+            rate_per_hour: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
             #[tabled(rename = "Created")]
             created: String,
         }
@@ -307,10 +567,15 @@ pub fn display_rental_items(
                 // Format SSH availability
                 let ssh = if rental.has_ssh { "✓" } else { "✗" };
 
+                // Get pricing data for this rental
+                let (rate_per_hour, total_cost) = get_rental_pricing(rental);
+
                 CompactRentalRow {
                     gpu,
                     state: rental.state.to_string(),
                     ssh: ssh.to_string(),
+                    rate_per_hour,
+                    total_cost,
                     created: format_timestamp(&rental.created_at),
                 }
             })
@@ -420,7 +685,10 @@ pub fn display_config(config: &HashMap<String, String>) -> Result<()> {
 }
 
 /// Display available nodes in compact format (grouped by location and GPU type)
-pub fn display_available_nodes_compact(nodes: &[AvailableNode]) -> Result<()> {
+pub fn display_available_nodes_compact(
+    nodes: &[AvailableNode],
+    pricing_map: &HashMap<String, String>,
+) -> Result<()> {
     if nodes.is_empty() {
         println!("No available nodes found matching the specified criteria.");
         return Ok(());
@@ -476,6 +744,8 @@ pub fn display_available_nodes_compact(nodes: &[AvailableNode]) -> Result<()> {
             gpu_type: String,
             #[tabled(rename = "AVAILABLE")]
             available: String,
+            #[tabled(rename = "PRICE/HR")]
+            price_per_hour: String,
         }
 
         let gpu_groups = country_groups.get(&country).unwrap();
@@ -489,9 +759,39 @@ pub fn display_available_nodes_compact(nodes: &[AvailableNode]) -> Result<()> {
             let nodes_in_group = gpu_groups.get(&gpu_config).unwrap();
             let count = nodes_in_group.len();
 
+            // Get pricing for this GPU type
+            // Extract GPU category from the gpu_config string (format: "2x H100")
+            let price_per_hour = if let Some(first_node) = nodes_in_group.first() {
+                if let Some(gpu_spec) = first_node.node.gpu_specs.first() {
+                    let category = GpuCategory::from_str(&gpu_spec.name).unwrap();
+                    let gpu_count = first_node.node.gpu_specs.len();
+
+                    // Look up price by category string (lowercase, as package names are h100, a100, etc.)
+                    pricing_map
+                        .get(&category.to_string().to_lowercase())
+                        .map(|rate| {
+                            // Parse rate and multiply by GPU count for total node price
+                            rate.parse::<Decimal>()
+                                .ok()
+                                .map(|r| {
+                                    let gpu_count_decimal = Decimal::from(gpu_count);
+                                    let total = r * gpu_count_decimal;
+                                    format!("${:.2}/hr", total)
+                                })
+                                .unwrap_or_else(|| "-".to_string())
+                        })
+                        .unwrap_or_else(|| "-".to_string())
+                } else {
+                    "-".to_string()
+                }
+            } else {
+                "-".to_string()
+            };
+
             rows.push(CompactRow {
                 gpu_type: gpu_config.clone(),
                 available: count.to_string(),
+                price_per_hour,
             });
         }
 
@@ -605,11 +905,33 @@ pub fn display_available_nodes_detailed(
     nodes: &[AvailableNode],
     show_full_gpu_names: bool,
     show_ids: bool,
+    pricing_map: &HashMap<String, String>,
 ) -> Result<()> {
     if nodes.is_empty() {
         println!("No available nodes found matching the specified criteria.");
         return Ok(());
     }
+
+    // Helper function to calculate price for a node
+    let get_node_price = |node: &AvailableNode| -> String {
+        if let Some(gpu_spec) = node.node.gpu_specs.first() {
+            let category = GpuCategory::from_str(&gpu_spec.name).unwrap();
+            let gpu_count = node.node.gpu_specs.len();
+            // Package names are lowercase (h100, a100, etc.)
+            let lookup_key = category.to_string().to_lowercase();
+
+            pricing_map
+                .get(&lookup_key)
+                .and_then(|rate| {
+                    rate.parse::<f64>()
+                        .ok()
+                        .map(|r| format!("${:.2}/hr", r * gpu_count as f64))
+                })
+                .unwrap_or_else(|| "-".to_string())
+        } else {
+            "-".to_string()
+        }
+    };
 
     // Different structs based on whether we show IDs
     if show_ids {
@@ -625,6 +947,8 @@ pub fn display_available_nodes_detailed(
             ram: String,
             #[tabled(rename = "Location")]
             location: String,
+            #[tabled(rename = "PRICE")]
+            price: String,
         }
 
         let rows: Vec<DetailedNodeRowWithId> = nodes
@@ -648,6 +972,7 @@ pub fn display_available_nodes_detailed(
                     ),
                     ram: format!("{}GB", node.node.cpu_specs.memory_gb),
                     location: format_node_location(&node.node.location),
+                    price: get_node_price(node),
                 }
             })
             .collect();
@@ -666,6 +991,8 @@ pub fn display_available_nodes_detailed(
             ram: String,
             #[tabled(rename = "Location")]
             location: String,
+            #[tabled(rename = "PRICE")]
+            price: String,
         }
 
         let rows: Vec<DetailedNodeRow> = nodes
@@ -678,6 +1005,7 @@ pub fn display_available_nodes_detailed(
                 ),
                 ram: format!("{}GB", node.node.cpu_specs.memory_gb),
                 location: format_node_location(&node.node.location),
+                price: get_node_price(node),
             })
             .collect();
 
@@ -846,11 +1174,6 @@ pub fn display_pricing_table(
 
     println!();
     println!("{}", style("Quick Commands:").cyan().bold());
-    println!(
-        "  {} {}",
-        style("basilica price <gpu-type>").yellow().bold(),
-        style("- Inspect pricing for a specific GPU profile").dim()
-    );
     println!(
         "  {} {}",
         style("basilica fund").yellow().bold(),
@@ -1073,19 +1396,141 @@ pub fn display_rental_usage_detail(usage: &RentalUsageResponse) -> Result<()> {
     println!("{}", style("Quick Commands:").cyan().bold());
     println!(
         "  {} {}",
-        style("basilica usage").yellow().bold(),
-        style("- List usage history across all rentals").dim()
-    );
-    println!(
-        "  {} {}",
-        style("basilica price").yellow().bold(),
-        style("- Review pricing for available GPUs").dim()
-    );
-    println!(
-        "  {} {}",
         style("basilica ps").yellow().bold(),
-        style("- List active rentals").dim()
+        style("- List active rentals with pricing and cost information").dim()
     );
+
+    Ok(())
+}
+
+/// Display usage history for ps command with history flag
+pub fn display_usage_history_for_ps(
+    rentals: &[&basilica_sdk::types::RentalUsageRecord],
+    show_detailed: bool,
+) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No rental history found").yellow());
+        return Ok(());
+    }
+
+    if show_detailed {
+        #[derive(Tabled)]
+        struct DetailedHistoryRow {
+            #[tabled(rename = "Rental ID")]
+            rental_id: String,
+            #[tabled(rename = "Node ID")]
+            node_id: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Started")]
+            started: String,
+            #[tabled(rename = "Stopped")]
+            stopped: String,
+            #[tabled(rename = "Duration")]
+            duration: String,
+        }
+
+        let mut rows: Vec<DetailedHistoryRow> = rentals
+            .iter()
+            .map(|rental| {
+                let total_cost = rental
+                    .current_cost
+                    .parse::<Decimal>()
+                    .ok()
+                    .map(|cost| format!("${:.2}", cost))
+                    .unwrap_or_else(|| rental.current_cost.clone());
+
+                let diff = rental.last_updated.signed_duration_since(rental.start_time);
+                let hours = diff.num_hours();
+                let minutes = diff.num_minutes() % 60;
+                let duration = if hours > 0 {
+                    format!("{}h {}m", hours, minutes)
+                } else {
+                    format!("{}m", minutes)
+                };
+
+                DetailedHistoryRow {
+                    rental_id: rental.rental_id.clone(),
+                    node_id: rental.node_id.clone(),
+                    total_cost,
+                    started: rental
+                        .start_time
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    stopped: rental
+                        .last_updated
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    duration,
+                }
+            })
+            .collect();
+
+        rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    } else {
+        #[derive(Tabled)]
+        struct HistoryRow {
+            #[tabled(rename = "Rental ID")]
+            rental_id: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Started")]
+            started: String,
+            #[tabled(rename = "Stopped")]
+            stopped: String,
+            #[tabled(rename = "Duration")]
+            duration: String,
+        }
+
+        let mut rows: Vec<HistoryRow> = rentals
+            .iter()
+            .map(|rental| {
+                let total_cost = rental
+                    .current_cost
+                    .parse::<Decimal>()
+                    .ok()
+                    .map(|cost| format!("${:.2}", cost))
+                    .unwrap_or_else(|| rental.current_cost.clone());
+
+                let diff = rental.last_updated.signed_duration_since(rental.start_time);
+                let hours = diff.num_hours();
+                let minutes = diff.num_minutes() % 60;
+                let duration = if hours > 0 {
+                    format!("{}h {}m", hours, minutes)
+                } else {
+                    format!("{}m", minutes)
+                };
+
+                HistoryRow {
+                    rental_id: rental.rental_id.clone(),
+                    total_cost,
+                    started: rental
+                        .start_time
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    stopped: rental
+                        .last_updated
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    duration,
+                }
+            })
+            .collect();
+
+        rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    }
 
     Ok(())
 }
@@ -1173,18 +1618,8 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
     println!("{}", style("Quick Commands:").cyan().bold());
     println!(
         "  {} {}",
-        style("basilica usage <rental-id>").yellow().bold(),
-        style("- Drill into resource usage for a particular rental").dim()
-    );
-    println!(
-        "  {} {}",
         style("basilica balance").yellow().bold(),
         style("- Show your current credit balance").dim()
-    );
-    println!(
-        "  {} {}",
-        style("basilica price").yellow().bold(),
-        style("- Review pricing for available GPUs").dim()
     );
 
     Ok(())
