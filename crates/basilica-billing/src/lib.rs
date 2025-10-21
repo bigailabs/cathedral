@@ -3,7 +3,6 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod grpc;
-pub mod http;
 pub mod metrics;
 pub mod pricing;
 pub mod server;

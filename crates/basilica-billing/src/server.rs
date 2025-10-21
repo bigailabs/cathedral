@@ -18,7 +18,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Billing server that hosts the gRPC service
 pub struct BillingServer {
@@ -264,40 +264,9 @@ impl BillingServer {
         let rds_connection = self.rds_connection.clone();
         let metrics = self.metrics.clone();
 
-        // Create pricing components for HTTP endpoints
-        let price_cache = Arc::new(PriceCache::new(self.rds_connection.pool().clone()));
-        let pricing_service = if self.config.pricing.enabled {
-            info!("Dynamic pricing enabled - creating pricing service for HTTP endpoints");
-            match crate::pricing::providers::create_providers(&self.config.pricing) {
-                Ok(providers) if !providers.is_empty() => Some(Arc::new(PricingService::new(
-                    providers,
-                    price_cache.clone(),
-                    self.config.pricing.clone(),
-                ))),
-                Ok(_) => {
-                    warn!("No pricing providers configured");
-                    None
-                }
-                Err(e) => {
-                    warn!("Failed to create pricing providers: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         // Start HTTP server
         let http_handle = tokio::spawn(async move {
-            Self::start_http_server(
-                http_listener,
-                http_rx,
-                rds_connection,
-                metrics,
-                pricing_service,
-                price_cache,
-            )
-            .await
+            Self::start_http_server(http_listener, http_rx, rds_connection, metrics).await
         });
 
         // Start gRPC server
@@ -460,8 +429,6 @@ impl BillingServer {
         shutdown_signal: tokio::sync::oneshot::Receiver<()>,
         rds_connection: Arc<RdsConnection>,
         metrics: Option<Arc<BillingMetricsSystem>>,
-        pricing_service: Option<Arc<PricingService>>,
-        price_cache: Arc<PriceCache>,
     ) -> anyhow::Result<()> {
         let addr = listener.local_addr()?;
         info!("Starting billing HTTP server on {}", addr);
@@ -470,22 +437,12 @@ impl BillingServer {
         let app_state = AppState {
             rds_connection,
             metrics,
-            pricing_service: pricing_service.clone(),
-            price_cache: price_cache.clone(),
         };
-
-        // Create pricing routes with their state
-        let pricing_state = crate::http::pricing::PricingState {
-            pricing_service,
-            price_cache,
-        };
-        let pricing_routes = crate::http::pricing_routes(pricing_state);
 
         let app = Router::new()
             .route("/health", get(health_check))
             .route("/metrics", get(metrics_handler))
             .with_state(app_state)
-            .merge(pricing_routes)
             .layer(
                 ServiceBuilder::new()
                     .layer(CorsLayer::permissive())
@@ -510,10 +467,6 @@ impl BillingServer {
 struct AppState {
     rds_connection: Arc<RdsConnection>,
     metrics: Option<Arc<BillingMetricsSystem>>,
-    #[allow(dead_code)]
-    pricing_service: Option<Arc<PricingService>>,
-    #[allow(dead_code)]
-    price_cache: Arc<PriceCache>,
 }
 
 async fn health_check(

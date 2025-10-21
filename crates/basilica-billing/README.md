@@ -7,8 +7,7 @@ The billing service handles GPU rental pricing, package management, and cost cal
 - Dynamic GPU pricing from marketplace aggregator
 - Package-based billing with volume discounts
 - Credit-based system
-- gRPC API for rental management
-- HTTP API for price queries
+- gRPC API for rental management and price queries
 
 ## Dynamic GPU Pricing
 
@@ -233,13 +232,13 @@ cargo test --lib pricing::types
 - Check `sync_hour_utc` if using scheduled sync (default: 2 AM UTC)
 - Review cache TTL settings (`cache_ttl_seconds`)
 - Check background sync job is running (look for sync logs)
-- Manually trigger sync via admin API: `POST /admin/prices/sync`
+- Manually trigger sync via gRPC: `SyncPrices` RPC
 
 ### Prices seem incorrect
 - Check `global_discount_percent` configuration (default: -20%)
 - Verify per-GPU discount overrides in `gpu_discounts`
 - Check `aggregation_strategy` (minimum, median, or average)
-- Review price history: `GET /admin/prices/history?gpu_model=H100`
+- Review price history via gRPC: `GetPriceHistory` RPC
 
 ### High API usage
 - Increase `cache_ttl_seconds` to reduce sync frequency
