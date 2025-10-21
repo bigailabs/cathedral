@@ -601,10 +601,18 @@ mod tests {
         let service = PricingService::new(providers, cache, config);
 
         let fetched = service.fetch_latest_prices().await.unwrap();
-        assert_eq!(fetched.len(), 2, "Should collect prices from both providers");
+        assert_eq!(
+            fetched.len(),
+            2,
+            "Should collect prices from both providers"
+        );
 
         let mut aggregated = service.aggregate_prices(fetched).await.unwrap();
-        assert_eq!(aggregated.len(), 1, "Median aggregation should collapse to one price");
+        assert_eq!(
+            aggregated.len(),
+            1,
+            "Median aggregation should collapse to one price"
+        );
         assert_eq!(
             aggregated[0].market_price_per_hour,
             dec!(27.0),
@@ -624,8 +632,7 @@ mod tests {
             "Discount metadata should reflect global discount"
         );
         assert_eq!(
-            aggregated[0].source,
-            "aggregated_median",
+            aggregated[0].source, "aggregated_median",
             "Aggregated prices should mark the synthetic source"
         );
     }
@@ -683,13 +690,13 @@ mod tests {
         }
     }
 
-    /// Live integration test that calls the Shadeform API when SHADEFORM_API_KEY is set.
+    /// Live integration test that calls the Shadeform API when MARKETPLACE_API_KEY is set.
     #[tokio::test]
-    async fn test_fetch_prices_from_shadeform_api() {
-        let api_key = match env::var("SHADEFORM_API_KEY") {
+    async fn test_fetch_prices_from_marketplace_api() {
+        let api_key = match env::var("MARKETPLACE_API_KEY") {
             Ok(key) if !key.trim().is_empty() => key,
             _ => {
-                eprintln!("SHADEFORM_API_KEY not set; skipping live Shadeform API test");
+                eprintln!("MARKETPLACE_API_KEY not set; skipping live Shadeform API test");
                 return;
             }
         };
@@ -750,6 +757,25 @@ mod tests {
             config.global_discount_percent.round_dp(2),
             "Discount percent metadata should match configuration"
         );
+
+        println!(
+            "Marketplace aggregated prices ({} entries):",
+            aggregated.len()
+        );
+        for price in &aggregated {
+            println!(
+                "  - {model:<8} provider={provider:<12} location={location:<12} market=${market:.4} discounted=${discount:.4} updated_at={updated}",
+                model = price.gpu_model,
+                provider = price.provider,
+                location = price
+                    .location
+                    .clone()
+                    .unwrap_or_else(|| "n/a".to_string()),
+                market = price.market_price_per_hour,
+                discount = price.discounted_price_per_hour,
+                updated = price.updated_at
+            );
+        }
     }
 
     /// Test discount calculation with GPU-specific override
