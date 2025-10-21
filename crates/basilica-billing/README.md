@@ -23,7 +23,8 @@ Production configuration example:
 [pricing]
 enabled = true
 global_discount_percent = -20.0
-update_interval_seconds = 86400  # Sync every 24 hours
+update_interval_seconds = 86400
+sync_hour_utc = 2
 cache_ttl_seconds = 86400
 fallback_to_static = true
 sources = ["marketplace"]
@@ -62,8 +63,9 @@ marketplace_available_only = false  # Show all instances for testing
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `false` | Enable dynamic pricing |
 | `global_discount_percent` | `Decimal` | `-20.0` | Global discount percentage (negative = discount) |
-| `update_interval_seconds` | `u64` | `86400` | How often to fetch prices in seconds (syncs every N seconds from service start) |
-| `cache_ttl_seconds` | `u64` | `86400` | Cache time-to-live in seconds - controls both cache expiry checks and how long stored prices remain valid |
+| `update_interval_seconds` | `u64` | `86400` | How often to fetch prices (seconds) |
+| `sync_hour_utc` | `Option<u8>` | `Some(2)` | UTC hour to sync prices (0-23) |
+| `cache_ttl_seconds` | `u64` | `86400` | Cache time-to-live (seconds) |
 | `fallback_to_static` | `bool` | `true` | Fall back to static prices if API fails |
 | `sources` | `Vec<PriceSource>` | `["marketplace"]` | Price sources to query |
 | `aggregation_strategy` | `PriceAggregationStrategy` | `"median"` | How to aggregate prices from multiple sources |
@@ -86,7 +88,7 @@ marketplace_available_only = false  # Show all instances for testing
 #### How It Works
 
 1. **Price Fetching**: The service fetches GPU prices from the marketplace API at configured intervals (default: daily at 2 AM UTC)
-2. **Caching**: Prices are cached in the database with an expiry timestamp based on `cache_ttl_seconds` (default: 24 hours). This setting controls both when cached prices are written and when they're considered expired during reads.
+2. **Caching**: Prices are cached in the database to reduce API calls and improve performance
 3. **Discount Application**: Global and per-GPU discounts are applied to market prices
 4. **Automatic Updates**: Prices are automatically refreshed based on the configured sync schedule
 5. **Fallback**: If the API is unavailable, the service falls back to static prices (if enabled)
@@ -182,7 +184,7 @@ Background Sync (Daily at 2 AM UTC):
   3. PricingService aggregates by GPU model
   4. Applies configured discounts
   5. Stores in price_cache table
-  6. Sets expiration timestamp based on cache_ttl_seconds (default: 24 hours)
+  6. Sets 24-hour expiration
 
 Rental Creation:
   1. User requests GPU rental
@@ -226,9 +228,9 @@ cargo test --lib pricing::types
 - Ensure `fallback_to_static = true` if using fallback
 
 ### Stale prices
-- Verify `update_interval_seconds` is set appropriately (default: 86400 = daily)
-- Review cache TTL settings (`cache_ttl_seconds`) - this controls how long prices remain valid in the cache
-- Ensure `cache_ttl_seconds` is not shorter than `update_interval_seconds` to avoid cache expiring before the next sync
+- Verify `update_interval_seconds` is set appropriately (default: 86400)
+- Check `sync_hour_utc` if using scheduled sync (default: 2 AM UTC)
+- Review cache TTL settings (`cache_ttl_seconds`)
 - Check background sync job is running (look for sync logs)
 - Manually trigger sync via gRPC: `SyncPrices` RPC
 

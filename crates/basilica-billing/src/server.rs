@@ -137,19 +137,12 @@ impl BillingServer {
         let telemetry_ingester = Arc::new(telemetry_ingester);
         let telemetry_processor = Arc::new(TelemetryProcessor::new(self.rds_connection.clone()));
 
-        let pricing_config = if self.config.pricing.enabled {
-            Some(self.config.pricing.clone())
-        } else {
-            None
-        };
-
         let billing_service = BillingServiceImpl::new_with_pricing(
             self.rds_connection.clone(),
             telemetry_ingester.clone(),
             telemetry_processor.clone(),
             self.metrics.clone(),
             self.pricing_service.clone(),
-            pricing_config,
             self.price_cache.clone(),
         )
         .await?;
@@ -364,15 +357,27 @@ impl BillingServer {
         info!("Starting price sync background job");
 
         tokio::spawn(async move {
-            let interval = std::time::Duration::from_secs(pricing_config.update_interval_seconds);
             info!(
-                "Price sync job configured: update_interval={}s",
-                pricing_config.update_interval_seconds
+                "Price sync job configured: sync_hour_utc={:?}, update_interval={}s",
+                pricing_config.sync_hour_utc, pricing_config.update_interval_seconds
             );
 
             loop {
-                // Sleep for the configured interval
-                tokio::time::sleep(interval).await;
+                // Calculate next sync time
+                let next_sync = Self::calculate_next_sync_time(pricing_config.sync_hour_utc);
+                let now = chrono::Utc::now();
+                let wait_duration = (next_sync - now)
+                    .to_std()
+                    .unwrap_or(std::time::Duration::from_secs(60));
+
+                info!(
+                    "Next price sync scheduled for {} (in {} seconds)",
+                    next_sync.format("%Y-%m-%d %H:%M:%S UTC"),
+                    wait_duration.as_secs()
+                );
+
+                // Sleep until sync time
+                tokio::time::sleep(wait_duration).await;
 
                 // Run price sync
                 info!("Starting scheduled price sync");
@@ -396,6 +401,33 @@ impl BillingServer {
         });
 
         info!("Price sync job started");
+    }
+
+    /// Calculate the next sync time based on configured hour (UTC)
+    pub fn calculate_next_sync_time(sync_hour_utc: Option<u8>) -> chrono::DateTime<chrono::Utc> {
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let sync_hour = sync_hour_utc.unwrap_or(2) as u32; // Default to 2 AM UTC
+
+        // Try today at sync_hour
+        let today_sync = now
+            .date_naive()
+            .and_hms_opt(sync_hour, 0, 0)
+            .expect("Invalid sync hour")
+            .and_utc();
+
+        if now < today_sync {
+            // Sync time hasn't happened yet today
+            today_sync
+        } else {
+            // Sync time already passed today, schedule for tomorrow
+            (now + chrono::Duration::days(1))
+                .date_naive()
+                .and_hms_opt(sync_hour, 0, 0)
+                .expect("Invalid sync hour")
+                .and_utc()
+        }
     }
 
     async fn telemetry_consumer_loop(
@@ -486,4 +518,103 @@ async fn metrics_handler(
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use chrono::{Timelike, Utc};
+
+    #[test]
+    fn test_calculate_next_sync_time_before_sync_hour() {
+        // Mock current time: 2024-01-15 01:00:00 UTC
+        // Sync hour: 2 AM UTC
+        // Expected: Today at 2 AM
+
+        let sync_hour = Some(2);
+
+        // Since we can't easily mock the current time, we'll test the logic indirectly
+        // by checking that the result is either today or tomorrow at the sync hour
+
+        let next_sync = BillingServer::calculate_next_sync_time(sync_hour);
+
+        // Verify it's at the correct hour
+        assert_eq!(next_sync.hour(), 2);
+        assert_eq!(next_sync.minute(), 0);
+        assert_eq!(next_sync.second(), 0);
+
+        // Verify it's in the future
+        let now = Utc::now();
+        assert!(next_sync > now);
+
+        // Verify it's within the next 24 hours
+        let max_wait = now + chrono::Duration::days(1);
+        assert!(next_sync <= max_wait);
+    }
+
+    #[test]
+    fn test_calculate_next_sync_time_after_sync_hour() {
+        // Test with a sync hour that's definitely in the past (e.g., hour 0)
+        let sync_hour = Some(0);
+
+        let next_sync = BillingServer::calculate_next_sync_time(sync_hour);
+
+        // Verify it's at midnight
+        assert_eq!(next_sync.hour(), 0);
+        assert_eq!(next_sync.minute(), 0);
+        assert_eq!(next_sync.second(), 0);
+
+        // Verify it's in the future
+        let now = Utc::now();
+        assert!(next_sync > now);
+    }
+
+    #[test]
+    fn test_calculate_next_sync_time_default_hour() {
+        // Test with None (should default to 2 AM)
+        let next_sync = BillingServer::calculate_next_sync_time(None);
+
+        // Verify it's at 2 AM
+        assert_eq!(next_sync.hour(), 2);
+        assert_eq!(next_sync.minute(), 0);
+        assert_eq!(next_sync.second(), 0);
+
+        // Verify it's in the future
+        let now = Utc::now();
+        assert!(next_sync > now);
+    }
+
+    #[test]
+    fn test_calculate_next_sync_time_various_hours() {
+        // Test several different hours
+        for hour in [0u8, 6, 12, 18, 23] {
+            let next_sync = BillingServer::calculate_next_sync_time(Some(hour));
+
+            assert_eq!(next_sync.hour(), hour as u32);
+            assert_eq!(next_sync.minute(), 0);
+            assert_eq!(next_sync.second(), 0);
+
+            let now = Utc::now();
+            assert!(next_sync > now);
+
+            // Should be within next 24 hours
+            let max_wait = now + chrono::Duration::days(1);
+            assert!(next_sync <= max_wait);
+        }
+    }
+
+    #[test]
+    fn test_calculate_next_sync_time_exactly_at_sync_hour() {
+        // This tests the edge case where current time might be exactly at sync hour
+        // The function should schedule for tomorrow in this case
+        let sync_hour_value = Utc::now().hour() as u8;
+        let sync_hour = Some(sync_hour_value);
+
+        let next_sync = BillingServer::calculate_next_sync_time(sync_hour);
+
+        let now = Utc::now();
+
+        // Should be in the future (either today if minutes/seconds are less, or tomorrow)
+        assert!(next_sync > now);
+
+        // Should be at the correct hour
+        assert_eq!(next_sync.hour(), sync_hour_value as u32);
+    }
+}

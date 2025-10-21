@@ -484,10 +484,60 @@ impl PricingService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::types::PriceAggregationStrategy;
+    use crate::error::BillingError;
+    use crate::pricing::providers::{create_providers, PriceProvider};
+    use crate::pricing::types::{PriceAggregationStrategy, PriceSource};
+    use async_trait::async_trait;
     use chrono::Utc;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
+    use std::env;
+
+    struct StubProvider {
+        name: &'static str,
+        prices: Vec<GpuPrice>,
+        should_fail: bool,
+    }
+
+    impl StubProvider {
+        fn successful(name: &'static str, prices: Vec<GpuPrice>) -> Self {
+            Self {
+                name,
+                prices,
+                should_fail: false,
+            }
+        }
+
+        fn failing(name: &'static str) -> Self {
+            Self {
+                name,
+                prices: Vec::new(),
+                should_fail: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PriceProvider for StubProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn fetch_prices(&self, _filter: &PriceQueryFilter) -> Result<Vec<GpuPrice>> {
+            if self.should_fail {
+                Err(BillingError::ExternalApiError {
+                    provider: self.name.to_string(),
+                    details: "forced failure for test".to_string(),
+                })
+            } else {
+                Ok(self.prices.clone())
+            }
+        }
+
+        async fn health_check(&self) -> bool {
+            !self.should_fail
+        }
+    }
 
     /// Helper to create a test GpuPrice
     fn create_test_price(gpu_model: &str, provider: &str, price: Decimal) -> GpuPrice {
@@ -525,6 +575,181 @@ mod tests {
         // Default global discount is -20%
         // 100 * (1 + (-20/100)) = 100 * 0.8 = 80
         assert_eq!(discounted, Decimal::from(80));
+    }
+
+    /// Test fetch, aggregate, and discount pipeline without database dependencies
+    #[tokio::test]
+    async fn test_fetch_aggregate_and_discount_pipeline() {
+        let config = PricingConfig {
+            enabled: true,
+            aggregation_strategy: PriceAggregationStrategy::Median,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let providers: Vec<Box<dyn PriceProvider>> = vec![
+            Box::new(StubProvider::successful(
+                "marketplace-primary",
+                vec![create_test_price("H100", "aws", dec!(30.0))],
+            )),
+            Box::new(StubProvider::successful(
+                "marketplace-secondary",
+                vec![create_test_price("H100", "runpod", dec!(24.0))],
+            )),
+        ];
+
+        let service = PricingService::new(providers, cache, config);
+
+        let fetched = service.fetch_latest_prices().await.unwrap();
+        assert_eq!(fetched.len(), 2, "Should collect prices from both providers");
+
+        let mut aggregated = service.aggregate_prices(fetched).await.unwrap();
+        assert_eq!(aggregated.len(), 1, "Median aggregation should collapse to one price");
+        assert_eq!(
+            aggregated[0].market_price_per_hour,
+            dec!(27.0),
+            "Median of 24 and 30 should be 27"
+        );
+
+        service.apply_discounts(&mut aggregated);
+
+        assert_eq!(
+            aggregated[0].discounted_price_per_hour,
+            dec!(21.6),
+            "20% discount should be applied to aggregated price"
+        );
+        assert_eq!(
+            aggregated[0].discount_percent,
+            dec!(-20.0),
+            "Discount metadata should reflect global discount"
+        );
+        assert_eq!(
+            aggregated[0].source,
+            "aggregated_median",
+            "Aggregated prices should mark the synthetic source"
+        );
+    }
+
+    /// Test that a failing provider does not break successful ones
+    #[tokio::test]
+    async fn test_fetch_skips_failed_providers() {
+        let config = PricingConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let providers: Vec<Box<dyn PriceProvider>> = vec![
+            Box::new(StubProvider::successful(
+                "marketplace",
+                vec![create_test_price("H100", "aws", dec!(30.0))],
+            )),
+            Box::new(StubProvider::failing("unreachable")),
+        ];
+
+        let service = PricingService::new(providers, cache, config);
+
+        let fetched = service.fetch_latest_prices().await.unwrap();
+        assert_eq!(
+            fetched.len(),
+            1,
+            "Only successful provider results should be returned"
+        );
+        assert_eq!(fetched[0].provider, "aws");
+    }
+
+    /// Test that fetch_latest_prices surfaces an error when all providers fail
+    #[tokio::test]
+    async fn test_fetch_all_providers_fail() {
+        let config = PricingConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let providers: Vec<Box<dyn PriceProvider>> =
+            vec![Box::new(StubProvider::failing("marketplace"))];
+
+        let service = PricingService::new(providers, cache, config);
+
+        let result = service.fetch_latest_prices().await;
+        match result {
+            Ok(_) => panic!("Expected error when all providers fail"),
+            Err(BillingError::ConfigurationError { message }) => assert!(
+                message.contains("All price providers failed"),
+                "Error message should mention all providers failing"
+            ),
+            Err(other) => panic!("Unexpected error type: {:?}", other),
+        }
+    }
+
+    /// Live integration test that calls the Shadeform API when SHADEFORM_API_KEY is set.
+    #[tokio::test]
+    async fn test_fetch_prices_from_shadeform_api() {
+        let api_key = match env::var("SHADEFORM_API_KEY") {
+            Ok(key) if !key.trim().is_empty() => key,
+            _ => {
+                eprintln!("SHADEFORM_API_KEY not set; skipping live Shadeform API test");
+                return;
+            }
+        };
+
+        let config = PricingConfig {
+            enabled: true,
+            sources: vec![PriceSource::Marketplace],
+            marketplace_api_key: Some(api_key),
+            aggregation_strategy: PriceAggregationStrategy::Median,
+            global_discount_percent: dec!(-20.0),
+            fallback_to_static: true,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let providers =
+            create_providers(&config).expect("Expected marketplace provider with API key");
+        assert!(
+            !providers.is_empty(),
+            "Dynamic pricing should create at least one provider"
+        );
+
+        let service = PricingService::new(providers, cache, config.clone());
+
+        let prices = service
+            .fetch_latest_prices()
+            .await
+            .expect("Shadeform API call should succeed with valid key");
+        assert!(
+            !prices.is_empty(),
+            "Shadeform API should return at least one GPU price"
+        );
+
+        let mut aggregated = service
+            .aggregate_prices(prices)
+            .await
+            .expect("Aggregation should succeed");
+        assert!(
+            !aggregated.is_empty(),
+            "Aggregation should yield at least one GPU model"
+        );
+
+        let original = aggregated[0].market_price_per_hour;
+        service.apply_discounts(&mut aggregated);
+        let discounted = aggregated[0].discounted_price_per_hour;
+
+        let expected_multiplier =
+            Decimal::ONE + (config.global_discount_percent / Decimal::from(100));
+        let expected = (original * expected_multiplier).round_dp(4);
+
+        assert_eq!(
+            discounted.round_dp(4),
+            expected,
+            "Discounted price should reflect the configured global discount"
+        );
+        assert_eq!(
+            aggregated[0].discount_percent.round_dp(2),
+            config.global_discount_percent.round_dp(2),
+            "Discount percent metadata should match configuration"
+        );
     }
 
     /// Test discount calculation with GPU-specific override
