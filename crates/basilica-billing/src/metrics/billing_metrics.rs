@@ -27,7 +27,8 @@ impl BillingMetricNames {
     pub const PROCESSOR_RUNNING: &'static str = "basilica_billing_processor_running";
 
     pub const GRPC_REQUESTS: &'static str = "basilica_billing_grpc_requests_total";
-    pub const GRPC_REQUEST_DURATION: &'static str = "basilica_billing_grpc_request_duration_seconds";
+    pub const GRPC_REQUEST_DURATION: &'static str =
+        "basilica_billing_grpc_request_duration_seconds";
 
     pub const EVENT_PROCESSING_DURATION: &'static str =
         "basilica_billing_event_processing_duration_seconds";
@@ -45,7 +46,8 @@ impl BillingMetricNames {
     pub const AGGREGATION_FAILURES: &'static str = "basilica_billing_aggregation_failures_total";
     pub const BATCH_SIZE: &'static str = "basilica_billing_batch_size";
 
-    pub const PROMO_CODE_VALIDATIONS: &'static str = "basilica_billing_promo_code_validations_total";
+    pub const PROMO_CODE_VALIDATIONS: &'static str =
+        "basilica_billing_promo_code_validations_total";
     pub const PROMO_CODE_APPLIED: &'static str = "basilica_billing_promo_code_applied_total";
     pub const PROMO_CODE_FAILURES: &'static str = "basilica_billing_promo_code_failures_total";
     pub const DISCOUNT_AMOUNT: &'static str = "basilica_billing_discount_amount_total";
