@@ -25,14 +25,19 @@ pub struct BillingServer {
     config: BillingConfig,
     rds_connection: Arc<RdsConnection>,
     metrics: Option<Arc<BillingMetricsSystem>>,
+    pricing_service: Option<Arc<PricingService>>,
+    price_cache: Arc<PriceCache>,
 }
 
 impl BillingServer {
     pub fn new(rds_connection: Arc<RdsConnection>) -> Self {
+        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
         Self {
             config: BillingConfig::default(),
             rds_connection,
             metrics: None,
+            pricing_service: None,
+            price_cache,
         }
     }
 
@@ -60,10 +65,45 @@ impl BillingServer {
             )
         };
 
+        // Create shared price cache
+        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
+
+        // Build shared pricing service if enabled
+        let pricing_service = if config.pricing.enabled {
+            info!("Dynamic pricing is enabled, building pricing service");
+
+            match create_providers(&config.pricing) {
+                Ok(providers) if !providers.is_empty() => {
+                    info!("Created {} pricing providers", providers.len());
+                    Some(Arc::new(PricingService::new(
+                        providers,
+                        price_cache.clone(),
+                        config.pricing.clone(),
+                    )))
+                }
+                Ok(_) => {
+                    info!("No pricing providers configured, dynamic pricing will be disabled");
+                    None
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to create pricing providers: {}. Dynamic pricing will be disabled.",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            info!("Dynamic pricing is disabled");
+            None
+        };
+
         Ok(Self {
             config,
             rds_connection,
             metrics,
+            pricing_service,
+            price_cache,
         })
     }
 
@@ -97,11 +137,13 @@ impl BillingServer {
         let telemetry_ingester = Arc::new(telemetry_ingester);
         let telemetry_processor = Arc::new(TelemetryProcessor::new(self.rds_connection.clone()));
 
-        let billing_service = BillingServiceImpl::new(
+        let billing_service = BillingServiceImpl::new_with_pricing(
             self.rds_connection.clone(),
             telemetry_ingester.clone(),
             telemetry_processor.clone(),
             self.metrics.clone(),
+            self.pricing_service.clone(),
+            self.price_cache.clone(),
         )
         .await?;
 
@@ -129,9 +171,14 @@ impl BillingServer {
 
         let rental_repository = Arc::new(SqlRentalRepository::new(self.rds_connection.clone()));
         let credit_repository = Arc::new(SqlCreditRepository::new(self.rds_connection.clone()));
-        let package_repository = Arc::new(SqlPackageRepository::new(
-            self.rds_connection.pool().clone(),
-        ));
+
+        // Create package repository with shared pricing service
+        let mut package_repository = SqlPackageRepository::new(self.rds_connection.pool().clone());
+        if let Some(ref pricing_service) = self.pricing_service {
+            package_repository = package_repository.with_pricing_service(pricing_service.clone());
+        }
+        let package_repository = Arc::new(package_repository);
+
         package_repository
             .initialize()
             .await
@@ -185,7 +232,11 @@ impl BillingServer {
         info!("Aggregation jobs started successfully");
 
         // Start price sync job if dynamic pricing is enabled
-        Self::start_price_sync_job(self.rds_connection.clone(), self.config.clone()).await;
+        if let Some(ref pricing_service) = self.pricing_service {
+            Self::start_price_sync_job(pricing_service.clone(), self.config.pricing.clone()).await;
+        } else {
+            info!("Pricing service not available, price sync job will not start");
+        }
 
         let mut server_builder = Server::builder();
 
@@ -298,44 +349,14 @@ impl BillingServer {
         Ok(())
     }
 
-    /// Start the background price sync job
-    pub async fn start_price_sync_job(rds_connection: Arc<RdsConnection>, config: BillingConfig) {
-        if !config.pricing.enabled {
-            info!("Dynamic pricing is disabled, price sync job will not start");
-            return;
-        }
-
+    /// Start the background price sync job with shared pricing service
+    pub async fn start_price_sync_job(
+        pricing_service: Arc<PricingService>,
+        pricing_config: crate::pricing::types::PricingConfig,
+    ) {
         info!("Starting price sync background job");
 
         tokio::spawn(async move {
-            let pricing_config = config.pricing.clone();
-            let pool = rds_connection.pool().clone();
-
-            // Create pricing service components
-            let cache = Arc::new(PriceCache::new(pool));
-
-            let providers = match create_providers(&pricing_config) {
-                Ok(p) => p,
-                Err(e) => {
-                    error!(
-                        "Failed to create price providers: {}. Price sync disabled.",
-                        e
-                    );
-                    return;
-                }
-            };
-
-            if providers.is_empty() {
-                info!("No price providers configured, price sync job will not run");
-                return;
-            }
-
-            let pricing_service = Arc::new(PricingService::new(
-                providers,
-                cache,
-                pricing_config.clone(),
-            ));
-
             info!(
                 "Price sync job configured: sync_hour_utc={:?}, update_interval={}s",
                 pricing_config.sync_hour_utc, pricing_config.update_interval_seconds

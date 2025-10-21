@@ -66,12 +66,16 @@ impl BillingServiceImpl {
         telemetry_processor: Arc<TelemetryProcessor>,
         metrics: Option<Arc<BillingMetricsSystem>>,
     ) -> anyhow::Result<Self> {
+        // Create default price cache
+        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
+
         Self::new_with_pricing(
             rds_connection,
             telemetry_ingester,
             telemetry_processor,
             metrics,
             None,
+            price_cache,
         )
         .await
     }
@@ -82,10 +86,18 @@ impl BillingServiceImpl {
         telemetry_processor: Arc<TelemetryProcessor>,
         metrics: Option<Arc<BillingMetricsSystem>>,
         pricing_service: Option<Arc<PricingService>>,
+        price_cache: Arc<PriceCache>,
     ) -> anyhow::Result<Self> {
         let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));
         let rental_repository = Arc::new(SqlRentalRepository::new(rds_connection.clone()));
-        let package_repository = Arc::new(SqlPackageRepository::new(rds_connection.pool().clone()));
+
+        // Create package repository with shared pricing service if available
+        let mut package_repository = SqlPackageRepository::new(rds_connection.pool().clone());
+        if let Some(ref pricing_svc) = pricing_service {
+            package_repository = package_repository.with_pricing_service(pricing_svc.clone());
+        }
+        let package_repository = Arc::new(package_repository);
+
         package_repository
             .initialize()
             .await
@@ -116,9 +128,6 @@ impl BillingServiceImpl {
             1000,
             90,
         ));
-
-        // Create price cache
-        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
 
         Ok(Self {
             credit_manager: Arc::new(CreditManager::new(credit_repository.clone())),
