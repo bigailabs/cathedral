@@ -1328,12 +1328,6 @@ impl BillingService for BillingServiceImpl {
         // Calculate next scheduled sync (assumes default 2 AM UTC)
         let next_scheduled_sync = crate::server::BillingServer::calculate_next_sync_time(Some(2));
 
-        let providers_used = vec![
-            "VastAI".to_string(),
-            "RunPod".to_string(),
-            // Add more based on configured providers
-        ];
-
         let response = SyncPricesResponse {
             success: true,
             prices_synced: prices_synced as u32,
@@ -1349,7 +1343,6 @@ impl BillingService for BillingServiceImpl {
                 seconds: next_scheduled_sync.timestamp(),
                 nanos: next_scheduled_sync.timestamp_subsec_nanos() as i32,
             }),
-            providers_used,
             error_message: String::new(),
         };
 

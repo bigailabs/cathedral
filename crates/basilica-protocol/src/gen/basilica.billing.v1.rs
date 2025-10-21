@@ -522,8 +522,6 @@ pub struct SyncPricesResponse {
     pub sync_completed_at: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, optional, tag = "5")]
     pub next_scheduled_sync: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(string, repeated, tag = "6")]
-    pub providers_used: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag = "7")]
     pub error_message: ::prost::alloc::string::String,
 }

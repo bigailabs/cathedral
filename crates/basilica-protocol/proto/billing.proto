@@ -331,7 +331,6 @@ message SyncPricesResponse {
     google.protobuf.Timestamp sync_started_at = 3;
     google.protobuf.Timestamp sync_completed_at = 4;
     google.protobuf.Timestamp next_scheduled_sync = 5;
-    repeated string providers_used = 6;
     string error_message = 7;
 }
 
