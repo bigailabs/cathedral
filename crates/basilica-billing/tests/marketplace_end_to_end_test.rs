@@ -51,11 +51,6 @@ fn test_load_test_configuration() {
         "Update interval should be 3600 seconds for tests"
     );
     assert_eq!(
-        config.pricing.sync_hour_utc,
-        Some(2),
-        "Sync hour should be 2 AM UTC"
-    );
-    assert_eq!(
         config.pricing.cache_ttl_seconds, 3600,
         "Cache TTL should be 3600 seconds"
     );
@@ -331,7 +326,6 @@ fn test_complete_pricing_configuration() {
         global_discount_percent: dec!(-20.0),
         cache_ttl_seconds: 3600,
         update_interval_seconds: 3600,
-        sync_hour_utc: Some(2),
         fallback_to_static: true,
         ..Default::default()
     };
@@ -357,7 +351,6 @@ fn test_complete_pricing_configuration() {
     assert_eq!(config.global_discount_percent, dec!(-20.0));
     assert_eq!(config.cache_ttl_seconds, 3600);
     assert_eq!(config.update_interval_seconds, 3600);
-    assert_eq!(config.sync_hour_utc, Some(2));
     assert!(config.fallback_to_static);
     assert_eq!(config.gpu_discounts.len(), 3);
 
@@ -369,7 +362,6 @@ fn test_complete_pricing_configuration() {
     println!("  • GPU overrides: {}", config.gpu_discounts.len());
     println!("  • Cache TTL: {}s", config.cache_ttl_seconds);
     println!("  • Update interval: {}s", config.update_interval_seconds);
-    println!("  • Sync hour: {:?} UTC", config.sync_hour_utc);
     println!("  • Fallback enabled: {}", config.fallback_to_static);
 }
 

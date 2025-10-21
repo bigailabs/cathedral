@@ -272,14 +272,6 @@ impl BillingConfig {
                 });
             }
 
-            if let Some(hour) = self.pricing.sync_hour_utc {
-                if hour > 23 {
-                    return Err(ConfigurationError::ValidationFailed {
-                        details: format!("pricing.sync_hour_utc must be 0-23, got {}", hour),
-                    });
-                }
-            }
-
             if self.pricing.sources.is_empty() {
                 return Err(ConfigurationError::ValidationFailed {
                     details: "pricing.sources must not be empty when pricing is enabled"
@@ -400,23 +392,6 @@ mod tests {
         match err {
             ConfigurationError::ValidationFailed { details } => {
                 assert!(details.contains("cache_ttl_seconds"));
-            }
-            _ => panic!("Expected ValidationFailed error"),
-        }
-    }
-
-    #[test]
-    fn test_pricing_config_validation_invalid_sync_hour() {
-        let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.sync_hour_utc = Some(25);
-
-        let result = config.validate();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        match err {
-            ConfigurationError::ValidationFailed { details } => {
-                assert!(details.contains("sync_hour_utc"));
             }
             _ => panic!("Expected ValidationFailed error"),
         }

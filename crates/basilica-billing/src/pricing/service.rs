@@ -268,7 +268,11 @@ impl PricingService {
         }
 
         // Store in cache
-        match self.cache.store(aggregated_prices, self.config.cache_ttl_seconds).await {
+        match self
+            .cache
+            .store(aggregated_prices, self.config.cache_ttl_seconds)
+            .await
+        {
             Ok(()) => {
                 info!("Successfully synced {} GPU prices", count);
 

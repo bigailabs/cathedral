@@ -164,7 +164,6 @@ fn test_configuration_validation() {
     let config = PricingConfig::default();
     assert!(!config.enabled);
     assert_eq!(config.cache_ttl_seconds, 86400);
-    assert_eq!(config.sync_hour_utc, Some(2));
     assert_eq!(config.sources.len(), 1);
     assert_eq!(config.sources[0], PriceSource::Marketplace);
     println!("✓ Default configuration is valid");
@@ -173,14 +172,12 @@ fn test_configuration_validation() {
     let config = PricingConfig {
         enabled: true,
         cache_ttl_seconds: 43200,
-        sync_hour_utc: Some(6),
         global_discount_percent: dec!(-25.0),
         marketplace_api_key: Some("custom-key".to_string()),
         ..Default::default()
     };
 
     assert_eq!(config.cache_ttl_seconds, 43200);
-    assert_eq!(config.sync_hour_utc, Some(6));
     assert_eq!(config.global_discount_percent, dec!(-25.0));
     assert_eq!(config.marketplace_api_key, Some("custom-key".to_string()));
     println!("✓ Custom configuration validated");
@@ -215,7 +212,6 @@ async fn test_end_to_end_configuration_and_providers() {
         global_discount_percent: dec!(-20.0), // 20% discount
         fallback_to_static: true,
         cache_ttl_seconds: 3600,
-        sync_hour_utc: Some(3),
         ..Default::default()
     };
 
@@ -250,11 +246,6 @@ async fn test_end_to_end_configuration_and_providers() {
     assert_eq!(
         config.cache_ttl_seconds, 3600,
         "Cache TTL should be 3600 seconds"
-    );
-    assert_eq!(
-        config.sync_hour_utc,
-        Some(3),
-        "Sync hour should be 3 AM UTC"
     );
 
     // 4. Test marketplace provider requires API key
@@ -375,7 +366,7 @@ fn test_cache_ttl_configuration() {
 
     // Verify that cache TTL is independent of update interval
     let config_diff_intervals = PricingConfig {
-        cache_ttl_seconds: 7200,      // 2 hours
+        cache_ttl_seconds: 7200,       // 2 hours
         update_interval_seconds: 3600, // 1 hour
         ..Default::default()
     };

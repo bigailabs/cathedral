@@ -56,6 +56,7 @@ pub struct BillingServiceImpl {
     event_store: Arc<EventStore>,
     metrics: Option<Arc<BillingMetricsSystem>>,
     pricing_service: Option<Arc<PricingService>>,
+    pricing_config: Option<crate::pricing::types::PricingConfig>,
     price_cache: Arc<PriceCache>,
 }
 
@@ -75,6 +76,7 @@ impl BillingServiceImpl {
             telemetry_processor,
             metrics,
             None,
+            None,
             price_cache,
         )
         .await
@@ -86,6 +88,7 @@ impl BillingServiceImpl {
         telemetry_processor: Arc<TelemetryProcessor>,
         metrics: Option<Arc<BillingMetricsSystem>>,
         pricing_service: Option<Arc<PricingService>>,
+        pricing_config: Option<crate::pricing::types::PricingConfig>,
         price_cache: Arc<PriceCache>,
     ) -> anyhow::Result<Self> {
         let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));
@@ -147,6 +150,7 @@ impl BillingServiceImpl {
             event_store,
             metrics,
             pricing_service,
+            pricing_config,
             price_cache,
         })
     }
@@ -1325,8 +1329,13 @@ impl BillingService for BillingServiceImpl {
 
         let sync_completed_at = chrono::Utc::now();
 
-        // Calculate next scheduled sync (assumes default 2 AM UTC)
-        let next_scheduled_sync = crate::server::BillingServer::calculate_next_sync_time(Some(2));
+        // Calculate next scheduled sync based on update_interval_seconds
+        let next_scheduled_sync = if let Some(ref config) = self.pricing_config {
+            sync_completed_at + chrono::Duration::seconds(config.update_interval_seconds as i64)
+        } else {
+            // Default to 24 hours if config not available
+            sync_completed_at + chrono::Duration::hours(24)
+        };
 
         let response = SyncPricesResponse {
             success: true,

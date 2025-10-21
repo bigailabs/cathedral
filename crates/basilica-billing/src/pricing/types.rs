@@ -18,11 +18,8 @@ pub struct PricingConfig {
     pub gpu_discounts: HashMap<String, Decimal>,
 
     /// Price update interval in seconds (default: 86400 = daily)
+    /// Sync runs every N seconds from service start
     pub update_interval_seconds: u64,
-
-    /// Optional: specific UTC hour to run daily sync (0-23)
-    /// If None, sync runs on interval from service start
-    pub sync_hour_utc: Option<u8>,
 
     /// Cache TTL in seconds (default: 86400 = 24 hours)
     pub cache_ttl_seconds: u64,
@@ -64,7 +61,6 @@ impl Default for PricingConfig {
             global_discount_percent: Decimal::from(-20), // 20% discount
             gpu_discounts: HashMap::new(),
             update_interval_seconds: 86400, // 24 hours (daily)
-            sync_hour_utc: Some(2),         // Sync at 2:00 AM UTC
             cache_ttl_seconds: 86400,       // 24 hours
             fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
@@ -190,7 +186,6 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.global_discount_percent, Decimal::from(-20));
         assert_eq!(config.update_interval_seconds, 86400);
-        assert_eq!(config.sync_hour_utc, Some(2));
         assert_eq!(config.cache_ttl_seconds, 86400);
         assert!(config.fallback_to_static);
         assert_eq!(config.sources.len(), 1);
@@ -351,7 +346,6 @@ mod tests {
             global_discount_percent: Decimal::from(-20),
             gpu_discounts: HashMap::new(),
             update_interval_seconds: 86400,
-            sync_hour_utc: Some(2),
             cache_ttl_seconds: 86400,
             fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
