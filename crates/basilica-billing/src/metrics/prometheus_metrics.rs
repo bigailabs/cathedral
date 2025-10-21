@@ -23,224 +23,224 @@ impl PrometheusMetricsRecorder {
 
     fn register_standard_metrics() {
         describe_counter!(
-            "basilca_billing_credits_applied_total",
+            "basilica_billing_credits_applied_total",
             Unit::Count,
             "Total credits applied to user accounts"
         );
 
         describe_counter!(
-            "basilca_billing_rentals_tracked_total",
+            "basilica_billing_rentals_tracked_total",
             Unit::Count,
             "Total rentals tracked"
         );
 
         describe_counter!(
-            "basilca_billing_rentals_finalized_total",
+            "basilica_billing_rentals_finalized_total",
             Unit::Count,
             "Total rentals finalized"
         );
 
         describe_gauge!(
-            "basilca_billing_rentals_active",
+            "basilica_billing_rentals_active",
             Unit::Count,
             "Currently active rentals"
         );
 
         describe_gauge!(
-            "basilca_billing_total_credits_balance",
+            "basilica_billing_total_credits_balance",
             Unit::Count,
             "Total credits balance across all users"
         );
 
         describe_counter!(
-            "basilca_billing_events_processed_total",
+            "basilica_billing_events_processed_total",
             Unit::Count,
             "Total billing events processed"
         );
 
         describe_counter!(
-            "basilca_billing_events_failed_total",
+            "basilica_billing_events_failed_total",
             Unit::Count,
             "Total billing events that failed processing"
         );
 
         describe_gauge!(
-            "basilca_billing_event_queue_size",
+            "basilica_billing_event_queue_size",
             Unit::Count,
             "Current size of unprocessed event queue"
         );
 
         describe_counter!(
-            "basilca_billing_telemetry_received_total",
+            "basilica_billing_telemetry_received_total",
             Unit::Count,
             "Total telemetry data points received"
         );
 
         describe_counter!(
-            "basilca_billing_telemetry_dropped_total",
+            "basilica_billing_telemetry_dropped_total",
             Unit::Count,
             "Total telemetry data points dropped"
         );
 
         describe_gauge!(
-            "basilca_billing_telemetry_buffer_size",
+            "basilica_billing_telemetry_buffer_size",
             Unit::Count,
             "Current telemetry buffer size"
         );
 
         describe_counter!(
-            "basilca_billing_rules_applied_total",
+            "basilica_billing_rules_applied_total",
             Unit::Count,
             "Total billing rules applied"
         );
 
         describe_counter!(
-            "basilca_billing_rules_evaluated_total",
+            "basilica_billing_rules_evaluated_total",
             Unit::Count,
             "Total billing rules evaluated"
         );
 
         describe_gauge!(
-            "basilca_billing_processor_running",
+            "basilica_billing_processor_running",
             Unit::Count,
             "Event processor running status (1 = running, 0 = stopped)"
         );
 
         describe_histogram!(
-            "basilca_billing_grpc_request_duration_seconds",
+            "basilica_billing_grpc_request_duration_seconds",
             Unit::Seconds,
             "Duration of gRPC request handling"
         );
 
         describe_counter!(
-            "basilca_billing_grpc_requests_total",
+            "basilica_billing_grpc_requests_total",
             Unit::Count,
             "Total number of gRPC requests"
         );
 
         describe_histogram!(
-            "basilca_billing_event_processing_duration_seconds",
+            "basilica_billing_event_processing_duration_seconds",
             Unit::Seconds,
             "Duration of event processing"
         );
 
         describe_histogram!(
-            "basilca_billing_aggregation_duration_seconds",
+            "basilica_billing_aggregation_duration_seconds",
             Unit::Seconds,
             "Duration of aggregation jobs"
         );
 
         describe_histogram!(
-            "basilca_billing_database_query_duration_seconds",
+            "basilica_billing_database_query_duration_seconds",
             Unit::Seconds,
             "Duration of database queries"
         );
 
         describe_counter!(
-            "basilca_billing_database_errors_total",
+            "basilica_billing_database_errors_total",
             Unit::Count,
             "Total database errors encountered"
         );
 
         describe_counter!(
-            "basilca_billing_reservations_created_total",
+            "basilica_billing_reservations_created_total",
             Unit::Count,
             "Total credit reservations created"
         );
 
         describe_counter!(
-            "basilca_billing_reservations_released_total",
+            "basilica_billing_reservations_released_total",
             Unit::Count,
             "Total credit reservations released"
         );
 
         describe_gauge!(
-            "basilca_billing_health_status",
+            "basilica_billing_health_status",
             Unit::Count,
             "Health status of the billing service"
         );
 
         describe_counter!(
-            "basilca_billing_aggregation_runs_total",
+            "basilica_billing_aggregation_runs_total",
             Unit::Count,
             "Total aggregation job runs"
         );
 
         describe_counter!(
-            "basilca_billing_aggregation_failures_total",
+            "basilica_billing_aggregation_failures_total",
             Unit::Count,
             "Total aggregation job failures"
         );
 
         describe_gauge!(
-            "basilca_billing_batch_size",
+            "basilica_billing_batch_size",
             Unit::Count,
             "Current batch size for event processing"
         );
 
         // Dynamic Pricing Metrics
         describe_counter!(
-            "basilca_billing_pricing_sync_total",
+            "basilica_billing_pricing_sync_total",
             Unit::Count,
             "Total successful GPU price syncs"
         );
 
         describe_counter!(
-            "basilca_billing_pricing_sync_errors_total",
+            "basilica_billing_pricing_sync_errors_total",
             Unit::Count,
             "Total GPU price sync errors"
         );
 
         describe_histogram!(
-            "basilca_billing_pricing_fetch_duration_seconds",
+            "basilica_billing_pricing_fetch_duration_seconds",
             Unit::Seconds,
             "Duration of GPU price fetching per provider"
         );
 
         describe_histogram!(
-            "basilca_billing_pricing_sync_duration_seconds",
+            "basilica_billing_pricing_sync_duration_seconds",
             Unit::Seconds,
             "Duration of complete GPU price sync operations"
         );
 
         describe_gauge!(
-            "basilca_billing_pricing_cache_size",
+            "basilica_billing_pricing_cache_size",
             Unit::Count,
             "Number of GPU prices currently cached"
         );
 
         describe_gauge!(
-            "basilca_billing_pricing_oldest_cache_age_seconds",
+            "basilica_billing_pricing_oldest_cache_age_seconds",
             Unit::Seconds,
             "Age of the oldest cached GPU price in seconds"
         );
 
         describe_counter!(
-            "basilca_billing_pricing_fallback_to_static_total",
+            "basilica_billing_pricing_fallback_to_static_total",
             Unit::Count,
             "Total times dynamic pricing fell back to static pricing"
         );
 
         describe_counter!(
-            "basilca_billing_pricing_prices_fetched_total",
+            "basilica_billing_pricing_prices_fetched_total",
             Unit::Count,
             "Total GPU prices fetched from providers"
         );
 
         describe_counter!(
-            "basilca_billing_pricing_provider_errors_total",
+            "basilica_billing_pricing_provider_errors_total",
             Unit::Count,
             "Total provider fetch errors"
         );
 
         describe_counter!(
-            "basilca_billing_pricing_cache_hits_total",
+            "basilica_billing_pricing_cache_hits_total",
             Unit::Count,
             "Total cache hits for GPU price lookups"
         );
 
         describe_counter!(
-            "basilca_billing_pricing_cache_misses_total",
+            "basilica_billing_pricing_cache_misses_total",
             Unit::Count,
             "Total cache misses for GPU price lookups"
         );

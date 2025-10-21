@@ -69,22 +69,22 @@ impl BillingBusinessMetrics {
     async fn collect_and_publish(&self) -> Result<()> {
         let active_rentals = *self.active_rentals_count.read().await as f64;
         self.recorder
-            .record_gauge("basilca_billing_rentals_active", active_rentals, &[])
+            .record_gauge("basilica_billing_rentals_active", active_rentals, &[])
             .await;
 
         let total_balance = *self.total_credits_balance.read().await;
         self.recorder
-            .record_gauge("basilca_billing_total_credits_balance", total_balance, &[])
+            .record_gauge("basilica_billing_total_credits_balance", total_balance, &[])
             .await;
 
         let queue_size = *self.event_queue_size.read().await as f64;
         self.recorder
-            .record_gauge("basilca_billing_event_queue_size", queue_size, &[])
+            .record_gauge("basilica_billing_event_queue_size", queue_size, &[])
             .await;
 
         let buffer_size = *self.telemetry_buffer_size.read().await as f64;
         self.recorder
-            .record_gauge("basilca_billing_telemetry_buffer_size", buffer_size, &[])
+            .record_gauge("basilica_billing_telemetry_buffer_size", buffer_size, &[])
             .await;
 
         let processor_status = if *self.processor_running.read().await {
@@ -93,11 +93,11 @@ impl BillingBusinessMetrics {
             0.0
         };
         self.recorder
-            .record_gauge("basilca_billing_processor_running", processor_status, &[])
+            .record_gauge("basilica_billing_processor_running", processor_status, &[])
             .await;
 
         self.recorder
-            .record_gauge("basilca_billing_health_status", 1.0, &[])
+            .record_gauge("basilica_billing_health_status", 1.0, &[])
             .await;
 
         Ok(())
@@ -108,7 +108,7 @@ impl BillingBusinessMetrics {
         let amount_units = (amount * 1000.0) as u64;
         self.recorder
             .record_counter(
-                "basilca_billing_credits_applied_total",
+                "basilica_billing_credits_applied_total",
                 amount_units,
                 labels,
             )
@@ -118,7 +118,7 @@ impl BillingBusinessMetrics {
     pub async fn record_rental_tracked(&self, labels: &[(&str, &str)]) {
         self.stats.rentals_tracked.fetch_add(1, Ordering::Relaxed);
         self.recorder
-            .increment_counter("basilca_billing_rentals_tracked_total", labels)
+            .increment_counter("basilica_billing_rentals_tracked_total", labels)
             .await;
     }
 
@@ -127,7 +127,7 @@ impl BillingBusinessMetrics {
         let cost_units = (total_cost * 1000.0) as u64;
         self.recorder
             .record_counter(
-                "basilca_billing_rentals_finalized_total",
+                "basilica_billing_rentals_finalized_total",
                 cost_units,
                 labels,
             )
@@ -138,7 +138,7 @@ impl BillingBusinessMetrics {
         self.stats.events_processed.fetch_add(1, Ordering::Relaxed);
         self.recorder
             .increment_counter(
-                "basilca_billing_events_processed_total",
+                "basilica_billing_events_processed_total",
                 &[("event_type", event_type)],
             )
             .await;
@@ -148,7 +148,7 @@ impl BillingBusinessMetrics {
         self.stats.events_failed.fetch_add(1, Ordering::Relaxed);
         self.recorder
             .increment_counter(
-                "basilca_billing_events_failed_total",
+                "basilica_billing_events_failed_total",
                 &[("event_type", event_type), ("reason", reason)],
             )
             .await;
@@ -159,7 +159,7 @@ impl BillingBusinessMetrics {
             .telemetry_received
             .fetch_add(1, Ordering::Relaxed);
         self.recorder
-            .increment_counter("basilca_billing_telemetry_received_total", labels)
+            .increment_counter("basilica_billing_telemetry_received_total", labels)
             .await;
     }
 
@@ -167,7 +167,7 @@ impl BillingBusinessMetrics {
         self.stats.telemetry_dropped.fetch_add(1, Ordering::Relaxed);
         self.recorder
             .increment_counter(
-                "basilca_billing_telemetry_dropped_total",
+                "basilica_billing_telemetry_dropped_total",
                 &[("reason", reason)],
             )
             .await;
@@ -177,7 +177,7 @@ impl BillingBusinessMetrics {
         self.stats.rules_applied.fetch_add(1, Ordering::Relaxed);
         self.recorder
             .increment_counter(
-                "basilca_billing_rules_applied_total",
+                "basilica_billing_rules_applied_total",
                 &[("rule_type", rule_type)],
             )
             .await;
@@ -188,13 +188,13 @@ impl BillingBusinessMetrics {
         let status = if success { "success" } else { "failure" };
         let labels = &[("type", aggregation_type), ("status", status)];
         self.recorder
-            .increment_counter("basilca_billing_aggregation_runs_total", labels)
+            .increment_counter("basilica_billing_aggregation_runs_total", labels)
             .await;
 
         if !success {
             self.recorder
                 .increment_counter(
-                    "basilca_billing_aggregation_failures_total",
+                    "basilica_billing_aggregation_failures_total",
                     &[("type", aggregation_type)],
                 )
                 .await;
@@ -205,7 +205,7 @@ impl BillingBusinessMetrics {
         self.stats.database_errors.fetch_add(1, Ordering::Relaxed);
         self.recorder
             .increment_counter(
-                "basilca_billing_database_errors_total",
+                "basilica_billing_database_errors_total",
                 &[("operation", operation)],
             )
             .await;

@@ -7,18 +7,18 @@ pub struct PricingMetrics;
 impl PricingMetrics {
     /// Increment the pricing sync counter (successful syncs)
     pub fn record_sync_success() {
-        counter!("basilca_billing_pricing_sync_total").increment(1);
+        counter!("basilica_billing_pricing_sync_total").increment(1);
     }
 
     /// Increment the pricing sync errors counter
     pub fn record_sync_error() {
-        counter!("basilca_billing_pricing_sync_errors_total").increment(1);
+        counter!("basilica_billing_pricing_sync_errors_total").increment(1);
     }
 
     /// Record the duration of a pricing fetch operation for a specific provider
     pub fn record_fetch_duration(provider: &str, duration: std::time::Duration) {
         histogram!(
-            "basilca_billing_pricing_fetch_duration_seconds",
+            "basilica_billing_pricing_fetch_duration_seconds",
             &[("provider", provider.to_string())]
         )
         .record(duration.as_secs_f64());
@@ -26,18 +26,18 @@ impl PricingMetrics {
 
     /// Update the cache size gauge
     pub fn set_cache_size(size: usize) {
-        gauge!("basilca_billing_pricing_cache_size").set(size as f64);
+        gauge!("basilica_billing_pricing_cache_size").set(size as f64);
     }
 
     /// Update the oldest cache age gauge (in seconds)
     pub fn set_oldest_cache_age(age_seconds: f64) {
-        gauge!("basilca_billing_pricing_oldest_cache_age_seconds").set(age_seconds);
+        gauge!("basilica_billing_pricing_oldest_cache_age_seconds").set(age_seconds);
     }
 
     /// Increment the fallback to static pricing counter
     pub fn record_fallback_to_static(gpu_model: &str) {
         counter!(
-            "basilca_billing_pricing_fallback_to_static_total",
+            "basilica_billing_pricing_fallback_to_static_total",
             &[("gpu_model", gpu_model.to_string())]
         )
         .increment(1);
@@ -50,13 +50,13 @@ impl PricingMetrics {
 
     /// Record the complete sync duration
     pub fn record_sync_duration(duration: std::time::Duration) {
-        histogram!("basilca_billing_pricing_sync_duration_seconds").record(duration.as_secs_f64());
+        histogram!("basilica_billing_pricing_sync_duration_seconds").record(duration.as_secs_f64());
     }
 
     /// Record the number of prices fetched from a provider
     pub fn record_prices_fetched(provider: &str, count: usize) {
         counter!(
-            "basilca_billing_pricing_prices_fetched_total",
+            "basilica_billing_pricing_prices_fetched_total",
             &[("provider", provider.to_string())]
         )
         .increment(count as u64);
@@ -65,7 +65,7 @@ impl PricingMetrics {
     /// Record a provider fetch error
     pub fn record_provider_error(provider: &str) {
         counter!(
-            "basilca_billing_pricing_provider_errors_total",
+            "basilica_billing_pricing_provider_errors_total",
             &[("provider", provider.to_string())]
         )
         .increment(1);
@@ -74,7 +74,7 @@ impl PricingMetrics {
     /// Record cache hits
     pub fn record_cache_hit(gpu_model: &str) {
         counter!(
-            "basilca_billing_pricing_cache_hits_total",
+            "basilica_billing_pricing_cache_hits_total",
             &[("gpu_model", gpu_model.to_string())]
         )
         .increment(1);
@@ -83,7 +83,7 @@ impl PricingMetrics {
     /// Record cache misses
     pub fn record_cache_miss(gpu_model: &str) {
         counter!(
-            "basilca_billing_pricing_cache_misses_total",
+            "basilica_billing_pricing_cache_misses_total",
             &[("gpu_model", gpu_model.to_string())]
         )
         .increment(1);
