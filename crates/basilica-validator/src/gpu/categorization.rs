@@ -1,11 +1,8 @@
 use basilica_common::identity::MinerUid;
-use basilica_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
 use std::collections::HashMap;
-use std::fmt;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

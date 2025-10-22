@@ -2,12 +2,12 @@
 mod tests {
     use crate::gpu::categorization::*;
     use basilica_common::identity::MinerUid;
+    use basilica_common::types::GpuCategory;
     use chrono::Utc;
+    use std::str::FromStr;
 
     #[test]
     fn test_gpu_model_normalization() {
-        use std::str::FromStr;
-
         // Test A100 variants
         assert_eq!(
             GpuCategory::from_str("NVIDIA A100 PCIe")
@@ -464,8 +464,6 @@ mod tests {
 
     #[test]
     fn test_complex_gpu_normalization_scenarios() {
-        use std::str::FromStr;
-
         // Test multiple NVIDIA prefixes
         assert_eq!(
             GpuCategory::from_str("NVIDIA NVIDIA GeForce RTX 4090")

@@ -132,11 +132,7 @@ impl GpuCategory {
     /// assert_eq!(supported, vec!["A100", "H100", "B200"]);
     /// ```
     pub fn supported_models() -> Vec<String> {
-        vec![
-            "A100".to_string(),
-            "H100".to_string(),
-            "B200".to_string(),
-        ]
+        vec!["A100".to_string(), "H100".to_string(), "B200".to_string()]
     }
 
     /// Get the use case description for this GPU category
