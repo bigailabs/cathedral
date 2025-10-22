@@ -54,6 +54,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_num_gpus() -> u32 {
+    1
+}
+
 impl Default for PricingConfig {
     fn default() -> Self {
         Self {
@@ -99,6 +103,11 @@ pub struct GpuPrice {
 
     /// VRAM in GB
     pub vram_gb: Option<u32>,
+
+    /// Number of GPUs in this configuration (e.g., 1, 2, 4, 8)
+    /// Used to normalize prices for fair comparison across configurations
+    #[serde(default = "default_num_gpus")]
+    pub num_gpus: u32,
 
     /// Raw market price per hour (before discount)
     pub market_price_per_hour: Decimal,
@@ -153,6 +162,69 @@ impl GpuPrice {
     }
 }
 
+/// Aggregated GPU price (computed from multiple providers)
+/// This type represents a synthetic price that has been aggregated across multiple
+/// provider prices. It does not have provider-specific fields like provider name,
+/// location, or instance name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregatedGpuPrice {
+    /// GPU model name (e.g., "H100", "A100")
+    pub gpu_model: String,
+
+    /// VRAM in GB
+    pub vram_gb: Option<u32>,
+
+    /// Number of GPUs (normalized to 1 after aggregation)
+    pub num_gpus: u32,
+
+    /// Raw market price per hour (before discount)
+    pub market_price_per_hour: Decimal,
+
+    /// Discounted price per hour (after applying discount)
+    pub discounted_price_per_hour: Decimal,
+
+    /// Discount applied as percentage
+    pub discount_percent: Decimal,
+
+    /// Aggregation strategy used to compute this price
+    pub aggregation_strategy: PriceAggregationStrategy,
+
+    /// Last updated timestamp
+    pub updated_at: DateTime<Utc>,
+
+    /// Whether this represents spot/interruptible instances
+    pub is_spot: bool,
+}
+
+impl AggregatedGpuPrice {
+    /// Apply discount percentage to market price
+    pub fn apply_discount(&mut self, discount_percent: Decimal) {
+        self.discount_percent = discount_percent;
+        let discount_multiplier = Decimal::ONE + (discount_percent / Decimal::from(100));
+        self.discounted_price_per_hour = self.market_price_per_hour * discount_multiplier;
+    }
+}
+
+/// Convert aggregated price to regular GpuPrice for storage in cache
+impl From<AggregatedGpuPrice> for GpuPrice {
+    fn from(aggregated: AggregatedGpuPrice) -> Self {
+        GpuPrice {
+            gpu_model: aggregated.gpu_model,
+            vram_gb: aggregated.vram_gb,
+            num_gpus: aggregated.num_gpus,
+            market_price_per_hour: aggregated.market_price_per_hour,
+            discounted_price_per_hour: aggregated.discounted_price_per_hour,
+            discount_percent: aggregated.discount_percent,
+            source: format!("aggregated_{:?}", aggregated.aggregation_strategy).to_lowercase(),
+            provider: "aggregated".to_string(),
+            location: None,
+            instance_name: None,
+            updated_at: aggregated.updated_at,
+            is_spot: aggregated.is_spot,
+        }
+    }
+}
+
 /// Filter for querying prices
 #[derive(Debug, Clone, Default)]
 pub struct PriceQueryFilter {
@@ -199,6 +271,7 @@ mod tests {
         let mut price = GpuPrice {
             gpu_model: "H100".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(100),
             discounted_price_per_hour: Decimal::from(100),
             discount_percent: Decimal::ZERO,
@@ -246,6 +319,7 @@ mod tests {
         let mut price = GpuPrice {
             gpu_model: "H100".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(100),
             discounted_price_per_hour: Decimal::from(100),
             discount_percent: Decimal::ZERO,
@@ -269,6 +343,7 @@ mod tests {
         let mut price = GpuPrice {
             gpu_model: "A100".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(100),
             discounted_price_per_hour: Decimal::from(100),
             discount_percent: Decimal::ZERO,

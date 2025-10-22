@@ -39,7 +39,6 @@ struct MarketplaceInstanceType {
 struct MarketplaceConfiguration {
     gpu_type: String,
     #[serde(default)]
-    #[allow(dead_code)]
     num_gpus: Option<u32>,
     #[serde(default)]
     vram_per_gpu_in_gb: Option<u32>,
@@ -106,11 +105,15 @@ impl MarketplaceProvider {
             instance.availability.iter().collect()
         };
 
+        // Get number of GPUs from configuration, default to 1 if not specified
+        let num_gpus = instance.configuration.num_gpus.unwrap_or(1);
+
         // If no regions or empty availability, create one entry with no location
         if regions_to_include.is_empty() {
             prices.push(GpuPrice {
                 gpu_model: instance.configuration.gpu_type.clone(),
                 vram_gb: instance.configuration.vram_per_gpu_in_gb,
+                num_gpus,
                 market_price_per_hour: market_price,
                 discounted_price_per_hour: market_price,
                 discount_percent: Decimal::ZERO,
@@ -126,6 +129,7 @@ impl MarketplaceProvider {
                 prices.push(GpuPrice {
                     gpu_model: instance.configuration.gpu_type.clone(),
                     vram_gb: instance.configuration.vram_per_gpu_in_gb,
+                    num_gpus,
                     market_price_per_hour: market_price,
                     discounted_price_per_hour: market_price,
                     discount_percent: Decimal::ZERO,
@@ -237,6 +241,7 @@ impl PriceProvider for MarketplaceProvider {
                 vec![
                     "H100".to_string(),
                     "H200".to_string(),
+                    "B200".to_string(),
                     "A100".to_string(),
                     "A40".to_string(),
                     "RTX4090".to_string(),

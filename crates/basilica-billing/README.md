@@ -80,16 +80,26 @@ marketplace_available_only = false  # Show all instances for testing
 
 #### Aggregation Strategies
 
-- `minimum`: Use lowest price across all sources
-- `average`: Use average price (default)
+**All strategies normalize prices by GPU count before aggregation**, ensuring fair comparison between different configurations (1x, 2x, 4x, 8x GPUs). This means a 2x H100 at $4/hr is correctly recognized as $2 per GPU, not treated as a separate $4/hr option.
+
+- `minimum`: Use lowest **per-GPU** price across all sources
+- `average`: Use average **per-GPU** price (default)
+
+**Example:**
+- Provider A: 1x H100 @ $2/hr → $2 per GPU
+- Provider B: 2x H100 @ $4/hr → $2 per GPU
+- Provider C: 8x H100 @ $24/hr → $3 per GPU
+- **Average strategy**: ($2 + $2 + $3) / 3 = **$2.33 per GPU** ✅
+- **Without normalization**: ($2 + $4 + $24) / 3 = $10/hr ❌ (incorrect!)
 
 #### How It Works
 
 1. **Price Fetching**: The service fetches GPU prices from the marketplace API at configured intervals (default: daily at 2 AM UTC)
-2. **Caching**: Prices are cached in the database to reduce API calls and improve performance
-3. **Discount Application**: Global and per-GPU discounts are applied to market prices
-4. **Automatic Updates**: Prices are automatically refreshed based on the configured sync schedule
-5. **Fallback**: If the API is unavailable, the service falls back to static prices (if enabled)
+2. **Price Normalization**: All prices are normalized to per-GPU cost for fair comparison across multi-GPU configurations
+3. **Caching**: Prices are cached in the database to reduce API calls and improve performance
+4. **Discount Application**: Global and per-GPU discounts are applied to market prices
+5. **Automatic Updates**: Prices are automatically refreshed based on the configured sync schedule
+6. **Fallback**: If the API is unavailable, the service falls back to static prices (if enabled)
 
 #### Monitored GPU Models
 

@@ -199,6 +199,7 @@ impl From<GpuPriceRow> for GpuPrice {
         GpuPrice {
             gpu_model: row.gpu_model,
             vram_gb: row.vram_gb.map(|v| v as u32),
+            num_gpus: 1, // Default to 1 GPU for cached prices
             market_price_per_hour: row.market_price_per_hour,
             discounted_price_per_hour: row.discounted_price_per_hour,
             discount_percent: row.discount_percent,
@@ -222,6 +223,7 @@ mod tests {
         let mut price = GpuPrice {
             gpu_model: "H100".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(100),
             discounted_price_per_hour: Decimal::from(80),
             discount_percent: Decimal::from(-20),
@@ -247,6 +249,7 @@ mod tests {
         let price = GpuPrice {
             gpu_model: "A100".to_string(),
             vram_gb: Some(40),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(50),
             discounted_price_per_hour: Decimal::from(40),
             discount_percent: Decimal::from(-20),
@@ -268,6 +271,7 @@ mod tests {
         let price = GpuPrice {
             gpu_model: "H200".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(120),
             discounted_price_per_hour: Decimal::from(96),
             discount_percent: Decimal::from(-20),
@@ -292,6 +296,7 @@ mod tests {
         let fresh_price = GpuPrice {
             gpu_model: "H100".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(100),
             discounted_price_per_hour: Decimal::from(80),
             discount_percent: Decimal::from(-20),
@@ -308,6 +313,7 @@ mod tests {
         let old_price = GpuPrice {
             gpu_model: "A100".to_string(),
             vram_gb: Some(40),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(50),
             discounted_price_per_hour: Decimal::from(40),
             discount_percent: Decimal::from(-20),
@@ -324,6 +330,7 @@ mod tests {
         let boundary_price = GpuPrice {
             gpu_model: "H200".to_string(),
             vram_gb: Some(80),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(120),
             discounted_price_per_hour: Decimal::from(96),
             discount_percent: Decimal::from(-20),
@@ -340,6 +347,7 @@ mod tests {
         let just_before_price = GpuPrice {
             gpu_model: "A6000".to_string(),
             vram_gb: Some(48),
+            num_gpus: 1,
             market_price_per_hour: Decimal::from(40),
             discounted_price_per_hour: Decimal::from(32),
             discount_percent: Decimal::from(-20),

@@ -2,7 +2,7 @@ use crate::error::Result;
 use crate::pricing::cache::PriceCache;
 use crate::pricing::metrics::PricingMetrics;
 use crate::pricing::providers::PriceProvider;
-use crate::pricing::types::{GpuPrice, PriceQueryFilter, PricingConfig};
+use crate::pricing::types::{AggregatedGpuPrice, GpuPrice, PriceQueryFilter, PricingConfig};
 use futures::future::join_all;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -259,8 +259,12 @@ impl PricingService {
 
         let count = aggregated_prices.len();
 
+        // Convert aggregated prices to GpuPrice for storage
+        let storage_prices: Vec<GpuPrice> =
+            aggregated_prices.into_iter().map(|p| p.into()).collect();
+
         // Record price history (non-fatal if this fails)
-        if let Err(e) = self.record_price_history(&aggregated_prices).await {
+        if let Err(e) = self.record_price_history(&storage_prices).await {
             error!(
                 "Failed to record price history: {}. Continuing with sync.",
                 e
@@ -270,7 +274,7 @@ impl PricingService {
         // Store in cache
         match self
             .cache
-            .store(aggregated_prices, self.config.cache_ttl_seconds)
+            .store(storage_prices, self.config.cache_ttl_seconds)
             .await
         {
             Ok(()) => {
@@ -365,8 +369,8 @@ impl PricingService {
     }
 
     /// Aggregate prices from multiple providers by GPU model
-    async fn aggregate_prices(&self, all_prices: Vec<GpuPrice>) -> Result<Vec<GpuPrice>> {
-        use crate::pricing::types::PriceAggregationStrategy;
+    async fn aggregate_prices(&self, all_prices: Vec<GpuPrice>) -> Result<Vec<AggregatedGpuPrice>> {
+        use crate::pricing::types::{AggregatedGpuPrice, PriceAggregationStrategy};
         use std::collections::HashMap;
 
         if all_prices.is_empty() {
@@ -398,21 +402,49 @@ impl PricingService {
 
             let aggregated_price = match &self.config.aggregation_strategy {
                 PriceAggregationStrategy::Minimum => {
-                    // Take the lowest price
-                    prices.sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
-                    prices.into_iter().next().unwrap()
+                    // Normalize prices by GPU count, then find minimum per-GPU price
+                    prices.sort_by(|a, b| {
+                        let price_a = a.market_price_per_hour / Decimal::from(a.num_gpus);
+                        let price_b = b.market_price_per_hour / Decimal::from(b.num_gpus);
+                        price_a.cmp(&price_b)
+                    });
+                    let min_price = prices.into_iter().next().unwrap();
+                    // Normalize to per-GPU price
+                    let per_gpu_price =
+                        min_price.market_price_per_hour / Decimal::from(min_price.num_gpus);
+                    AggregatedGpuPrice {
+                        gpu_model: min_price.gpu_model,
+                        vram_gb: min_price.vram_gb,
+                        num_gpus: 1, // Normalized to single GPU
+                        market_price_per_hour: per_gpu_price,
+                        discounted_price_per_hour: per_gpu_price,
+                        discount_percent: Decimal::ZERO,
+                        aggregation_strategy: PriceAggregationStrategy::Minimum,
+                        updated_at: min_price.updated_at,
+                        is_spot: min_price.is_spot,
+                    }
                 }
                 PriceAggregationStrategy::Average => {
-                    // Calculate average price
-                    let sum: Decimal = prices.iter().map(|p| p.market_price_per_hour).sum();
+                    // Normalize each price by GPU count, then calculate average per-GPU price
+                    let sum_per_gpu: Decimal = prices
+                        .iter()
+                        .map(|p| p.market_price_per_hour / Decimal::from(p.num_gpus))
+                        .sum();
                     let count = Decimal::from(prices.len());
-                    let avg_price = sum / count;
+                    let avg_per_gpu_price = sum_per_gpu / count;
 
-                    let mut avg_gpu_price = prices.into_iter().next().unwrap();
-                    avg_gpu_price.market_price_per_hour = avg_price;
-                    avg_gpu_price.discounted_price_per_hour = avg_price;
-                    avg_gpu_price.source = "aggregated_average".to_string();
-                    avg_gpu_price
+                    let first_price = prices.into_iter().next().unwrap();
+                    AggregatedGpuPrice {
+                        gpu_model: first_price.gpu_model,
+                        vram_gb: first_price.vram_gb,
+                        num_gpus: 1, // Normalized to single GPU
+                        market_price_per_hour: avg_per_gpu_price,
+                        discounted_price_per_hour: avg_per_gpu_price,
+                        discount_percent: Decimal::ZERO,
+                        aggregation_strategy: PriceAggregationStrategy::Average,
+                        updated_at: first_price.updated_at,
+                        is_spot: first_price.is_spot,
+                    }
                 }
             };
 
@@ -428,7 +460,9 @@ impl PricingService {
     }
 
     /// Apply discounts to aggregated prices
-    fn apply_discounts(&self, prices: &mut [GpuPrice]) {
+    fn apply_discounts(&self, prices: &mut [AggregatedGpuPrice]) {
+        use crate::pricing::types::GpuPrice;
+
         for price in prices.iter_mut() {
             let discount = GpuPrice::effective_discount(
                 self.config.global_discount_percent,
@@ -499,11 +533,22 @@ mod tests {
         }
     }
 
-    /// Helper to create a test GpuPrice
+    /// Helper to create a test GpuPrice with 1 GPU
     fn create_test_price(gpu_model: &str, provider: &str, price: Decimal) -> GpuPrice {
+        create_test_price_with_gpus(gpu_model, provider, price, 1)
+    }
+
+    /// Helper to create a test GpuPrice with specified number of GPUs
+    fn create_test_price_with_gpus(
+        gpu_model: &str,
+        provider: &str,
+        price: Decimal,
+        num_gpus: u32,
+    ) -> GpuPrice {
         GpuPrice {
             gpu_model: gpu_model.to_string(),
             vram_gb: Some(80),
+            num_gpus,
             market_price_per_hour: price,
             discounted_price_per_hour: price,
             discount_percent: Decimal::ZERO,
@@ -611,8 +656,9 @@ mod tests {
         );
 
         assert_eq!(
-            aggregated[0].source, "aggregated_average",
-            "Aggregated prices should mark the synthetic source"
+            aggregated[0].aggregation_strategy,
+            PriceAggregationStrategy::Average,
+            "Aggregated prices should track the aggregation strategy"
         );
 
         // Apply discount
@@ -694,8 +740,9 @@ mod tests {
             "Discount metadata should reflect global discount"
         );
         assert_eq!(
-            aggregated[0].source, "aggregated_average",
-            "Aggregated prices should mark the synthetic source"
+            aggregated[0].aggregation_strategy,
+            PriceAggregationStrategy::Average,
+            "Aggregated prices should track the aggregation strategy"
         );
     }
 
@@ -827,13 +874,9 @@ mod tests {
         );
         for price in &aggregated {
             println!(
-                "  - {model:<8} provider={provider:<12} location={location:<12} market=${market:.4} discounted=${discount:.4} updated_at={updated}",
+                "  - {model:<8} strategy={strategy:<12} market=${market:.4} discounted=${discount:.4} updated_at={updated}",
                 model = price.gpu_model,
-                provider = price.provider,
-                location = price
-                    .location
-                    .clone()
-                    .unwrap_or_else(|| "n/a".to_string()),
+                strategy = format!("{:?}", price.aggregation_strategy),
                 market = price.market_price_per_hour,
                 discount = price.discounted_price_per_hour,
                 updated = price.updated_at
@@ -901,7 +944,10 @@ mod tests {
         let aggregated = service.aggregate_prices(prices).await.unwrap();
         assert_eq!(aggregated.len(), 1);
         assert_eq!(aggregated[0].market_price_per_hour, dec!(28.0));
-        assert_eq!(aggregated[0].provider, "azure");
+        assert_eq!(
+            aggregated[0].aggregation_strategy,
+            PriceAggregationStrategy::Minimum
+        );
     }
 
     /// Test average aggregation strategy
@@ -980,6 +1026,112 @@ mod tests {
         let aggregated = service.aggregate_prices(prices).await.unwrap();
         assert_eq!(aggregated.len(), 1);
         assert_eq!(aggregated[0].market_price_per_hour, dec!(30.0));
+    }
+
+    /// Test multi-GPU price normalization with average strategy
+    #[tokio::test]
+    async fn test_aggregate_multi_gpu_normalization_average() {
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Average,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let service = PricingService::new(Vec::new(), cache, config);
+
+        // Different GPU configurations with their total prices
+        // 1x H100 @ $2/hr = $2 per GPU
+        // 2x H100 @ $4/hr = $2 per GPU
+        // 4x H100 @ $10/hr = $2.5 per GPU
+        // 8x H100 @ $24/hr = $3 per GPU
+        // Average per-GPU: (2 + 2 + 2.5 + 3) / 4 = $2.375
+        let prices = vec![
+            create_test_price_with_gpus("H100", "provider1", dec!(2.0), 1),
+            create_test_price_with_gpus("H100", "provider2", dec!(4.0), 2),
+            create_test_price_with_gpus("H100", "provider3", dec!(10.0), 4),
+            create_test_price_with_gpus("H100", "provider4", dec!(24.0), 8),
+        ];
+
+        let aggregated = service.aggregate_prices(prices).await.unwrap();
+        assert_eq!(aggregated.len(), 1, "Should aggregate to single H100 price");
+        assert_eq!(
+            aggregated[0].market_price_per_hour,
+            dec!(2.375),
+            "Should calculate correct average per-GPU price"
+        );
+        assert_eq!(
+            aggregated[0].num_gpus, 1,
+            "Aggregated price should be normalized to 1 GPU"
+        );
+    }
+
+    /// Test multi-GPU price normalization with minimum strategy
+    #[tokio::test]
+    async fn test_aggregate_multi_gpu_normalization_minimum() {
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Minimum,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let service = PricingService::new(Vec::new(), cache, config);
+
+        // Different GPU configurations with their total prices
+        // 1x H100 @ $3/hr = $3 per GPU
+        // 2x H100 @ $4/hr = $2 per GPU <- minimum per-GPU
+        // 4x H100 @ $10/hr = $2.5 per GPU
+        // 8x H100 @ $24/hr = $3 per GPU
+        let prices = vec![
+            create_test_price_with_gpus("H100", "provider1", dec!(3.0), 1),
+            create_test_price_with_gpus("H100", "provider2", dec!(4.0), 2),
+            create_test_price_with_gpus("H100", "provider3", dec!(10.0), 4),
+            create_test_price_with_gpus("H100", "provider4", dec!(24.0), 8),
+        ];
+
+        let aggregated = service.aggregate_prices(prices).await.unwrap();
+        assert_eq!(aggregated.len(), 1, "Should aggregate to single H100 price");
+        assert_eq!(
+            aggregated[0].market_price_per_hour,
+            dec!(2.0),
+            "Should find minimum per-GPU price"
+        );
+        assert_eq!(
+            aggregated[0].num_gpus, 1,
+            "Aggregated price should be normalized to 1 GPU"
+        );
+        assert_eq!(
+            aggregated[0].aggregation_strategy,
+            PriceAggregationStrategy::Minimum,
+            "Aggregated price should track the aggregation strategy"
+        );
+    }
+
+    /// Test that single-GPU prices are normalized correctly
+    #[tokio::test]
+    async fn test_aggregate_single_gpu_normalization() {
+        let config = PricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Average,
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let service = PricingService::new(Vec::new(), cache, config);
+
+        // All single-GPU configurations
+        let prices = vec![
+            create_test_price_with_gpus("H100", "provider1", dec!(2.0), 1),
+            create_test_price_with_gpus("H100", "provider2", dec!(3.0), 1),
+            create_test_price_with_gpus("H100", "provider3", dec!(4.0), 1),
+        ];
+
+        let aggregated = service.aggregate_prices(prices).await.unwrap();
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(
+            aggregated[0].market_price_per_hour,
+            dec!(3.0),
+            "Average of 2, 3, 4 should be 3"
+        );
+        assert_eq!(aggregated[0].num_gpus, 1);
     }
 
     /// Test get_price_with_fallback when dynamic pricing is disabled

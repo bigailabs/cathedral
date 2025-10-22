@@ -7,4 +7,7 @@ pub mod types;
 pub use cache::PriceCache;
 pub use metrics::PricingMetrics;
 pub use service::PricingService;
-pub use types::{GpuPrice, PriceAggregationStrategy, PriceQueryFilter, PriceSource, PricingConfig};
+pub use types::{
+    AggregatedGpuPrice, GpuPrice, PriceAggregationStrategy, PriceQueryFilter, PriceSource,
+    PricingConfig,
+};
