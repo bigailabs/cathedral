@@ -41,15 +41,15 @@ fn test_price_aggregation_strategies() {
 fn test_discount_application() {
     // Test global discount
     let config = PricingConfig {
-        global_discount_percent: dec!(-20.0),
+        global_discount_percent: dec!(-50.0),
         ..Default::default()
     };
-    assert_eq!(config.global_discount_percent, dec!(-20.0));
-    println!("✓ Global discount configured: -20%");
+    assert_eq!(config.global_discount_percent, dec!(-50.0));
+    println!("✓ Global discount configured: -50%");
 
     // Test GPU-specific discount override
     let mut config = PricingConfig {
-        global_discount_percent: dec!(-20.0),
+        global_discount_percent: dec!(-50.0),
         ..Default::default()
     };
     config.gpu_discounts.insert("H100".to_string(), dec!(-15.0));
@@ -187,7 +187,7 @@ async fn test_end_to_end_configuration_and_providers() {
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some("test-api-key".to_string()),
         aggregation_strategy: PriceAggregationStrategy::Minimum,
-        global_discount_percent: dec!(-20.0), // 20% discount
+        global_discount_percent: dec!(-50.0), // 50% discount
         fallback_to_static: true,
         cache_ttl_seconds: 3600,
         ..Default::default()
@@ -207,8 +207,8 @@ async fn test_end_to_end_configuration_and_providers() {
     assert!(config.enabled, "Dynamic pricing should be enabled");
     assert_eq!(
         config.global_discount_percent,
-        dec!(-20.0),
-        "Global discount should be -20%"
+        dec!(-50.0),
+        "Global discount should be -50%"
     );
     assert!(
         matches!(

@@ -134,7 +134,7 @@ async fn test_marketplace_provider_with_config() {
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some(std::env::var("MARKETPLACE_API_KEY").unwrap()),
         aggregation_strategy: PriceAggregationStrategy::Average,
-        global_discount_percent: dec!(-20.0),
+        global_discount_percent: dec!(-50.0),
         fallback_to_static: true,
         ..Default::default()
     };
@@ -175,7 +175,7 @@ fn test_discount_calculations() {
     let mut config = PricingConfig {
         enabled: true,
         aggregation_strategy: PriceAggregationStrategy::Minimum,
-        global_discount_percent: dec!(-20.0),
+        global_discount_percent: dec!(-50.0),
         fallback_to_static: true,
         ..Default::default()
     };
@@ -192,7 +192,7 @@ fn test_discount_calculations() {
         ("H100", dec!(100.0), dec!(75.0), "25% override"),
         ("A100", dec!(100.0), dec!(80.0), "20% override"),
         ("RTX4090", dec!(100.0), dec!(70.0), "30% override"),
-        ("V100", dec!(100.0), dec!(80.0), "20% global default"),
+        ("V100", dec!(100.0), dec!(50.0), "50% global default"),
     ];
 
     for (gpu_model, market_price, expected_price, description) in test_cases {
@@ -314,7 +314,7 @@ fn test_complete_pricing_configuration() {
         marketplace_api_url: "https://api.shadeform.ai/v1".to_string(),
         marketplace_available_only: true,
         aggregation_strategy: PriceAggregationStrategy::Average,
-        global_discount_percent: dec!(-20.0),
+        global_discount_percent: dec!(-50.0),
         cache_ttl_seconds: 3600,
         update_interval_seconds: 3600,
         fallback_to_static: true,
@@ -339,7 +339,7 @@ fn test_complete_pricing_configuration() {
         config.aggregation_strategy,
         PriceAggregationStrategy::Average
     ));
-    assert_eq!(config.global_discount_percent, dec!(-20.0));
+    assert_eq!(config.global_discount_percent, dec!(-50.0));
     assert_eq!(config.cache_ttl_seconds, 3600);
     assert_eq!(config.update_interval_seconds, 3600);
     assert!(config.fallback_to_static);

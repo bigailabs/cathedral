@@ -577,9 +577,9 @@ mod tests {
         let multiplier = Decimal::ONE + (discount / Decimal::from(100));
         let discounted = market_price * multiplier;
 
-        // Default global discount is -20%
-        // 100 * (1 + (-20/100)) = 100 * 0.8 = 80
-        assert_eq!(discounted, Decimal::from(80));
+        // Default global discount is -50%
+        // 100 * (1 + (-50/100)) = 100 * 0.5 = 50
+        assert_eq!(discounted, Decimal::from(50));
     }
 
     /// Test fetch, aggregate, and discount pipeline with real Shadeform API
@@ -602,7 +602,7 @@ mod tests {
             marketplace_api_key: Some(api_key),
             marketplace_api_url: "https://api.shadeform.ai/v1".to_string(),
             marketplace_available_only: false, // Include all prices for aggregation
-            global_discount_percent: dec!(-20.0),
+            global_discount_percent: dec!(-50.0),
             ..Default::default()
         };
 
@@ -731,12 +731,12 @@ mod tests {
 
         assert_eq!(
             aggregated[0].discounted_price_per_hour,
-            dec!(2.0),
-            "20% discount should be applied to aggregated price"
+            dec!(1.25),
+            "50% discount should be applied to aggregated price"
         );
         assert_eq!(
             aggregated[0].discount_percent,
-            dec!(-20.0),
+            dec!(-50.0),
             "Discount metadata should reflect global discount"
         );
         assert_eq!(
@@ -815,7 +815,7 @@ mod tests {
             sources: vec![PriceSource::Marketplace],
             marketplace_api_key: Some(api_key),
             aggregation_strategy: PriceAggregationStrategy::Average,
-            global_discount_percent: dec!(-20.0),
+            global_discount_percent: dec!(-50.0),
             fallback_to_static: true,
             ..Default::default()
         };
@@ -890,7 +890,7 @@ mod tests {
         let mut gpu_discounts = HashMap::new();
         gpu_discounts.insert("H100".to_string(), Decimal::from(-15));
 
-        let global_discount = Decimal::from(-20);
+        let global_discount = Decimal::from(-50);
 
         let market_price = Decimal::from(100);
         let discount = GpuPrice::effective_discount(global_discount, &gpu_discounts, "H100");
@@ -910,7 +910,7 @@ mod tests {
         let mut gpu_discounts = HashMap::new();
         gpu_discounts.insert("H100".to_string(), Decimal::from(-15));
 
-        let global_discount = Decimal::from(-20);
+        let global_discount = Decimal::from(-50);
 
         let market_price = Decimal::from(100);
         let discount = GpuPrice::effective_discount(global_discount, &gpu_discounts, "A6000");
@@ -919,9 +919,9 @@ mod tests {
         let multiplier = Decimal::ONE + (discount / Decimal::from(100));
         let discounted = market_price * multiplier;
 
-        // A6000 not in overrides, uses global -20%
-        // 100 * (1 + (-20/100)) = 100 * 0.8 = 80
-        assert_eq!(discounted, Decimal::from(80));
+        // A6000 not in overrides, uses global -50%
+        // 100 * (1 + (-50/100)) = 100 * 0.5 = 50
+        assert_eq!(discounted, Decimal::from(50));
     }
 
     /// Test minimum aggregation strategy

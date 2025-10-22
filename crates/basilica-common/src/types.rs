@@ -1,6 +1,7 @@
 //! Common types used across Basilica components
 
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
@@ -96,6 +97,99 @@ impl From<ApiKeyName> for String {
 impl AsRef<str> for ApiKeyName {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+/// GPU category for network-wide GPU classification and scoring
+///
+/// This enum represents the GPU models that are officially supported and scored
+/// by the Basilica validator network. Any GPU that doesn't match one of these
+/// categories is classified as "Other" for general compute purposes.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
+pub enum GpuCategory {
+    /// NVIDIA A100 - High-end training & inference
+    A100,
+    /// NVIDIA H100 - Flagship AI training & inference
+    H100,
+    /// NVIDIA B200 - Next-gen AI acceleration
+    B200,
+    /// Other GPU models - General GPU compute
+    Other(String),
+}
+
+impl GpuCategory {
+    /// Get the list of supported GPU model names as strings
+    ///
+    /// Returns the GPU models that the validator network officially supports
+    /// for scoring and pricing. Use this list when querying external pricing APIs
+    /// to ensure you're only fetching prices for GPUs the network can handle.
+    ///
+    /// # Example
+    /// ```
+    /// use basilica_common::types::GpuCategory;
+    ///
+    /// let supported = GpuCategory::supported_models();
+    /// assert_eq!(supported, vec!["A100", "H100", "B200"]);
+    /// ```
+    pub fn supported_models() -> Vec<String> {
+        vec![
+            "A100".to_string(),
+            "H100".to_string(),
+            "B200".to_string(),
+        ]
+    }
+
+    /// Get the use case description for this GPU category
+    pub fn description(&self) -> &'static str {
+        match self {
+            GpuCategory::A100 => "High-end training & inference",
+            GpuCategory::H100 => "Flagship AI training & inference",
+            GpuCategory::B200 => "Next-gen AI acceleration",
+            GpuCategory::Other(_) => "General GPU compute",
+        }
+    }
+
+    /// Get the display string for this GPU category (e.g., "A100", "H100", "OTHER")
+    pub fn as_str(&self) -> String {
+        match self {
+            GpuCategory::A100 => "A100".to_string(),
+            GpuCategory::H100 => "H100".to_string(),
+            GpuCategory::B200 => "B200".to_string(),
+            GpuCategory::Other(_) => "OTHER".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for GpuCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for GpuCategory {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let model = s.to_uppercase();
+
+        // Remove common prefixes and clean up
+        let cleaned = model
+            .replace("NVIDIA", "")
+            .replace("GEFORCE", "")
+            .replace("TESLA", "")
+            .trim()
+            .to_string();
+
+        // Check for known GPU models
+        if cleaned.contains("A100") {
+            Ok(GpuCategory::A100)
+        } else if cleaned.contains("H100") {
+            Ok(GpuCategory::H100)
+        } else if cleaned.contains("B200") {
+            Ok(GpuCategory::B200)
+        } else {
+            Ok(GpuCategory::Other(s.to_string()))
+        }
     }
 }
 

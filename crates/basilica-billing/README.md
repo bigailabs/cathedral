@@ -103,13 +103,12 @@ marketplace_available_only = false  # Show all instances for testing
 
 #### Monitored GPU Models
 
-By default, the marketplace provider queries prices for:
-- H100, H200, B200 (high-end data center GPUs)
-- A100, A40 (NVIDIA data center GPUs)
-- RTX4090, RTX3090 (consumer/prosumer GPUs)
-- V100, L40 (legacy/alternative data center GPUs)
+The billing service queries prices for GPU models that are officially supported by the Basilica validator network:
+- **A100** - High-end training & inference
+- **H100** - Flagship AI training & inference
+- **B200** - Next-gen AI acceleration
 
-You can configure which GPU models to monitor through the API query filters.
+These models are defined in `basilica-common::types::GpuCategory` and represent the GPUs that the validator network can score and allocate. You can configure custom GPU models through the API query filters if needed.
 
 #### API Key Setup
 
