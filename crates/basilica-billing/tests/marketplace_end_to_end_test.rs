@@ -75,9 +75,9 @@ fn test_load_test_configuration() {
     assert!(
         matches!(
             config.pricing.aggregation_strategy,
-            PriceAggregationStrategy::Median
+            PriceAggregationStrategy::Average
         ),
-        "Should use median aggregation strategy"
+        "Should use average aggregation strategy"
     );
 
     // Verify marketplace configuration
@@ -133,7 +133,7 @@ async fn test_marketplace_provider_with_config() {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some(std::env::var("MARKETPLACE_API_KEY").unwrap()),
-        aggregation_strategy: PriceAggregationStrategy::Median,
+        aggregation_strategy: PriceAggregationStrategy::Average,
         global_discount_percent: dec!(-20.0),
         fallback_to_static: true,
         ..Default::default()
@@ -274,19 +274,9 @@ fn test_aggregation_strategy_configurations() {
             "Use lowest price",
         ),
         (
-            PriceAggregationStrategy::Median,
-            "Median",
-            "Use median price",
-        ),
-        (
             PriceAggregationStrategy::Average,
             "Average",
             "Use average price",
-        ),
-        (
-            PriceAggregationStrategy::PreferProvider("vastai".to_string()),
-            "PreferProvider",
-            "Prefer specific provider",
         ),
     ];
 
@@ -322,7 +312,7 @@ fn test_complete_pricing_configuration() {
         marketplace_api_key: Some("test-api-key".to_string()),
         marketplace_api_url: "https://api.shadeform.ai/v1".to_string(),
         marketplace_available_only: true,
-        aggregation_strategy: PriceAggregationStrategy::Median,
+        aggregation_strategy: PriceAggregationStrategy::Average,
         global_discount_percent: dec!(-20.0),
         cache_ttl_seconds: 3600,
         update_interval_seconds: 3600,
@@ -346,7 +336,7 @@ fn test_complete_pricing_configuration() {
     assert!(config.marketplace_available_only);
     assert!(matches!(
         config.aggregation_strategy,
-        PriceAggregationStrategy::Median
+        PriceAggregationStrategy::Average
     ));
     assert_eq!(config.global_discount_percent, dec!(-20.0));
     assert_eq!(config.cache_ttl_seconds, 3600);
@@ -465,9 +455,9 @@ async fn test_marketplace_full_integration() {
     assert!(
         matches!(
             pricing_config.aggregation_strategy,
-            PriceAggregationStrategy::Median
+            PriceAggregationStrategy::Average
         ),
-        "Should use Median aggregation strategy"
+        "Should use Average aggregation strategy"
     );
 
     // 6. Test fallback configuration

@@ -24,17 +24,6 @@ fn test_price_aggregation_strategies() {
     ));
     println!("✓ Minimum aggregation strategy configured");
 
-    // Test Median strategy
-    let config = PricingConfig {
-        aggregation_strategy: PriceAggregationStrategy::Median,
-        ..Default::default()
-    };
-    assert!(matches!(
-        config.aggregation_strategy,
-        PriceAggregationStrategy::Median
-    ));
-    println!("✓ Median aggregation strategy configured");
-
     // Test Average strategy
     let config = PricingConfig {
         aggregation_strategy: PriceAggregationStrategy::Average,
@@ -45,17 +34,6 @@ fn test_price_aggregation_strategies() {
         PriceAggregationStrategy::Average
     ));
     println!("✓ Average aggregation strategy configured");
-
-    // Test PreferProvider strategy
-    let config = PricingConfig {
-        aggregation_strategy: PriceAggregationStrategy::PreferProvider("vastai".to_string()),
-        ..Default::default()
-    };
-    assert!(matches!(
-        config.aggregation_strategy,
-        PriceAggregationStrategy::PreferProvider(_)
-    ));
-    println!("✓ PreferProvider aggregation strategy configured");
 }
 
 /// Test discount application configuration
@@ -302,12 +280,7 @@ async fn test_end_to_end_configuration_and_providers() {
     // 8. Test aggregation strategies
     let strategies = vec![
         (PriceAggregationStrategy::Minimum, "Minimum"),
-        (PriceAggregationStrategy::Median, "Median"),
         (PriceAggregationStrategy::Average, "Average"),
-        (
-            PriceAggregationStrategy::PreferProvider("test".to_string()),
-            "PreferProvider",
-        ),
     ];
 
     for (strategy, name) in strategies {

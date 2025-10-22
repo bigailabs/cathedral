@@ -68,7 +68,7 @@ marketplace_available_only = false  # Show all instances for testing
 | `cache_ttl_seconds` | `u64` | `86400` | Cache time-to-live (seconds) |
 | `fallback_to_static` | `bool` | `true` | Fall back to static prices if API fails |
 | `sources` | `Vec<PriceSource>` | `["marketplace"]` | Price sources to query |
-| `aggregation_strategy` | `PriceAggregationStrategy` | `"median"` | How to aggregate prices from multiple sources |
+| `aggregation_strategy` | `PriceAggregationStrategy` | `"average"` | How to aggregate prices from multiple sources |
 | `marketplace_api_key` | `Option<String>` | `None` | Marketplace API key (required) |
 | `marketplace_api_url` | `String` | `"https://api.shadeform.ai/v1"` | Marketplace API URL |
 | `marketplace_available_only` | `bool` | `true` | Only return available instances |
@@ -81,9 +81,7 @@ marketplace_available_only = false  # Show all instances for testing
 #### Aggregation Strategies
 
 - `minimum`: Use lowest price across all sources
-- `median`: Use median price (default)
-- `average`: Use average price
-- `PreferProvider(String)`: Prefer specific provider's price
+- `average`: Use average price (default)
 
 #### How It Works
 

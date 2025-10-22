@@ -402,28 +402,6 @@ impl PricingService {
                     prices.sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
                     prices.into_iter().next().unwrap()
                 }
-                PriceAggregationStrategy::Median => {
-                    // Take the median price
-                    prices.sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
-                    let mid = prices.len() / 2;
-                    if prices.len() % 2 == 0 && prices.len() > 1 {
-                        // Even number: average the two middle values
-                        let price1 = &prices[mid - 1];
-                        let price2 = &prices[mid];
-                        let avg_price = (price1.market_price_per_hour
-                            + price2.market_price_per_hour)
-                            / Decimal::from(2);
-
-                        let mut median_price = price1.clone();
-                        median_price.market_price_per_hour = avg_price;
-                        median_price.discounted_price_per_hour = avg_price;
-                        median_price.source = "aggregated_median".to_string();
-                        median_price
-                    } else {
-                        // Odd number: take the middle value
-                        prices.into_iter().nth(mid).unwrap()
-                    }
-                }
                 PriceAggregationStrategy::Average => {
                     // Calculate average price
                     let sum: Decimal = prices.iter().map(|p| p.market_price_per_hour).sum();
@@ -435,24 +413,6 @@ impl PricingService {
                     avg_gpu_price.discounted_price_per_hour = avg_price;
                     avg_gpu_price.source = "aggregated_average".to_string();
                     avg_gpu_price
-                }
-                PriceAggregationStrategy::PreferProvider(preferred) => {
-                    // Prefer specific provider, fallback to minimum
-                    if let Some(preferred_price) = prices
-                        .iter()
-                        .find(|p| p.provider.eq_ignore_ascii_case(preferred))
-                    {
-                        debug!("Using preferred provider {} for {}", preferred, gpu_model);
-                        preferred_price.clone()
-                    } else {
-                        warn!(
-                            "Preferred provider {} not found for {}, using minimum",
-                            preferred, gpu_model
-                        );
-                        prices
-                            .sort_by(|a, b| a.market_price_per_hour.cmp(&b.market_price_per_hour));
-                        prices.into_iter().next().unwrap()
-                    }
                 }
             };
 
@@ -577,12 +537,114 @@ mod tests {
         assert_eq!(discounted, Decimal::from(80));
     }
 
-    /// Test fetch, aggregate, and discount pipeline without database dependencies
+    /// Test fetch, aggregate, and discount pipeline with real Shadeform API
+    #[tokio::test]
+    #[ignore] // Only run when explicitly requested with --ignored
+    async fn test_fetch_aggregate_and_discount_pipeline_with_real_api() {
+        // Skip test if API key not available
+        let api_key = match std::env::var("MARKETPLACE_API_KEY") {
+            Ok(key) if !key.is_empty() => key,
+            _ => {
+                println!("Skipping test: MARKETPLACE_API_KEY not set");
+                return;
+            }
+        };
+
+        let config = PricingConfig {
+            enabled: true,
+            aggregation_strategy: PriceAggregationStrategy::Average,
+            sources: vec![PriceSource::Marketplace],
+            marketplace_api_key: Some(api_key),
+            marketplace_api_url: "https://api.shadeform.ai/v1".to_string(),
+            marketplace_available_only: false, // Include all prices for aggregation
+            global_discount_percent: dec!(-20.0),
+            ..Default::default()
+        };
+
+        let cache = Arc::new(PriceCache::new_fake());
+        let providers = create_providers(&config).expect("Should create marketplace provider");
+        assert_eq!(providers.len(), 1, "Should have one marketplace provider");
+
+        let service = PricingService::new(providers, cache, config);
+
+        // Fetch prices from real API
+        let fetched = service.fetch_latest_prices().await.unwrap();
+        assert!(
+            !fetched.is_empty(),
+            "Should fetch prices from marketplace API"
+        );
+
+        println!("Fetched {} prices from marketplace", fetched.len());
+
+        // Filter to only H100 prices for consistent testing
+        let h100_prices: Vec<GpuPrice> = fetched
+            .into_iter()
+            .filter(|p| p.gpu_model == "H100")
+            .collect();
+
+        assert!(
+            !h100_prices.is_empty(),
+            "Should have at least some H100 prices"
+        );
+
+        println!("Found {} H100 prices", h100_prices.len());
+
+        // Aggregate prices
+        let mut aggregated = service.aggregate_prices(h100_prices).await.unwrap();
+        assert_eq!(
+            aggregated.len(),
+            1,
+            "Average aggregation should collapse to one price per GPU model"
+        );
+
+        let market_price = aggregated[0].market_price_per_hour;
+        println!(
+            "Aggregated H100 price: ${}/hr (average of all providers)",
+            market_price
+        );
+
+        // Verify price is reasonable (between $1 and $50/hr based on real market data)
+        assert!(
+            market_price >= dec!(1.0) && market_price <= dec!(50.0),
+            "Average H100 price should be between $1-50/hr, got ${}",
+            market_price
+        );
+
+        assert_eq!(
+            aggregated[0].source, "aggregated_average",
+            "Aggregated prices should mark the synthetic source"
+        );
+
+        // Apply discount
+        service.apply_discounts(&mut aggregated);
+
+        let discounted_price = aggregated[0].discounted_price_per_hour;
+        let expected_discounted = market_price * dec!(0.8); // 20% discount
+
+        assert_eq!(
+            discounted_price.round_dp(4),
+            expected_discounted.round_dp(4),
+            "20% discount should be applied correctly"
+        );
+
+        assert_eq!(
+            aggregated[0].discount_percent,
+            dec!(-20.0),
+            "Discount metadata should reflect global discount"
+        );
+
+        println!(
+            "After 20% discount: ${}/hr (from ${}/hr)",
+            discounted_price, market_price
+        );
+    }
+
+    /// Test fetch, aggregate, and discount pipeline with mock data
     #[tokio::test]
     async fn test_fetch_aggregate_and_discount_pipeline() {
         let config = PricingConfig {
             enabled: true,
-            aggregation_strategy: PriceAggregationStrategy::Median,
+            aggregation_strategy: PriceAggregationStrategy::Average,
             ..Default::default()
         };
 
@@ -590,11 +652,11 @@ mod tests {
         let providers: Vec<Box<dyn PriceProvider>> = vec![
             Box::new(StubProvider::successful(
                 "marketplace-primary",
-                vec![create_test_price("H100", "aws", dec!(30.0))],
+                vec![create_test_price("H100", "aws", dec!(3.0))],
             )),
             Box::new(StubProvider::successful(
                 "marketplace-secondary",
-                vec![create_test_price("H100", "runpod", dec!(24.0))],
+                vec![create_test_price("H100", "runpod", dec!(2.0))],
             )),
         ];
 
@@ -611,19 +673,19 @@ mod tests {
         assert_eq!(
             aggregated.len(),
             1,
-            "Median aggregation should collapse to one price"
+            "Average aggregation should collapse to one price"
         );
         assert_eq!(
             aggregated[0].market_price_per_hour,
-            dec!(27.0),
-            "Median of 24 and 30 should be 27"
+            dec!(2.5),
+            "Average of 2 and 3 should be 2.5"
         );
 
         service.apply_discounts(&mut aggregated);
 
         assert_eq!(
             aggregated[0].discounted_price_per_hour,
-            dec!(21.6),
+            dec!(2.0),
             "20% discount should be applied to aggregated price"
         );
         assert_eq!(
@@ -632,7 +694,7 @@ mod tests {
             "Discount metadata should reflect global discount"
         );
         assert_eq!(
-            aggregated[0].source, "aggregated_median",
+            aggregated[0].source, "aggregated_average",
             "Aggregated prices should mark the synthetic source"
         );
     }
@@ -705,7 +767,7 @@ mod tests {
             enabled: true,
             sources: vec![PriceSource::Marketplace],
             marketplace_api_key: Some(api_key),
-            aggregation_strategy: PriceAggregationStrategy::Median,
+            aggregation_strategy: PriceAggregationStrategy::Average,
             global_discount_percent: dec!(-20.0),
             fallback_to_static: true,
             ..Default::default()
@@ -729,6 +791,7 @@ mod tests {
             !prices.is_empty(),
             "Shadeform API should return at least one GPU price"
         );
+        dbg!(&prices);
 
         let mut aggregated = service
             .aggregate_prices(prices)
@@ -841,52 +904,6 @@ mod tests {
         assert_eq!(aggregated[0].provider, "azure");
     }
 
-    /// Test median aggregation with odd count
-    #[tokio::test]
-    async fn test_aggregate_median_odd() {
-        let config = PricingConfig {
-            aggregation_strategy: PriceAggregationStrategy::Median,
-            ..Default::default()
-        };
-
-        let cache = Arc::new(PriceCache::new_fake());
-        let service = PricingService::new(Vec::new(), cache, config);
-
-        let prices = vec![
-            create_test_price("H100", "aws", dec!(30.0)),
-            create_test_price("H100", "azure", dec!(28.0)),
-            create_test_price("H100", "gcp", dec!(32.0)),
-        ];
-
-        let aggregated = service.aggregate_prices(prices).await.unwrap();
-        assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].market_price_per_hour, dec!(30.0));
-    }
-
-    /// Test median aggregation with even count
-    #[tokio::test]
-    async fn test_aggregate_median_even() {
-        let config = PricingConfig {
-            aggregation_strategy: PriceAggregationStrategy::Median,
-            ..Default::default()
-        };
-
-        let cache = Arc::new(PriceCache::new_fake());
-        let service = PricingService::new(Vec::new(), cache, config);
-
-        let prices = vec![
-            create_test_price("H100", "aws", dec!(30.0)),
-            create_test_price("H100", "azure", dec!(28.0)),
-            create_test_price("H100", "gcp", dec!(32.0)),
-            create_test_price("H100", "vastai", dec!(26.0)),
-        ];
-
-        let aggregated = service.aggregate_prices(prices).await.unwrap();
-        assert_eq!(aggregated.len(), 1);
-        // Median of [26, 28, 30, 32] = (28 + 30) / 2 = 29
-        assert_eq!(aggregated[0].market_price_per_hour, dec!(29.0));
-    }
-
     /// Test average aggregation strategy
     #[tokio::test]
     async fn test_aggregate_average() {
@@ -908,53 +925,6 @@ mod tests {
         assert_eq!(aggregated.len(), 1);
         // Average of [30, 28, 32] = 90 / 3 = 30
         assert_eq!(aggregated[0].market_price_per_hour, dec!(30.0));
-    }
-
-    /// Test PreferProvider strategy with preferred provider available
-    #[tokio::test]
-    async fn test_aggregate_prefer_provider_found() {
-        let config = PricingConfig {
-            aggregation_strategy: PriceAggregationStrategy::PreferProvider("azure".to_string()),
-            ..Default::default()
-        };
-
-        let cache = Arc::new(PriceCache::new_fake());
-        let service = PricingService::new(Vec::new(), cache, config);
-
-        let prices = vec![
-            create_test_price("H100", "aws", dec!(30.0)),
-            create_test_price("H100", "azure", dec!(28.0)),
-            create_test_price("H100", "gcp", dec!(32.0)),
-        ];
-
-        let aggregated = service.aggregate_prices(prices).await.unwrap();
-        assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].market_price_per_hour, dec!(28.0));
-        assert_eq!(aggregated[0].provider, "azure");
-    }
-
-    /// Test PreferProvider strategy with fallback to minimum
-    #[tokio::test]
-    async fn test_aggregate_prefer_provider_fallback() {
-        let config = PricingConfig {
-            aggregation_strategy: PriceAggregationStrategy::PreferProvider("vastai".to_string()),
-            ..Default::default()
-        };
-
-        let cache = Arc::new(PriceCache::new_fake());
-        let service = PricingService::new(Vec::new(), cache, config);
-
-        let prices = vec![
-            create_test_price("H100", "aws", dec!(30.0)),
-            create_test_price("H100", "azure", dec!(28.0)),
-            create_test_price("H100", "gcp", dec!(32.0)),
-        ];
-
-        let aggregated = service.aggregate_prices(prices).await.unwrap();
-        assert_eq!(aggregated.len(), 1);
-        // Falls back to minimum since vastai not found
-        assert_eq!(aggregated[0].market_price_per_hour, dec!(28.0));
-        assert_eq!(aggregated[0].provider, "azure");
     }
 
     /// Test aggregation with multiple GPU models

@@ -64,7 +64,7 @@ impl Default for PricingConfig {
             cache_ttl_seconds: 86400,       // 24 hours
             fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
-            aggregation_strategy: PriceAggregationStrategy::Median,
+            aggregation_strategy: PriceAggregationStrategy::Average,
             marketplace_api_key: None,
             marketplace_api_url: default_marketplace_url(),
             marketplace_available_only: true,
@@ -87,12 +87,8 @@ pub enum PriceSource {
 pub enum PriceAggregationStrategy {
     /// Use minimum price across all sources
     Minimum,
-    /// Use median price across all sources
-    Median,
     /// Use average price across all sources
     Average,
-    /// Prefer a specific provider's price
-    PreferProvider(String),
 }
 
 /// GPU price information from external sources
@@ -192,7 +188,7 @@ mod tests {
         assert_eq!(config.sources[0], PriceSource::Marketplace);
         assert_eq!(
             config.aggregation_strategy,
-            PriceAggregationStrategy::Median
+            PriceAggregationStrategy::Average
         );
         assert_eq!(config.marketplace_api_url, "https://api.shadeform.ai/v1");
         assert!(config.marketplace_available_only);
@@ -330,10 +326,10 @@ mod tests {
 
     #[test]
     fn test_aggregation_strategy_serialization() {
-        let strategy = PriceAggregationStrategy::Median;
+        let strategy = PriceAggregationStrategy::Average;
         let json = serde_json::to_string(&strategy).unwrap();
         let deserialized: PriceAggregationStrategy = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized, PriceAggregationStrategy::Median);
+        assert_eq!(deserialized, PriceAggregationStrategy::Average);
     }
 
     #[test]
@@ -349,7 +345,7 @@ mod tests {
             cache_ttl_seconds: 86400,
             fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
-            aggregation_strategy: PriceAggregationStrategy::Median,
+            aggregation_strategy: PriceAggregationStrategy::Average,
             marketplace_api_key: Some("test-key-123".to_string()),
             marketplace_api_url: "https://api.shadeform.ai/v1".to_string(),
             marketplace_available_only: true,
