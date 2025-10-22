@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2]
+
+### Added
+- `basilica ps --history` now lists completed rentals with per-rental totals and an overall spend summary to simplify billing reviews.
+- (Debug builds) `basilica packages` exposes the raw billing package feed for troubleshooting pricing mismatches.
+
+### Changed
+- `basilica ls`/`ps` consume live billing package data so hourly USD pricing shows up directly in the tables, including recalculated totals for multi-GPU nodes.
+- Balance and rental cost displays now share the same credit formatter, keeping dollar figures aligned to two decimal places in every view.
+- Table output for rentals highlights hourly rate, accumulated cost, and durations inline, removing the need to cross-reference separate commands.
+
+### Removed
+- Deprecated `basilica price` and `basilica usage` subcommands; their workflows are now part of the enhanced `ls`/`ps` experience.
+
 ## [0.5.1]
 
 ### Added
