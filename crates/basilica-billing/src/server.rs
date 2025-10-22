@@ -1,10 +1,10 @@
 use crate::config::BillingConfig;
 use crate::grpc::BillingServiceImpl;
 use crate::metrics::BillingMetricsSystem;
-use crate::pricing::cache::PriceCache;
 use crate::pricing::providers::create_providers;
 use crate::pricing::service::PricingService;
 use crate::storage::rds::RdsConnection;
+use crate::storage::{PriceCacheRepository, SqlPriceCacheRepository};
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 
 use axum::{http::StatusCode, response::Json, routing::get, Router};
@@ -26,12 +26,13 @@ pub struct BillingServer {
     rds_connection: Arc<RdsConnection>,
     metrics: Option<Arc<BillingMetricsSystem>>,
     pricing_service: Option<Arc<PricingService>>,
-    price_cache: Arc<PriceCache>,
+    price_cache: Arc<dyn PriceCacheRepository>,
 }
 
 impl BillingServer {
     pub fn new(rds_connection: Arc<RdsConnection>) -> Self {
-        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
+        let price_cache: Arc<dyn PriceCacheRepository> =
+            Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
         Self {
             config: BillingConfig::default(),
             rds_connection,
@@ -66,7 +67,8 @@ impl BillingServer {
         };
 
         // Create shared price cache
-        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
+        let price_cache: Arc<dyn PriceCacheRepository> =
+            Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
 
         // Build shared pricing service if enabled
         let pricing_service = if config.pricing.enabled {

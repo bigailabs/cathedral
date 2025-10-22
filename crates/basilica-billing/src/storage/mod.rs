@@ -1,6 +1,7 @@
 pub mod credits;
 pub mod events;
 pub mod packages;
+pub mod price_cache;
 pub mod promo_codes;
 pub mod rds;
 pub mod rentals;
@@ -33,3 +34,7 @@ pub use user_preferences::{
 };
 
 pub use rules::{RulesRepository, SqlRulesRepository};
+
+pub use price_cache::{
+    PriceCacheRepository, PriceHistoryEntry, PriceHistoryFilter, SqlPriceCacheRepository,
+};

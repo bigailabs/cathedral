@@ -1,8 +1,8 @@
 use crate::error::Result;
-use crate::pricing::cache::PriceCache;
 use crate::pricing::metrics::PricingMetrics;
 use crate::pricing::providers::PriceProvider;
 use crate::pricing::types::{AggregatedGpuPrice, GpuPrice, PriceQueryFilter, PricingConfig};
+use crate::storage::PriceCacheRepository;
 use futures::future::join_all;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 /// Core pricing service for fetching, aggregating, and caching GPU prices
 pub struct PricingService {
     providers: Vec<Box<dyn PriceProvider>>,
-    cache: Arc<PriceCache>,
+    cache: Arc<dyn PriceCacheRepository>,
     config: PricingConfig,
 }
 
@@ -20,7 +20,7 @@ impl PricingService {
     /// Create a new pricing service
     pub fn new(
         providers: Vec<Box<dyn PriceProvider>>,
-        cache: Arc<PriceCache>,
+        cache: Arc<dyn PriceCacheRepository>,
         config: PricingConfig,
     ) -> Self {
         Self {
@@ -325,33 +325,7 @@ impl PricingService {
 
     /// Record price history for tracking price changes over time
     async fn record_price_history(&self, prices: &[GpuPrice]) -> Result<()> {
-        debug!("Recording {} prices to history", prices.len());
-
-        let pool = self.cache.pool();
-
-        for price in prices {
-            sqlx::query(
-                r#"
-                INSERT INTO billing.price_history (
-                    gpu_model, price_per_hour, source, provider, recorded_at
-                )
-                VALUES ($1, $2, $3, $4, NOW())
-                "#,
-            )
-            .bind(&price.gpu_model)
-            .bind(price.discounted_price_per_hour)
-            .bind(&price.source)
-            .bind(&price.provider)
-            .execute(pool)
-            .await
-            .map_err(|e| crate::error::BillingError::DatabaseError {
-                operation: "record_price_history".to_string(),
-                source: Box::new(e),
-            })?;
-        }
-
-        debug!("Successfully recorded {} prices to history", prices.len());
-        Ok(())
+        self.cache.record_price_history(prices).await
     }
 
     /// Apply discount logic to prices
@@ -481,11 +455,45 @@ mod tests {
     use crate::error::BillingError;
     use crate::pricing::providers::{create_providers, PriceProvider};
     use crate::pricing::types::{PriceAggregationStrategy, PriceSource};
+    use crate::storage::{PriceCacheRepository, PriceHistoryEntry, PriceHistoryFilter};
     use async_trait::async_trait;
     use chrono::Utc;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
     use std::env;
+
+    /// Mock price cache repository for testing
+    struct MockPriceCacheRepository;
+
+    #[async_trait]
+    impl PriceCacheRepository for MockPriceCacheRepository {
+        async fn store(&self, _prices: Vec<GpuPrice>, _ttl_seconds: u64) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get(&self, _gpu_model: &str) -> Result<Option<GpuPrice>> {
+            Ok(None)
+        }
+
+        async fn get_all(&self) -> Result<Vec<GpuPrice>> {
+            Ok(Vec::new())
+        }
+
+        async fn clear_expired(&self, _ttl_seconds: u64) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn record_price_history(&self, _prices: &[GpuPrice]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_price_history(
+            &self,
+            _filter: PriceHistoryFilter,
+        ) -> Result<Vec<PriceHistoryEntry>> {
+            Ok(Vec::new())
+        }
+    }
 
     struct StubProvider {
         name: &'static str,
@@ -606,7 +614,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers = create_providers(&config).expect("Should create marketplace provider");
         assert_eq!(providers.len(), 1, "Should have one marketplace provider");
 
@@ -694,7 +702,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers: Vec<Box<dyn PriceProvider>> = vec![
             Box::new(StubProvider::successful(
                 "marketplace-primary",
@@ -754,7 +762,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers: Vec<Box<dyn PriceProvider>> = vec![
             Box::new(StubProvider::successful(
                 "marketplace",
@@ -782,7 +790,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers: Vec<Box<dyn PriceProvider>> =
             vec![Box::new(StubProvider::failing("marketplace"))];
 
@@ -820,7 +828,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers =
             create_providers(&config).expect("Expected marketplace provider with API key");
         assert!(
@@ -932,7 +940,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![
@@ -958,7 +966,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![
@@ -981,7 +989,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![
@@ -1006,7 +1014,7 @@ mod tests {
     #[tokio::test]
     async fn test_aggregate_empty() {
         let config = PricingConfig::default();
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = Vec::new();
@@ -1018,7 +1026,7 @@ mod tests {
     #[tokio::test]
     async fn test_aggregate_single_price() {
         let config = PricingConfig::default();
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![create_test_price("H100", "aws", dec!(30.0))];
@@ -1036,7 +1044,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         // Different GPU configurations with their total prices
@@ -1073,7 +1081,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         // Different GPU configurations with their total prices
@@ -1114,7 +1122,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         // All single-GPU configurations
@@ -1142,7 +1150,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let static_price = dec!(100.0);
@@ -1164,7 +1172,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let static_price = dec!(100.0);
@@ -1186,7 +1194,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let static_price = dec!(100.0);

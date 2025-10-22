@@ -24,7 +24,6 @@ Production configuration example:
 enabled = true
 global_discount_percent = -20.0
 update_interval_seconds = 86400
-sync_hour_utc = 2
 cache_ttl_seconds = 86400
 fallback_to_static = true
 sources = ["marketplace"]
@@ -64,7 +63,6 @@ marketplace_available_only = false  # Show all instances for testing
 | `enabled` | `bool` | `false` | Enable dynamic pricing |
 | `global_discount_percent` | `Decimal` | `-20.0` | Global discount percentage (negative = discount) |
 | `update_interval_seconds` | `u64` | `86400` | How often to fetch prices (seconds) |
-| `sync_hour_utc` | `Option<u8>` | `Some(2)` | UTC hour to sync prices (0-23) |
 | `cache_ttl_seconds` | `u64` | `86400` | Cache time-to-live (seconds) |
 | `fallback_to_static` | `bool` | `true` | Fall back to static prices if API fails |
 | `sources` | `Vec<PriceSource>` | `["marketplace"]` | Price sources to query |
@@ -236,7 +234,6 @@ cargo test --lib pricing::types
 
 ### Stale prices
 - Verify `update_interval_seconds` is set appropriately (default: 86400)
-- Check `sync_hour_utc` if using scheduled sync (default: 2 AM UTC)
 - Review cache TTL settings (`cache_ttl_seconds`)
 - Check background sync job is running (look for sync logs)
 - Manually trigger sync via gRPC: `SyncPrices` RPC
