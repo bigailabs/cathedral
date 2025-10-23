@@ -19,11 +19,13 @@ resolver = "2"
 # Workspace-wide dependencies that all crates can use
 [workspace.dependencies]
 # Alloy
+# MUSL COMPATIBILITY: alloy-provider defaults to reqwest-default-tls (native-tls)
+# We explicitly use reqwest-rustls-tls instead
 alloy = { version = "1.0.23", features = ["sol-types"] }
 alloy-sol-types = { version = "1.0.23" }
 alloy-network = { version = "1.0.23" }
 alloy-primitives = { version = "1.0.23" }
-alloy-provider = { version = "1.0.23" }
+alloy-provider = { version = "1.0.23", default-features = false, features = ["reqwest", "reqwest-rustls-tls"] }
 alloy-contract = { version = "1.0.23" }
 
 # Async runtime and utilities
@@ -46,7 +48,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-journald = "0.3"
 metrics = "0.22"
-metrics-exporter-prometheus = "0.13"
+# MUSL COMPATIBILITY: Disable default features and enable only http-listener
+# (default features include push-gateway which pulls in hyper-tls with native-tls)
+metrics-exporter-prometheus = { version = "0.13", default-features = false, features = ["http-listener"] }
 
 # Configuration
 figment = { version = "0.10", features = ["toml", "env", "json"] }
@@ -168,7 +172,8 @@ sysinfo = "0.30"
 bollard = "0.15"
 
 # OCI client for Docker image validation
-oci-client = "0.13"
+# MUSL COMPATIBILITY: Use rustls-tls instead of native-tls
+oci-client = { version = "0.13", default-features = false, features = ["rustls-tls"] }
 
 # HTTP server (for validator API)
 axum = "0.7"
