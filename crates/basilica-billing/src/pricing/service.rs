@@ -1,5 +1,4 @@
 use crate::error::Result;
-use crate::pricing::metrics::PricingMetrics;
 use crate::pricing::providers::PriceProvider;
 use crate::pricing::types::{AggregatedGpuPrice, GpuPrice, PriceQueryFilter, PricingConfig};
 use crate::storage::PriceCacheRepository;
@@ -63,9 +62,6 @@ impl PricingService {
                             prices.len(),
                             duration
                         );
-                        // Record metrics
-                        PricingMetrics::record_fetch_duration(&provider_name, duration);
-                        PricingMetrics::record_prices_fetched(&provider_name, prices.len());
                         (provider_name, Ok(prices))
                     }
                     Err(e) => {
@@ -73,8 +69,6 @@ impl PricingService {
                             "Provider {} failed after {:?}: {}",
                             provider_name, duration, e
                         );
-                        // Record error metric
-                        PricingMetrics::record_provider_error(&provider_name);
                         (provider_name, Err(e))
                     }
                 }
@@ -134,20 +128,16 @@ impl PricingService {
                         "Cache hit for {}: ${}/hr",
                         gpu_model, cached_price.discounted_price_per_hour
                     );
-                    PricingMetrics::record_cache_hit(gpu_model);
                     return Ok(Some(cached_price.discounted_price_per_hour));
                 } else {
                     warn!("Cached price for {} is expired", gpu_model);
-                    PricingMetrics::record_cache_miss(gpu_model);
                 }
             }
             Ok(None) => {
                 debug!("No cached price found for {}", gpu_model);
-                PricingMetrics::record_cache_miss(gpu_model);
             }
             Err(e) => {
                 error!("Error fetching price from cache for {}: {}", gpu_model, e);
-                PricingMetrics::record_cache_miss(gpu_model);
                 return Err(e);
             }
         }
@@ -184,7 +174,6 @@ impl PricingService {
                         "No dynamic price available for {}, falling back to static price ${}/hr",
                         gpu_model, static_price
                     );
-                    PricingMetrics::record_fallback_to_static(gpu_model);
                     Ok(static_price)
                 } else {
                     error!(
@@ -205,7 +194,6 @@ impl PricingService {
                         "Error fetching price for {}: {}. Falling back to static price ${}/hr",
                         gpu_model, e, static_price
                     );
-                    PricingMetrics::record_fallback_to_static(gpu_model);
                     Ok(static_price)
                 } else {
                     error!(
@@ -221,14 +209,12 @@ impl PricingService {
     /// Sync prices from all providers to database cache
     pub async fn sync_prices(&self) -> Result<usize> {
         info!("Starting price sync");
-        let sync_start = PricingMetrics::start_sync_timer();
 
         // Fetch from all providers (this handles individual provider failures)
         let all_prices = match self.fetch_latest_prices().await {
             Ok(prices) => prices,
             Err(e) => {
                 error!("Failed to fetch prices from providers: {}", e);
-                PricingMetrics::record_sync_error();
                 if self.config.fallback_to_static {
                     warn!("Continuing with fallback to static pricing");
                     return Ok(0);
@@ -240,7 +226,6 @@ impl PricingService {
 
         if all_prices.is_empty() {
             warn!("No prices fetched from any providers");
-            PricingMetrics::record_sync_error();
             return Ok(0);
         }
 
@@ -249,7 +234,6 @@ impl PricingService {
             Ok(prices) => prices,
             Err(e) => {
                 error!("Failed to aggregate prices: {}", e);
-                PricingMetrics::record_sync_error();
                 return Err(e);
             }
         };
@@ -279,46 +263,11 @@ impl PricingService {
         {
             Ok(()) => {
                 info!("Successfully synced {} GPU prices", count);
-
-                // Record successful sync metrics
-                PricingMetrics::record_sync_success();
-                PricingMetrics::record_sync_duration(sync_start.elapsed());
-
-                // Update cache size metrics
-                self.update_cache_metrics().await;
-
                 Ok(count)
             }
             Err(e) => {
                 error!("Failed to store prices in cache: {}", e);
-                PricingMetrics::record_sync_error();
                 Err(e)
-            }
-        }
-    }
-
-    /// Update cache size and age metrics
-    async fn update_cache_metrics(&self) {
-        // Get all cached prices to calculate metrics
-        match self.cache.get_all().await {
-            Ok(prices) => {
-                // Update cache size
-                PricingMetrics::set_cache_size(prices.len());
-
-                // Calculate oldest cache age
-                if !prices.is_empty() {
-                    let now = chrono::Utc::now();
-                    let oldest_age = prices
-                        .iter()
-                        .map(|p| (now - p.updated_at).num_seconds())
-                        .max()
-                        .unwrap_or(0);
-
-                    PricingMetrics::set_oldest_cache_age(oldest_age as f64);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to update cache metrics: {}", e);
             }
         }
     }
