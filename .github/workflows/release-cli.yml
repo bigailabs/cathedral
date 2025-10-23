@@ -68,12 +68,12 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux x86_64 - native build on Ubuntu 24.04 LTS
-          - target: x86_64-unknown-linux-gnu
+          # Linux x86_64 - musl static build on Ubuntu 24.04 LTS
+          - target: x86_64-unknown-linux-musl
             os: blacksmith-4vcpu-ubuntu-2404
             suffix: linux-amd64
-          # Linux ARM64 - native build on Blacksmith ARM runner
-          - target: aarch64-unknown-linux-gnu
+          # Linux ARM64 - musl static build on Blacksmith ARM runner
+          - target: aarch64-unknown-linux-musl
             os: blacksmith-4vcpu-ubuntu-2404-arm
             suffix: linux-arm64
           # macOS Intel build
@@ -109,7 +109,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler pkg-config libssl-dev build-essential
+          sudo apt-get install -y protobuf-compiler pkg-config build-essential musl-tools
 
       # Install dependencies for macOS
       - name: Install dependencies (macOS)
@@ -135,7 +135,13 @@ jobs:
           chmod +x ./basilica-${{ matrix.suffix }}
 
           # Strip debug symbols to reduce size
-          strip ./basilica-${{ matrix.suffix }}
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            # Use --strip-all for musl static binaries (maximum size reduction)
+            strip --strip-all ./basilica-${{ matrix.suffix }}
+          else
+            # macOS strip (uses different flags)
+            strip ./basilica-${{ matrix.suffix }}
+          fi
 
           # Generate checksum
           if command -v shasum &> /dev/null; then
