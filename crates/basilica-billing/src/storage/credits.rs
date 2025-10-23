@@ -258,7 +258,7 @@ impl CreditRepository for SqlCreditRepository {
 
         let user_uuid = self.require_user_uuid(user_id).await?;
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE billing.credits
             SET balance = balance - $2,
@@ -275,6 +275,13 @@ impl CreditRepository for SqlCreditRepository {
             operation: "deduct_credits".to_string(),
             source: Box::new(e),
         })?;
+
+        if result.rows_affected() == 0 {
+            return Err(BillingError::InsufficientCredits {
+                available: account.balance.as_decimal(),
+                required: amount.as_decimal(),
+            });
+        }
 
         sqlx::query(
             r#"
