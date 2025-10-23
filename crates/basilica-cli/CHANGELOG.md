@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3]
+
+### Fixed
+- Use musl instead of gnu build to avoid issues with glibc version in older distributions.
+
 ## [0.5.2]
 
 ### Added
