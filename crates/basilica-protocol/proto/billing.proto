@@ -10,8 +10,6 @@ service BillingService {
     // Credit management
     rpc ApplyCredits(ApplyCreditsRequest) returns (ApplyCreditsResponse);
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
-    rpc ReserveCredits(ReserveCreditsRequest) returns (ReserveCreditsResponse);
-    rpc ReleaseReservation(ReleaseReservationRequest) returns (ReleaseReservationResponse);
 
     // Rental tracking
     rpc TrackRental(TrackRentalRequest) returns (TrackRentalResponse);
@@ -56,36 +54,8 @@ message GetBalanceRequest {
 
 message GetBalanceResponse {
     string available_balance = 1; // Decimal string
-    string reserved_balance = 2; // Decimal string
-    string total_balance = 3; // Decimal string
-    google.protobuf.Timestamp last_updated = 4;
-}
-
-message ReserveCreditsRequest {
-    string user_id = 1;
-    string rental_id = 2;
-    string amount = 3; // Decimal string
-    google.protobuf.Duration duration = 4;
-}
-
-message ReserveCreditsResponse {
-    bool success = 1;
-    string reservation_id = 2;
-    string reserved_amount = 3; // Decimal string
-    google.protobuf.Timestamp reserved_until = 4;
-    string error_message = 5;
-}
-
-message ReleaseReservationRequest {
-    string reservation_id = 1;
-    string final_amount = 2; // Decimal string - actual amount to charge
-}
-
-message ReleaseReservationResponse {
-    bool success = 1;
-    string charged_amount = 2; // Decimal string
-    string refunded_amount = 3; // Decimal string
-    string new_balance = 4; // Decimal string
+    string total_balance = 2; // Decimal string
+    google.protobuf.Timestamp last_updated = 3;
 }
 
 // Rental Tracking Messages
@@ -98,8 +68,7 @@ message TrackRentalRequest {
     ResourceSpec resource_spec = 5;
     string hourly_rate = 6; // Decimal string
     google.protobuf.Timestamp start_time = 7;
-    google.protobuf.Duration max_duration = 8;
-    map<string, string> metadata = 9;
+    map<string, string> metadata = 8;
 }
 
 message ResourceSpec {
@@ -119,8 +88,6 @@ message GpuSpec {
 message TrackRentalResponse {
     bool success = 1;
     string tracking_id = 2;
-    string reservation_id = 3;
-    string estimated_cost = 4; // Decimal string
 }
 
 message UpdateRentalStatusRequest {

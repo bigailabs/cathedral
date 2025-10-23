@@ -15,10 +15,10 @@ impl SimplePersistence {
         let query = r#"
             INSERT INTO rentals (
                 id, node_id, customer_public_key, docker_image, env_vars,
-                gpu_requirements, ssh_access_info, max_duration_hours, cost_per_hour,
+                gpu_requirements, ssh_access_info, cost_per_hour,
                 status, created_at, updated_at, started_at, terminated_at,
                 termination_reason, total_cost
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#;
 
         let status_str = match rental.status {
@@ -41,7 +41,6 @@ impl SimplePersistence {
             )
             .bind(serde_json::to_string(&rental.gpu_requirements)?)
             .bind(serde_json::to_string(&rental.ssh_access_info)?)
-            .bind(rental.max_duration_hours as i64)
             .bind(rental.cost_per_hour)
             .bind(status_str)
             .bind(rental.created_at.to_rfc3339())
@@ -295,7 +294,6 @@ impl SimplePersistence {
             env_vars: env_vars_str.map(|s| serde_json::from_str(&s)).transpose()?,
             gpu_requirements: serde_json::from_str(&gpu_requirements_str)?,
             ssh_access_info: serde_json::from_str(&ssh_access_info_str)?,
-            max_duration_hours: row.get::<i64, _>("max_duration_hours") as u32,
             cost_per_hour: row.get("cost_per_hour"),
             status,
             created_at: DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc),

@@ -37,9 +37,6 @@ impl BillingMetricNames {
         "basilica_billing_database_query_duration_seconds";
     pub const DATABASE_ERRORS: &'static str = "basilica_billing_database_errors_total";
 
-    pub const RESERVATIONS_CREATED: &'static str = "basilica_billing_reservations_created_total";
-    pub const RESERVATIONS_RELEASED: &'static str = "basilica_billing_reservations_released_total";
-
     pub const HEALTH_STATUS: &'static str = "basilica_billing_health_status";
 
     pub const AGGREGATION_RUNS: &'static str = "basilica_billing_aggregation_runs_total";
@@ -206,25 +203,6 @@ impl BillingMetrics {
         let cost_units = (total_cost * 1000.0) as u64;
         self.recorder
             .record_counter(BillingMetricNames::RENTALS_FINALIZED, cost_units, labels)
-            .await;
-    }
-
-    pub async fn record_reservation_created(&self, reservation_id: &str, amount: f64) {
-        let labels = &[("reservation_id", reservation_id)];
-        let amount_units = (amount * 1000.0) as u64;
-        self.recorder
-            .record_counter(
-                BillingMetricNames::RESERVATIONS_CREATED,
-                amount_units,
-                labels,
-            )
-            .await;
-    }
-
-    pub async fn record_reservation_released(&self, reservation_id: &str) {
-        let labels = &[("reservation_id", reservation_id)];
-        self.recorder
-            .increment_counter(BillingMetricNames::RESERVATIONS_RELEASED, labels)
             .await;
     }
 

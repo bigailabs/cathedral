@@ -2,22 +2,17 @@ use crate::domain::events::EventStore;
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
     rentals::{RentalManager, RentalOperations},
-    rules_engine::{RulesEngine, RulesEvaluator},
-    types::{
-        CreditBalance, GpuSpec, PackageId, RentalId, RentalState, ReservationId, ResourceSpec,
-        UserId,
-    },
+    types::{CreditBalance, GpuSpec, PackageId, RentalId, RentalState, ResourceSpec, UserId},
 };
 use crate::error::BillingError;
 use crate::metrics::BillingMetricsSystem;
 use crate::pricing::PricingService;
 use crate::storage::events::{EventType, UsageEvent};
 use crate::storage::rds::RdsConnection;
-use crate::storage::SqlRulesRepository;
 use crate::storage::{PackageRepository, SqlPackageRepository};
 use crate::storage::{PriceCacheRepository, SqlPriceCacheRepository};
 use crate::storage::{RentalRepository, SqlCreditRepository, SqlRentalRepository};
-use crate::storage::{SqlUserPreferencesRepository, UsageRepository, UserPreferencesRepository};
+use crate::storage::{SqlUserPreferencesRepository, UserPreferencesRepository};
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 
 use basilica_protocol::billing::{
@@ -25,15 +20,13 @@ use basilica_protocol::billing::{
     ApplyCreditsResponse, FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
     GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, GetBillingPackagesRequest,
     GetBillingPackagesResponse, GetCachedPricesRequest, GetCachedPricesResponse,
-    GetPriceHistoryRequest, GetPriceHistoryResponse, IngestResponse, ReleaseReservationRequest,
-    ReleaseReservationResponse, RentalStatus, ReserveCreditsRequest, ReserveCreditsResponse,
+    GetPriceHistoryRequest, GetPriceHistoryResponse, IngestResponse, RentalStatus,
     SetUserPackageRequest, SetUserPackageResponse, SyncPricesRequest, SyncPricesResponse,
     TelemetryData, TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
     UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest, UsageReportResponse,
     UsageSummary,
 };
 
-use chrono::Duration;
 use rust_decimal::prelude::*;
 use serde_json;
 use std::str::FromStr;
@@ -46,14 +39,12 @@ use uuid;
 pub struct BillingServiceImpl {
     credit_manager: Arc<dyn CreditOperations + Send + Sync>,
     rental_manager: Arc<dyn RentalOperations + Send + Sync>,
-    rules_engine: Arc<RulesEngine>,
     #[allow(dead_code)] // Used in server's consumer loop
     telemetry_processor: Arc<TelemetryProcessor>,
     telemetry_ingester: Arc<TelemetryIngester>,
     rental_repository: Arc<dyn RentalRepository + Send + Sync>,
     package_repository: Arc<dyn PackageRepository + Send + Sync>,
     user_preferences_repository: Arc<dyn UserPreferencesRepository + Send + Sync>,
-    usage_repository: Arc<dyn UsageRepository + Send + Sync>,
     event_store: Arc<EventStore>,
     metrics: Option<Arc<BillingMetricsSystem>>,
     pricing_service: Option<Arc<PricingService>>,
@@ -107,18 +98,8 @@ impl BillingServiceImpl {
             .initialize()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize package repository: {}", e))?;
-        let rules_repository = Arc::new(SqlRulesRepository::new(rds_connection.pool().clone()));
         let user_preferences_repository =
             Arc::new(SqlUserPreferencesRepository::new(rds_connection.clone()));
-        let usage_repository = Arc::new(crate::storage::SqlUsageRepository::new(
-            rds_connection.clone(),
-        ));
-        let user_metadata_repository = Arc::new(crate::storage::SqlUserMetadataRepository::new(
-            rds_connection.pool().clone(),
-        ));
-        let promo_code_repository = Arc::new(crate::storage::SqlPromoCodeRepository::new(
-            rds_connection.pool().clone(),
-        ));
 
         // Create event repositories using proper pattern
         let event_repository = Arc::new(crate::storage::events::SqlEventRepository::new(
@@ -137,18 +118,11 @@ impl BillingServiceImpl {
         Ok(Self {
             credit_manager: Arc::new(CreditManager::new(credit_repository.clone())),
             rental_manager: Arc::new(RentalManager::new(rental_repository.clone())),
-            rules_engine: Arc::new(RulesEngine::new(
-                package_repository.clone(),
-                rules_repository,
-                user_metadata_repository,
-                promo_code_repository,
-            )),
             telemetry_processor,
             telemetry_ingester,
             rental_repository: rental_repository.clone(),
             package_repository: package_repository.clone(),
             user_preferences_repository: user_preferences_repository.clone(),
-            usage_repository,
             event_store,
             metrics,
             pricing_service,
@@ -202,37 +176,6 @@ impl BillingServiceImpl {
             RentalState::Completed => RentalStatus::Stopped,
             RentalState::Failed => RentalStatus::Failed,
         }
-    }
-
-    #[allow(clippy::result_large_err)]
-    fn determine_final_cost(
-        validator_provided_cost: &str,
-        calculated_cost: CreditBalance,
-        rental_id: &RentalId,
-    ) -> Result<CreditBalance, Status> {
-        if validator_provided_cost.is_empty() {
-            return Ok(calculated_cost);
-        }
-
-        let validator_cost = rust_decimal::Decimal::from_str(validator_provided_cost)
-            .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?;
-
-        if validator_cost.is_sign_negative() {
-            return Err(Status::invalid_argument("final_cost cannot be negative"));
-        }
-
-        let validator_balance = CreditBalance::from_decimal(validator_cost);
-
-        let cost_tolerance = rust_decimal::Decimal::new(1, 2);
-
-        if (calculated_cost.as_decimal() - validator_balance.as_decimal()).abs() > cost_tolerance {
-            warn!(
-                "Validator-provided final_cost ({}) differs from computed cost ({}) for rental {}",
-                validator_balance, calculated_cost, rental_id
-            );
-        }
-
-        Ok(validator_balance)
     }
 }
 
@@ -308,129 +251,11 @@ impl BillingService for BillingServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to get account: {}", e)))?;
 
         let response = GetBalanceResponse {
-            available_balance: Self::format_credit_balance(account.available_balance()),
-            reserved_balance: Self::format_credit_balance(account.reserved),
+            available_balance: Self::format_credit_balance(account.balance),
             total_balance: Self::format_credit_balance(account.balance),
             last_updated: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
                 account.last_updated,
             ))),
-        };
-
-        Ok(Response::new(response))
-    }
-
-    async fn reserve_credits(
-        &self,
-        request: Request<ReserveCreditsRequest>,
-    ) -> std::result::Result<Response<ReserveCreditsResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = UserId::new(req.user_id);
-        let rental_id = if req.rental_id.is_empty() {
-            None
-        } else {
-            Some(
-                RentalId::from_str(&req.rental_id)
-                    .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?,
-            )
-        };
-        let amount = Self::parse_decimal(&req.amount)
-            .map_err(|e| Status::invalid_argument(format!("Invalid amount: {}", e)))?;
-        let credit_balance = CreditBalance::from_decimal(amount);
-        let proto_duration = req
-            .duration
-            .ok_or_else(|| Status::invalid_argument("Duration is required"))?;
-        let duration = Duration::seconds(proto_duration.seconds)
-            + Duration::nanoseconds(proto_duration.nanos as i64);
-        let hours = duration.num_hours();
-
-        info!(
-            "Reserving {} credits for user {} for {} hours",
-            amount, user_id, hours
-        );
-
-        let reservation_id = self
-            .credit_manager
-            .reserve_credits(&user_id, credit_balance, duration, rental_id)
-            .await
-            .map_err(|e| match e {
-                BillingError::InsufficientBalance {
-                    available,
-                    required,
-                } => Status::failed_precondition(format!(
-                    "Insufficient balance: available={}, required={}",
-                    available, required
-                )),
-                _ => Status::internal(format!("Failed to reserve credits: {}", e)),
-            })?;
-
-        let reservation = self
-            .credit_manager
-            .get_reservation(&reservation_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get reservation: {}", e)))?;
-
-        let response = ReserveCreditsResponse {
-            success: true,
-            reservation_id: reservation_id.to_string(),
-            reserved_amount: Self::format_credit_balance(reservation.amount),
-            reserved_until: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
-                reservation.expires_at,
-            ))),
-            error_message: String::new(),
-        };
-
-        Ok(Response::new(response))
-    }
-
-    async fn release_reservation(
-        &self,
-        request: Request<ReleaseReservationRequest>,
-    ) -> std::result::Result<Response<ReleaseReservationResponse>, Status> {
-        let req = request.into_inner();
-        let reservation_id = ReservationId::from_uuid(
-            uuid::Uuid::parse_str(&req.reservation_id)
-                .map_err(|e| Status::invalid_argument(format!("Invalid reservation ID: {}", e)))?,
-        );
-        let final_amount = Self::parse_decimal(&req.final_amount)
-            .map_err(|e| Status::invalid_argument(format!("Invalid amount: {}", e)))?;
-        let final_balance = CreditBalance::from_decimal(final_amount);
-
-        info!(
-            "Releasing reservation {} with final amount {}",
-            reservation_id, final_amount
-        );
-
-        let reservation = self
-            .credit_manager
-            .get_reservation(&reservation_id)
-            .await
-            .map_err(|e| Status::not_found(format!("Reservation not found: {}", e)))?;
-
-        let reserved_amount = reservation.amount;
-
-        let new_balance = self
-            .credit_manager
-            .charge_from_reservation(&reservation_id, final_balance)
-            .await
-            .map_err(|e| match e {
-                BillingError::ReservationNotFound { .. } => {
-                    Status::not_found(format!("Reservation not found: {}", e))
-                }
-                BillingError::ReservationAlreadyReleased { .. } => {
-                    Status::failed_precondition(format!("Reservation already released: {}", e))
-                }
-                _ => Status::internal(format!("Failed to release reservation: {}", e)),
-            })?;
-
-        let refunded = reserved_amount
-            .subtract(final_balance)
-            .unwrap_or(CreditBalance::zero());
-
-        let response = ReleaseReservationResponse {
-            success: true,
-            charged_amount: Self::format_decimal(final_amount),
-            refunded_amount: Self::format_credit_balance(refunded),
-            new_balance: Self::format_credit_balance(new_balance),
         };
 
         Ok(Response::new(response))
@@ -526,21 +351,11 @@ impl BillingService for BillingServiceImpl {
                 let response = TrackRentalResponse {
                     success: true,
                     tracking_id: rental_id.to_string(),
-                    reservation_id: String::new(),
-                    estimated_cost: "0.00".to_string(),
                 };
                 return Ok(response);
             }
 
             // Calculate max duration first
-            let proto_duration = req
-                .max_duration
-                .ok_or_else(|| Status::invalid_argument("Max duration is required"))?;
-            let max_duration = Duration::seconds(proto_duration.seconds)
-                + Duration::nanoseconds(proto_duration.nanos as i64);
-            let max_duration_hours =
-                max_duration.num_hours() as f64 + (max_duration.num_minutes() % 60) as f64 / 60.0;
-
             // Create rental with the provided ID
             use crate::domain::rentals::Rental;
             use crate::domain::types::{CostBreakdown, UsageMetrics};
@@ -552,7 +367,6 @@ impl BillingService for BillingServiceImpl {
                 node_id: req.node_id.clone(),
                 validator_id: validator_id.clone(),
                 package_id,
-                reservation_id: None,
                 state: crate::domain::types::RentalState::Pending,
                 resource_spec,
                 usage_metrics: UsageMetrics::zero(),
@@ -573,7 +387,6 @@ impl BillingService for BillingServiceImpl {
                 actual_start_time: Some(now),
                 actual_end_time: None,
                 actual_cost: CreditBalance::zero(),
-                max_duration_hours,
             };
 
             // Persist to database
@@ -581,33 +394,6 @@ impl BillingService for BillingServiceImpl {
                 .create_rental(&rental)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
-            let estimated_cost =
-                credit_rate.multiply(Decimal::from_f64(max_duration_hours).ok_or_else(|| {
-                    Status::invalid_argument("Invalid duration for cost calculation")
-                })?);
-
-            let reservation_id = match self
-                .credit_manager
-                .reserve_credits(&user_id, estimated_cost, max_duration, Some(rental_id))
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    if let Ok(Some(mut failed_rental)) = self.rental_repository.get_rental(&rental_id).await {
-                        failed_rental.state = RentalState::Failed;
-                        failed_rental.last_updated = chrono::Utc::now();
-                        if let Err(update_err) = self.rental_repository.update_rental(&failed_rental).await {
-                            warn!("Failed to mark rental {} as failed after reservation error: {}", rental_id, update_err);
-                        }
-                    }
-                    return Err(match e {
-                        BillingError::InsufficientBalance { .. } => {
-                            Status::failed_precondition(format!("Insufficient balance: {}", e))
-                        }
-                        _ => Status::internal(format!("Failed to reserve credits: {}", e)),
-                    });
-                }
-            };
 
             let rental_start_event = UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
@@ -620,8 +406,6 @@ impl BillingService for BillingServiceImpl {
                     "package_id": package_id_str,
                     "hourly_rate": Self::format_credit_balance(credit_rate),
                     "resource_spec": resource_spec_value,
-                    "estimated_cost": Self::format_credit_balance(estimated_cost),
-                    "max_duration_hours": max_duration_hours,
                 }),
                 timestamp: chrono::Utc::now(),
                 processed: false,
@@ -646,8 +430,6 @@ impl BillingService for BillingServiceImpl {
             let response = TrackRentalResponse {
                 success: true,
                 tracking_id: rental_id.to_string(),
-                reservation_id: reservation_id.to_string(),
-                estimated_cost: Self::format_credit_balance(estimated_cost),
             };
 
             Ok(response)
@@ -847,121 +629,85 @@ impl BillingService for BillingServiceImpl {
             let rental_id = RentalId::from_str(&req.rental_id)
                 .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
 
-            info!("Finalizing rental {}", rental_id);
-
             let rental = self
-                .rental_manager
-                .finalize_rental(&rental_id)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to finalize rental: {}", e)))?;
-
-            let usage_metrics = self
-                .usage_repository
-                .get_usage_for_rental(&rental_id)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to get usage metrics: {}", e)))?;
-
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("user_id".to_string(), rental.user_id.to_string());
-            metadata.insert("rental_id".to_string(), rental_id.to_string());
-            metadata.insert("validator_id".to_string(), rental.validator_id.clone());
-            metadata.insert("node_id".to_string(), rental.node_id.clone());
-
-            let cost_breakdown = self
-                .rules_engine
-                .evaluate_package(
-                    &rental.user_id,
-                    &rental.package_id,
-                    &usage_metrics,
-                    None,
-                    &metadata,
-                )
-                .await
-                .map_err(|e| {
-                    Status::internal(format!("Failed to evaluate billing rules: {}", e))
-                })?;
-
-            let rules_evaluated = self
-                .rules_engine
-                .evaluate_rules(&usage_metrics, &metadata)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to evaluate rules: {}", e)))?;
-
-            if let Some(ref metrics) = self.metrics {
-                for rule in &rules_evaluated {
-                    metrics
-                        .billing_metrics()
-                        .record_rule_applied(&rule.id, &rule.name)
-                        .await;
-                }
-            }
-
-            let calculated_cost = cost_breakdown.total_cost;
-
-            let final_balance =
-                Self::determine_final_cost(&req.final_cost, calculated_cost, &rental_id)?;
-
-            let final_cost = final_balance.as_decimal();
-
-            info!(
-                "Finalizing rental {} with final cost {} (calculated: {}, rules applied: {})",
-                rental_id,
-                final_cost,
-                calculated_cost.as_decimal(),
-                rules_evaluated.len()
-            );
-
-            let duration = rental.last_updated - rental.created_at;
-            let _duration_hours =
-                duration.num_hours() as f64 + (duration.num_minutes() % 60) as f64 / 60.0;
-
-            let reservations = self
-                .credit_manager
-                .get_active_reservations(&rental.user_id)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to get reservations: {}", e)))?;
-
-            let rental_reservation = reservations.iter().find(|r| r.rental_id == Some(rental_id));
-
-            let (charged_amount, refunded_amount) = if let Some(reservation) = rental_reservation {
-                let reserved = reservation.amount;
-                let refunded = reserved
-                    .subtract(final_balance)
-                    .unwrap_or(CreditBalance::zero());
-
-                self.credit_manager
-                    .charge_from_reservation(&reservation.id, final_balance)
-                    .await
-                    .map_err(|e| {
-                        Status::internal(format!("Failed to charge reservation: {}", e))
-                    })?;
-
-                (final_balance, refunded)
-            } else {
-                self.credit_manager
-                    .charge_credits(&rental.user_id, final_balance)
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to charge credits: {}", e)))?;
-
-                (final_balance, CreditBalance::zero())
-            };
-
-            let final_rental = self
-                .rental_manager
+                .rental_repository
                 .get_rental(&rental_id)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?
+                .ok_or_else(|| Status::not_found(format!("Rental {} not found", rental_id)))?;
+
+            info!(
+                "finalize_rental called for {} - telemetry already charged incrementally (actual_cost: {})",
+                rental_id, rental.actual_cost
+            );
+
+            let final_cost_decimal = if req.final_cost.is_empty() {
+                rental.actual_cost.as_decimal()
+            } else {
+                req.final_cost.parse::<rust_decimal::Decimal>()
+                    .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
+            };
+
+            let end_time = req.end_time
+                .map(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32).unwrap())
+                .unwrap_or_else(chrono::Utc::now);
+
+            let rental_end_data = crate::domain::processor::RentalEndData {
+                end_time,
+                final_cost: final_cost_decimal,
+                termination_reason: if req.termination_reason.is_empty() {
+                    None
+                } else {
+                    Some(req.termination_reason.clone())
+                },
+            };
+
+            // Update rental status to completed immediately
+            let mut rental = rental.clone();
+            rental.state = crate::domain::types::RentalState::Completed;
+            rental.last_updated = end_time;
+
             self.rental_repository
-                .update_rental(&final_rental)
+                .update_rental(&rental)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to persist rental: {}", e)))?;
+                .map_err(|e| {
+                    error!("Failed to update rental status to completed: {}", e);
+                    Status::internal(format!("Failed to update rental status: {}", e))
+                })?;
+
+            info!("Updated rental {} state to completed", rental_id);
+
+            // Publish rental_end event for audit purposes
+            let usage_event = crate::storage::UsageEvent {
+                event_id: uuid::Uuid::new_v4(),
+                rental_id: rental.id.as_uuid(),
+                user_id: rental.user_id.as_str().to_string(),
+                node_id: rental.node_id.clone(),
+                validator_id: rental.validator_id.clone(),
+                event_type: crate::storage::EventType::RentalEnd,
+                event_data: serde_json::to_value(&rental_end_data)
+                    .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?,
+                timestamp: chrono::Utc::now(),
+                processed: false,
+                processed_at: None,
+                batch_id: None,
+            };
+
+            self.event_store
+                .append_usage_event(&usage_event)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to append rental end event: {}", e)))?;
+
+            info!("Published rental_end event for rental {} for audit purposes", rental_id);
+
+            let duration = rental.last_updated - rental.created_at;
 
             if let Some(ref metrics) = self.metrics {
                 metrics
                     .billing_metrics()
                     .record_rental_finalized(
                         &rental_id.to_string(),
-                        final_cost.to_f64().unwrap_or(0.0),
+                        rental.actual_cost.as_decimal().to_f64().unwrap_or(0.0),
                     )
                     .await;
             }
@@ -973,10 +719,10 @@ impl BillingService for BillingServiceImpl {
 
             let response = FinalizeRentalResponse {
                 success: true,
-                total_cost: Self::format_decimal(final_cost),
+                total_cost: Self::format_credit_balance(rental.actual_cost),
                 duration: Some(duration_proto),
-                charged_amount: Self::format_credit_balance(charged_amount),
-                refunded_amount: Self::format_credit_balance(refunded_amount),
+                charged_amount: "0.00".to_string(),
+                refunded_amount: "0.00".to_string(),
             };
 
             Ok(response)
@@ -1495,115 +1241,5 @@ impl BillingService for BillingServiceImpl {
 
         info!("Returned {} price history entries", total_count);
         Ok(Response::new(response))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_determine_final_cost_uses_validator_cost_when_provided() {
-        let rental_id = RentalId::new();
-        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
-        let validator_cost = "25.5";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_ok());
-        let final_cost = result.unwrap();
-        assert_eq!(
-            final_cost.as_decimal(),
-            rust_decimal::Decimal::from_str("25.5").unwrap()
-        );
-    }
-
-    #[test]
-    fn test_determine_final_cost_falls_back_to_calculated_when_empty() {
-        let rental_id = RentalId::new();
-        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(15));
-        let validator_cost = "";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_ok());
-        let final_cost = result.unwrap();
-        assert_eq!(final_cost.as_decimal(), rust_decimal::Decimal::from(15));
-    }
-
-    #[test]
-    fn test_determine_final_cost_rejects_invalid_decimal() {
-        let rental_id = RentalId::new();
-        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
-        let validator_cost = "not-a-number";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
-    }
-
-    #[test]
-    fn test_determine_final_cost_handles_zero_validator_cost() {
-        let rental_id = RentalId::new();
-        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
-        let validator_cost = "0";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_ok());
-        let final_cost = result.unwrap();
-        assert_eq!(final_cost.as_decimal(), rust_decimal::Decimal::ZERO);
-    }
-
-    #[test]
-    fn test_determine_final_cost_with_exact_match() {
-        let rental_id = RentalId::new();
-        let calculated =
-            CreditBalance::from_decimal(rust_decimal::Decimal::from_str("25.5").unwrap());
-        let validator_cost = "25.5";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_ok());
-        let final_cost = result.unwrap();
-        assert_eq!(final_cost, calculated);
-    }
-
-    #[test]
-    fn test_determine_final_cost_with_high_precision() {
-        let rental_id = RentalId::new();
-        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
-        let validator_cost = "25.123456";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_ok());
-        let final_cost = result.unwrap();
-        assert_eq!(
-            final_cost.as_decimal(),
-            rust_decimal::Decimal::from_str("25.123456").unwrap()
-        );
-    }
-
-    #[test]
-    fn test_determine_final_cost_rejects_negative_cost() {
-        let rental_id = RentalId::new();
-        let calculated = CreditBalance::from_decimal(rust_decimal::Decimal::from(10));
-        let validator_cost = "-5.0";
-
-        let result =
-            BillingServiceImpl::determine_final_cost(validator_cost, calculated, &rental_id);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("cannot be negative"));
     }
 }
