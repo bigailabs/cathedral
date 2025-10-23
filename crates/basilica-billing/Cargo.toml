@@ -26,7 +26,6 @@ sqlx = { workspace = true, features = [
 
 aws-config = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
-aws-sdk-pricing = { workspace = true }
 
 tonic = { workspace = true }
 tonic-health = { workspace = true }
