@@ -309,7 +309,6 @@ pub struct ListDepositsQuery {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BalanceResponse {
     pub available: String,
-    pub reserved: String,
     pub total: String,
     pub last_updated: String,
 }
