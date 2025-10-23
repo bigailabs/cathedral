@@ -662,6 +662,22 @@ impl BillingService for BillingServiceImpl {
                 },
             };
 
+            // Update rental status to completed immediately
+            let mut rental = rental.clone();
+            rental.state = crate::domain::types::RentalState::Completed;
+            rental.last_updated = end_time;
+
+            self.rental_repository
+                .update_rental(&rental)
+                .await
+                .map_err(|e| {
+                    error!("Failed to update rental status to completed: {}", e);
+                    Status::internal(format!("Failed to update rental status: {}", e))
+                })?;
+
+            info!("Updated rental {} state to completed", rental_id);
+
+            // Publish rental_end event for audit purposes
             let usage_event = crate::storage::UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
                 rental_id: rental.id.as_uuid(),
@@ -682,7 +698,7 @@ impl BillingService for BillingServiceImpl {
                 .await
                 .map_err(|e| Status::internal(format!("Failed to append rental end event: {}", e)))?;
 
-            info!("Published rental_end event for rental {}", rental_id);
+            info!("Published rental_end event for rental {} for audit purposes", rental_id);
 
             let duration = rental.last_updated - rental.created_at;
 
