@@ -8,7 +8,7 @@ use crate::domain::{
 use crate::error::{BillingError, Result};
 use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -29,6 +29,10 @@ pub struct SqlRentalRepository {
 impl SqlRentalRepository {
     pub fn new(connection: Arc<RdsConnection>) -> Self {
         Self { connection }
+    }
+
+    pub fn pool(&self) -> &sqlx::PgPool {
+        self.connection.pool()
     }
 
     fn parse_rental_state(state_str: &str) -> RentalState {
@@ -87,10 +91,9 @@ impl SqlRentalRepository {
                 .get::<Option<String>, _>("validator_id")
                 .unwrap_or_default(),
             package_id,
-            reservation_id: None, // No reservation_id in rentals table
             state,
             resource_spec,
-            usage_metrics: UsageMetrics::zero(), // Not stored in rentals table
+            usage_metrics: UsageMetrics::zero(),
             cost_breakdown: {
                 let hourly_rate = r.get::<rust_decimal::Decimal, _>("hourly_rate");
                 let total_cost = r
@@ -117,10 +120,6 @@ impl SqlRentalRepository {
                 .get::<Option<rust_decimal::Decimal>, _>("total_cost")
                 .map(CreditBalance::from_decimal)
                 .unwrap_or_else(CreditBalance::zero),
-            max_duration_hours: r
-                .get::<Option<i32>, _>("max_duration_hours")
-                .map(|v| v as f64)
-                .unwrap_or(24.0),
         }
     }
 }
@@ -136,8 +135,8 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             INSERT INTO billing.rentals
             (rental_id, user_id, node_id, validator_id, package_id, status,
-             resource_spec, hourly_rate, start_time, max_duration_hours, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             resource_spec, hourly_rate, start_time, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -153,7 +152,6 @@ impl RentalRepository for SqlRentalRepository {
         .bind(resource_spec_json)
         .bind(hourly_rate)
         .bind(rental.started_at)
-        .bind(rental.max_duration_hours as i32)
         .bind(metadata_json)
         .execute(self.connection.pool())
         .await
@@ -170,7 +168,7 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at, max_duration_hours
+                   metadata, created_at, updated_at
             FROM billing.rentals
             WHERE rental_id = $1
             "#,
@@ -234,7 +232,7 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at, max_duration_hours
+                       metadata, created_at, updated_at
                 FROM billing.rentals
                 WHERE user_id = $1 AND status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -246,7 +244,7 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at, max_duration_hours
+                       metadata, created_at, updated_at
                 FROM billing.rentals
                 WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -269,7 +267,7 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at, max_duration_hours
+                   metadata, created_at, updated_at
             FROM billing.rentals
             WHERE status = $1
             ORDER BY start_time DESC
@@ -338,5 +336,53 @@ impl RentalRepository for SqlRentalRepository {
             ),
             average_duration_hours: row.get::<f64, _>("avg_duration_hours"),
         })
+    }
+}
+
+impl SqlRentalRepository {
+    pub async fn update_rental_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        rental: &Rental,
+    ) -> Result<()> {
+        let resource_spec_json = serde_json::to_value(&rental.resource_spec)?;
+        let metadata_json = serde_json::to_value(&rental.metadata)?;
+        let hourly_rate = rental.cost_breakdown.base_cost.as_decimal();
+        let total_cost = rental.actual_cost.as_decimal();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE billing.rentals
+            SET status = $2, resource_spec = $3, hourly_rate = $4,
+                updated_at = $5, end_time = $6, metadata = $7, total_cost = $8
+            WHERE rental_id = $1
+            "#,
+        )
+        .bind(rental.id.as_uuid())
+        .bind(rental.state.to_string())
+        .bind(resource_spec_json)
+        .bind(hourly_rate)
+        .bind(chrono::Utc::now())
+        .bind(rental.ended_at)
+        .bind(metadata_json)
+        .bind(if total_cost == rust_decimal::Decimal::ZERO {
+            None
+        } else {
+            Some(total_cost)
+        })
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "update_rental_tx".to_string(),
+            source: Box::new(e),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(BillingError::RentalNotFound {
+                id: rental.id.to_string(),
+            });
+        }
+
+        Ok(())
     }
 }

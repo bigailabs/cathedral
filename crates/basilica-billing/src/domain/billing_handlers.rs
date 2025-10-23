@@ -7,8 +7,8 @@ use crate::domain::types::{
 };
 use crate::error::{BillingError, Result};
 use crate::storage::{
-    BillingEvent, CreditRepository, EventRepository, PackageRepository, RentalRepository,
-    UsageEvent,
+    rentals::RentalRepository, BillingEvent, EventRepository, PackageRepository,
+    SqlCreditRepository, SqlRentalRepository, UsageEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -20,16 +20,16 @@ use uuid::Uuid;
 
 /// Concrete implementation of EventHandlers for billing operations
 pub struct BillingEventHandlers {
-    rental_repository: Arc<dyn RentalRepository + Send + Sync>,
-    credit_repository: Arc<dyn CreditRepository + Send + Sync>,
+    rental_repository: Arc<SqlRentalRepository>,
+    credit_repository: Arc<SqlCreditRepository>,
     package_repository: Arc<dyn PackageRepository + Send + Sync>,
     event_repository: Arc<dyn EventRepository + Send + Sync>,
 }
 
 impl BillingEventHandlers {
     pub fn new(
-        rental_repository: Arc<dyn RentalRepository + Send + Sync>,
-        credit_repository: Arc<dyn CreditRepository + Send + Sync>,
+        rental_repository: Arc<SqlRentalRepository>,
+        credit_repository: Arc<SqlCreditRepository>,
         package_repository: Arc<dyn PackageRepository + Send + Sync>,
         event_repository: Arc<dyn EventRepository + Send + Sync>,
     ) -> Self {
@@ -179,15 +179,37 @@ impl EventHandlers for BillingEventHandlers {
 
         let incremental_cost = cost_breakdown.total_cost;
 
-        let deduction_result = self
-            .credit_repository
-            .deduct_credits(&rental.user_id, incremental_cost)
-            .await;
+        let mut tx = self.credit_repository.pool().begin().await.map_err(|e| {
+            BillingError::DatabaseError {
+                operation: "begin_billing_transaction".to_string(),
+                source: Box::new(e),
+            }
+        })?;
 
-        match deduction_result {
+        match self
+            .credit_repository
+            .deduct_credits_tx(&mut tx, &rental.user_id, incremental_cost)
+            .await
+        {
             Ok(()) => {
                 rental.actual_cost = rental.actual_cost.add(incremental_cost);
-                self.rental_repository.update_rental(&rental).await?;
+
+                if let Err(e) = self
+                    .rental_repository
+                    .update_rental_tx(&mut tx, &rental)
+                    .await
+                {
+                    error!(
+                        "Failed to update rental in transaction: {}. Rolling back.",
+                        e
+                    );
+                    return Err(e);
+                }
+
+                tx.commit().await.map_err(|e| BillingError::DatabaseError {
+                    operation: "commit_billing_transaction".to_string(),
+                    source: Box::new(e),
+                })?;
 
                 self.record_billing_event(
                     "telemetry_processed",
@@ -204,13 +226,13 @@ impl EventHandlers for BillingEventHandlers {
                 .await?;
 
                 info!(
-                    "Processed telemetry for rental {} - incremental cost: {}, total cost: {}, credits deducted",
+                    "Processed telemetry for rental {} - incremental cost: {}, total cost: {}, transaction committed",
                     rental_id, incremental_cost, rental.actual_cost
                 );
             }
             Err(e) => {
                 error!(
-                    "Failed to deduct credits for rental {}: {}. Pausing rental billing.",
+                    "Failed to deduct credits for rental {}: {}. Transaction auto-rolled back.",
                     rental_id, e
                 );
 
@@ -231,19 +253,6 @@ impl EventHandlers for BillingEventHandlers {
                     }),
                 )
                 .await?;
-
-                if let Some(reservation_id) = &rental.reservation_id {
-                    if let Err(release_err) = self
-                        .credit_repository
-                        .release_reservation(reservation_id)
-                        .await
-                    {
-                        warn!(
-                            "Failed to release reservation {} after billing failure: {}",
-                            reservation_id, release_err
-                        );
-                    }
-                }
 
                 return Err(e);
             }
@@ -290,27 +299,11 @@ impl EventHandlers for BillingEventHandlers {
 
         match (&old_state, &new_state) {
             (RentalState::Pending, RentalState::Active) => {
-                if let Some(reservation_id) = &rental.reservation_id {
-                    debug!(
-                        "Rental {} activated with reservation {}",
-                        rental_id, reservation_id
-                    );
-                }
                 rental.actual_start_time = Some(Utc::now());
             }
             (RentalState::Active, RentalState::Completed)
             | (RentalState::Active, RentalState::Failed) => {
                 rental.actual_end_time = Some(Utc::now());
-
-                if let Some(reservation_id) = &rental.reservation_id {
-                    if let Err(e) = self
-                        .credit_repository
-                        .release_reservation(reservation_id)
-                        .await
-                    {
-                        warn!("Failed to release reservation {}: {}", reservation_id, e);
-                    }
-                }
 
                 info!(
                     "Rental {} completed/failed with total cost: {} (credits deducted incrementally)",
@@ -417,35 +410,6 @@ impl EventHandlers for BillingEventHandlers {
             .map(|s| PackageId::new(s.to_string()))
             .unwrap_or_else(PackageId::h100); // Default to H100 if not specified
 
-        let package = self.package_repository.get_package(&package_id).await?;
-
-        let estimated_usage = UsageMetrics {
-            gpu_hours: Decimal::ONE,
-            gpu_count: 1,
-            cpu_hours: Decimal::ZERO,
-            memory_gb_hours: Decimal::ZERO,
-            storage_gb_hours: Decimal::ZERO,
-            network_gb: Decimal::ZERO,
-            disk_io_gb: Decimal::ZERO,
-        };
-
-        let estimated_cost = package
-            .calculate_cost_with_gpu_count(&estimated_usage, estimated_usage.gpu_count)
-            .total_cost;
-
-        let max_duration_hours = event
-            .event_data
-            .get("max_duration_hours")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(24.0);
-
-        let duration = chrono::Duration::seconds((max_duration_hours * 3600.0) as i64);
-
-        let reservation = self
-            .credit_repository
-            .reserve_credits(&user_id, estimated_cost, &rental_id, duration)
-            .await?;
-
         let resource_spec = ResourceSpec {
             gpu_specs: vec![],
             cpu_cores: 1,
@@ -459,10 +423,8 @@ impl EventHandlers for BillingEventHandlers {
             user_id.clone(),
             event.node_id.clone(),
             event.validator_id.clone(),
-            package_id,
+            package_id.clone(),
             resource_spec,
-            Some(reservation.id),
-            max_duration_hours,
         );
         rental.id = rental_id;
 
@@ -470,10 +432,6 @@ impl EventHandlers for BillingEventHandlers {
         rental.actual_start_time = Some(Utc::now());
 
         self.rental_repository.create_rental(&rental).await?;
-
-        // Note: active_rentals_facts is populated by the rental sync job.
-        // usage_aggregation_facts is populated by aggregation jobs.
-        // No manual initialization needed.
 
         self.record_billing_event(
             "rental_started",
@@ -483,8 +441,7 @@ impl EventHandlers for BillingEventHandlers {
                 "package_id": rental.package_id.to_string(),
                 "node_id": event.node_id,
                 "validator_id": event.validator_id,
-                "estimated_cost": estimated_cost.to_string(),
-                "reservation_id": reservation.id.to_string(),
+                "billing_model": "pay_as_you_go",
                 "timestamp": event.timestamp,
             }),
         )
@@ -545,19 +502,6 @@ impl EventHandlers for BillingEventHandlers {
             RentalState::Completed
         };
         rental.actual_end_time = Some(Utc::now());
-
-        if let Some(reservation_id) = &rental.reservation_id {
-            if let Err(e) = self
-                .credit_repository
-                .release_reservation(reservation_id)
-                .await
-            {
-                warn!(
-                    "Failed to release reservation {} for rental {}: {}",
-                    reservation_id, rental_id, e
-                );
-            }
-        }
 
         self.rental_repository.update_rental(&rental).await?;
 
