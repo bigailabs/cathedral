@@ -83,7 +83,6 @@ impl TestContext {
         // Clean up all test data - order matters due to foreign key constraints
         let queries = vec![
             "TRUNCATE TABLE billing.usage_events CASCADE",
-            "TRUNCATE TABLE billing.credit_reservations CASCADE",
             "TRUNCATE TABLE billing.rentals CASCADE",
             "TRUNCATE TABLE billing.user_preferences CASCADE",
             "TRUNCATE TABLE billing.credits CASCADE",
@@ -206,11 +205,10 @@ impl TestContext {
 
         // Then insert/update credits using ON CONFLICT to handle race conditions
         sqlx::query(
-            "INSERT INTO billing.credits (user_id, balance, reserved_balance, lifetime_spent, updated_at)
-             VALUES ($1, $2, 0, 0, NOW())
+            "INSERT INTO billing.credits (user_id, balance, lifetime_spent, updated_at)
+             VALUES ($1, $2, 0, NOW())
              ON CONFLICT (user_id) DO UPDATE SET
                balance = EXCLUDED.balance,
-               reserved_balance = 0,
                updated_at = NOW()",
         )
         .bind(user_uuid)
@@ -225,18 +223,6 @@ impl TestContext {
     pub async fn get_user_balance(&self, user_id: &str) -> rust_decimal::Decimal {
         sqlx::query_scalar::<_, rust_decimal::Decimal>(
             "SELECT c.balance FROM billing.credits c
-             JOIN billing.users u ON c.user_id = u.user_id
-             WHERE u.external_id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(rust_decimal::Decimal::ZERO)
-    }
-
-    pub async fn get_reserved_balance(&self, user_id: &str) -> rust_decimal::Decimal {
-        sqlx::query_scalar::<_, rust_decimal::Decimal>(
-            "SELECT COALESCE(c.reserved_balance, 0) FROM billing.credits c
              JOIN billing.users u ON c.user_id = u.user_id
              WHERE u.external_id = $1",
         )
@@ -280,16 +266,6 @@ impl TestContext {
         .fetch_optional(&self.pool)
         .await
         .unwrap_or(None)
-    }
-
-    pub async fn reservation_exists(&self, reservation_id: &str) -> bool {
-        sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM billing.credit_reservations WHERE id = $1::uuid)",
-        )
-        .bind(reservation_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false)
     }
 
     pub async fn get_user_package(&self, user_id: &str) -> Option<String> {

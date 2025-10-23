@@ -22,7 +22,6 @@ async fn main() -> Result<()> {
 
     println!("Balance:");
     println!("  Available: {}", balance.available_balance);
-    println!("  Reserved: {}", balance.reserved_balance);
     println!("  Total: {}", balance.total_balance);
     if let Some(timestamp) = balance.last_updated {
         println!(
