@@ -142,18 +142,6 @@ impl PrometheusMetricsRecorder {
             "Total database errors encountered"
         );
 
-        describe_counter!(
-            "basilica_billing_reservations_created_total",
-            Unit::Count,
-            "Total credit reservations created"
-        );
-
-        describe_counter!(
-            "basilica_billing_reservations_released_total",
-            Unit::Count,
-            "Total credit reservations released"
-        );
-
         describe_gauge!(
             "basilica_billing_health_status",
             Unit::Count,

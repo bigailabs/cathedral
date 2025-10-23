@@ -10,12 +10,6 @@ pub enum BillingError {
         required: Decimal,
     },
 
-    #[error("Credit reservation not found: {id}")]
-    ReservationNotFound { id: String },
-
-    #[error("Credit reservation already released: {id}")]
-    ReservationAlreadyReleased { id: String },
-
     #[error("User not found: {id}")]
     UserNotFound { id: String },
 
