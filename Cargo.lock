@@ -1739,28 +1739,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aws-sdk-pricing"
-version = "1.90.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e275c4689180daff7dacb87b87ad0f755b8d8e06e819cb6500548720af4e164"
-dependencies = [
- "aws-credential-types",
- "aws-runtime",
- "aws-smithy-async",
- "aws-smithy-http",
- "aws-smithy-json",
- "aws-smithy-runtime",
- "aws-smithy-runtime-api",
- "aws-smithy-types",
- "aws-types",
- "bytes",
- "fastrand",
- "http 0.2.12",
- "regex-lite",
- "tracing",
-]
-
-[[package]]
 name = "aws-sdk-secretsmanager"
 version = "1.90.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2281,7 +2259,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "aws-config",
- "aws-sdk-pricing",
  "aws-sdk-secretsmanager",
  "axum 0.7.9",
  "basilica-common",

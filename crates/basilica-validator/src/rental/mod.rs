@@ -68,7 +68,7 @@ pub(crate) fn extract_miner_uid(miner_id: &str) -> Option<u16> {
 
 /// Get normalized GPU type from node details
 pub(crate) fn get_gpu_type(node_details: &crate::api::types::NodeDetails) -> String {
-    use crate::gpu::categorization::GpuCategory;
+    use basilica_common::types::GpuCategory;
     use std::str::FromStr;
 
     node_details
@@ -262,7 +262,7 @@ impl RentalManager {
 
     /// Initialize metrics for all nodes on startup
     pub async fn initialize_node_metrics(&self) -> Result<()> {
-        use crate::gpu::categorization::GpuCategory;
+        use basilica_common::types::GpuCategory;
         use std::str::FromStr;
 
         // Get all nodes with their GPU and rental data in a single query

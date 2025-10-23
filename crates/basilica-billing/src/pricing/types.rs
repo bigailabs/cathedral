@@ -24,9 +24,6 @@ pub struct PricingConfig {
     /// Cache TTL in seconds (default: 86400 = 24 hours)
     pub cache_ttl_seconds: u64,
 
-    /// Fallback to static prices if external fetch fails
-    pub fallback_to_static: bool,
-
     /// Price sources to query
     pub sources: Vec<PriceSource>,
 
@@ -62,11 +59,10 @@ impl Default for PricingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            global_discount_percent: Decimal::from(-20), // 20% discount
+            global_discount_percent: Decimal::from(-50), // 50% discount
             gpu_discounts: HashMap::new(),
             update_interval_seconds: 86400, // 24 hours (daily)
             cache_ttl_seconds: 86400,       // 24 hours
-            fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
             aggregation_strategy: PriceAggregationStrategy::Average,
             marketplace_api_key: None,
@@ -252,10 +248,9 @@ mod tests {
     fn test_pricing_config_default() {
         let config = PricingConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.global_discount_percent, Decimal::from(-20));
+        assert_eq!(config.global_discount_percent, Decimal::from(-50));
         assert_eq!(config.update_interval_seconds, 86400);
         assert_eq!(config.cache_ttl_seconds, 86400);
-        assert!(config.fallback_to_static);
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0], PriceSource::Marketplace);
         assert_eq!(
@@ -315,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gpu_price_apply_discount_20_percent() {
+    fn test_gpu_price_apply_discount_50_percent() {
         let mut price = GpuPrice {
             gpu_model: "H100".to_string(),
             vram_gb: Some(80),
@@ -331,11 +326,11 @@ mod tests {
             is_spot: false,
         };
 
-        // Apply 20% discount (-20)
-        price.apply_discount(Decimal::from(-20));
-        assert_eq!(price.discount_percent, Decimal::from(-20));
-        // Expected: 100 * 0.8 = 80
-        assert_eq!(price.discounted_price_per_hour, Decimal::from(80));
+        // Apply 50% discount (-50)
+        price.apply_discount(Decimal::from(-50));
+        assert_eq!(price.discount_percent, Decimal::from(-50));
+        // Expected: 100 * 0.5 = 50
+        assert_eq!(price.discounted_price_per_hour, Decimal::from(50));
     }
 
     #[test]
@@ -365,27 +360,27 @@ mod tests {
     #[test]
     fn test_effective_discount_with_override() {
         let mut gpu_discounts = HashMap::new();
-        gpu_discounts.insert("H100".to_string(), Decimal::from(-15));
-        gpu_discounts.insert("A100".to_string(), Decimal::from(-25));
+        gpu_discounts.insert("H100".to_string(), Decimal::from(-40));
+        gpu_discounts.insert("A100".to_string(), Decimal::from(-60));
 
-        let global_discount = Decimal::from(-20);
+        let global_discount = Decimal::from(-50);
 
         // H100 has override
         assert_eq!(
             GpuPrice::effective_discount(global_discount, &gpu_discounts, "H100"),
-            Decimal::from(-15)
+            Decimal::from(-40)
         );
 
         // A100 has override
         assert_eq!(
             GpuPrice::effective_discount(global_discount, &gpu_discounts, "A100"),
-            Decimal::from(-25)
+            Decimal::from(-60)
         );
 
         // H200 has no override, use global
         assert_eq!(
             GpuPrice::effective_discount(global_discount, &gpu_discounts, "H200"),
-            Decimal::from(-20)
+            Decimal::from(-50)
         );
     }
 
@@ -414,11 +409,10 @@ mod tests {
         // Simulate TOML configuration
         let config = PricingConfig {
             enabled: true,
-            global_discount_percent: Decimal::from(-20),
+            global_discount_percent: Decimal::from(-50),
             gpu_discounts: HashMap::new(),
             update_interval_seconds: 86400,
             cache_ttl_seconds: 86400,
-            fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
             aggregation_strategy: PriceAggregationStrategy::Average,
             marketplace_api_key: Some("test-key-123".to_string()),

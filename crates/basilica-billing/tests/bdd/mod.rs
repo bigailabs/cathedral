@@ -24,7 +24,8 @@ impl TestContext {
             .await
             .expect("Failed to get test database pool");
 
-        Self::cleanup_database(&pool).await;
+        // Only seed test data (packages) - don't cleanup to allow parallel test execution
+        // Each test uses unique user IDs so they won't conflict
         Self::seed_test_data(&pool).await;
 
         // Get the database URL from the test container
@@ -79,21 +80,9 @@ impl TestContext {
         }
     }
 
-    async fn cleanup_database(pool: &Pool<Postgres>) {
-        // Clean up all test data - order matters due to foreign key constraints
-        let queries = vec![
-            "TRUNCATE TABLE billing.usage_events CASCADE",
-            "TRUNCATE TABLE billing.rentals CASCADE",
-            "TRUNCATE TABLE billing.user_preferences CASCADE",
-            "TRUNCATE TABLE billing.credits CASCADE",
-            "TRUNCATE TABLE billing.users CASCADE",
-            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'h200', 'a100', 'custom')",
-        ];
-
-        for query in queries {
-            let _ = sqlx::query(query).execute(pool).await;
-        }
-    }
+    // Note: cleanup_database was removed to enable parallel test execution
+    // Each test uses unique user IDs, so they don't interfere with each other
+    // The shared test database accumulates test data but tests are isolated by user_id
 
     async fn seed_test_data(pool: &Pool<Postgres>) {
         // Test packages matching production pricing from migration 005_billing_packages.sql

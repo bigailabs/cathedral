@@ -2,6 +2,7 @@ use crate::error::{BillingError, Result};
 use crate::pricing::providers::PriceProvider;
 use crate::pricing::types::{GpuPrice, PriceQueryFilter};
 use async_trait::async_trait;
+use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::prelude::FromPrimitive;
@@ -237,18 +238,9 @@ impl PriceProvider for MarketplaceProvider {
         let gpu_models = match &filter.gpu_models {
             Some(models) => models.clone(),
             None => {
-                // Default GPU models to query
-                vec![
-                    "H100".to_string(),
-                    "H200".to_string(),
-                    "B200".to_string(),
-                    "A100".to_string(),
-                    "A40".to_string(),
-                    "RTX4090".to_string(),
-                    "RTX3090".to_string(),
-                    "V100".to_string(),
-                    "L40".to_string(),
-                ]
+                // Query only the GPU models that the validator network supports
+                // This ensures pricing aligns with what the network can score
+                GpuCategory::supported_models()
             }
         };
 

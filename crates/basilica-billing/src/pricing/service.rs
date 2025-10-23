@@ -1,8 +1,7 @@
 use crate::error::Result;
-use crate::pricing::cache::PriceCache;
-use crate::pricing::metrics::PricingMetrics;
 use crate::pricing::providers::PriceProvider;
 use crate::pricing::types::{AggregatedGpuPrice, GpuPrice, PriceQueryFilter, PricingConfig};
+use crate::storage::PriceCacheRepository;
 use futures::future::join_all;
 use rust_decimal::Decimal;
 use std::sync::Arc;
@@ -12,7 +11,7 @@ use tracing::{debug, error, info, warn};
 /// Core pricing service for fetching, aggregating, and caching GPU prices
 pub struct PricingService {
     providers: Vec<Box<dyn PriceProvider>>,
-    cache: Arc<PriceCache>,
+    cache: Arc<dyn PriceCacheRepository>,
     config: PricingConfig,
 }
 
@@ -20,7 +19,7 @@ impl PricingService {
     /// Create a new pricing service
     pub fn new(
         providers: Vec<Box<dyn PriceProvider>>,
-        cache: Arc<PriceCache>,
+        cache: Arc<dyn PriceCacheRepository>,
         config: PricingConfig,
     ) -> Self {
         Self {
@@ -63,9 +62,6 @@ impl PricingService {
                             prices.len(),
                             duration
                         );
-                        // Record metrics
-                        PricingMetrics::record_fetch_duration(&provider_name, duration);
-                        PricingMetrics::record_prices_fetched(&provider_name, prices.len());
                         (provider_name, Ok(prices))
                     }
                     Err(e) => {
@@ -73,8 +69,6 @@ impl PricingService {
                             "Provider {} failed after {:?}: {}",
                             provider_name, duration, e
                         );
-                        // Record error metric
-                        PricingMetrics::record_provider_error(&provider_name);
                         (provider_name, Err(e))
                     }
                 }
@@ -134,20 +128,16 @@ impl PricingService {
                         "Cache hit for {}: ${}/hr",
                         gpu_model, cached_price.discounted_price_per_hour
                     );
-                    PricingMetrics::record_cache_hit(gpu_model);
                     return Ok(Some(cached_price.discounted_price_per_hour));
                 } else {
                     warn!("Cached price for {} is expired", gpu_model);
-                    PricingMetrics::record_cache_miss(gpu_model);
                 }
             }
             Ok(None) => {
                 debug!("No cached price found for {}", gpu_model);
-                PricingMetrics::record_cache_miss(gpu_model);
             }
             Err(e) => {
                 error!("Error fetching price from cache for {}: {}", gpu_model, e);
-                PricingMetrics::record_cache_miss(gpu_model);
                 return Err(e);
             }
         }
@@ -172,48 +162,25 @@ impl PricingService {
             return Ok(static_price);
         }
 
-        // Try to get dynamic price from cache
+        // Try to get dynamic price from cache, fallback to static if unavailable
         match self.get_price(gpu_model).await {
             Ok(Some(price)) => {
                 info!("Using dynamic price for {}: ${}/hr", gpu_model, price);
                 Ok(price)
             }
             Ok(None) => {
-                if self.config.fallback_to_static {
-                    warn!(
-                        "No dynamic price available for {}, falling back to static price ${}/hr",
-                        gpu_model, static_price
-                    );
-                    PricingMetrics::record_fallback_to_static(gpu_model);
-                    Ok(static_price)
-                } else {
-                    error!(
-                        "No dynamic price available for {} and fallback disabled",
-                        gpu_model
-                    );
-                    Err(crate::error::BillingError::ConfigurationError {
-                        message: format!(
-                            "Dynamic price not available for {} and fallback disabled",
-                            gpu_model
-                        ),
-                    })
-                }
+                warn!(
+                    "No dynamic price available for {}, falling back to static price ${}/hr",
+                    gpu_model, static_price
+                );
+                Ok(static_price)
             }
             Err(e) => {
-                if self.config.fallback_to_static {
-                    error!(
-                        "Error fetching price for {}: {}. Falling back to static price ${}/hr",
-                        gpu_model, e, static_price
-                    );
-                    PricingMetrics::record_fallback_to_static(gpu_model);
-                    Ok(static_price)
-                } else {
-                    error!(
-                        "Error fetching price for {}: {} and fallback disabled",
-                        gpu_model, e
-                    );
-                    Err(e)
-                }
+                error!(
+                    "Error fetching price for {}: {}. Falling back to static price ${}/hr",
+                    gpu_model, e, static_price
+                );
+                Ok(static_price)
             }
         }
     }
@@ -221,26 +188,19 @@ impl PricingService {
     /// Sync prices from all providers to database cache
     pub async fn sync_prices(&self) -> Result<usize> {
         info!("Starting price sync");
-        let sync_start = PricingMetrics::start_sync_timer();
 
         // Fetch from all providers (this handles individual provider failures)
         let all_prices = match self.fetch_latest_prices().await {
             Ok(prices) => prices,
             Err(e) => {
                 error!("Failed to fetch prices from providers: {}", e);
-                PricingMetrics::record_sync_error();
-                if self.config.fallback_to_static {
-                    warn!("Continuing with fallback to static pricing");
-                    return Ok(0);
-                } else {
-                    return Err(e);
-                }
+                warn!("Continuing with fallback to static pricing");
+                return Ok(0);
             }
         };
 
         if all_prices.is_empty() {
             warn!("No prices fetched from any providers");
-            PricingMetrics::record_sync_error();
             return Ok(0);
         }
 
@@ -249,7 +209,6 @@ impl PricingService {
             Ok(prices) => prices,
             Err(e) => {
                 error!("Failed to aggregate prices: {}", e);
-                PricingMetrics::record_sync_error();
                 return Err(e);
             }
         };
@@ -279,79 +238,18 @@ impl PricingService {
         {
             Ok(()) => {
                 info!("Successfully synced {} GPU prices", count);
-
-                // Record successful sync metrics
-                PricingMetrics::record_sync_success();
-                PricingMetrics::record_sync_duration(sync_start.elapsed());
-
-                // Update cache size metrics
-                self.update_cache_metrics().await;
-
                 Ok(count)
             }
             Err(e) => {
                 error!("Failed to store prices in cache: {}", e);
-                PricingMetrics::record_sync_error();
                 Err(e)
-            }
-        }
-    }
-
-    /// Update cache size and age metrics
-    async fn update_cache_metrics(&self) {
-        // Get all cached prices to calculate metrics
-        match self.cache.get_all().await {
-            Ok(prices) => {
-                // Update cache size
-                PricingMetrics::set_cache_size(prices.len());
-
-                // Calculate oldest cache age
-                if !prices.is_empty() {
-                    let now = chrono::Utc::now();
-                    let oldest_age = prices
-                        .iter()
-                        .map(|p| (now - p.updated_at).num_seconds())
-                        .max()
-                        .unwrap_or(0);
-
-                    PricingMetrics::set_oldest_cache_age(oldest_age as f64);
-                }
-            }
-            Err(e) => {
-                warn!("Failed to update cache metrics: {}", e);
             }
         }
     }
 
     /// Record price history for tracking price changes over time
     async fn record_price_history(&self, prices: &[GpuPrice]) -> Result<()> {
-        debug!("Recording {} prices to history", prices.len());
-
-        let pool = self.cache.pool();
-
-        for price in prices {
-            sqlx::query(
-                r#"
-                INSERT INTO billing.price_history (
-                    gpu_model, price_per_hour, source, provider, recorded_at
-                )
-                VALUES ($1, $2, $3, $4, NOW())
-                "#,
-            )
-            .bind(&price.gpu_model)
-            .bind(price.discounted_price_per_hour)
-            .bind(&price.source)
-            .bind(&price.provider)
-            .execute(pool)
-            .await
-            .map_err(|e| crate::error::BillingError::DatabaseError {
-                operation: "record_price_history".to_string(),
-                source: Box::new(e),
-            })?;
-        }
-
-        debug!("Successfully recorded {} prices to history", prices.len());
-        Ok(())
+        self.cache.record_price_history(prices).await
     }
 
     /// Apply discount logic to prices
@@ -481,11 +379,45 @@ mod tests {
     use crate::error::BillingError;
     use crate::pricing::providers::{create_providers, PriceProvider};
     use crate::pricing::types::{PriceAggregationStrategy, PriceSource};
+    use crate::storage::{PriceCacheRepository, PriceHistoryEntry, PriceHistoryFilter};
     use async_trait::async_trait;
     use chrono::Utc;
     use rust_decimal_macros::dec;
     use std::collections::HashMap;
     use std::env;
+
+    /// Mock price cache repository for testing
+    struct MockPriceCacheRepository;
+
+    #[async_trait]
+    impl PriceCacheRepository for MockPriceCacheRepository {
+        async fn store(&self, _prices: Vec<GpuPrice>, _ttl_seconds: u64) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get(&self, _gpu_model: &str) -> Result<Option<GpuPrice>> {
+            Ok(None)
+        }
+
+        async fn get_all(&self) -> Result<Vec<GpuPrice>> {
+            Ok(Vec::new())
+        }
+
+        async fn clear_expired(&self, _ttl_seconds: u64) -> Result<u64> {
+            Ok(0)
+        }
+
+        async fn record_price_history(&self, _prices: &[GpuPrice]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_price_history(
+            &self,
+            _filter: PriceHistoryFilter,
+        ) -> Result<Vec<PriceHistoryEntry>> {
+            Ok(Vec::new())
+        }
+    }
 
     struct StubProvider {
         name: &'static str,
@@ -577,9 +509,9 @@ mod tests {
         let multiplier = Decimal::ONE + (discount / Decimal::from(100));
         let discounted = market_price * multiplier;
 
-        // Default global discount is -20%
-        // 100 * (1 + (-20/100)) = 100 * 0.8 = 80
-        assert_eq!(discounted, Decimal::from(80));
+        // Default global discount is -50%
+        // 100 * (1 + (-50/100)) = 100 * 0.5 = 50
+        assert_eq!(discounted, Decimal::from(50));
     }
 
     /// Test fetch, aggregate, and discount pipeline with real Shadeform API
@@ -602,11 +534,11 @@ mod tests {
             marketplace_api_key: Some(api_key),
             marketplace_api_url: "https://api.shadeform.ai/v1".to_string(),
             marketplace_available_only: false, // Include all prices for aggregation
-            global_discount_percent: dec!(-20.0),
+            global_discount_percent: dec!(-50.0),
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers = create_providers(&config).expect("Should create marketplace provider");
         assert_eq!(providers.len(), 1, "Should have one marketplace provider");
 
@@ -694,7 +626,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers: Vec<Box<dyn PriceProvider>> = vec![
             Box::new(StubProvider::successful(
                 "marketplace-primary",
@@ -731,12 +663,12 @@ mod tests {
 
         assert_eq!(
             aggregated[0].discounted_price_per_hour,
-            dec!(2.0),
-            "20% discount should be applied to aggregated price"
+            dec!(1.25),
+            "50% discount should be applied to aggregated price"
         );
         assert_eq!(
             aggregated[0].discount_percent,
-            dec!(-20.0),
+            dec!(-50.0),
             "Discount metadata should reflect global discount"
         );
         assert_eq!(
@@ -754,7 +686,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers: Vec<Box<dyn PriceProvider>> = vec![
             Box::new(StubProvider::successful(
                 "marketplace",
@@ -782,7 +714,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers: Vec<Box<dyn PriceProvider>> =
             vec![Box::new(StubProvider::failing("marketplace"))];
 
@@ -815,12 +747,11 @@ mod tests {
             sources: vec![PriceSource::Marketplace],
             marketplace_api_key: Some(api_key),
             aggregation_strategy: PriceAggregationStrategy::Average,
-            global_discount_percent: dec!(-20.0),
-            fallback_to_static: true,
+            global_discount_percent: dec!(-50.0),
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let providers =
             create_providers(&config).expect("Expected marketplace provider with API key");
         assert!(
@@ -890,7 +821,7 @@ mod tests {
         let mut gpu_discounts = HashMap::new();
         gpu_discounts.insert("H100".to_string(), Decimal::from(-15));
 
-        let global_discount = Decimal::from(-20);
+        let global_discount = Decimal::from(-50);
 
         let market_price = Decimal::from(100);
         let discount = GpuPrice::effective_discount(global_discount, &gpu_discounts, "H100");
@@ -910,7 +841,7 @@ mod tests {
         let mut gpu_discounts = HashMap::new();
         gpu_discounts.insert("H100".to_string(), Decimal::from(-15));
 
-        let global_discount = Decimal::from(-20);
+        let global_discount = Decimal::from(-50);
 
         let market_price = Decimal::from(100);
         let discount = GpuPrice::effective_discount(global_discount, &gpu_discounts, "A6000");
@@ -919,9 +850,9 @@ mod tests {
         let multiplier = Decimal::ONE + (discount / Decimal::from(100));
         let discounted = market_price * multiplier;
 
-        // A6000 not in overrides, uses global -20%
-        // 100 * (1 + (-20/100)) = 100 * 0.8 = 80
-        assert_eq!(discounted, Decimal::from(80));
+        // A6000 not in overrides, uses global -50%
+        // 100 * (1 + (-50/100)) = 100 * 0.5 = 50
+        assert_eq!(discounted, Decimal::from(50));
     }
 
     /// Test minimum aggregation strategy
@@ -932,7 +863,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![
@@ -958,7 +889,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![
@@ -981,7 +912,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![
@@ -1006,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn test_aggregate_empty() {
         let config = PricingConfig::default();
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = Vec::new();
@@ -1018,7 +949,7 @@ mod tests {
     #[tokio::test]
     async fn test_aggregate_single_price() {
         let config = PricingConfig::default();
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let prices = vec![create_test_price("H100", "aws", dec!(30.0))];
@@ -1036,7 +967,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         // Different GPU configurations with their total prices
@@ -1073,7 +1004,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         // Different GPU configurations with their total prices
@@ -1114,7 +1045,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         // All single-GPU configurations
@@ -1142,7 +1073,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let static_price = dec!(100.0);
@@ -1160,11 +1091,10 @@ mod tests {
     async fn test_get_price_with_fallback_cache_miss() {
         let config = PricingConfig {
             enabled: true,
-            fallback_to_static: true,
             ..Default::default()
         };
 
-        let cache = Arc::new(PriceCache::new_fake());
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
         let static_price = dec!(100.0);
@@ -1173,26 +1103,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Should fall back to static price on cache miss
+        // Should always fall back to static price on cache miss
         assert_eq!(result, static_price);
-    }
-
-    /// Test get_price_with_fallback when cache miss and fallback disabled
-    #[tokio::test]
-    async fn test_get_price_with_fallback_disabled_no_cache() {
-        let config = PricingConfig {
-            enabled: true,
-            fallback_to_static: false,
-            ..Default::default()
-        };
-
-        let cache = Arc::new(PriceCache::new_fake());
-        let service = PricingService::new(Vec::new(), cache, config);
-
-        let static_price = dec!(100.0);
-        let result = service.get_price_with_fallback("H100", static_price).await;
-
-        // Should return error when no cache and fallback disabled
-        assert!(result.is_err());
     }
 }

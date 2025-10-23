@@ -6,10 +6,11 @@ use crate::domain::{
 };
 use crate::error::BillingError;
 use crate::metrics::BillingMetricsSystem;
-use crate::pricing::{PriceCache, PricingService};
+use crate::pricing::PricingService;
 use crate::storage::events::{EventType, UsageEvent};
 use crate::storage::rds::RdsConnection;
 use crate::storage::{PackageRepository, SqlPackageRepository};
+use crate::storage::{PriceCacheRepository, SqlPriceCacheRepository};
 use crate::storage::{RentalRepository, SqlCreditRepository, SqlRentalRepository};
 use crate::storage::{SqlUserPreferencesRepository, UserPreferencesRepository};
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
@@ -48,7 +49,7 @@ pub struct BillingServiceImpl {
     metrics: Option<Arc<BillingMetricsSystem>>,
     pricing_service: Option<Arc<PricingService>>,
     pricing_config: Option<crate::pricing::types::PricingConfig>,
-    price_cache: Arc<PriceCache>,
+    price_cache: Arc<dyn PriceCacheRepository>,
 }
 
 impl BillingServiceImpl {
@@ -59,7 +60,8 @@ impl BillingServiceImpl {
         metrics: Option<Arc<BillingMetricsSystem>>,
     ) -> anyhow::Result<Self> {
         // Create default price cache
-        let price_cache = Arc::new(PriceCache::new(rds_connection.pool().clone()));
+        let price_cache: Arc<dyn PriceCacheRepository> =
+            Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
 
         Self::new_with_pricing(
             rds_connection,
@@ -80,7 +82,7 @@ impl BillingServiceImpl {
         metrics: Option<Arc<BillingMetricsSystem>>,
         pricing_service: Option<Arc<PricingService>>,
         pricing_config: Option<crate::pricing::types::PricingConfig>,
-        price_cache: Arc<PriceCache>,
+        price_cache: Arc<dyn PriceCacheRepository>,
     ) -> anyhow::Result<Self> {
         let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));
         let rental_repository = Arc::new(SqlRentalRepository::new(rds_connection.clone()));
@@ -1125,6 +1127,8 @@ impl BillingService for BillingServiceImpl {
         &self,
         request: Request<GetPriceHistoryRequest>,
     ) -> std::result::Result<Response<GetPriceHistoryResponse>, Status> {
+        use crate::storage::PriceHistoryFilter;
+
         let req = request.into_inner();
 
         if req.gpu_model.is_empty() {
@@ -1133,83 +1137,38 @@ impl BillingService for BillingServiceImpl {
 
         info!("Get price history requested for GPU: {}", req.gpu_model);
 
-        // Build query
-        let limit = if req.limit == 0 { 100 } else { req.limit };
+        // Build filter from request
+        let filter = PriceHistoryFilter {
+            gpu_model: req.gpu_model.clone(),
+            start_time: req
+                .start_time
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)),
+            end_time: req
+                .end_time
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)),
+            providers: req.providers.clone(),
+            limit: req.limit,
+        };
 
-        let mut query = String::from(
-            "SELECT gpu_model, price_per_hour, source, provider, recorded_at
-             FROM billing.price_history
-             WHERE gpu_model = $1",
-        );
-
-        let mut param_count = 2;
-
-        // Add time filters if provided
-        if req.start_time.is_some() {
-            query.push_str(&format!(" AND recorded_at >= ${}", param_count));
-            param_count += 1;
-        }
-        if req.end_time.is_some() {
-            query.push_str(&format!(" AND recorded_at <= ${}", param_count));
-            param_count += 1;
-        }
-
-        // Add provider filter if provided
-        if !req.providers.is_empty() {
-            query.push_str(&format!(" AND provider = ANY(${})", param_count));
-        }
-
-        query.push_str(&format!(" ORDER BY recorded_at DESC LIMIT {}", limit));
-
-        // Execute query
-        let pool = self.price_cache.pool();
-        let mut query_builder = sqlx::query_as::<
-            _,
-            (
-                String,
-                rust_decimal::Decimal,
-                String,
-                String,
-                chrono::DateTime<chrono::Utc>,
-            ),
-        >(&query);
-
-        query_builder = query_builder.bind(&req.gpu_model);
-
-        if let Some(start_time) = req.start_time {
-            let dt = chrono::DateTime::from_timestamp(start_time.seconds, start_time.nanos as u32)
-                .unwrap_or_else(chrono::Utc::now);
-            query_builder = query_builder.bind(dt);
-        }
-
-        if let Some(end_time) = req.end_time {
-            let dt = chrono::DateTime::from_timestamp(end_time.seconds, end_time.nanos as u32)
-                .unwrap_or_else(chrono::Utc::now);
-            query_builder = query_builder.bind(dt);
-        }
-
-        if !req.providers.is_empty() {
-            query_builder = query_builder.bind(&req.providers);
-        }
-
-        let rows = query_builder
-            .fetch_all(pool)
+        // Query repository
+        let history_entries = self
+            .price_cache
+            .get_price_history(filter)
             .await
             .map_err(|e| Status::internal(format!("Failed to fetch price history: {}", e)))?;
 
-        let entries = rows
+        // Convert to protocol format
+        let entries = history_entries
             .into_iter()
-            .map(|(gpu_model, price, source, provider, recorded_at)| {
-                basilica_protocol::billing::PriceHistoryEntry {
-                    gpu_model,
-                    price_per_hour: Self::format_decimal(price),
-                    source,
-                    provider,
-                    recorded_at: Some(prost_types::Timestamp {
-                        seconds: recorded_at.timestamp(),
-                        nanos: recorded_at.timestamp_subsec_nanos() as i32,
-                    }),
-                }
+            .map(|entry| basilica_protocol::billing::PriceHistoryEntry {
+                gpu_model: entry.gpu_model,
+                price_per_hour: Self::format_decimal(entry.price_per_hour),
+                source: entry.source,
+                provider: entry.provider,
+                recorded_at: Some(prost_types::Timestamp {
+                    seconds: entry.recorded_at.timestamp(),
+                    nanos: entry.recorded_at.timestamp_subsec_nanos() as i32,
+                }),
             })
             .collect::<Vec<_>>();
 

@@ -24,9 +24,7 @@ Production configuration example:
 enabled = true
 global_discount_percent = -20.0
 update_interval_seconds = 86400
-sync_hour_utc = 2
 cache_ttl_seconds = 86400
-fallback_to_static = true
 sources = ["marketplace"]
 aggregation_strategy = "median"
 
@@ -44,7 +42,6 @@ enabled = true
 global_discount_percent = 0.0  # No discount for testing
 update_interval_seconds = 3600  # Sync every hour
 cache_ttl_seconds = 3600
-fallback_to_static = true
 sources = ["marketplace"]
 aggregation_strategy = "median"
 
@@ -64,11 +61,11 @@ marketplace_available_only = false  # Show all instances for testing
 | `enabled` | `bool` | `false` | Enable dynamic pricing |
 | `global_discount_percent` | `Decimal` | `-20.0` | Global discount percentage (negative = discount) |
 | `update_interval_seconds` | `u64` | `86400` | How often to fetch prices (seconds) |
-| `sync_hour_utc` | `Option<u8>` | `Some(2)` | UTC hour to sync prices (0-23) |
 | `cache_ttl_seconds` | `u64` | `86400` | Cache time-to-live (seconds) |
-| `fallback_to_static` | `bool` | `true` | Fall back to static prices if API fails |
 | `sources` | `Vec<PriceSource>` | `["marketplace"]` | Price sources to query |
 | `aggregation_strategy` | `PriceAggregationStrategy` | `"average"` | How to aggregate prices from multiple sources |
+
+**Note:** The pricing system now always falls back to static prices if dynamic pricing is unavailable, ensuring system reliability.
 | `marketplace_api_key` | `Option<String>` | `None` | Marketplace API key (required) |
 | `marketplace_api_url` | `String` | `"https://api.shadeform.ai/v1"` | Marketplace API URL |
 | `marketplace_available_only` | `bool` | `true` | Only return available instances |
@@ -103,13 +100,12 @@ marketplace_available_only = false  # Show all instances for testing
 
 #### Monitored GPU Models
 
-By default, the marketplace provider queries prices for:
-- H100, H200, B200 (high-end data center GPUs)
-- A100, A40 (NVIDIA data center GPUs)
-- RTX4090, RTX3090 (consumer/prosumer GPUs)
-- V100, L40 (legacy/alternative data center GPUs)
+The billing service queries prices for GPU models that are officially supported by the Basilica validator network:
+- **A100** - High-end training & inference
+- **H100** - Flagship AI training & inference
+- **B200** - Next-gen AI acceleration
 
-You can configure which GPU models to monitor through the API query filters.
+These models are defined in `basilica-common::types::GpuCategory` and represent the GPUs that the validator network can score and allocate. You can configure custom GPU models through the API query filters if needed.
 
 #### API Key Setup
 
@@ -197,10 +193,10 @@ Background Sync (Daily at 2 AM UTC):
 Rental Creation:
   1. User requests GPU rental
   2. PackageRepository loads package for GPU model
-  3. If use_dynamic_pricing=true:
+  3. If pricing service is configured:
      - Queries price_cache for latest price
-     - Falls back to static price if cache miss
-  4. Creates rental with current market price
+     - Falls back to static price if cache miss or pricing disabled
+  4. Creates rental with current price
 ```
 
 ## Testing
@@ -233,11 +229,10 @@ cargo test --lib pricing::types
 - Check marketplace API key is valid
 - Verify network connectivity to marketplace API (`https://api.shadeform.ai/v1`)
 - Check logs for API errors or rate limiting
-- Ensure `fallback_to_static = true` if using fallback
+- The system automatically falls back to static prices if dynamic pricing fails
 
 ### Stale prices
 - Verify `update_interval_seconds` is set appropriately (default: 86400)
-- Check `sync_hour_utc` if using scheduled sync (default: 2 AM UTC)
 - Review cache TTL settings (`cache_ttl_seconds`)
 - Check background sync job is running (look for sync logs)
 - Manually trigger sync via gRPC: `SyncPrices` RPC
@@ -264,7 +259,6 @@ The pricing service exposes Prometheus metrics for monitoring:
 - `pricing_cache_size`: Number of cached price entries
 - `pricing_cache_hits_total`: Cache hit count
 - `pricing_cache_misses_total`: Cache miss count
-- `pricing_fallback_to_static_total`: Fallback to static prices count
 
 Monitor these to ensure pricing service health and performance.
 

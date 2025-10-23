@@ -10,13 +10,13 @@ use crate::output::{
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use crate::ssh::{parse_ssh_credentials, SshClient};
 use crate::CliError;
+use basilica_common::types::GpuCategory;
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
     GpuRequirements, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile, NodeSelection,
     RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
-use basilica_validator::gpu::categorization::GpuCategory;
 use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
