@@ -310,13 +310,6 @@ impl BillingConfig {
                 ));
             }
 
-            if !self.pricing.fallback_to_static {
-                warnings.push(
-                    "Pricing fallback is disabled - service may fail if external APIs are unavailable"
-                        .to_string(),
-                );
-            }
-
             if self.pricing.cache_ttl_seconds < self.pricing.update_interval_seconds {
                 warnings.push(format!(
                     "Cache TTL ({}) is less than update interval ({}) - prices may expire before next update",
@@ -422,16 +415,6 @@ mod tests {
 
         let warnings = config.warnings();
         assert!(warnings.iter().any(|w| w.contains("very frequent")));
-    }
-
-    #[test]
-    fn test_pricing_config_warnings_no_fallback() {
-        let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.fallback_to_static = false;
-
-        let warnings = config.warnings();
-        assert!(warnings.iter().any(|w| w.contains("fallback")));
     }
 
     #[test]

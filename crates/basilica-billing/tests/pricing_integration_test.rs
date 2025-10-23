@@ -6,7 +6,7 @@ use basilica_billing::pricing::providers::create_providers;
 /// - Price aggregation strategies
 /// - Discount application
 /// - Metrics recording
-/// - Error handling and fallbacks
+/// - Error handling
 use basilica_billing::pricing::{PriceAggregationStrategy, PriceSource, PricingConfig};
 use rust_decimal_macros::dec;
 
@@ -60,23 +60,21 @@ fn test_discount_application() {
 /// Test error handling configuration
 #[test]
 fn test_error_handling_configuration() {
-    // Test with fallback enabled
+    // Test pricing enabled
     let config = PricingConfig {
         enabled: true,
-        fallback_to_static: true,
         ..Default::default()
     };
-    assert!(config.fallback_to_static);
-    println!("✓ Fallback to static pricing configured");
+    assert!(config.enabled);
+    println!("✓ Dynamic pricing enabled configuration validated");
 
-    // Test with fallback disabled
+    // Test pricing disabled
     let config = PricingConfig {
-        enabled: true,
-        fallback_to_static: false,
+        enabled: false,
         ..Default::default()
     };
-    assert!(!config.fallback_to_static);
-    println!("✓ Fallback disabled configuration validated");
+    assert!(!config.enabled);
+    println!("✓ Dynamic pricing disabled configuration validated");
 }
 
 /// Test pricing disabled scenario
@@ -178,7 +176,7 @@ fn test_marketplace_configuration() {
     println!("✓ Marketplace-specific configuration validated");
 }
 
-/// Comprehensive integration test: configuration + provider creation + fallback behavior
+/// Comprehensive integration test: configuration + provider creation + error handling
 #[tokio::test]
 async fn test_end_to_end_configuration_and_providers() {
     // 1. Test complete configuration with marketplace provider
@@ -188,7 +186,6 @@ async fn test_end_to_end_configuration_and_providers() {
         marketplace_api_key: Some("test-api-key".to_string()),
         aggregation_strategy: PriceAggregationStrategy::Minimum,
         global_discount_percent: dec!(-50.0), // 50% discount
-        fallback_to_static: true,
         cache_ttl_seconds: 3600,
         ..Default::default()
     };
@@ -216,10 +213,6 @@ async fn test_end_to_end_configuration_and_providers() {
             PriceAggregationStrategy::Minimum
         ),
         "Should use minimum aggregation strategy"
-    );
-    assert!(
-        config.fallback_to_static,
-        "Fallback to static should be enabled"
     );
     assert_eq!(
         config.cache_ttl_seconds, 3600,

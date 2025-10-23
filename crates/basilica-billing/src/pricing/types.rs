@@ -24,9 +24,6 @@ pub struct PricingConfig {
     /// Cache TTL in seconds (default: 86400 = 24 hours)
     pub cache_ttl_seconds: u64,
 
-    /// Fallback to static prices if external fetch fails
-    pub fallback_to_static: bool,
-
     /// Price sources to query
     pub sources: Vec<PriceSource>,
 
@@ -66,7 +63,6 @@ impl Default for PricingConfig {
             gpu_discounts: HashMap::new(),
             update_interval_seconds: 86400, // 24 hours (daily)
             cache_ttl_seconds: 86400,       // 24 hours
-            fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
             aggregation_strategy: PriceAggregationStrategy::Average,
             marketplace_api_key: None,
@@ -255,7 +251,6 @@ mod tests {
         assert_eq!(config.global_discount_percent, Decimal::from(-50));
         assert_eq!(config.update_interval_seconds, 86400);
         assert_eq!(config.cache_ttl_seconds, 86400);
-        assert!(config.fallback_to_static);
         assert_eq!(config.sources.len(), 1);
         assert_eq!(config.sources[0], PriceSource::Marketplace);
         assert_eq!(
@@ -418,7 +413,6 @@ mod tests {
             gpu_discounts: HashMap::new(),
             update_interval_seconds: 86400,
             cache_ttl_seconds: 86400,
-            fallback_to_static: true,
             sources: vec![PriceSource::Marketplace],
             aggregation_strategy: PriceAggregationStrategy::Average,
             marketplace_api_key: Some("test-key-123".to_string()),

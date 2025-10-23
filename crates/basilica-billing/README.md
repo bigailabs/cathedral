@@ -25,7 +25,6 @@ enabled = true
 global_discount_percent = -20.0
 update_interval_seconds = 86400
 cache_ttl_seconds = 86400
-fallback_to_static = true
 sources = ["marketplace"]
 aggregation_strategy = "median"
 
@@ -43,7 +42,6 @@ enabled = true
 global_discount_percent = 0.0  # No discount for testing
 update_interval_seconds = 3600  # Sync every hour
 cache_ttl_seconds = 3600
-fallback_to_static = true
 sources = ["marketplace"]
 aggregation_strategy = "median"
 
@@ -64,9 +62,10 @@ marketplace_available_only = false  # Show all instances for testing
 | `global_discount_percent` | `Decimal` | `-20.0` | Global discount percentage (negative = discount) |
 | `update_interval_seconds` | `u64` | `86400` | How often to fetch prices (seconds) |
 | `cache_ttl_seconds` | `u64` | `86400` | Cache time-to-live (seconds) |
-| `fallback_to_static` | `bool` | `true` | Fall back to static prices if API fails |
 | `sources` | `Vec<PriceSource>` | `["marketplace"]` | Price sources to query |
 | `aggregation_strategy` | `PriceAggregationStrategy` | `"average"` | How to aggregate prices from multiple sources |
+
+**Note:** The pricing system now always falls back to static prices if dynamic pricing is unavailable, ensuring system reliability.
 | `marketplace_api_key` | `Option<String>` | `None` | Marketplace API key (required) |
 | `marketplace_api_url` | `String` | `"https://api.shadeform.ai/v1"` | Marketplace API URL |
 | `marketplace_available_only` | `bool` | `true` | Only return available instances |
@@ -230,7 +229,7 @@ cargo test --lib pricing::types
 - Check marketplace API key is valid
 - Verify network connectivity to marketplace API (`https://api.shadeform.ai/v1`)
 - Check logs for API errors or rate limiting
-- Ensure `fallback_to_static = true` if using fallback
+- The system automatically falls back to static prices if dynamic pricing fails
 
 ### Stale prices
 - Verify `update_interval_seconds` is set appropriately (default: 86400)
@@ -260,7 +259,6 @@ The pricing service exposes Prometheus metrics for monitoring:
 - `pricing_cache_size`: Number of cached price entries
 - `pricing_cache_hits_total`: Cache hit count
 - `pricing_cache_misses_total`: Cache miss count
-- `pricing_fallback_to_static_total`: Fallback to static prices count
 
 Monitor these to ensure pricing service health and performance.
 

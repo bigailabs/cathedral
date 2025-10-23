@@ -162,46 +162,25 @@ impl PricingService {
             return Ok(static_price);
         }
 
-        // Try to get dynamic price from cache
+        // Try to get dynamic price from cache, fallback to static if unavailable
         match self.get_price(gpu_model).await {
             Ok(Some(price)) => {
                 info!("Using dynamic price for {}: ${}/hr", gpu_model, price);
                 Ok(price)
             }
             Ok(None) => {
-                if self.config.fallback_to_static {
-                    warn!(
-                        "No dynamic price available for {}, falling back to static price ${}/hr",
-                        gpu_model, static_price
-                    );
-                    Ok(static_price)
-                } else {
-                    error!(
-                        "No dynamic price available for {} and fallback disabled",
-                        gpu_model
-                    );
-                    Err(crate::error::BillingError::ConfigurationError {
-                        message: format!(
-                            "Dynamic price not available for {} and fallback disabled",
-                            gpu_model
-                        ),
-                    })
-                }
+                warn!(
+                    "No dynamic price available for {}, falling back to static price ${}/hr",
+                    gpu_model, static_price
+                );
+                Ok(static_price)
             }
             Err(e) => {
-                if self.config.fallback_to_static {
-                    error!(
-                        "Error fetching price for {}: {}. Falling back to static price ${}/hr",
-                        gpu_model, e, static_price
-                    );
-                    Ok(static_price)
-                } else {
-                    error!(
-                        "Error fetching price for {}: {} and fallback disabled",
-                        gpu_model, e
-                    );
-                    Err(e)
-                }
+                error!(
+                    "Error fetching price for {}: {}. Falling back to static price ${}/hr",
+                    gpu_model, e, static_price
+                );
+                Ok(static_price)
             }
         }
     }
@@ -215,12 +194,8 @@ impl PricingService {
             Ok(prices) => prices,
             Err(e) => {
                 error!("Failed to fetch prices from providers: {}", e);
-                if self.config.fallback_to_static {
-                    warn!("Continuing with fallback to static pricing");
-                    return Ok(0);
-                } else {
-                    return Err(e);
-                }
+                warn!("Continuing with fallback to static pricing");
+                return Ok(0);
             }
         };
 
@@ -773,7 +748,6 @@ mod tests {
             marketplace_api_key: Some(api_key),
             aggregation_strategy: PriceAggregationStrategy::Average,
             global_discount_percent: dec!(-50.0),
-            fallback_to_static: true,
             ..Default::default()
         };
 
@@ -1117,7 +1091,6 @@ mod tests {
     async fn test_get_price_with_fallback_cache_miss() {
         let config = PricingConfig {
             enabled: true,
-            fallback_to_static: true,
             ..Default::default()
         };
 
@@ -1130,26 +1103,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Should fall back to static price on cache miss
+        // Should always fall back to static price on cache miss
         assert_eq!(result, static_price);
-    }
-
-    /// Test get_price_with_fallback when cache miss and fallback disabled
-    #[tokio::test]
-    async fn test_get_price_with_fallback_disabled_no_cache() {
-        let config = PricingConfig {
-            enabled: true,
-            fallback_to_static: false,
-            ..Default::default()
-        };
-
-        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
-        let service = PricingService::new(Vec::new(), cache, config);
-
-        let static_price = dec!(100.0);
-        let result = service.get_price_with_fallback("H100", static_price).await;
-
-        // Should return error when no cache and fallback disabled
-        assert!(result.is_err());
     }
 }

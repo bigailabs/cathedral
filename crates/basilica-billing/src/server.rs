@@ -390,12 +390,10 @@ impl BillingServer {
                         );
                     }
                     Err(e) => {
-                        error!("Price sync failed: {}", e);
-                        if !pricing_config.fallback_to_static {
-                            error!(
-                                "Fallback to static pricing is disabled. This may impact billing."
-                            );
-                        }
+                        error!(
+                            "Price sync failed: {}. Continuing with fallback to static pricing.",
+                            e
+                        );
                     }
                 }
 
