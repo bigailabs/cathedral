@@ -641,6 +641,49 @@ impl BillingService for BillingServiceImpl {
                 rental_id, rental.actual_cost
             );
 
+            let final_cost_decimal = if req.final_cost.is_empty() {
+                rental.actual_cost.as_decimal()
+            } else {
+                req.final_cost.parse::<rust_decimal::Decimal>()
+                    .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
+            };
+
+            let end_time = req.end_time
+                .map(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32).unwrap())
+                .unwrap_or_else(chrono::Utc::now);
+
+            let rental_end_data = crate::domain::processor::RentalEndData {
+                end_time,
+                final_cost: final_cost_decimal,
+                termination_reason: if req.termination_reason.is_empty() {
+                    None
+                } else {
+                    Some(req.termination_reason.clone())
+                },
+            };
+
+            let usage_event = crate::storage::UsageEvent {
+                event_id: uuid::Uuid::new_v4(),
+                rental_id: rental.id.as_uuid(),
+                user_id: rental.user_id.as_str().to_string(),
+                node_id: rental.node_id.clone(),
+                validator_id: rental.validator_id.clone(),
+                event_type: crate::storage::EventType::RentalEnd,
+                event_data: serde_json::to_value(&rental_end_data)
+                    .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?,
+                timestamp: chrono::Utc::now(),
+                processed: false,
+                processed_at: None,
+                batch_id: None,
+            };
+
+            self.event_store
+                .append_usage_event(&usage_event)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to append rental end event: {}", e)))?;
+
+            info!("Published rental_end event for rental {}", rental_id);
+
             let duration = rental.last_updated - rental.created_at;
 
             if let Some(ref metrics) = self.metrics {

@@ -63,6 +63,7 @@ async fn test_track_rental_fails_with_insufficient_balance() {
     let user_id = "test_rental_insufficient";
 
     context.create_test_user(user_id, "10.0").await;
+    let initial_balance = context.get_user_balance(user_id).await;
 
     let rental_id = Uuid::new_v4().to_string();
     let request = TrackRentalRequest {
@@ -77,22 +78,29 @@ async fn test_track_rental_fails_with_insufficient_balance() {
     };
 
     let result = context.client.track_rental(request).await;
-
-    assert!(result.is_err(), "Should fail with insufficient balance");
-    let error = result.unwrap_err();
     assert!(
-        error.message().contains("Insufficient balance"),
-        "Error should mention insufficient balance"
+        result.is_ok(),
+        "Pay-as-you-go: rental creation should succeed even with low balance"
     );
 
-    if context.rental_exists(&rental_id).await {
-        let status = context.get_rental_status(&rental_id).await;
-        assert_eq!(
-            status,
-            Some("failed".to_string()),
-            "If rental exists, it should be in failed state"
-        );
-    }
+    let tracking_id = result.unwrap().into_inner().tracking_id;
+    assert!(
+        context.rental_exists(&tracking_id).await,
+        "Rental should be created"
+    );
+
+    let status = context.get_rental_status(&tracking_id).await;
+    assert_eq!(
+        status,
+        Some("pending".to_string()),
+        "Rental should start in pending state"
+    );
+
+    let final_balance = context.get_user_balance(user_id).await;
+    assert_eq!(
+        final_balance, initial_balance,
+        "Balance unchanged - pay-as-you-go deducts on telemetry, not at creation"
+    );
 
     context.cleanup().await;
 }
