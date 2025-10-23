@@ -51,8 +51,7 @@ const PACKAGE_SELECT_COLUMNS: &str = r#"
     storage_rate_per_gb_hour, network_rate_per_gb, disk_io_rate_per_gb,
     cpu_rate_per_core_hour, memory_rate_per_gb_hour,
     included_storage_gb_hours, included_network_gb, included_disk_io_gb,
-    included_cpu_core_hours, included_memory_gb_hours,
-    use_dynamic_pricing, last_market_price, price_last_updated_at
+    included_cpu_core_hours, included_memory_gb_hours
 "#;
 
 impl SqlPackageRepository {
@@ -131,10 +130,6 @@ impl SqlPackageRepository {
             included_memory_gb_hours: row
                 .try_get("included_memory_gb_hours")
                 .unwrap_or(Decimal::ZERO),
-
-            use_dynamic_pricing: row.try_get("use_dynamic_pricing").unwrap_or(false),
-            last_market_price: row.try_get("last_market_price").ok(),
-            price_last_updated_at: row.try_get("price_last_updated_at").ok(),
         })
     }
 
@@ -271,42 +266,31 @@ impl PackageRepository for SqlPackageRepository {
             }
         };
 
-        // Apply dynamic pricing if enabled for this package
-        if package.use_dynamic_pricing {
-            debug!(
-                "Package {} has dynamic pricing enabled, fetching current price for {}",
-                package_id, package.gpu_model
-            );
-
-            if let Some(pricing_service) = &self.pricing_service {
-                // Get dynamic price with fallback to static price
-                match pricing_service
-                    .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
-                    .await
-                {
-                    Ok(dynamic_price) => {
-                        debug!(
-                            "Using dynamic price for {}: ${}/hr (static was ${}/hr)",
-                            package.gpu_model,
-                            dynamic_price,
-                            package.hourly_rate.as_decimal()
-                        );
-                        package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to get dynamic price for {}: {}. Using static price ${}/hr",
-                            package.gpu_model,
-                            e,
-                            package.hourly_rate.as_decimal()
-                        );
-                    }
+        // Apply dynamic pricing if pricing service is configured
+        // The pricing service handles the enabled/disabled check internally
+        if let Some(pricing_service) = &self.pricing_service {
+            match pricing_service
+                .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                .await
+            {
+                Ok(dynamic_price) => {
+                    debug!(
+                        "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                        package_id,
+                        dynamic_price,
+                        package.gpu_model,
+                        package.hourly_rate.as_decimal()
+                    );
+                    package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
                 }
-            } else {
-                warn!(
-                    "Package {} has dynamic pricing enabled but PricingService not configured. Using static price.",
-                    package_id
-                );
+                Err(e) => {
+                    warn!(
+                        "Failed to get price for {}: {}. Using static price ${}/hr",
+                        package.gpu_model,
+                        e,
+                        package.hourly_rate.as_decimal()
+                    );
+                }
             }
         }
 

@@ -193,10 +193,10 @@ Background Sync (Daily at 2 AM UTC):
 Rental Creation:
   1. User requests GPU rental
   2. PackageRepository loads package for GPU model
-  3. If use_dynamic_pricing=true:
+  3. If pricing service is configured:
      - Queries price_cache for latest price
-     - Falls back to static price if cache miss
-  4. Creates rental with current market price
+     - Falls back to static price if cache miss or pricing disabled
+  4. Creates rental with current price
 ```
 
 ## Testing
