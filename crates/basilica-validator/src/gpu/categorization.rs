@@ -1,4 +1,5 @@
 use basilica_common::identity::MinerUid;
+use basilica_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
@@ -60,9 +61,6 @@ impl sqlx::FromRow<'_, SqliteRow> for MinerGpuProfile {
         })
     }
 }
-
-// Re-export GpuCategory for backward compatibility
-pub use basilica_common::types::GpuCategory;
 
 pub struct GpuCategorizer;
 

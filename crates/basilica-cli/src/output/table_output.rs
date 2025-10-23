@@ -5,7 +5,7 @@ use crate::{
     output::format_credits,
 };
 use basilica_api::country_mapping::get_country_name_from_code;
-use basilica_common::LocationProfile;
+use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{
         ApiKeyInfo, ApiRentalListItem, BalanceResponse, BillingPackageInfo, GpuSpec,
@@ -14,7 +14,6 @@ use basilica_sdk::{
     },
     AvailableNode,
 };
-use basilica_validator::gpu::GpuCategory;
 use chrono::{DateTime, Local};
 use color_eyre::eyre::eyre;
 use console::style;

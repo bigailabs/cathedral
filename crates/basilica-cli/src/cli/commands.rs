@@ -1,9 +1,9 @@
+use basilica_common::types::GpuCategory;
 use basilica_sdk::types::RentalState;
 use clap::{Subcommand, ValueHint};
 use std::path::PathBuf;
 
 use crate::handlers::gpu_rental::TargetType;
-use basilica_validator::gpu::categorization::GpuCategory;
 
 /// Main CLI commands
 #[derive(Subcommand, Debug, Clone)]
