@@ -195,15 +195,12 @@ fn test_discount_calculations() {
         // Create a test price
         let mut price = GpuPrice {
             gpu_model: gpu_model.to_string(),
-            provider: "test".to_string(),
             market_price_per_hour: market_price,
             discounted_price_per_hour: market_price,
             vram_gb: Some(80),
             num_gpus: 1,
             discount_percent: Decimal::ZERO,
             source: "test".to_string(),
-            location: Some("us-east-1".to_string()),
-            instance_name: Some("test-instance".to_string()),
             updated_at: Utc::now(),
             is_spot: false,
         };
@@ -408,15 +405,12 @@ async fn test_marketplace_full_integration() {
 
     let mut h100_price = GpuPrice {
         gpu_model: "H100".to_string(),
-        provider: "test".to_string(),
         market_price_per_hour: dec!(100.0),
         discounted_price_per_hour: dec!(100.0),
         vram_gb: Some(80),
         num_gpus: 1,
         discount_percent: Decimal::ZERO,
         source: "test".to_string(),
-        location: Some("us-east-1".to_string()),
-        instance_name: Some("test-h100".to_string()),
         updated_at: Utc::now(),
         is_spot: false,
     };

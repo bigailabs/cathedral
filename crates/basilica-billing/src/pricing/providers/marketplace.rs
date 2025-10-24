@@ -28,7 +28,6 @@ struct MarketplaceResponse {
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceInstanceType {
-    cloud: String,
     shade_instance_type: String,
     hourly_price: u64, // in cents
     configuration: MarketplaceConfiguration,
@@ -50,11 +49,7 @@ struct MarketplaceConfiguration {
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceAvailability {
-    region: String,
     available: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    display_name: Option<String>,
 }
 
 impl MarketplaceProvider {
@@ -119,14 +114,11 @@ impl MarketplaceProvider {
                 discounted_price_per_hour: market_price,
                 discount_percent: Decimal::ZERO,
                 source: "marketplace".to_string(),
-                provider: instance.cloud.clone(),
-                location: None,
-                instance_name: Some(instance.shade_instance_type.clone()),
                 updated_at: Utc::now(),
                 is_spot: false, // TODO: Check if marketplace API provides spot instance info
             });
         } else {
-            for av in regions_to_include {
+            for _av in regions_to_include {
                 prices.push(GpuPrice {
                     gpu_model: instance.configuration.gpu_type.clone(),
                     vram_gb: instance.configuration.vram_per_gpu_in_gb,
@@ -135,9 +127,6 @@ impl MarketplaceProvider {
                     discounted_price_per_hour: market_price,
                     discount_percent: Decimal::ZERO,
                     source: "marketplace".to_string(),
-                    provider: instance.cloud.clone(),
-                    location: Some(av.region.clone()),
-                    instance_name: Some(format!("{}-{}", instance.shade_instance_type, av.region)),
                     updated_at: Utc::now(),
                     is_spot: false,
                 });
@@ -272,7 +261,7 @@ impl PriceProvider for MarketplaceProvider {
             prices.retain(|p| {
                 providers
                     .iter()
-                    .any(|prov| p.provider.eq_ignore_ascii_case(prov))
+                    .any(|prov| p.source.eq_ignore_ascii_case(prov))
             });
         }
 
@@ -346,7 +335,6 @@ mod tests {
         .unwrap();
 
         let instance = MarketplaceInstanceType {
-            cloud: "testcloud".to_string(),
             shade_instance_type: "test-h100".to_string(),
             hourly_price: 299, // $2.99
             configuration: MarketplaceConfiguration {
@@ -366,8 +354,7 @@ mod tests {
             prices[0].market_price_per_hour,
             Decimal::from_f64(2.99).unwrap()
         );
-        assert_eq!(prices[0].provider, "testcloud");
-        assert_eq!(prices[0].location, None);
+        assert_eq!(prices[0].source, "marketplace");
     }
 
     #[test]
@@ -380,7 +367,6 @@ mod tests {
         .unwrap();
 
         let instance = MarketplaceInstanceType {
-            cloud: "testcloud".to_string(),
             shade_instance_type: "test-a100".to_string(),
             hourly_price: 189, // $1.89
             configuration: MarketplaceConfiguration {
@@ -390,25 +376,17 @@ mod tests {
                 interconnect: Some("nvlink".to_string()),
             },
             availability: vec![
-                MarketplaceAvailability {
-                    region: "us-east".to_string(),
-                    available: true,
-                    display_name: Some("US East".to_string()),
-                },
-                MarketplaceAvailability {
-                    region: "eu-west".to_string(),
-                    available: true,
-                    display_name: Some("EU West".to_string()),
-                },
+                MarketplaceAvailability { available: true },
+                MarketplaceAvailability { available: true },
             ],
         };
 
         let prices = provider.convert_instance(instance);
         assert_eq!(prices.len(), 2);
-        assert_eq!(prices[0].location, Some("us-east".to_string()));
-        assert_eq!(prices[1].location, Some("eu-west".to_string()));
         assert_eq!(prices[0].gpu_model, "A100");
         assert_eq!(prices[1].gpu_model, "A100");
+        assert_eq!(prices[0].source, "marketplace");
+        assert_eq!(prices[1].source, "marketplace");
     }
 
     #[test]
@@ -421,7 +399,6 @@ mod tests {
         .unwrap();
 
         let instance = MarketplaceInstanceType {
-            cloud: "testcloud".to_string(),
             shade_instance_type: "test-h100".to_string(),
             hourly_price: 299,
             configuration: MarketplaceConfiguration {
@@ -431,15 +408,9 @@ mod tests {
                 interconnect: None,
             },
             availability: vec![
+                MarketplaceAvailability { available: true },
                 MarketplaceAvailability {
-                    region: "us-east".to_string(),
-                    available: true,
-                    display_name: None,
-                },
-                MarketplaceAvailability {
-                    region: "eu-west".to_string(),
                     available: false, // Not available
-                    display_name: None,
                 },
             ],
         };
@@ -447,6 +418,6 @@ mod tests {
         let prices = provider.convert_instance(instance);
         // Should only get the available region
         assert_eq!(prices.len(), 1);
-        assert_eq!(prices[0].location, Some("us-east".to_string()));
+        assert_eq!(prices[0].source, "marketplace");
     }
 }

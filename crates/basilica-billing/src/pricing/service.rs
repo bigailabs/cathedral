@@ -481,9 +481,6 @@ mod tests {
             discounted_price_per_hour: price,
             discount_percent: Decimal::ZERO,
             source: provider.to_string(),
-            provider: provider.to_string(),
-            location: Some("us-east-1".to_string()),
-            instance_name: Some("test-instance".to_string()),
             updated_at: Utc::now(),
             is_spot: false,
         }
@@ -699,7 +696,7 @@ mod tests {
             1,
             "Only successful provider results should be returned"
         );
-        assert_eq!(fetched[0].provider, "aws");
+        assert_eq!(fetched[0].source, "aws");
     }
 
     /// Test that fetch_latest_prices surfaces an error when all providers fail
