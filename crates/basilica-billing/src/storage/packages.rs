@@ -311,7 +311,42 @@ impl PackageRepository for SqlPackageRepository {
                 source: Box::new(e),
             })?;
 
-        rows.iter().map(Self::row_to_billing_package).collect()
+        let mut packages: Vec<BillingPackage> = rows
+            .iter()
+            .map(Self::row_to_billing_package)
+            .collect::<Result<Vec<_>>>()?;
+
+        // Apply dynamic pricing if pricing service is configured
+        // The pricing service handles the enabled/disabled check internally
+        if let Some(pricing_service) = &self.pricing_service {
+            for package in &mut packages {
+                match pricing_service
+                    .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                    .await
+                {
+                    Ok(dynamic_price) => {
+                        debug!(
+                            "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                            package.id,
+                            dynamic_price,
+                            package.gpu_model,
+                            package.hourly_rate.as_decimal()
+                        );
+                        package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get price for {}: {}. Using static price ${}/hr",
+                            package.gpu_model,
+                            e,
+                            package.hourly_rate.as_decimal()
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(packages)
     }
 
     async fn create_package(&self, package: BillingPackage) -> Result<()> {
