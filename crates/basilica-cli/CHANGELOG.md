@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4]
+
+### Changed
+- Removed reserved balance from `basilica balance` command output to align with pay-as-you-go billing model
+- Rental pricing changed from fixed to dynamic model.
+
 ## [0.5.3]
 
 ### Fixed
