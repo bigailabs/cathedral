@@ -28,8 +28,6 @@ struct MarketplaceResponse {
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceInstanceType {
-    #[allow(dead_code)]
-    cloud: String,
     shade_instance_type: String,
     hourly_price: u64, // in cents
     configuration: MarketplaceConfiguration,
@@ -51,12 +49,7 @@ struct MarketplaceConfiguration {
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceAvailability {
-    #[allow(dead_code)]
-    region: String,
     available: bool,
-    #[serde(default)]
-    #[allow(dead_code)]
-    display_name: Option<String>,
 }
 
 impl MarketplaceProvider {
@@ -342,7 +335,6 @@ mod tests {
         .unwrap();
 
         let instance = MarketplaceInstanceType {
-            cloud: "testcloud".to_string(),
             shade_instance_type: "test-h100".to_string(),
             hourly_price: 299, // $2.99
             configuration: MarketplaceConfiguration {
@@ -375,7 +367,6 @@ mod tests {
         .unwrap();
 
         let instance = MarketplaceInstanceType {
-            cloud: "testcloud".to_string(),
             shade_instance_type: "test-a100".to_string(),
             hourly_price: 189, // $1.89
             configuration: MarketplaceConfiguration {
@@ -385,16 +376,8 @@ mod tests {
                 interconnect: Some("nvlink".to_string()),
             },
             availability: vec![
-                MarketplaceAvailability {
-                    region: "us-east".to_string(),
-                    available: true,
-                    display_name: Some("US East".to_string()),
-                },
-                MarketplaceAvailability {
-                    region: "eu-west".to_string(),
-                    available: true,
-                    display_name: Some("EU West".to_string()),
-                },
+                MarketplaceAvailability { available: true },
+                MarketplaceAvailability { available: true },
             ],
         };
 
@@ -416,7 +399,6 @@ mod tests {
         .unwrap();
 
         let instance = MarketplaceInstanceType {
-            cloud: "testcloud".to_string(),
             shade_instance_type: "test-h100".to_string(),
             hourly_price: 299,
             configuration: MarketplaceConfiguration {
@@ -426,15 +408,9 @@ mod tests {
                 interconnect: None,
             },
             availability: vec![
+                MarketplaceAvailability { available: true },
                 MarketplaceAvailability {
-                    region: "us-east".to_string(),
-                    available: true,
-                    display_name: None,
-                },
-                MarketplaceAvailability {
-                    region: "eu-west".to_string(),
                     available: false, // Not available
-                    display_name: None,
                 },
             ],
         };
