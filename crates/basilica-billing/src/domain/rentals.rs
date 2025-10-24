@@ -1,6 +1,6 @@
 use crate::domain::types::{
-    CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ReservationId, ResourceSpec,
-    UsageMetrics, UserId,
+    CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
+    UserId,
 };
 use crate::error::{BillingError, Result};
 use async_trait::async_trait;
@@ -18,7 +18,6 @@ pub struct Rental {
     pub node_id: String,
     pub validator_id: String,
     pub package_id: PackageId,
-    pub reservation_id: Option<ReservationId>,
     pub state: RentalState,
     pub resource_spec: ResourceSpec,
     pub usage_metrics: UsageMetrics,
@@ -34,7 +33,6 @@ pub struct Rental {
     pub actual_start_time: Option<DateTime<Utc>>,
     pub actual_end_time: Option<DateTime<Utc>>,
     pub actual_cost: CreditBalance,
-    pub max_duration_hours: f64,
 }
 
 impl Rental {
@@ -44,8 +42,6 @@ impl Rental {
         validator_id: String,
         package_id: PackageId,
         resource_spec: ResourceSpec,
-        reservation_id: Option<ReservationId>,
-        max_duration_hours: f64,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -54,7 +50,6 @@ impl Rental {
             node_id,
             validator_id,
             package_id,
-            reservation_id,
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -75,7 +70,6 @@ impl Rental {
             actual_start_time: None,
             actual_end_time: None,
             actual_cost: CreditBalance::zero(),
-            max_duration_hours,
         }
     }
 
@@ -146,8 +140,6 @@ pub struct CreateRentalParams {
     pub validator_id: String,
     pub package_id: PackageId,
     pub resource_spec: ResourceSpec,
-    pub reservation_id: Option<ReservationId>,
-    pub max_duration_hours: f64,
 }
 
 /// Rental management operations
@@ -198,8 +190,6 @@ impl RentalOperations for RentalManager {
             params.validator_id,
             params.package_id,
             params.resource_spec,
-            params.reservation_id,
-            params.max_duration_hours,
         );
         let rental_id = rental.id;
 

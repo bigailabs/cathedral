@@ -1,13 +1,14 @@
 use basilica_billing::server::BillingServer;
 use basilica_billing::storage::rds::RdsConnection;
 use basilica_protocol::billing::billing_service_client::BillingServiceClient;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::{Pool, Postgres, Row};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tonic::transport::Channel;
-use tracing::info;
+
+// Import the test database utilities from parent module
+use crate::common;
 
 pub struct TestContext {
     pub client: BillingServiceClient<Channel>,
@@ -18,18 +19,19 @@ pub struct TestContext {
 
 impl TestContext {
     pub async fn new() -> Self {
-        let database_url =
-            "postgres://billing:billing_dev_password@localhost:5432/basilica_billing";
-
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(database_url)
+        // Use the test database pool from the singleton container
+        let pool = common::test_db::get_test_pool()
             .await
-            .expect("Failed to connect to database");
+            .expect("Failed to get test database pool");
 
-        Self::run_migrations(&pool).await;
-        Self::cleanup_database(&pool).await;
+        // Only seed test data (packages) - don't cleanup to allow parallel test execution
+        // Each test uses unique user IDs so they won't conflict
         Self::seed_test_data(&pool).await;
+
+        // Get the database URL from the test container
+        let database_url = common::test_db::get_test_database_url()
+            .await
+            .expect("Failed to get test database URL");
 
         let db_config = basilica_billing::config::DatabaseConfig {
             url: database_url.to_string(),
@@ -78,50 +80,9 @@ impl TestContext {
         }
     }
 
-    async fn run_migrations(pool: &Pool<Postgres>) {
-        let migrations_dir = std::path::Path::new("migrations");
-        if !migrations_dir.exists() {
-            return;
-        }
-
-        let mut entries: Vec<_> = std::fs::read_dir(migrations_dir)
-            .expect("Failed to read migrations directory")
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "sql")
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        entries.sort_by_key(|e| e.path());
-
-        for entry in entries {
-            let sql = std::fs::read_to_string(entry.path()).expect("Failed to read migration file");
-
-            if let Err(e) = sqlx::query(&sql).execute(pool).await {
-                info!("Migration already applied or error: {}", e);
-            }
-        }
-    }
-
-    async fn cleanup_database(pool: &Pool<Postgres>) {
-        // Clean up all test data - order matters due to foreign key constraints
-        let queries = vec![
-            "TRUNCATE TABLE billing.usage_events CASCADE",
-            "TRUNCATE TABLE billing.credit_reservations CASCADE",
-            "TRUNCATE TABLE billing.rentals CASCADE",
-            "TRUNCATE TABLE billing.user_preferences CASCADE",
-            "TRUNCATE TABLE billing.credits CASCADE",
-            "TRUNCATE TABLE billing.users CASCADE",
-            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'h200', 'a100', 'custom')",
-        ];
-
-        for query in queries {
-            let _ = sqlx::query(query).execute(pool).await;
-        }
-    }
+    // Note: cleanup_database was removed to enable parallel test execution
+    // Each test uses unique user IDs, so they don't interfere with each other
+    // The shared test database accumulates test data but tests are isolated by user_id
 
     async fn seed_test_data(pool: &Pool<Postgres>) {
         // Test packages matching production pricing from migration 005_billing_packages.sql
@@ -233,11 +194,10 @@ impl TestContext {
 
         // Then insert/update credits using ON CONFLICT to handle race conditions
         sqlx::query(
-            "INSERT INTO billing.credits (user_id, balance, reserved_balance, lifetime_spent, updated_at)
-             VALUES ($1, $2, 0, 0, NOW())
+            "INSERT INTO billing.credits (user_id, balance, lifetime_spent, updated_at)
+             VALUES ($1, $2, 0, NOW())
              ON CONFLICT (user_id) DO UPDATE SET
                balance = EXCLUDED.balance,
-               reserved_balance = 0,
                updated_at = NOW()",
         )
         .bind(user_uuid)
@@ -252,18 +212,6 @@ impl TestContext {
     pub async fn get_user_balance(&self, user_id: &str) -> rust_decimal::Decimal {
         sqlx::query_scalar::<_, rust_decimal::Decimal>(
             "SELECT c.balance FROM billing.credits c
-             JOIN billing.users u ON c.user_id = u.user_id
-             WHERE u.external_id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(rust_decimal::Decimal::ZERO)
-    }
-
-    pub async fn get_reserved_balance(&self, user_id: &str) -> rust_decimal::Decimal {
-        sqlx::query_scalar::<_, rust_decimal::Decimal>(
-            "SELECT COALESCE(c.reserved_balance, 0) FROM billing.credits c
              JOIN billing.users u ON c.user_id = u.user_id
              WHERE u.external_id = $1",
         )
@@ -307,16 +255,6 @@ impl TestContext {
         .fetch_optional(&self.pool)
         .await
         .unwrap_or(None)
-    }
-
-    pub async fn reservation_exists(&self, reservation_id: &str) -> bool {
-        sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM billing.credit_reservations WHERE id = $1::uuid)",
-        )
-        .bind(reservation_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false)
     }
 
     pub async fn get_user_package(&self, user_id: &str) -> Option<String> {

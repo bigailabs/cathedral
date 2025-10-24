@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
-use super::categorization::{GpuCategory, MinerGpuProfile, NodeValidationResult};
+use super::categorization::{MinerGpuProfile, NodeValidationResult};
 use crate::config::emission::EmissionConfig;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
 use basilica_common::identity::MinerUid;
+use basilica_common::types::GpuCategory;
 use std::str::FromStr;
 
 pub struct GpuScoringEngine {
@@ -1326,9 +1327,6 @@ mod tests {
         ];
 
         // Test the underlying logic through GpuCategory::from_str
-        use crate::gpu::categorization::GpuCategory;
-        use std::str::FromStr;
-
         for (model, should_be_rewardable) in test_cases {
             let category = GpuCategory::from_str(model).unwrap();
             let normalized = category.to_string();

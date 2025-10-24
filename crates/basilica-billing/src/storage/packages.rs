@@ -1,6 +1,7 @@
 use crate::domain::packages::BillingPackage;
 use crate::domain::types::{BillingPeriod, CostBreakdown, CreditBalance, PackageId, UsageMetrics};
 use crate::error::{BillingError, Result};
+use crate::pricing::service::PricingService;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde_json;
@@ -9,6 +10,7 @@ use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 #[async_trait]
 pub trait PackageRepository: Send + Sync {
@@ -40,6 +42,7 @@ pub trait PackageRepository: Send + Sync {
 pub struct SqlPackageRepository {
     pool: PgPool,
     cache: Arc<RwLock<HashMap<PackageId, BillingPackage>>>,
+    pricing_service: Option<Arc<PricingService>>,
 }
 
 const PACKAGE_SELECT_COLUMNS: &str = r#"
@@ -56,7 +59,14 @@ impl SqlPackageRepository {
         Self {
             pool,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            pricing_service: None,
         }
+    }
+
+    /// Set the pricing service for dynamic pricing integration
+    pub fn with_pricing_service(mut self, pricing_service: Arc<PricingService>) -> Self {
+        self.pricing_service = Some(pricing_service);
+        self
     }
 
     /// Initialize the repository by loading packages into cache
@@ -237,24 +247,54 @@ impl SqlPackageRepository {
 impl PackageRepository for SqlPackageRepository {
     async fn get_package(&self, package_id: &PackageId) -> Result<BillingPackage> {
         // Check cache first
-        {
+        let mut package = {
             let cache = self.cache.read().await;
             if let Some(package) = cache.get(package_id) {
-                return Ok(package.clone());
+                package.clone()
+            } else {
+                // Load from database
+                if let Some(package) = self.load_from_database(package_id).await? {
+                    // Update cache
+                    let mut cache = self.cache.write().await;
+                    cache.insert(package_id.clone(), package.clone());
+                    package
+                } else {
+                    return Err(BillingError::PackageNotFound {
+                        id: package_id.to_string(),
+                    });
+                }
+            }
+        };
+
+        // Apply dynamic pricing if pricing service is configured
+        // The pricing service handles the enabled/disabled check internally
+        if let Some(pricing_service) = &self.pricing_service {
+            match pricing_service
+                .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                .await
+            {
+                Ok(dynamic_price) => {
+                    debug!(
+                        "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                        package_id,
+                        dynamic_price,
+                        package.gpu_model,
+                        package.hourly_rate.as_decimal()
+                    );
+                    package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to get price for {}: {}. Using static price ${}/hr",
+                        package.gpu_model,
+                        e,
+                        package.hourly_rate.as_decimal()
+                    );
+                }
             }
         }
 
-        // Load from database
-        if let Some(package) = self.load_from_database(package_id).await? {
-            // Update cache
-            let mut cache = self.cache.write().await;
-            cache.insert(package_id.clone(), package.clone());
-            return Ok(package);
-        }
-
-        Err(BillingError::PackageNotFound {
-            id: package_id.to_string(),
-        })
+        Ok(package)
     }
 
     async fn list_packages(&self) -> Result<Vec<BillingPackage>> {

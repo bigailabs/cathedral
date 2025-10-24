@@ -7,49 +7,48 @@ use basilica_common::metrics::MetricsRecorder;
 pub struct BillingMetricNames;
 
 impl BillingMetricNames {
-    pub const CREDITS_APPLIED: &'static str = "basilca_billing_credits_applied_total";
-    pub const RENTALS_TRACKED: &'static str = "basilca_billing_rentals_tracked_total";
-    pub const RENTALS_FINALIZED: &'static str = "basilca_billing_rentals_finalized_total";
-    pub const RENTALS_ACTIVE: &'static str = "basilca_billing_rentals_active";
-    pub const TOTAL_CREDITS_BALANCE: &'static str = "basilca_billing_total_credits_balance";
+    pub const CREDITS_APPLIED: &'static str = "basilica_billing_credits_applied_total";
+    pub const RENTALS_TRACKED: &'static str = "basilica_billing_rentals_tracked_total";
+    pub const RENTALS_FINALIZED: &'static str = "basilica_billing_rentals_finalized_total";
+    pub const RENTALS_ACTIVE: &'static str = "basilica_billing_rentals_active";
+    pub const TOTAL_CREDITS_BALANCE: &'static str = "basilica_billing_total_credits_balance";
 
-    pub const EVENTS_PROCESSED: &'static str = "basilca_billing_events_processed_total";
-    pub const EVENTS_FAILED: &'static str = "basilca_billing_events_failed_total";
-    pub const EVENT_QUEUE_SIZE: &'static str = "basilca_billing_event_queue_size";
+    pub const EVENTS_PROCESSED: &'static str = "basilica_billing_events_processed_total";
+    pub const EVENTS_FAILED: &'static str = "basilica_billing_events_failed_total";
+    pub const EVENT_QUEUE_SIZE: &'static str = "basilica_billing_event_queue_size";
 
-    pub const TELEMETRY_RECEIVED: &'static str = "basilca_billing_telemetry_received_total";
-    pub const TELEMETRY_DROPPED: &'static str = "basilca_billing_telemetry_dropped_total";
-    pub const TELEMETRY_BUFFER_SIZE: &'static str = "basilca_billing_telemetry_buffer_size";
+    pub const TELEMETRY_RECEIVED: &'static str = "basilica_billing_telemetry_received_total";
+    pub const TELEMETRY_DROPPED: &'static str = "basilica_billing_telemetry_dropped_total";
+    pub const TELEMETRY_BUFFER_SIZE: &'static str = "basilica_billing_telemetry_buffer_size";
 
-    pub const RULES_APPLIED: &'static str = "basilca_billing_rules_applied_total";
-    pub const RULES_EVALUATED: &'static str = "basilca_billing_rules_evaluated_total";
+    pub const RULES_APPLIED: &'static str = "basilica_billing_rules_applied_total";
+    pub const RULES_EVALUATED: &'static str = "basilica_billing_rules_evaluated_total";
 
-    pub const PROCESSOR_RUNNING: &'static str = "basilca_billing_processor_running";
+    pub const PROCESSOR_RUNNING: &'static str = "basilica_billing_processor_running";
 
-    pub const GRPC_REQUESTS: &'static str = "basilca_billing_grpc_requests_total";
-    pub const GRPC_REQUEST_DURATION: &'static str = "basilca_billing_grpc_request_duration_seconds";
+    pub const GRPC_REQUESTS: &'static str = "basilica_billing_grpc_requests_total";
+    pub const GRPC_REQUEST_DURATION: &'static str =
+        "basilica_billing_grpc_request_duration_seconds";
 
     pub const EVENT_PROCESSING_DURATION: &'static str =
-        "basilca_billing_event_processing_duration_seconds";
-    pub const AGGREGATION_DURATION: &'static str = "basilca_billing_aggregation_duration_seconds";
+        "basilica_billing_event_processing_duration_seconds";
+    pub const AGGREGATION_DURATION: &'static str = "basilica_billing_aggregation_duration_seconds";
     pub const DATABASE_QUERY_DURATION: &'static str =
-        "basilca_billing_database_query_duration_seconds";
-    pub const DATABASE_ERRORS: &'static str = "basilca_billing_database_errors_total";
+        "basilica_billing_database_query_duration_seconds";
+    pub const DATABASE_ERRORS: &'static str = "basilica_billing_database_errors_total";
 
-    pub const RESERVATIONS_CREATED: &'static str = "basilca_billing_reservations_created_total";
-    pub const RESERVATIONS_RELEASED: &'static str = "basilca_billing_reservations_released_total";
+    pub const HEALTH_STATUS: &'static str = "basilica_billing_health_status";
 
-    pub const HEALTH_STATUS: &'static str = "basilca_billing_health_status";
+    pub const AGGREGATION_RUNS: &'static str = "basilica_billing_aggregation_runs_total";
+    pub const AGGREGATION_FAILURES: &'static str = "basilica_billing_aggregation_failures_total";
+    pub const BATCH_SIZE: &'static str = "basilica_billing_batch_size";
 
-    pub const AGGREGATION_RUNS: &'static str = "basilca_billing_aggregation_runs_total";
-    pub const AGGREGATION_FAILURES: &'static str = "basilca_billing_aggregation_failures_total";
-    pub const BATCH_SIZE: &'static str = "basilca_billing_batch_size";
-
-    pub const PROMO_CODE_VALIDATIONS: &'static str = "basilca_billing_promo_code_validations_total";
-    pub const PROMO_CODE_APPLIED: &'static str = "basilca_billing_promo_code_applied_total";
-    pub const PROMO_CODE_FAILURES: &'static str = "basilca_billing_promo_code_failures_total";
-    pub const DISCOUNT_AMOUNT: &'static str = "basilca_billing_discount_amount_total";
-    pub const TIER_DISCOUNT_APPLIED: &'static str = "basilca_billing_tier_discount_applied_total";
+    pub const PROMO_CODE_VALIDATIONS: &'static str =
+        "basilica_billing_promo_code_validations_total";
+    pub const PROMO_CODE_APPLIED: &'static str = "basilica_billing_promo_code_applied_total";
+    pub const PROMO_CODE_FAILURES: &'static str = "basilica_billing_promo_code_failures_total";
+    pub const DISCOUNT_AMOUNT: &'static str = "basilica_billing_discount_amount_total";
+    pub const TIER_DISCOUNT_APPLIED: &'static str = "basilica_billing_tier_discount_applied_total";
 }
 
 pub const BILLING_METRIC_NAMES: BillingMetricNames = BillingMetricNames;
@@ -204,25 +203,6 @@ impl BillingMetrics {
         let cost_units = (total_cost * 1000.0) as u64;
         self.recorder
             .record_counter(BillingMetricNames::RENTALS_FINALIZED, cost_units, labels)
-            .await;
-    }
-
-    pub async fn record_reservation_created(&self, reservation_id: &str, amount: f64) {
-        let labels = &[("reservation_id", reservation_id)];
-        let amount_units = (amount * 1000.0) as u64;
-        self.recorder
-            .record_counter(
-                BillingMetricNames::RESERVATIONS_CREATED,
-                amount_units,
-                labels,
-            )
-            .await;
-    }
-
-    pub async fn record_reservation_released(&self, reservation_id: &str) {
-        let labels = &[("reservation_id", reservation_id)];
-        self.recorder
-            .increment_counter(BillingMetricNames::RESERVATIONS_RELEASED, labels)
             .await;
     }
 

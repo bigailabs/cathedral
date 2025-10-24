@@ -170,6 +170,10 @@ module "billing_service" {
     BILLING_AWS__SECRET_NAME             = ""
     BILLING_AWS__ENDPOINT_URL            = ""
 
+    # Dynamic Pricing Configuration
+    BILLING_DYNAMIC_PRICING__ENABLED              = "true"
+    BILLING_DYNAMIC_PRICING__MARKETPLACE_API_KEY  = var.marketplace_api_key
+
     # Logging
     RUST_LOG = "basilica_billing=info,basilica_protocol=info"
   }
@@ -244,7 +248,7 @@ module "payments_service" {
     PAYMENTS_GRPC__PORT             = "50061"
 
     # Blockchain Configuration
-    PAYMENTS_BLOCKCHAIN__WEBSOCKET_URL = "wss://entrypoint-finney.opentensor.ai:443"
+    PAYMENTS_BLOCKCHAIN__WEBSOCKET_URL = var.payments_blockchain_websocket_url
     PAYMENTS_BLOCKCHAIN__SS58_PREFIX   = "42"
 
     # Treasury Configuration

@@ -10,7 +10,7 @@ use super::validation_states::{StateResult, ValidationState};
 use super::validation_strategy::{ValidationNode, ValidationStrategy, ValidationStrategySelector};
 use super::validation_worker::{ValidationWorkerQueue, WorkerQueueConfig};
 use crate::config::VerificationConfig;
-use crate::gpu::{categorization::GpuCategory, MinerGpuProfile};
+use crate::gpu::MinerGpuProfile;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
@@ -18,6 +18,7 @@ use crate::persistence::{
 use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::{Context, Result};
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
+use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use futures::future::join_all;
 use std::collections::HashMap;

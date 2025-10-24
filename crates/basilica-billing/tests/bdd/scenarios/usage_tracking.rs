@@ -5,14 +5,6 @@ use basilica_protocol::billing::{
 };
 use uuid::Uuid;
 
-// Helper function to convert hours to protobuf Duration
-fn hours_to_duration(hours: u32) -> prost_types::Duration {
-    prost_types::Duration {
-        seconds: (hours as i64) * 3600,
-        nanos: 0,
-    }
-}
-
 #[tokio::test]
 async fn test_get_usage_report_for_rental() {
     let mut context = TestContext::new().await;
@@ -27,7 +19,6 @@ async fn test_get_usage_report_for_rental() {
         node_id: "node_usage".to_string(),
         validator_id: "validator_usage".to_string(),
         hourly_rate: "5.0".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -57,7 +48,7 @@ async fn test_get_usage_report_for_rental() {
         Uuid::parse_str(&track_response.tracking_id).expect("Failed to parse rental UUID");
 
     sqlx::query(
-        "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp) 
+        "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())"
     )
     .bind(Uuid::new_v4())
@@ -121,7 +112,6 @@ async fn test_usage_report_empty_for_new_rental() {
         node_id: "node_empty".to_string(),
         validator_id: "validator_empty".to_string(),
         hourly_rate: "3.0".to_string(),
-        max_duration: Some(hours_to_duration(5)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -172,7 +162,6 @@ async fn test_ingest_telemetry_stream() {
         node_id: "node_telemetry".to_string(),
         validator_id: "validator_telemetry".to_string(),
         hourly_rate: "4.0".to_string(),
-        max_duration: Some(hours_to_duration(8)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -242,7 +231,6 @@ async fn test_usage_aggregation_in_report() {
         node_id: "node_agg".to_string(),
         validator_id: "validator_agg".to_string(),
         hourly_rate: "6.0".to_string(),
-        max_duration: Some(hours_to_duration(12)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -263,7 +251,7 @@ async fn test_usage_aggregation_in_report() {
 
     for (i, (cpu, memory)) in cpu_values.iter().zip(memory_values.iter()).enumerate() {
         sqlx::query(
-            "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp) 
+            "INSERT INTO billing.usage_events (event_id, rental_id, user_id, node_id, validator_id, event_type, event_data, timestamp)
              VALUES ($1, $2, $3, $4, $5, $6, $7, NOW() - INTERVAL '1 minute' * $8)"
         )
         .bind(Uuid::new_v4())
@@ -338,7 +326,6 @@ async fn test_usage_report_calculates_cost() {
         node_id: "node_cost".to_string(),
         validator_id: "validator_cost".to_string(),
         hourly_rate: hourly_rate.to_string(),
-        max_duration: Some(hours_to_duration(24)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -426,7 +413,6 @@ async fn test_single_gpu_rental_cost() {
         node_id: "node_single_gpu".to_string(),
         validator_id: "validator_single_gpu".to_string(),
         hourly_rate: "3.5".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -485,7 +471,6 @@ async fn test_multi_gpu_rental_with_volume_discount() {
         node_id: "node_multi_gpu".to_string(),
         validator_id: "validator_multi_gpu".to_string(),
         hourly_rate: "3.5".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -544,7 +529,6 @@ async fn test_gpu_count_extracted_from_telemetry() {
         node_id: "node_gpu_count".to_string(),
         validator_id: "validator_gpu_count".to_string(),
         hourly_rate: "3.5".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -614,7 +598,6 @@ async fn test_cost_breakdown_includes_volume_discount() {
         node_id: "node_discount".to_string(),
         validator_id: "validator_discount".to_string(),
         hourly_rate: "3.5".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,

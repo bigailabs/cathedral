@@ -235,12 +235,6 @@ pub async fn start_rental(
             nanos: now.timestamp_subsec_nanos() as i32,
         };
 
-        // Set max duration to 1 day (86400 seconds)
-        let max_duration = prost_types::Duration {
-            seconds: 86400,
-            nanos: 0,
-        };
-
         // Build resource spec from actual node GPU specs
         let mut gpus = Vec::new();
         for gpu_spec in &rental_status.node.gpu_specs {
@@ -267,7 +261,6 @@ pub async fn start_rental(
             resource_spec,
             hourly_rate: "0.00".to_string(),
             start_time: Some(timestamp.clone()),
-            max_duration: Some(max_duration),
             metadata: Default::default(),
         };
 
@@ -358,11 +351,9 @@ pub async fn stop_rental(
         .terminate_rental(&owned_rental.rental_id, request.clone())
         .await?;
 
-    // Notify billing service that rental is stopping and finalize charges
+    // Notify billing service that rental is stopping
     if let Some(billing_client) = &state.billing_client {
-        use basilica_protocol::billing::{
-            FinalizeRentalRequest, RentalStatus, UpdateRentalStatusRequest,
-        };
+        use basilica_protocol::billing::{RentalStatus, UpdateRentalStatusRequest};
 
         let now = chrono::Utc::now();
         let timestamp = prost_types::Timestamp {
@@ -373,7 +364,7 @@ pub async fn stop_rental(
         let update_request = UpdateRentalStatusRequest {
             rental_id: owned_rental.rental_id.clone(),
             status: RentalStatus::Stopped as i32,
-            timestamp: Some(timestamp.clone()),
+            timestamp: Some(timestamp),
             reason: request.reason.clone().unwrap_or_default(),
         };
 
@@ -382,28 +373,6 @@ pub async fn stop_rental(
                 "Failed to update rental status in billing service for {}: {}",
                 owned_rental.rental_id, e
             );
-        }
-
-        let finalize_request = FinalizeRentalRequest {
-            rental_id: owned_rental.rental_id.clone(),
-            end_time: Some(timestamp),
-            final_cost: "0.00".to_string(),
-            termination_reason: request.reason.clone().unwrap_or_default(),
-        };
-
-        match billing_client.finalize_rental(finalize_request).await {
-            Ok(response) => {
-                info!(
-                    "Successfully finalized rental {} in billing service. Total cost: {}",
-                    owned_rental.rental_id, response.total_cost
-                );
-            }
-            Err(e) => {
-                error!(
-                    "Failed to finalize rental in billing service for {}: {}",
-                    owned_rental.rental_id, e
-                );
-            }
         }
     }
 

@@ -1,7 +1,10 @@
 use crate::config::BillingConfig;
 use crate::grpc::BillingServiceImpl;
 use crate::metrics::BillingMetricsSystem;
+use crate::pricing::providers::create_providers;
+use crate::pricing::service::PricingService;
 use crate::storage::rds::RdsConnection;
+use crate::storage::{PriceCacheRepository, SqlPriceCacheRepository};
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 
 use axum::{http::StatusCode, response::Json, routing::get, Router};
@@ -15,21 +18,27 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Billing server that hosts the gRPC service
 pub struct BillingServer {
     config: BillingConfig,
     rds_connection: Arc<RdsConnection>,
     metrics: Option<Arc<BillingMetricsSystem>>,
+    pricing_service: Option<Arc<PricingService>>,
+    price_cache: Arc<dyn PriceCacheRepository>,
 }
 
 impl BillingServer {
     pub fn new(rds_connection: Arc<RdsConnection>) -> Self {
+        let price_cache: Arc<dyn PriceCacheRepository> =
+            Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
         Self {
             config: BillingConfig::default(),
             rds_connection,
             metrics: None,
+            pricing_service: None,
+            price_cache,
         }
     }
 
@@ -57,10 +66,46 @@ impl BillingServer {
             )
         };
 
+        // Create shared price cache
+        let price_cache: Arc<dyn PriceCacheRepository> =
+            Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
+
+        // Build shared pricing service if enabled
+        let pricing_service = if config.dynamic_pricing.enabled {
+            info!("Dynamic pricing is enabled, building pricing service");
+
+            match create_providers(&config.dynamic_pricing) {
+                Ok(providers) if !providers.is_empty() => {
+                    info!("Created {} pricing providers", providers.len());
+                    Some(Arc::new(PricingService::new(
+                        providers,
+                        price_cache.clone(),
+                        config.dynamic_pricing.clone(),
+                    )))
+                }
+                Ok(_) => {
+                    info!("No pricing providers configured, dynamic pricing will be disabled");
+                    None
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to create pricing providers: {}. Dynamic pricing will be disabled.",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            info!("Dynamic pricing is disabled");
+            None
+        };
+
         Ok(Self {
             config,
             rds_connection,
             metrics,
+            pricing_service,
+            price_cache,
         })
     }
 
@@ -94,11 +139,20 @@ impl BillingServer {
         let telemetry_ingester = Arc::new(telemetry_ingester);
         let telemetry_processor = Arc::new(TelemetryProcessor::new(self.rds_connection.clone()));
 
-        let billing_service = BillingServiceImpl::new(
+        let pricing_config = if self.config.dynamic_pricing.enabled {
+            Some(self.config.dynamic_pricing.clone())
+        } else {
+            None
+        };
+
+        let billing_service = BillingServiceImpl::new_with_pricing(
             self.rds_connection.clone(),
             telemetry_ingester.clone(),
             telemetry_processor.clone(),
             self.metrics.clone(),
+            self.pricing_service.clone(),
+            pricing_config.clone(),
+            self.price_cache.clone(),
         )
         .await?;
 
@@ -126,9 +180,14 @@ impl BillingServer {
 
         let rental_repository = Arc::new(SqlRentalRepository::new(self.rds_connection.clone()));
         let credit_repository = Arc::new(SqlCreditRepository::new(self.rds_connection.clone()));
-        let package_repository = Arc::new(SqlPackageRepository::new(
-            self.rds_connection.pool().clone(),
-        ));
+
+        // Create package repository with shared pricing service
+        let mut package_repository = SqlPackageRepository::new(self.rds_connection.pool().clone());
+        if let Some(ref pricing_service) = self.pricing_service {
+            package_repository = package_repository.with_pricing_service(pricing_service.clone());
+        }
+        let package_repository = Arc::new(package_repository);
+
         package_repository
             .initialize()
             .await
@@ -180,6 +239,17 @@ impl BillingServer {
             .await;
 
         info!("Aggregation jobs started successfully");
+
+        // Start price sync job if dynamic pricing is enabled
+        if let Some(ref pricing_service) = self.pricing_service {
+            Self::start_price_sync_job(
+                pricing_service.clone(),
+                self.config.dynamic_pricing.clone(),
+            )
+            .await;
+        } else {
+            info!("Pricing service not available, price sync job will not start");
+        }
 
         let mut server_builder = Server::builder();
 
@@ -292,6 +362,60 @@ impl BillingServer {
         Ok(())
     }
 
+    /// Start the background price sync job with shared pricing service
+    pub async fn start_price_sync_job(
+        pricing_service: Arc<PricingService>,
+        pricing_config: crate::pricing::types::DynamicPricingConfig,
+    ) {
+        info!("Starting price sync background job");
+
+        tokio::spawn(async move {
+            let interval_seconds =
+                Self::normalize_update_interval(pricing_config.update_interval_seconds);
+            if pricing_config.update_interval_seconds == 0 {
+                warn!(
+                    "Configured update_interval_seconds was 0; defaulting price sync interval to 86400s"
+                );
+            }
+            let interval_duration = std::time::Duration::from_secs(interval_seconds);
+
+            info!(
+                "Price sync job configured: update_interval={}s, cache_ttl={}s",
+                interval_seconds, pricing_config.cache_ttl_seconds
+            );
+
+            loop {
+                info!("Starting scheduled price sync");
+                match pricing_service.sync_prices().await {
+                    Ok(count) => {
+                        info!(
+                            "Price sync completed successfully: {} GPU prices synced",
+                            count
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "Price sync failed: {}. Continuing with fallback to static pricing.",
+                            e
+                        );
+                    }
+                }
+
+                tokio::time::sleep(interval_duration).await;
+            }
+        });
+
+        info!("Price sync job started");
+    }
+
+    fn normalize_update_interval(update_interval_seconds: u64) -> u64 {
+        if update_interval_seconds == 0 {
+            86_400
+        } else {
+            update_interval_seconds
+        }
+    }
+
     async fn telemetry_consumer_loop(
         mut receiver: mpsc::Receiver<basilica_protocol::billing::TelemetryData>,
         processor: Arc<TelemetryProcessor>,
@@ -316,18 +440,21 @@ impl BillingServer {
         let addr = listener.local_addr()?;
         info!("Starting billing HTTP server on {}", addr);
 
+        // Create app state
+        let app_state = AppState {
+            rds_connection,
+            metrics,
+        };
+
         let app = Router::new()
             .route("/health", get(health_check))
             .route("/metrics", get(metrics_handler))
+            .with_state(app_state)
             .layer(
                 ServiceBuilder::new()
                     .layer(CorsLayer::permissive())
                     .into_inner(),
-            )
-            .with_state(AppState {
-                rds_connection,
-                metrics,
-            });
+            );
 
         let server = axum::serve(listener, app);
 
@@ -373,5 +500,37 @@ async fn metrics_handler(
     match state.metrics {
         Some(metrics) => Ok(metrics.render_prometheus()),
         None => Ok("# Metrics collection disabled\n".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_update_interval_defaults_when_zero() {
+        let normalized = BillingServer::normalize_update_interval(0);
+        assert_eq!(
+            normalized, 86_400,
+            "Zero update interval should default to 86400 seconds (24h)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_update_interval_preserves_value() {
+        let normalized = BillingServer::normalize_update_interval(3_600);
+        assert_eq!(
+            normalized, 3_600,
+            "Non-zero update interval should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_normalize_update_interval_large_value() {
+        let normalized = BillingServer::normalize_update_interval(200_000);
+        assert_eq!(
+            normalized, 200_000,
+            "Arbitrary large interval should remain unchanged"
+        );
     }
 }

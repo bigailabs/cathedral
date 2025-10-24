@@ -42,11 +42,6 @@ fn display_balance(balance: &basilica_sdk::BalanceResponse) {
     );
     println!(
         "  {}: {} credits",
-        style("Reserved").cyan(),
-        style(format_credits(&balance.reserved)).yellow()
-    );
-    println!(
-        "  {}: {} credits",
         style("Total").cyan(),
         style(format_credits(&balance.total)).bold()
     );

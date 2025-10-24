@@ -10,8 +10,6 @@ service BillingService {
     // Credit management
     rpc ApplyCredits(ApplyCreditsRequest) returns (ApplyCreditsResponse);
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
-    rpc ReserveCredits(ReserveCreditsRequest) returns (ReserveCreditsResponse);
-    rpc ReleaseReservation(ReleaseReservationRequest) returns (ReleaseReservationResponse);
 
     // Rental tracking
     rpc TrackRental(TrackRentalRequest) returns (TrackRentalResponse);
@@ -26,6 +24,11 @@ service BillingService {
     // Billing rules and packages
     rpc GetBillingPackages(GetBillingPackagesRequest) returns (GetBillingPackagesResponse);
     rpc SetUserPackage(SetUserPackageRequest) returns (SetUserPackageResponse);
+
+    // Dynamic GPU pricing
+    rpc SyncPrices(SyncPricesRequest) returns (SyncPricesResponse);
+    rpc GetCachedPrices(GetCachedPricesRequest) returns (GetCachedPricesResponse);
+    rpc GetPriceHistory(GetPriceHistoryRequest) returns (GetPriceHistoryResponse);
 }
 
 // Credit Management Messages
@@ -51,36 +54,8 @@ message GetBalanceRequest {
 
 message GetBalanceResponse {
     string available_balance = 1; // Decimal string
-    string reserved_balance = 2; // Decimal string
-    string total_balance = 3; // Decimal string
-    google.protobuf.Timestamp last_updated = 4;
-}
-
-message ReserveCreditsRequest {
-    string user_id = 1;
-    string rental_id = 2;
-    string amount = 3; // Decimal string
-    google.protobuf.Duration duration = 4;
-}
-
-message ReserveCreditsResponse {
-    bool success = 1;
-    string reservation_id = 2;
-    string reserved_amount = 3; // Decimal string
-    google.protobuf.Timestamp reserved_until = 4;
-    string error_message = 5;
-}
-
-message ReleaseReservationRequest {
-    string reservation_id = 1;
-    string final_amount = 2; // Decimal string - actual amount to charge
-}
-
-message ReleaseReservationResponse {
-    bool success = 1;
-    string charged_amount = 2; // Decimal string
-    string refunded_amount = 3; // Decimal string
-    string new_balance = 4; // Decimal string
+    string total_balance = 2; // Decimal string
+    google.protobuf.Timestamp last_updated = 3;
 }
 
 // Rental Tracking Messages
@@ -93,8 +68,7 @@ message TrackRentalRequest {
     ResourceSpec resource_spec = 5;
     string hourly_rate = 6; // Decimal string
     google.protobuf.Timestamp start_time = 7;
-    google.protobuf.Duration max_duration = 8;
-    map<string, string> metadata = 9;
+    map<string, string> metadata = 8;
 }
 
 message ResourceSpec {
@@ -114,8 +88,6 @@ message GpuSpec {
 message TrackRentalResponse {
     bool success = 1;
     string tracking_id = 2;
-    string reservation_id = 3;
-    string estimated_cost = 4; // Decimal string
 }
 
 message UpdateRentalStatusRequest {
@@ -312,4 +284,67 @@ message ErrorDetail {
     string code = 1;
     string message = 2;
     map<string, string> metadata = 3;
+}
+
+// Dynamic GPU Pricing Messages
+
+message SyncPricesRequest {
+    bool force_sync = 1; // Force immediate sync even if recently synced
+}
+
+message SyncPricesResponse {
+    bool success = 1;
+    uint32 prices_synced = 2;
+    google.protobuf.Timestamp sync_started_at = 3;
+    google.protobuf.Timestamp sync_completed_at = 4;
+    google.protobuf.Timestamp next_scheduled_sync = 5;
+    string error_message = 7;
+}
+
+message GetCachedPricesRequest {
+    repeated string gpu_models = 1; // Filter by GPU models (empty = all)
+    repeated string providers = 2; // Filter by providers (empty = all)
+    bool include_expired = 3; // Include expired cache entries
+}
+
+message GetCachedPricesResponse {
+    repeated GpuPrice prices = 1;
+    google.protobuf.Timestamp cached_at = 2;
+}
+
+message GpuPrice {
+    string gpu_model = 1;
+    uint32 vram_gb = 2;
+    string market_price_per_hour = 3; // Decimal string
+    string discounted_price_per_hour = 4; // Decimal string
+    string discount_percent = 5; // Decimal string
+    string source = 6;
+    string provider = 7;
+    string location = 8;
+    string instance_name = 9;
+    google.protobuf.Timestamp updated_at = 10;
+    google.protobuf.Timestamp expires_at = 11;
+    bool is_spot = 12;
+}
+
+message GetPriceHistoryRequest {
+    string gpu_model = 1; // Required
+    google.protobuf.Timestamp start_time = 2;
+    google.protobuf.Timestamp end_time = 3;
+    repeated string providers = 4; // Filter by providers (empty = all)
+    uint32 limit = 5; // Max number of results (default: 100)
+}
+
+message GetPriceHistoryResponse {
+    string gpu_model = 1;
+    repeated PriceHistoryEntry entries = 2;
+    uint64 total_count = 3;
+}
+
+message PriceHistoryEntry {
+    string gpu_model = 1;
+    string price_per_hour = 2; // Decimal string
+    string source = 3;
+    string provider = 4;
+    google.protobuf.Timestamp recorded_at = 5;
 }
