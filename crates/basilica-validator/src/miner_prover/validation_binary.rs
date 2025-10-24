@@ -413,6 +413,9 @@ impl ValidationServerClient {
         // initial jitter of delay before polling
         tokio::time::sleep(initial_timeout.unwrap_or_else(|| Duration::from_secs(1))).await;
 
+        let mut consecutive_404s = 0;
+        const MAX_404_BEFORE_RESULT_CHECK: u32 = 3;
+
         loop {
             let elapsed = start_time.elapsed();
 
@@ -458,12 +461,57 @@ impl ValidationServerClient {
                     .text()
                     .await
                     .unwrap_or_else(|_| "Unknown error".to_string());
+
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    consecutive_404s += 1;
+                    warn!(
+                        job_id = job_id,
+                        consecutive_404s = consecutive_404s,
+                        "[EVAL_FLOW] Job {} status returned 404 (attempt {}/{}). Job may have completed and been cleaned up.",
+                        job_id, consecutive_404s, MAX_404_BEFORE_RESULT_CHECK
+                    );
+
+                    if consecutive_404s >= MAX_404_BEFORE_RESULT_CHECK {
+                        info!(
+                            job_id = job_id,
+                            "[EVAL_FLOW] Received {} consecutive 404s, attempting to fetch results directly",
+                            consecutive_404s
+                        );
+
+                        match self.get_job_result(job_id).await {
+                            Ok(result) => {
+                                info!(
+                                    job_id = job_id,
+                                    "[EVAL_FLOW] Successfully retrieved results despite 404 on status check"
+                                );
+                                return Ok(result);
+                            }
+                            Err(e) => {
+                                error!(
+                                    job_id = job_id,
+                                    "[EVAL_FLOW] Failed to retrieve results after 404s: {}. Job may not exist.",
+                                    e
+                                );
+                                return Err(anyhow::anyhow!(
+                                    "Failed to get job status (404) and results unavailable: {}",
+                                    e
+                                ));
+                            }
+                        }
+                    }
+
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
+                }
+
                 return Err(anyhow::anyhow!(
                     "Failed to get job status: {} - {}",
                     status,
                     error_text
                 ));
             }
+
+            consecutive_404s = 0;
 
             let response_text = response
                 .text()
@@ -632,7 +680,7 @@ impl BinaryValidator {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Validation server client not initialized"))?;
 
-        self.execute_with_client(client, ssh_details, binary_config)
+        self.execute_with_retry(client, ssh_details, binary_config)
             .await
     }
 
@@ -680,7 +728,79 @@ impl BinaryValidator {
         }
     }
 
-    /// Execute validation
+    /// Execute validation with retry logic for submission failures
+    pub async fn execute_with_retry(
+        &self,
+        client: &ValidationServerClient,
+        ssh_details: &SshConnectionDetails,
+        binary_config: &crate::config::BinaryValidationConfig,
+    ) -> Result<Vec<u8>> {
+        let max_attempts = binary_config.server_mode.max_workflow_retry_attempts;
+        let base_delay_ms = binary_config.server_mode.workflow_retry_base_delay_ms;
+
+        for attempt in 1..=max_attempts {
+            info!(
+                ssh_host = %ssh_details.host,
+                attempt = attempt,
+                max_attempts = max_attempts,
+                "[EVAL_FLOW] Starting validation workflow attempt {}/{}",
+                attempt, max_attempts
+            );
+
+            match self
+                .execute_with_client(client, ssh_details, binary_config)
+                .await
+            {
+                Ok(result) => {
+                    if attempt > 1 {
+                        info!(
+                            ssh_host = %ssh_details.host,
+                            attempt = attempt,
+                            "[EVAL_FLOW] Validation workflow succeeded on retry attempt {}",
+                            attempt
+                        );
+                    }
+                    return Ok(result);
+                }
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    let is_404_related = error_msg.contains("404")
+                        || error_msg.contains("Not Found")
+                        || error_msg.contains("Failed to get job status");
+
+                    if !is_404_related || attempt >= max_attempts {
+                        error!(
+                            ssh_host = %ssh_details.host,
+                            attempt = attempt,
+                            error = %e,
+                            is_404_related = is_404_related,
+                            "[EVAL_FLOW] Validation workflow failed on attempt {}: {}",
+                            attempt, e
+                        );
+                        return Err(e);
+                    }
+
+                    let delay_ms = base_delay_ms * (2_u64.pow(attempt - 1));
+                    warn!(
+                        ssh_host = %ssh_details.host,
+                        attempt = attempt,
+                        next_delay_ms = delay_ms,
+                        error = %e,
+                        "[EVAL_FLOW] Validation workflow failed with 404-related error on attempt {}. Retrying in {}ms...",
+                        attempt, delay_ms
+                    );
+
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Validation workflow exhausted all {} retry attempts",
+            max_attempts
+        ))
+    }
+
     pub async fn execute_with_client(
         &self,
         client: &ValidationServerClient,

@@ -254,6 +254,12 @@ pub struct ValidationServerConfig {
     /// Interval between server readiness checks (milliseconds)
     #[serde(default = "default_server_ready_check_interval_ms")]
     pub server_ready_check_interval_ms: u64,
+    /// Maximum workflow retry attempts on persistent 404 errors
+    #[serde(default = "default_max_workflow_retry_attempts")]
+    pub max_workflow_retry_attempts: u32,
+    /// Base delay for workflow retry backoff (milliseconds)
+    #[serde(default = "default_workflow_retry_base_delay_ms")]
+    pub workflow_retry_base_delay_ms: u64,
 }
 
 impl Default for ValidationServerConfig {
@@ -268,6 +274,8 @@ impl Default for ValidationServerConfig {
             max_poll_attempts: default_max_poll_attempts(),
             server_ready_timeout_secs: default_server_ready_timeout_secs(),
             server_ready_check_interval_ms: default_server_ready_check_interval_ms(),
+            max_workflow_retry_attempts: default_max_workflow_retry_attempts(),
+            workflow_retry_base_delay_ms: default_workflow_retry_base_delay_ms(),
         }
     }
 }
@@ -353,6 +361,14 @@ fn default_server_ready_timeout_secs() -> u64 {
 
 fn default_server_ready_check_interval_ms() -> u64 {
     500 // Check every 500ms
+}
+
+fn default_max_workflow_retry_attempts() -> u32 {
+    3 // Retry entire workflow up to 3 times
+}
+
+fn default_workflow_retry_base_delay_ms() -> u64 {
+    2000 // 2 seconds base delay, with exponential backoff
 }
 
 fn default_node_port() -> u16 {
