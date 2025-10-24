@@ -267,12 +267,24 @@ impl ConnectionManager {
 
             let timeout_duration = Duration::from_secs(30);
 
-            match tokio::time::timeout(
-                timeout_duration,
-                OnlineClient::<PolkadotConfig>::from_url(endpoint),
-            )
-            .await
-            {
+            let is_insecure = endpoint.starts_with("ws://") || endpoint.starts_with("http://");
+
+            let result = if is_insecure {
+                debug!("Using insecure connection for endpoint: {}", endpoint);
+                tokio::time::timeout(
+                    timeout_duration,
+                    OnlineClient::<PolkadotConfig>::from_insecure_url(endpoint),
+                )
+                .await
+            } else {
+                tokio::time::timeout(
+                    timeout_duration,
+                    OnlineClient::<PolkadotConfig>::from_url(endpoint),
+                )
+                .await
+            };
+
+            match result {
                 Ok(Ok(client)) => {
                     info!("Successfully connected to {}", endpoint);
                     return Ok((client, endpoint.to_string()));

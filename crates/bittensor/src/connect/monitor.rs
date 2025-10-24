@@ -25,7 +25,13 @@ pub struct BlockchainMonitor {
 impl BlockchainMonitor {
     /// Connect to blockchain endpoint
     pub async fn new(endpoint: &str) -> Result<Self> {
-        let client = OnlineClient::<PolkadotConfig>::from_url(endpoint).await?;
+        let is_insecure = endpoint.starts_with("ws://") || endpoint.starts_with("http://");
+        let client = if is_insecure {
+            debug!("Using insecure connection for endpoint: {}", endpoint);
+            OnlineClient::<PolkadotConfig>::from_insecure_url(endpoint).await?
+        } else {
+            OnlineClient::<PolkadotConfig>::from_url(endpoint).await?
+        };
         Ok(Self {
             client,
             endpoint: endpoint.to_string(),
@@ -49,7 +55,14 @@ impl BlockchainMonitor {
         use subxt::backend::legacy::LegacyRpcMethods;
         use subxt::backend::rpc::RpcClient;
 
-        let rpc = RpcClient::from_url(&self.endpoint).await?;
+        let is_insecure =
+            self.endpoint.starts_with("ws://") || self.endpoint.starts_with("http://");
+        let rpc = if is_insecure {
+            RpcClient::from_insecure_url(&self.endpoint).await?
+        } else {
+            RpcClient::from_url(&self.endpoint).await?
+        };
+
         let rpc_methods = LegacyRpcMethods::<PolkadotConfig>::new(rpc);
         let block_hash = rpc_methods
             .chain_get_block_hash(Some(block_number.into()))
