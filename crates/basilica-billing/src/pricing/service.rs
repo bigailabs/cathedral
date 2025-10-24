@@ -120,29 +120,21 @@ impl PricingService {
 
         match self.cache.get(gpu_model).await {
             Ok(Some(cached_price)) => {
-                if !self
-                    .cache
-                    .is_expired(&cached_price, self.config.cache_ttl_seconds)
-                {
-                    debug!(
-                        "Cache hit for {}: ${}/hr",
-                        gpu_model, cached_price.discounted_price_per_hour
-                    );
-                    return Ok(Some(cached_price.discounted_price_per_hour));
-                } else {
-                    warn!("Cached price for {} is expired", gpu_model);
-                }
+                debug!(
+                    "Cache hit for {}: ${}/hr",
+                    gpu_model, cached_price.discounted_price_per_hour
+                );
+                Ok(Some(cached_price.discounted_price_per_hour))
             }
             Ok(None) => {
                 debug!("No cached price found for {}", gpu_model);
+                Ok(None)
             }
             Err(e) => {
                 error!("Error fetching price from cache for {}: {}", gpu_model, e);
-                return Err(e);
+                Err(e)
             }
         }
-
-        Ok(None)
     }
 
     /// Get price with fallback to static price if dynamic pricing is unavailable
@@ -250,20 +242,6 @@ impl PricingService {
     /// Record price history for tracking price changes over time
     async fn record_price_history(&self, prices: &[GpuPrice]) -> Result<()> {
         self.cache.record_price_history(prices).await
-    }
-
-    /// Apply discount logic to prices
-    #[allow(dead_code)] // Used in Phase 3
-    fn apply_discount(&self, market_price: Decimal, gpu_model: &str) -> Decimal {
-        let discount = GpuPrice::effective_discount(
-            self.config.global_discount_percent,
-            &self.config.gpu_discounts,
-            gpu_model,
-        );
-
-        // Apply discount: price * (1 + discount%/100)
-        let multiplier = Decimal::ONE + (discount / Decimal::from(100));
-        market_price * multiplier
     }
 
     /// Aggregate prices from multiple providers by GPU model
