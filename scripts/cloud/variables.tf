@@ -94,3 +94,9 @@ variable "marketplace_api_key" {
   description = "API key for Shadeform marketplace pricing API"
   sensitive   = true
 }
+
+variable "payments_blockchain_websocket_url" {
+  type        = string
+  description = "WebSocket URL for blockchain connectivity (payments service)"
+  default     = "wss://entrypoint-finney.opentensor.ai:443"
+}

@@ -248,7 +248,7 @@ module "payments_service" {
     PAYMENTS_GRPC__PORT             = "50061"
 
     # Blockchain Configuration
-    PAYMENTS_BLOCKCHAIN__WEBSOCKET_URL = "wss://entrypoint-finney.opentensor.ai:443"
+    PAYMENTS_BLOCKCHAIN__WEBSOCKET_URL = var.payments_blockchain_websocket_url
     PAYMENTS_BLOCKCHAIN__SS58_PREFIX   = "42"
 
     # Treasury Configuration
