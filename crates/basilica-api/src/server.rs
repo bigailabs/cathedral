@@ -93,28 +93,13 @@ async fn process_rental_health_check(
             }
         }
         Err(e) => {
-            // Check if error indicates rental doesn't exist (404)
-            if e.to_string().contains("404") || e.to_string().contains("NOT_FOUND") {
-                // Rental not found on validator, archive it
-                if let Err(archive_err) = archive_rental_ownership(
-                    db,
-                    rental_id,
-                    Some("Health check: rental not found on validator"),
-                )
-                .await
-                {
-                    tracing::error!(
-                        "Failed to archive missing rental {}: {}",
-                        rental_id,
-                        archive_err
-                    );
-                } else {
-                    tracing::info!("Health check: Archived missing rental {}", rental_id);
-                }
-            } else {
-                // Log other errors at debug level to avoid spam
-                tracing::debug!("Health check failed for rental {}: {}", rental_id, e);
-            }
+            // Validator unavailable or having issues - don't change rental state
+            // The validator is the source of truth and will report actual status when available
+            tracing::warn!(
+                "Health check failed for rental {} (validator may be unavailable): {}",
+                rental_id,
+                e
+            );
         }
     }
 }
