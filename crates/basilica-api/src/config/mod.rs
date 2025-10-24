@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Rental health check interval in seconds
-const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
 
 /// Bittensor integration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
