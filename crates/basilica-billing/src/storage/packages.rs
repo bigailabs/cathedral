@@ -524,11 +524,40 @@ impl PackageRepository for SqlPackageRepository {
             })?;
 
         if let Some(row) = row {
-            let package = Self::row_to_billing_package(&row)?;
+            let mut package = Self::row_to_billing_package(&row)?;
             info!(
                 "Found matching package {} for GPU model {}",
                 package.id, gpu_model
             );
+
+            // Apply dynamic pricing if pricing service is configured
+            // The pricing service handles the enabled/disabled check internally
+            if let Some(pricing_service) = &self.pricing_service {
+                match pricing_service
+                    .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                    .await
+                {
+                    Ok(dynamic_price) => {
+                        debug!(
+                            "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                            package.id,
+                            dynamic_price,
+                            package.gpu_model,
+                            package.hourly_rate.as_decimal()
+                        );
+                        package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get price for {}: {}. Using static price ${}/hr",
+                            package.gpu_model,
+                            e,
+                            package.hourly_rate.as_decimal()
+                        );
+                    }
+                }
+            }
+
             Ok(package)
         } else {
             warn!(
