@@ -276,6 +276,18 @@ impl PricingService {
                 continue;
             }
 
+            // Filter out prices with zero GPUs to prevent division by zero
+            prices.retain(|p| p.num_gpus > 0);
+
+            // Skip this GPU model if no valid prices remain after filtering
+            if prices.is_empty() {
+                warn!(
+                    "Skipping GPU model {} - all prices had num_gpus == 0",
+                    gpu_model
+                );
+                continue;
+            }
+
             let aggregated_price = match &self.config.aggregation_strategy {
                 PriceAggregationStrategy::Minimum => {
                     // Normalize prices by GPU count, then find minimum per-GPU price
@@ -284,7 +296,10 @@ impl PricingService {
                         let price_b = b.market_price_per_hour / Decimal::from(b.num_gpus);
                         price_a.cmp(&price_b)
                     });
-                    let min_price = prices.into_iter().next().unwrap();
+                    let min_price = prices
+                        .into_iter()
+                        .next()
+                        .expect("prices not empty after filter");
                     // Normalize to per-GPU price
                     let per_gpu_price =
                         min_price.market_price_per_hour / Decimal::from(min_price.num_gpus);
@@ -306,10 +321,13 @@ impl PricingService {
                         .iter()
                         .map(|p| p.market_price_per_hour / Decimal::from(p.num_gpus))
                         .sum();
-                    let count = Decimal::from(prices.len());
-                    let avg_per_gpu_price = sum_per_gpu / count;
+                    let count = prices.len() as u32;
+                    let avg_per_gpu_price = sum_per_gpu / Decimal::from(count);
 
-                    let first_price = prices.into_iter().next().unwrap();
+                    let first_price = prices
+                        .into_iter()
+                        .next()
+                        .expect("prices not empty after filter");
                     AggregatedGpuPrice {
                         gpu_model: first_price.gpu_model,
                         vram_gb: first_price.vram_gb,
@@ -1041,6 +1059,88 @@ mod tests {
             "Average of 2, 3, 4 should be 3"
         );
         assert_eq!(aggregated[0].num_gpus, 1);
+    }
+
+    /// Test that prices with num_gpus == 0 are filtered out and don't cause division by zero
+    #[tokio::test]
+    async fn test_aggregate_zero_gpu_prices() {
+        let config = DynamicPricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Average,
+            ..Default::default()
+        };
+
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
+        let service = PricingService::new(Vec::new(), cache, config);
+
+        // All prices have num_gpus == 0, should be filtered out completely
+        let prices = vec![
+            create_test_price_with_gpus("H100", "provider1", dec!(2.0), 0),
+            create_test_price_with_gpus("H100", "provider2", dec!(3.0), 0),
+            create_test_price_with_gpus("H100", "provider3", dec!(4.0), 0),
+        ];
+
+        let aggregated = service.aggregate_prices(prices).await.unwrap();
+        assert_eq!(
+            aggregated.len(),
+            0,
+            "All prices with num_gpus == 0 should be filtered out"
+        );
+    }
+
+    /// Test that only valid prices (num_gpus > 0) are used in aggregation
+    #[tokio::test]
+    async fn test_aggregate_mixed_zero_and_valid_gpu_prices() {
+        let config = DynamicPricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Average,
+            ..Default::default()
+        };
+
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
+        let service = PricingService::new(Vec::new(), cache, config);
+
+        // Mix of valid and invalid prices
+        let prices = vec![
+            create_test_price_with_gpus("H100", "provider1", dec!(0.0), 0), // Should be filtered
+            create_test_price_with_gpus("H100", "provider2", dec!(2.0), 1),
+            create_test_price_with_gpus("H100", "provider3", dec!(0.0), 0), // Should be filtered
+            create_test_price_with_gpus("H100", "provider4", dec!(4.0), 1),
+        ];
+
+        let aggregated = service.aggregate_prices(prices).await.unwrap();
+        assert_eq!(aggregated.len(), 1, "Should aggregate only valid prices");
+        assert_eq!(
+            aggregated[0].market_price_per_hour,
+            dec!(3.0),
+            "Average of 2 and 4 should be 3 (zero GPU prices excluded)"
+        );
+    }
+
+    /// Test zero GPU filtering with minimum aggregation strategy
+    #[tokio::test]
+    async fn test_aggregate_zero_gpu_minimum_strategy() {
+        let config = DynamicPricingConfig {
+            aggregation_strategy: PriceAggregationStrategy::Minimum,
+            ..Default::default()
+        };
+
+        let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
+        let service = PricingService::new(Vec::new(), cache, config);
+
+        // Mix of valid and invalid prices
+        let prices = vec![
+            create_test_price_with_gpus("H100", "provider1", dec!(1.0), 0), // Should be filtered
+            create_test_price_with_gpus("H100", "provider2", dec!(5.0), 1),
+            create_test_price_with_gpus("H100", "provider3", dec!(3.0), 1), // Minimum valid price
+            create_test_price_with_gpus("H100", "provider4", dec!(7.0), 1),
+        ];
+
+        let aggregated = service.aggregate_prices(prices).await.unwrap();
+        assert_eq!(aggregated.len(), 1);
+        assert_eq!(
+            aggregated[0].market_price_per_hour,
+            dec!(3.0),
+            "Minimum should be 3 (zero GPU prices excluded)"
+        );
     }
 
     /// Test get_price_with_fallback when dynamic pricing is disabled
