@@ -71,16 +71,16 @@ impl BillingServer {
             Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
 
         // Build shared pricing service if enabled
-        let pricing_service = if config.pricing.enabled {
+        let pricing_service = if config.dynamic_pricing.enabled {
             info!("Dynamic pricing is enabled, building pricing service");
 
-            match create_providers(&config.pricing) {
+            match create_providers(&config.dynamic_pricing) {
                 Ok(providers) if !providers.is_empty() => {
                     info!("Created {} pricing providers", providers.len());
                     Some(Arc::new(PricingService::new(
                         providers,
                         price_cache.clone(),
-                        config.pricing.clone(),
+                        config.dynamic_pricing.clone(),
                     )))
                 }
                 Ok(_) => {
@@ -139,8 +139,8 @@ impl BillingServer {
         let telemetry_ingester = Arc::new(telemetry_ingester);
         let telemetry_processor = Arc::new(TelemetryProcessor::new(self.rds_connection.clone()));
 
-        let pricing_config = if self.config.pricing.enabled {
-            Some(self.config.pricing.clone())
+        let pricing_config = if self.config.dynamic_pricing.enabled {
+            Some(self.config.dynamic_pricing.clone())
         } else {
             None
         };
@@ -242,7 +242,11 @@ impl BillingServer {
 
         // Start price sync job if dynamic pricing is enabled
         if let Some(ref pricing_service) = self.pricing_service {
-            Self::start_price_sync_job(pricing_service.clone(), self.config.pricing.clone()).await;
+            Self::start_price_sync_job(
+                pricing_service.clone(),
+                self.config.dynamic_pricing.clone(),
+            )
+            .await;
         } else {
             info!("Pricing service not available, price sync job will not start");
         }
@@ -361,7 +365,7 @@ impl BillingServer {
     /// Start the background price sync job with shared pricing service
     pub async fn start_price_sync_job(
         pricing_service: Arc<PricingService>,
-        pricing_config: crate::pricing::types::PricingConfig,
+        pricing_config: crate::pricing::types::DynamicPricingConfig,
     ) {
         info!("Starting price sync background job");
 

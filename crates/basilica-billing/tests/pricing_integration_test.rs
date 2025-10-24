@@ -7,14 +7,14 @@ use basilica_billing::pricing::providers::create_providers;
 /// - Discount application
 /// - Metrics recording
 /// - Error handling
-use basilica_billing::pricing::{PriceAggregationStrategy, PriceSource, PricingConfig};
+use basilica_billing::pricing::{DynamicPricingConfig, PriceAggregationStrategy, PriceSource};
 use rust_decimal_macros::dec;
 
 /// Test price aggregation strategies
 #[test]
 fn test_price_aggregation_strategies() {
     // Test Minimum strategy
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         aggregation_strategy: PriceAggregationStrategy::Minimum,
         ..Default::default()
     };
@@ -25,7 +25,7 @@ fn test_price_aggregation_strategies() {
     println!("✓ Minimum aggregation strategy configured");
 
     // Test Average strategy
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         aggregation_strategy: PriceAggregationStrategy::Average,
         ..Default::default()
     };
@@ -40,7 +40,7 @@ fn test_price_aggregation_strategies() {
 #[test]
 fn test_discount_application() {
     // Test global discount
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         global_discount_percent: dec!(-50.0),
         ..Default::default()
     };
@@ -48,7 +48,7 @@ fn test_discount_application() {
     println!("✓ Global discount configured: -50%");
 
     // Test GPU-specific discount override
-    let mut config = PricingConfig {
+    let mut config = DynamicPricingConfig {
         global_discount_percent: dec!(-50.0),
         ..Default::default()
     };
@@ -61,7 +61,7 @@ fn test_discount_application() {
 #[test]
 fn test_error_handling_configuration() {
     // Test pricing enabled
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         ..Default::default()
     };
@@ -69,7 +69,7 @@ fn test_error_handling_configuration() {
     println!("✓ Dynamic pricing enabled configuration validated");
 
     // Test pricing disabled
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: false,
         ..Default::default()
     };
@@ -80,7 +80,7 @@ fn test_error_handling_configuration() {
 /// Test pricing disabled scenario
 #[test]
 fn test_pricing_disabled() {
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: false,
         ..Default::default()
     };
@@ -92,7 +92,7 @@ fn test_pricing_disabled() {
 #[test]
 fn test_marketplace_provider_creation() {
     // Test with marketplace provider
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some("test-api-key".to_string()),
@@ -108,7 +108,7 @@ fn test_marketplace_provider_creation() {
 /// Test marketplace provider creation without API key (should fail)
 #[test]
 fn test_marketplace_provider_requires_api_key() {
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: None,
@@ -123,7 +123,7 @@ fn test_marketplace_provider_requires_api_key() {
 /// Test disabled pricing returns empty providers
 #[test]
 fn test_disabled_pricing_returns_empty() {
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: false,
         ..Default::default()
     };
@@ -137,7 +137,7 @@ fn test_disabled_pricing_returns_empty() {
 #[test]
 fn test_configuration_validation() {
     // Valid default config
-    let config = PricingConfig::default();
+    let config = DynamicPricingConfig::default();
     assert!(!config.enabled);
     assert_eq!(config.cache_ttl_seconds, 86400);
     assert_eq!(config.sources.len(), 1);
@@ -145,7 +145,7 @@ fn test_configuration_validation() {
     println!("✓ Default configuration is valid");
 
     // Test with custom settings
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         cache_ttl_seconds: 43200,
         global_discount_percent: dec!(-25.0),
@@ -162,7 +162,7 @@ fn test_configuration_validation() {
 /// Test marketplace-specific configuration
 #[test]
 fn test_marketplace_configuration() {
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         marketplace_api_key: Some("test-key".to_string()),
         marketplace_api_url: "https://api.example.com".to_string(),
@@ -180,7 +180,7 @@ fn test_marketplace_configuration() {
 #[tokio::test]
 async fn test_end_to_end_configuration_and_providers() {
     // 1. Test complete configuration with marketplace provider
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some("test-api-key".to_string()),
@@ -220,7 +220,7 @@ async fn test_end_to_end_configuration_and_providers() {
     );
 
     // 4. Test marketplace provider requires API key
-    let invalid_config = PricingConfig {
+    let invalid_config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: None, // Missing API key
@@ -230,7 +230,7 @@ async fn test_end_to_end_configuration_and_providers() {
     assert!(result.is_err(), "Should fail without API key");
 
     // 5. Test disabled pricing returns no providers
-    let disabled_config = PricingConfig {
+    let disabled_config = DynamicPricingConfig {
         enabled: false,
         ..Default::default()
     };
@@ -277,7 +277,7 @@ async fn test_end_to_end_configuration_and_providers() {
     ];
 
     for (strategy, name) in strategies {
-        let test_config = PricingConfig {
+        let test_config = DynamicPricingConfig {
             aggregation_strategy: strategy.clone(),
             ..Default::default()
         };
@@ -301,7 +301,7 @@ async fn test_end_to_end_configuration_and_providers() {
 #[test]
 fn test_cache_ttl_configuration() {
     // Test default TTL (24 hours)
-    let default_config = PricingConfig::default();
+    let default_config = DynamicPricingConfig::default();
     assert_eq!(
         default_config.cache_ttl_seconds, 86400,
         "Default cache TTL should be 86400 seconds (24 hours)"
@@ -309,7 +309,7 @@ fn test_cache_ttl_configuration() {
     println!("✓ Default cache TTL is 24 hours (86400 seconds)");
 
     // Test custom TTL (1 hour)
-    let custom_config = PricingConfig {
+    let custom_config = DynamicPricingConfig {
         cache_ttl_seconds: 3600,
         ..Default::default()
     };
@@ -320,7 +320,7 @@ fn test_cache_ttl_configuration() {
     println!("✓ Custom cache TTL can be set to 1 hour (3600 seconds)");
 
     // Test custom TTL (12 hours)
-    let config_12h = PricingConfig {
+    let config_12h = DynamicPricingConfig {
         cache_ttl_seconds: 43200,
         ..Default::default()
     };
@@ -331,7 +331,7 @@ fn test_cache_ttl_configuration() {
     println!("✓ Custom cache TTL can be set to 12 hours (43200 seconds)");
 
     // Verify that cache TTL is independent of update interval
-    let config_diff_intervals = PricingConfig {
+    let config_diff_intervals = DynamicPricingConfig {
         cache_ttl_seconds: 7200,       // 2 hours
         update_interval_seconds: 3600, // 1 hour
         ..Default::default()

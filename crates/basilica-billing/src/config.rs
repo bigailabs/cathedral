@@ -1,4 +1,4 @@
-use crate::pricing::types::PricingConfig;
+use crate::pricing::types::DynamicPricingConfig;
 use basilica_common::error::ConfigurationError;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -19,7 +19,7 @@ pub struct BillingConfig {
     pub telemetry: TelemetryConfig,
     pub rules_engine: RulesEngineConfig,
     pub aws: AwsConfig,
-    pub pricing: PricingConfig,
+    pub dynamic_pricing: DynamicPricingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +169,7 @@ impl Default for BillingConfig {
                 secret_name: None,
                 endpoint_url: None,
             },
-            pricing: PricingConfig::default(),
+            dynamic_pricing: DynamicPricingConfig::default(),
         }
     }
 }
@@ -259,20 +259,20 @@ impl BillingConfig {
         }
 
         // Validate pricing configuration
-        if self.pricing.enabled {
-            if self.pricing.update_interval_seconds == 0 {
+        if self.dynamic_pricing.enabled {
+            if self.dynamic_pricing.update_interval_seconds == 0 {
                 return Err(ConfigurationError::ValidationFailed {
                     details: "pricing.update_interval_seconds must be greater than 0".to_string(),
                 });
             }
 
-            if self.pricing.cache_ttl_seconds == 0 {
+            if self.dynamic_pricing.cache_ttl_seconds == 0 {
                 return Err(ConfigurationError::ValidationFailed {
                     details: "pricing.cache_ttl_seconds must be greater than 0".to_string(),
                 });
             }
 
-            if self.pricing.sources.is_empty() {
+            if self.dynamic_pricing.sources.is_empty() {
                 return Err(ConfigurationError::ValidationFailed {
                     details: "pricing.sources must not be empty when pricing is enabled"
                         .to_string(),
@@ -302,18 +302,19 @@ impl BillingConfig {
         }
 
         // Pricing warnings
-        if self.pricing.enabled {
-            if self.pricing.update_interval_seconds < 3600 {
+        if self.dynamic_pricing.enabled {
+            if self.dynamic_pricing.update_interval_seconds < 3600 {
                 warnings.push(format!(
                     "Pricing update interval of {} seconds is very frequent and may hit API rate limits",
-                    self.pricing.update_interval_seconds
+                    self.dynamic_pricing.update_interval_seconds
                 ));
             }
 
-            if self.pricing.cache_ttl_seconds < self.pricing.update_interval_seconds {
+            if self.dynamic_pricing.cache_ttl_seconds < self.dynamic_pricing.update_interval_seconds
+            {
                 warnings.push(format!(
                     "Cache TTL ({}) is less than update interval ({}) - prices may expire before next update",
-                    self.pricing.cache_ttl_seconds, self.pricing.update_interval_seconds
+                    self.dynamic_pricing.cache_ttl_seconds, self.dynamic_pricing.update_interval_seconds
                 ));
             }
         }
@@ -359,8 +360,8 @@ mod tests {
     #[test]
     fn test_pricing_config_validation_zero_update_interval() {
         let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.update_interval_seconds = 0;
+        config.dynamic_pricing.enabled = true;
+        config.dynamic_pricing.update_interval_seconds = 0;
 
         let result = config.validate();
         assert!(result.is_err());
@@ -376,8 +377,8 @@ mod tests {
     #[test]
     fn test_pricing_config_validation_zero_cache_ttl() {
         let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.cache_ttl_seconds = 0;
+        config.dynamic_pricing.enabled = true;
+        config.dynamic_pricing.cache_ttl_seconds = 0;
 
         let result = config.validate();
         assert!(result.is_err());
@@ -393,8 +394,8 @@ mod tests {
     #[test]
     fn test_pricing_config_validation_empty_sources() {
         let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.sources = Vec::new();
+        config.dynamic_pricing.enabled = true;
+        config.dynamic_pricing.sources = Vec::new();
 
         let result = config.validate();
         assert!(result.is_err());
@@ -410,8 +411,8 @@ mod tests {
     #[test]
     fn test_pricing_config_warnings_high_frequency() {
         let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.update_interval_seconds = 60; // 1 minute
+        config.dynamic_pricing.enabled = true;
+        config.dynamic_pricing.update_interval_seconds = 60; // 1 minute
 
         let warnings = config.warnings();
         assert!(warnings.iter().any(|w| w.contains("very frequent")));
@@ -420,9 +421,9 @@ mod tests {
     #[test]
     fn test_pricing_config_warnings_cache_ttl_too_short() {
         let mut config = BillingConfig::default();
-        config.pricing.enabled = true;
-        config.pricing.update_interval_seconds = 86400; // 24 hours
-        config.pricing.cache_ttl_seconds = 3600; // 1 hour
+        config.dynamic_pricing.enabled = true;
+        config.dynamic_pricing.update_interval_seconds = 86400; // 24 hours
+        config.dynamic_pricing.cache_ttl_seconds = 3600; // 1 hour
 
         let warnings = config.warnings();
         assert!(warnings
@@ -433,9 +434,9 @@ mod tests {
     #[test]
     fn test_pricing_disabled_skips_validation() {
         let mut config = BillingConfig::default();
-        config.pricing.enabled = false;
-        config.pricing.update_interval_seconds = 0; // Would be invalid if enabled
-        config.pricing.sources = Vec::new(); // Would be invalid if enabled
+        config.dynamic_pricing.enabled = false;
+        config.dynamic_pricing.update_interval_seconds = 0; // Would be invalid if enabled
+        config.dynamic_pricing.sources = Vec::new(); // Would be invalid if enabled
 
         // Should pass validation because pricing is disabled
         assert!(config.validate().is_ok());

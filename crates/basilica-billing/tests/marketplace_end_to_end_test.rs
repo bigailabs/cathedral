@@ -9,7 +9,7 @@
 /// 6. Validate metrics and observability
 use basilica_billing::config::BillingConfig;
 use basilica_billing::pricing::providers::create_providers;
-use basilica_billing::pricing::{PriceAggregationStrategy, PriceSource, PricingConfig};
+use basilica_billing::pricing::{DynamicPricingConfig, PriceAggregationStrategy, PriceSource};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
@@ -37,31 +37,31 @@ fn test_load_test_configuration() {
 
     // Verify pricing configuration exists and is enabled
     assert!(
-        config.pricing.enabled,
+        config.dynamic_pricing.enabled,
         "Dynamic pricing should be enabled in test config"
     );
     assert_eq!(
-        config.pricing.global_discount_percent,
+        config.dynamic_pricing.global_discount_percent,
         dec!(-20.0),
         "Global discount should be -20%"
     );
     assert_eq!(
-        config.pricing.update_interval_seconds, 3600,
+        config.dynamic_pricing.update_interval_seconds, 3600,
         "Update interval should be 3600 seconds for tests"
     );
     assert_eq!(
-        config.pricing.cache_ttl_seconds, 3600,
+        config.dynamic_pricing.cache_ttl_seconds, 3600,
         "Cache TTL should be 3600 seconds"
     );
 
     // Verify price sources
     assert_eq!(
-        config.pricing.sources.len(),
+        config.dynamic_pricing.sources.len(),
         1,
         "Should have one price source"
     );
     assert_eq!(
-        config.pricing.sources[0],
+        config.dynamic_pricing.sources[0],
         PriceSource::Marketplace,
         "Source should be Marketplace"
     );
@@ -69,7 +69,7 @@ fn test_load_test_configuration() {
     // Verify aggregation strategy
     assert!(
         matches!(
-            config.pricing.aggregation_strategy,
+            config.dynamic_pricing.aggregation_strategy,
             PriceAggregationStrategy::Average
         ),
         "Should use average aggregation strategy"
@@ -77,27 +77,27 @@ fn test_load_test_configuration() {
 
     // Verify marketplace configuration
     assert_eq!(
-        config.pricing.marketplace_api_url, "https://api.shadeform.ai/v1",
+        config.dynamic_pricing.marketplace_api_url, "https://api.shadeform.ai/v1",
         "Marketplace API URL should be Shadeform"
     );
     assert!(
-        config.pricing.marketplace_available_only,
+        config.dynamic_pricing.marketplace_available_only,
         "Should only query available instances"
     );
 
     // Verify GPU-specific discount overrides from config
     assert_eq!(
-        config.pricing.gpu_discounts.get("H100"),
+        config.dynamic_pricing.gpu_discounts.get("H100"),
         Some(&dec!(-25.0)),
         "H100 should have 25% discount override"
     );
     assert_eq!(
-        config.pricing.gpu_discounts.get("A100"),
+        config.dynamic_pricing.gpu_discounts.get("A100"),
         Some(&dec!(-20.0)),
         "A100 should have 20% discount override"
     );
     assert_eq!(
-        config.pricing.gpu_discounts.get("RTX4090"),
+        config.dynamic_pricing.gpu_discounts.get("RTX4090"),
         Some(&dec!(-30.0)),
         "RTX4090 should have 30% discount override"
     );
@@ -108,12 +108,15 @@ fn test_load_test_configuration() {
     println!("  • Dynamic pricing: enabled");
     println!(
         "  • Global discount: {}%",
-        config.pricing.global_discount_percent
+        config.dynamic_pricing.global_discount_percent
     );
-    println!("  • Aggregation: {:?}", config.pricing.aggregation_strategy);
+    println!(
+        "  • Aggregation: {:?}",
+        config.dynamic_pricing.aggregation_strategy
+    );
     println!(
         "  • GPU overrides: {} configured",
-        config.pricing.gpu_discounts.len()
+        config.dynamic_pricing.gpu_discounts.len()
     );
 }
 
@@ -124,7 +127,7 @@ async fn test_marketplace_provider_with_config() {
     std::env::set_var("MARKETPLACE_API_KEY", "test-key-12345");
 
     // Create pricing config with marketplace enabled
-    let config = PricingConfig {
+    let config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some(std::env::var("MARKETPLACE_API_KEY").unwrap()),
@@ -166,7 +169,7 @@ fn test_discount_calculations() {
     use chrono::Utc;
 
     // Create pricing config with GPU-specific discounts
-    let mut config = PricingConfig {
+    let mut config = DynamicPricingConfig {
         enabled: true,
         aggregation_strategy: PriceAggregationStrategy::Minimum,
         global_discount_percent: dec!(-50.0),
@@ -233,7 +236,7 @@ fn test_discount_calculations() {
 /// Test disabled pricing configuration
 #[test]
 fn test_disabled_pricing_configuration() {
-    let disabled_config = PricingConfig {
+    let disabled_config = DynamicPricingConfig {
         enabled: false,
         ..Default::default()
     };
@@ -266,7 +269,7 @@ fn test_aggregation_strategy_configurations() {
     ];
 
     for (strategy, name, description) in strategies {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: strategy.clone(),
             enabled: true,
             ..Default::default()
@@ -291,7 +294,7 @@ fn test_aggregation_strategy_configurations() {
 #[test]
 fn test_complete_pricing_configuration() {
     // Create a complete pricing configuration
-    let mut config = PricingConfig {
+    let mut config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some("test-api-key".to_string()),
@@ -352,37 +355,40 @@ async fn test_marketplace_full_integration() {
         BillingConfig::load_from_file(&config_path).expect("Should load test configuration");
 
     // Verify pricing configuration
-    assert!(billing_config.pricing.enabled, "Pricing should be enabled");
+    assert!(
+        billing_config.dynamic_pricing.enabled,
+        "Pricing should be enabled"
+    );
     assert_eq!(
-        billing_config.pricing.sources.len(),
+        billing_config.dynamic_pricing.sources.len(),
         1,
         "Should have one source"
     );
     assert_eq!(
-        billing_config.pricing.sources[0],
+        billing_config.dynamic_pricing.sources[0],
         PriceSource::Marketplace,
         "Source should be Marketplace"
     );
     assert_eq!(
-        billing_config.pricing.global_discount_percent,
+        billing_config.dynamic_pricing.global_discount_percent,
         dec!(-20.0),
         "Global discount should be -20%"
     );
     assert_eq!(
-        billing_config.pricing.gpu_discounts.len(),
+        billing_config.dynamic_pricing.gpu_discounts.len(),
         3,
         "Should have 3 GPU-specific overrides"
     );
 
     // 2. Create pricing configuration with API key
     std::env::set_var("MARKETPLACE_API_KEY", "test-integration-key");
-    let pricing_config = PricingConfig {
+    let pricing_config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: Some("test-integration-key".to_string()),
-        aggregation_strategy: billing_config.pricing.aggregation_strategy.clone(),
-        global_discount_percent: billing_config.pricing.global_discount_percent,
-        gpu_discounts: billing_config.pricing.gpu_discounts.clone(),
+        aggregation_strategy: billing_config.dynamic_pricing.aggregation_strategy.clone(),
+        global_discount_percent: billing_config.dynamic_pricing.global_discount_percent,
+        gpu_discounts: billing_config.dynamic_pricing.gpu_discounts.clone(),
         ..Default::default()
     };
 
@@ -443,7 +449,7 @@ async fn test_marketplace_full_integration() {
     );
 
     // 6. Test that disabled pricing returns no providers
-    let disabled_config = PricingConfig {
+    let disabled_config = DynamicPricingConfig {
         enabled: false,
         ..Default::default()
     };
@@ -456,7 +462,7 @@ async fn test_marketplace_full_integration() {
     );
 
     // 7. Test that missing API key is detected
-    let no_key_config = PricingConfig {
+    let no_key_config = DynamicPricingConfig {
         enabled: true,
         sources: vec![PriceSource::Marketplace],
         marketplace_api_key: None,

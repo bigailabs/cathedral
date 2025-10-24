@@ -48,7 +48,7 @@ pub struct BillingServiceImpl {
     event_store: Arc<EventStore>,
     metrics: Option<Arc<BillingMetricsSystem>>,
     pricing_service: Option<Arc<PricingService>>,
-    pricing_config: Option<crate::pricing::types::PricingConfig>,
+    pricing_config: Option<crate::pricing::types::DynamicPricingConfig>,
     price_cache: Arc<dyn PriceCacheRepository>,
 }
 
@@ -81,7 +81,7 @@ impl BillingServiceImpl {
         telemetry_processor: Arc<TelemetryProcessor>,
         metrics: Option<Arc<BillingMetricsSystem>>,
         pricing_service: Option<Arc<PricingService>>,
-        pricing_config: Option<crate::pricing::types::PricingConfig>,
+        pricing_config: Option<crate::pricing::types::DynamicPricingConfig>,
         price_cache: Arc<dyn PriceCacheRepository>,
     ) -> anyhow::Result<Self> {
         let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));

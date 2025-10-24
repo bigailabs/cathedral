@@ -4,6 +4,6 @@ pub mod types;
 
 pub use service::PricingService;
 pub use types::{
-    AggregatedGpuPrice, GpuPrice, PriceAggregationStrategy, PriceQueryFilter, PriceSource,
-    PricingConfig,
+    AggregatedGpuPrice, DynamicPricingConfig, GpuPrice, PriceAggregationStrategy, PriceQueryFilter,
+    PriceSource,
 };

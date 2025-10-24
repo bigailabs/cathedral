@@ -1,5 +1,5 @@
 use crate::error::{BillingError, Result};
-use crate::pricing::types::{GpuPrice, PriceQueryFilter, PriceSource, PricingConfig};
+use crate::pricing::types::{DynamicPricingConfig, GpuPrice, PriceQueryFilter, PriceSource};
 use async_trait::async_trait;
 use tracing::info;
 
@@ -22,7 +22,7 @@ pub mod marketplace;
 pub use marketplace::MarketplaceProvider;
 
 /// Create providers from configuration
-pub fn create_providers(config: &PricingConfig) -> Result<Vec<Box<dyn PriceProvider>>> {
+pub fn create_providers(config: &DynamicPricingConfig) -> Result<Vec<Box<dyn PriceProvider>>> {
     if !config.enabled {
         info!("Dynamic pricing is disabled");
         return Ok(Vec::new());
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn test_create_providers_disabled() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: false,
             ..Default::default()
         };
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn test_create_providers_marketplace() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             sources: vec![PriceSource::Marketplace],
             marketplace_api_key: Some("test-key".to_string()),
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn test_create_providers_no_api_key() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             sources: vec![PriceSource::Marketplace],
             marketplace_api_key: None,
@@ -114,7 +114,7 @@ mod tests {
 
     #[test]
     fn test_create_providers_empty_sources_error() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             sources: Vec::new(),
             ..Default::default()

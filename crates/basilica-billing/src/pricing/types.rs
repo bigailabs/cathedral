@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 /// Configuration for dynamic pricing system
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PricingConfig {
+pub struct DynamicPricingConfig {
     /// Enable dynamic pricing from external sources
     pub enabled: bool,
 
@@ -55,7 +55,7 @@ fn default_num_gpus() -> u32 {
     1
 }
 
-impl Default for PricingConfig {
+impl Default for DynamicPricingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_pricing_config_default() {
-        let config = PricingConfig::default();
+        let config = DynamicPricingConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.global_discount_percent, Decimal::from(-50));
         assert_eq!(config.update_interval_seconds, 86400);
@@ -407,7 +407,7 @@ mod tests {
         use figment::{providers::Serialized, Figment};
 
         // Simulate TOML configuration
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             global_discount_percent: Decimal::from(-50),
             gpu_discounts: HashMap::new(),
@@ -422,7 +422,7 @@ mod tests {
 
         // Serialize and deserialize
         let figment = Figment::from(Serialized::defaults(config.clone()));
-        let loaded: PricingConfig = figment.extract().unwrap();
+        let loaded: DynamicPricingConfig = figment.extract().unwrap();
 
         assert!(loaded.enabled);
         assert_eq!(loaded.sources.len(), 1);

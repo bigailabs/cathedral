@@ -1,6 +1,6 @@
 use crate::error::Result;
 use crate::pricing::providers::PriceProvider;
-use crate::pricing::types::{AggregatedGpuPrice, GpuPrice, PriceQueryFilter, PricingConfig};
+use crate::pricing::types::{AggregatedGpuPrice, DynamicPricingConfig, GpuPrice, PriceQueryFilter};
 use crate::storage::PriceCacheRepository;
 use futures::future::join_all;
 use rust_decimal::Decimal;
@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 pub struct PricingService {
     providers: Vec<Box<dyn PriceProvider>>,
     cache: Arc<dyn PriceCacheRepository>,
-    config: PricingConfig,
+    config: DynamicPricingConfig,
 }
 
 impl PricingService {
@@ -20,7 +20,7 @@ impl PricingService {
     pub fn new(
         providers: Vec<Box<dyn PriceProvider>>,
         cache: Arc<dyn PriceCacheRepository>,
-        config: PricingConfig,
+        config: DynamicPricingConfig,
     ) -> Self {
         Self {
             providers,
@@ -496,7 +496,7 @@ mod tests {
     /// Test discount calculation with default global discount
     #[test]
     fn test_apply_discount() {
-        let config = PricingConfig::default();
+        let config = DynamicPricingConfig::default();
 
         let market_price = Decimal::from(100);
         let discount = GpuPrice::effective_discount(
@@ -527,7 +527,7 @@ mod tests {
             }
         };
 
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             aggregation_strategy: PriceAggregationStrategy::Average,
             sources: vec![PriceSource::Marketplace],
@@ -620,7 +620,7 @@ mod tests {
     /// Test fetch, aggregate, and discount pipeline with mock data
     #[tokio::test]
     async fn test_fetch_aggregate_and_discount_pipeline() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             aggregation_strategy: PriceAggregationStrategy::Average,
             ..Default::default()
@@ -681,7 +681,7 @@ mod tests {
     /// Test that a failing provider does not break successful ones
     #[tokio::test]
     async fn test_fetch_skips_failed_providers() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             ..Default::default()
         };
@@ -709,7 +709,7 @@ mod tests {
     /// Test that fetch_latest_prices surfaces an error when all providers fail
     #[tokio::test]
     async fn test_fetch_all_providers_fail() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             ..Default::default()
         };
@@ -742,7 +742,7 @@ mod tests {
             }
         };
 
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             sources: vec![PriceSource::Marketplace],
             marketplace_api_key: Some(api_key),
@@ -858,7 +858,7 @@ mod tests {
     /// Test minimum aggregation strategy
     #[tokio::test]
     async fn test_aggregate_minimum() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: PriceAggregationStrategy::Minimum,
             ..Default::default()
         };
@@ -884,7 +884,7 @@ mod tests {
     /// Test average aggregation strategy
     #[tokio::test]
     async fn test_aggregate_average() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: PriceAggregationStrategy::Average,
             ..Default::default()
         };
@@ -907,7 +907,7 @@ mod tests {
     /// Test aggregation with multiple GPU models
     #[tokio::test]
     async fn test_aggregate_multiple_gpu_models() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: PriceAggregationStrategy::Minimum,
             ..Default::default()
         };
@@ -936,7 +936,7 @@ mod tests {
     /// Test aggregation with empty price list
     #[tokio::test]
     async fn test_aggregate_empty() {
-        let config = PricingConfig::default();
+        let config = DynamicPricingConfig::default();
         let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
@@ -948,7 +948,7 @@ mod tests {
     /// Test aggregation with single price
     #[tokio::test]
     async fn test_aggregate_single_price() {
-        let config = PricingConfig::default();
+        let config = DynamicPricingConfig::default();
         let cache: Arc<dyn PriceCacheRepository> = Arc::new(MockPriceCacheRepository);
         let service = PricingService::new(Vec::new(), cache, config);
 
@@ -962,7 +962,7 @@ mod tests {
     /// Test multi-GPU price normalization with average strategy
     #[tokio::test]
     async fn test_aggregate_multi_gpu_normalization_average() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: PriceAggregationStrategy::Average,
             ..Default::default()
         };
@@ -999,7 +999,7 @@ mod tests {
     /// Test multi-GPU price normalization with minimum strategy
     #[tokio::test]
     async fn test_aggregate_multi_gpu_normalization_minimum() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: PriceAggregationStrategy::Minimum,
             ..Default::default()
         };
@@ -1040,7 +1040,7 @@ mod tests {
     /// Test that single-GPU prices are normalized correctly
     #[tokio::test]
     async fn test_aggregate_single_gpu_normalization() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             aggregation_strategy: PriceAggregationStrategy::Average,
             ..Default::default()
         };
@@ -1068,7 +1068,7 @@ mod tests {
     /// Test get_price_with_fallback when dynamic pricing is disabled
     #[tokio::test]
     async fn test_get_price_with_fallback_disabled() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: false,
             ..Default::default()
         };
@@ -1089,7 +1089,7 @@ mod tests {
     /// Test get_price_with_fallback when cache miss and fallback enabled
     #[tokio::test]
     async fn test_get_price_with_fallback_cache_miss() {
-        let config = PricingConfig {
+        let config = DynamicPricingConfig {
             enabled: true,
             ..Default::default()
         };
