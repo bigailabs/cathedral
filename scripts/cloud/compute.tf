@@ -170,6 +170,10 @@ module "billing_service" {
     BILLING_AWS__SECRET_NAME             = ""
     BILLING_AWS__ENDPOINT_URL            = ""
 
+    # Pricing Configuration
+    BILLING_PRICING__ENABLED              = "true"
+    BILLING_PRICING__MARKETPLACE_API_KEY  = var.marketplace_api_key
+
     # Logging
     RUST_LOG = "basilica_billing=info,basilica_protocol=info"
   }

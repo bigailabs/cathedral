@@ -88,3 +88,9 @@ variable "payments_reconciliation_dry_run" {
   description = "Run reconciliation in dry-run mode (no actual transfers)"
   default     = true
 }
+
+variable "marketplace_api_key" {
+  type        = string
+  description = "API key for Shadeform marketplace pricing API"
+  sensitive   = true
+}

@@ -46,6 +46,10 @@ route53_zone_id = ""
 # route53_zone_id = "Z1234567890ABC"
 # This will create an A record: billing.basilica.ai -> Internal ALB
 
+# Marketplace API Key (Required for dynamic pricing)
+# Get your API key from Shadeform: https://shadeform.ai/
+marketplace_api_key = "your-shadeform-api-key"
+
 # Cold Wallet Address (Required for reconciliation)
 # This is the SS58 address where swept funds will be sent
 # Example: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
