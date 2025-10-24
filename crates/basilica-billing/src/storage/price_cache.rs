@@ -74,18 +74,15 @@ impl SqlPriceCacheRepository {
             r#"
             INSERT INTO billing.price_cache (
                 gpu_model, vram_gb, market_price_per_hour, discounted_price_per_hour,
-                discount_percent, source, provider, location, instance_name,
-                updated_at, expires_at, is_spot
+                discount_percent, source, updated_at, expires_at, is_spot
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (gpu_model, provider, location, is_spot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (gpu_model, source, is_spot)
             DO UPDATE SET
                 vram_gb = EXCLUDED.vram_gb,
                 market_price_per_hour = EXCLUDED.market_price_per_hour,
                 discounted_price_per_hour = EXCLUDED.discounted_price_per_hour,
                 discount_percent = EXCLUDED.discount_percent,
-                source = EXCLUDED.source,
-                instance_name = EXCLUDED.instance_name,
                 updated_at = EXCLUDED.updated_at,
                 expires_at = EXCLUDED.expires_at
             "#,
@@ -96,9 +93,6 @@ impl SqlPriceCacheRepository {
         .bind(price.discounted_price_per_hour)
         .bind(price.discount_percent)
         .bind(&price.source)
-        .bind(&price.provider)
-        .bind(&price.location)
-        .bind(&price.instance_name)
         .bind(price.updated_at)
         .bind(expires_at)
         .bind(price.is_spot)
@@ -132,8 +126,7 @@ impl PriceCacheRepository for SqlPriceCacheRepository {
             r#"
             SELECT
                 gpu_model, vram_gb, market_price_per_hour, discounted_price_per_hour,
-                discount_percent, source, provider, location, instance_name,
-                updated_at, is_spot
+                discount_percent, source, updated_at, is_spot
             FROM billing.price_cache
             WHERE gpu_model = $1
                 AND is_spot = false
@@ -160,8 +153,7 @@ impl PriceCacheRepository for SqlPriceCacheRepository {
             r#"
             SELECT
                 gpu_model, vram_gb, market_price_per_hour, discounted_price_per_hour,
-                discount_percent, source, provider, location, instance_name,
-                updated_at, is_spot
+                discount_percent, source, updated_at, is_spot
             FROM billing.price_cache
             WHERE expires_at > NOW()
             ORDER BY gpu_model, updated_at DESC
@@ -213,7 +205,7 @@ impl PriceCacheRepository for SqlPriceCacheRepository {
             .bind(&price.gpu_model)
             .bind(price.discounted_price_per_hour)
             .bind(&price.source)
-            .bind(&price.provider)
+            .bind(&price.source) // Use source for provider as well
             .execute(self.connection.pool())
             .await
             .map_err(|e| BillingError::DatabaseError {
@@ -316,9 +308,6 @@ struct GpuPriceRow {
     discounted_price_per_hour: Decimal,
     discount_percent: Decimal,
     source: String,
-    provider: String,
-    location: Option<String>,
-    instance_name: Option<String>,
     updated_at: DateTime<Utc>,
     is_spot: bool,
 }
@@ -333,9 +322,6 @@ impl From<GpuPriceRow> for GpuPrice {
             discounted_price_per_hour: row.discounted_price_per_hour,
             discount_percent: row.discount_percent,
             source: row.source,
-            provider: row.provider,
-            location: row.location,
-            instance_name: row.instance_name,
             updated_at: row.updated_at,
             is_spot: row.is_spot,
         }
@@ -357,9 +343,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(80),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now(),
             is_spot: false,
         };
@@ -383,9 +366,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(40),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now() - chrono::Duration::seconds(86400),
             is_spot: false,
         };
@@ -405,9 +385,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(96),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now() - chrono::Duration::seconds(86399),
             is_spot: false,
         };
@@ -430,9 +407,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(80),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now(),
             is_spot: false,
         };
@@ -447,9 +421,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(40),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now() - chrono::Duration::seconds(3601),
             is_spot: false,
         };
@@ -464,9 +435,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(96),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now() - chrono::Duration::seconds(custom_ttl as i64),
             is_spot: false,
         };
@@ -481,9 +449,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(32),
             discount_percent: Decimal::from(-20),
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now() - chrono::Duration::seconds((custom_ttl - 1) as i64),
             is_spot: false,
         };

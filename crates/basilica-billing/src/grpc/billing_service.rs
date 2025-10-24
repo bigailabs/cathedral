@@ -1132,13 +1132,13 @@ impl BillingService for BillingServiceImpl {
                 .collect()
         };
 
-        // Filter by providers if specified
+        // Filter by providers if specified (use source field for provider filtering)
         let filtered_prices: Vec<_> = if req.providers.is_empty() {
             filtered_prices
         } else {
             filtered_prices
                 .into_iter()
-                .filter(|p| req.providers.contains(&p.provider))
+                .filter(|p| req.providers.contains(&p.source))
                 .collect()
         };
 
@@ -1146,15 +1146,15 @@ impl BillingService for BillingServiceImpl {
         let prices = filtered_prices
             .into_iter()
             .map(|p| basilica_protocol::billing::GpuPrice {
-                gpu_model: p.gpu_model,
+                gpu_model: p.gpu_model.clone(),
                 vram_gb: p.vram_gb.unwrap_or(0),
                 market_price_per_hour: Self::format_decimal(p.market_price_per_hour),
                 discounted_price_per_hour: Self::format_decimal(p.discounted_price_per_hour),
                 discount_percent: Self::format_decimal(p.discount_percent),
-                source: p.source,
-                provider: p.provider,
-                location: p.location.unwrap_or_default(),
-                instance_name: p.instance_name.unwrap_or_default(),
+                source: p.source.clone(),
+                provider: p.source, // Use source as provider for backward compatibility
+                location: String::new(), // No longer stored
+                instance_name: String::new(), // No longer stored
                 updated_at: Some(prost_types::Timestamp {
                     seconds: p.updated_at.timestamp(),
                     nanos: p.updated_at.timestamp_subsec_nanos() as i32,

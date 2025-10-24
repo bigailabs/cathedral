@@ -119,9 +119,6 @@ impl MarketplaceProvider {
                 discounted_price_per_hour: market_price,
                 discount_percent: Decimal::ZERO,
                 source: "marketplace".to_string(),
-                provider: instance.cloud.clone(),
-                location: None,
-                instance_name: Some(instance.shade_instance_type.clone()),
                 updated_at: Utc::now(),
                 is_spot: false, // TODO: Check if marketplace API provides spot instance info
             });
@@ -135,9 +132,6 @@ impl MarketplaceProvider {
                     discounted_price_per_hour: market_price,
                     discount_percent: Decimal::ZERO,
                     source: "marketplace".to_string(),
-                    provider: instance.cloud.clone(),
-                    location: Some(av.region.clone()),
-                    instance_name: Some(format!("{}-{}", instance.shade_instance_type, av.region)),
                     updated_at: Utc::now(),
                     is_spot: false,
                 });
@@ -272,7 +266,7 @@ impl PriceProvider for MarketplaceProvider {
             prices.retain(|p| {
                 providers
                     .iter()
-                    .any(|prov| p.provider.eq_ignore_ascii_case(prov))
+                    .any(|prov| p.source.eq_ignore_ascii_case(prov))
             });
         }
 
@@ -366,8 +360,7 @@ mod tests {
             prices[0].market_price_per_hour,
             Decimal::from_f64(2.99).unwrap()
         );
-        assert_eq!(prices[0].provider, "testcloud");
-        assert_eq!(prices[0].location, None);
+        assert_eq!(prices[0].source, "marketplace");
     }
 
     #[test]
@@ -405,10 +398,10 @@ mod tests {
 
         let prices = provider.convert_instance(instance);
         assert_eq!(prices.len(), 2);
-        assert_eq!(prices[0].location, Some("us-east".to_string()));
-        assert_eq!(prices[1].location, Some("eu-west".to_string()));
         assert_eq!(prices[0].gpu_model, "A100");
         assert_eq!(prices[1].gpu_model, "A100");
+        assert_eq!(prices[0].source, "marketplace");
+        assert_eq!(prices[1].source, "marketplace");
     }
 
     #[test]
@@ -447,6 +440,6 @@ mod tests {
         let prices = provider.convert_instance(instance);
         // Should only get the available region
         assert_eq!(prices.len(), 1);
-        assert_eq!(prices[0].location, Some("us-east".to_string()));
+        assert_eq!(prices[0].source, "marketplace");
     }
 }

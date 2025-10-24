@@ -114,17 +114,8 @@ pub struct GpuPrice {
     /// Discount applied as percentage
     pub discount_percent: Decimal,
 
-    /// Source of the price (e.g., "aws", "aggregated")
+    /// Source of the price (e.g., "aggregated_average", "aggregated_minimum")
     pub source: String,
-
-    /// Provider (e.g., "aws", "azure")
-    pub provider: String,
-
-    /// Location/region
-    pub location: Option<String>,
-
-    /// Instance type name
-    pub instance_name: Option<String>,
 
     /// Last updated timestamp
     pub updated_at: DateTime<Utc>,
@@ -212,9 +203,6 @@ impl From<AggregatedGpuPrice> for GpuPrice {
             discounted_price_per_hour: aggregated.discounted_price_per_hour,
             discount_percent: aggregated.discount_percent,
             source: format!("aggregated_{:?}", aggregated.aggregation_strategy).to_lowercase(),
-            provider: "aggregated".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: aggregated.updated_at,
             is_spot: aggregated.is_spot,
         }
@@ -271,9 +259,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(100),
             discount_percent: Decimal::ZERO,
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now(),
             is_spot: false,
         };
@@ -319,9 +304,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(100),
             discount_percent: Decimal::ZERO,
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now(),
             is_spot: false,
         };
@@ -343,9 +325,6 @@ mod tests {
             discounted_price_per_hour: Decimal::from(100),
             discount_percent: Decimal::ZERO,
             source: "test".to_string(),
-            provider: "test".to_string(),
-            location: None,
-            instance_name: None,
             updated_at: Utc::now(),
             is_spot: false,
         };
