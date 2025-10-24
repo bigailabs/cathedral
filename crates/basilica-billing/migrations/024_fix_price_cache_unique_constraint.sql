@@ -22,7 +22,28 @@ ALTER TABLE billing.price_cache
     DROP COLUMN IF EXISTS instance_name;
 
 -- ===========================================================================
--- 3. Add new unique constraint based on source
+-- 3. Remove duplicate rows before adding constraint
+-- ===========================================================================
+
+-- Delete duplicate rows, keeping only the most recent one (by created_at)
+-- This is necessary because existing data may have duplicates that would
+-- violate the new unique constraint
+DELETE FROM billing.price_cache
+WHERE id IN (
+    SELECT id
+    FROM (
+        SELECT id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY gpu_model, source, is_spot
+                   ORDER BY created_at DESC
+               ) as row_num
+        FROM billing.price_cache
+    ) t
+    WHERE row_num > 1
+);
+
+-- ===========================================================================
+-- 4. Add new unique constraint based on source
 -- ===========================================================================
 
 -- Create new unique constraint: one price per (gpu_model, source, is_spot)
