@@ -1,27 +1,43 @@
 use crate::error::{PaymentsError, Result};
 use anyhow::Context;
+use bittensor::connect::{ConnectionPool, ConnectionPoolBuilder};
 use sp_core::sr25519;
+use std::sync::Arc;
 use subxt::{dynamic::At, OnlineClient, PolkadotConfig};
 use tracing::{debug, info};
 
 pub struct BlockchainClient {
-    client: OnlineClient<PolkadotConfig>,
+    pool: Arc<ConnectionPool>,
     endpoint: String,
 }
 
 impl BlockchainClient {
     pub async fn new(endpoint: &str) -> Result<Self> {
-        let client = OnlineClient::<PolkadotConfig>::from_url(endpoint)
+        info!("Initializing blockchain client connection to {}", endpoint);
+
+        let pool = ConnectionPoolBuilder::new(vec![endpoint.to_string()])
+            .max_connections(1)
+            .build();
+
+        pool.initialize()
             .await
-            .context("Failed to connect to blockchain")
+            .context("Failed to initialize blockchain connection pool")
             .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
 
-        info!("Connected to blockchain at {}", endpoint);
+        info!("Successfully connected to blockchain at {}", endpoint);
 
         Ok(Self {
-            client,
+            pool: Arc::new(pool),
             endpoint: endpoint.to_string(),
         })
+    }
+
+    async fn get_client(&self) -> Result<Arc<OnlineClient<PolkadotConfig>>> {
+        self.pool
+            .get_healthy_client()
+            .await
+            .context("Failed to get healthy blockchain client")
+            .map_err(|e| PaymentsError::Blockchain(e.to_string()))
     }
 
     pub async fn get_balance(&self, account_hex: &str) -> Result<u128> {
@@ -47,8 +63,9 @@ impl BlockchainClient {
             vec![subxt::dynamic::Value::from_bytes(&account)],
         );
 
-        let result = self
-            .client
+        let client = self.get_client().await?;
+
+        let result = client
             .storage()
             .at_latest()
             .await
@@ -135,8 +152,9 @@ impl BlockchainClient {
 
         let signer = subxt::tx::PairSigner::new(keypair.clone());
 
-        let progress = self
-            .client
+        let client = self.get_client().await?;
+
+        let progress = client
             .tx()
             .sign_and_submit_then_watch_default(&transfer_tx, &signer)
             .await
