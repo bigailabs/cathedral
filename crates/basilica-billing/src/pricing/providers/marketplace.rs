@@ -28,6 +28,7 @@ struct MarketplaceResponse {
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceInstanceType {
+    #[allow(dead_code)]
     cloud: String,
     shade_instance_type: String,
     hourly_price: u64, // in cents
@@ -50,6 +51,7 @@ struct MarketplaceConfiguration {
 
 #[derive(Debug, Deserialize)]
 struct MarketplaceAvailability {
+    #[allow(dead_code)]
     region: String,
     available: bool,
     #[serde(default)]
@@ -123,7 +125,7 @@ impl MarketplaceProvider {
                 is_spot: false, // TODO: Check if marketplace API provides spot instance info
             });
         } else {
-            for av in regions_to_include {
+            for _av in regions_to_include {
                 prices.push(GpuPrice {
                     gpu_model: instance.configuration.gpu_type.clone(),
                     vram_gb: instance.configuration.vram_per_gpu_in_gb,
