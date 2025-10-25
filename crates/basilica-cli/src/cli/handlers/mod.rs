@@ -11,3 +11,4 @@ pub mod packages;
 #[cfg(debug_assertions)]
 pub mod test_auth;
 pub mod tokens;
+pub mod upgrade;

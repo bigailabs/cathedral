@@ -155,6 +155,17 @@ pub enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
+
+    /// Upgrade the Basilica CLI to a newer version
+    Upgrade {
+        /// Specific version to upgrade to (e.g., "0.5.4")
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Check for updates without installing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Fund management actions
@@ -221,7 +232,8 @@ impl Commands {
             Commands::Login { .. }
             | Commands::Logout
             | Commands::Validator { .. }
-            | Commands::Miner { .. } => false,
+            | Commands::Miner { .. }
+            | Commands::Upgrade { .. } => false,
 
             // Test auth command requires authentication
             #[cfg(debug_assertions)]
