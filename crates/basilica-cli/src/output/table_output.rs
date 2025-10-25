@@ -161,7 +161,7 @@ pub fn display_rental_items(
                     .parse::<Decimal>()
                     .ok()
                     .map(|c| format!("${:.2}", c))
-                    .unwrap_or_else(|| format!("${}", usage.current_cost))
+                    .unwrap_or_else(|| usage.current_cost.clone())
             })
             .unwrap_or_else(|| "-".to_string());
 
