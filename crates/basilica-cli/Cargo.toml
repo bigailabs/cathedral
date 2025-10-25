@@ -56,6 +56,9 @@ sha2 = { workspace = true }
 webbrowser = { workspace = true }
 url = { workspace = true }
 
+# Self-update
+self_update = { workspace = true }
+
 
 # Internal crate dependencies
 basilica-api = { path = "../basilica-api" }

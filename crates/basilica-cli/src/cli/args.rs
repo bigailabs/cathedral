@@ -244,6 +244,11 @@ impl Args {
             Commands::Packages { json } => {
                 handlers::packages::handle_packages(*json, config).await?;
             }
+
+            // Upgrade command
+            Commands::Upgrade { version } => {
+                handlers::upgrade::handle_upgrade(version.clone()).await?;
+            }
         }
         Ok(())
     }

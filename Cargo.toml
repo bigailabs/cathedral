@@ -158,6 +158,9 @@ pyo3-stub-gen = { version = "0.13.1" }
 pyo3-stub-gen-derive = { version = "0.13.1" }
 pythonize = "0.26"
 
+# Self-update (MUSL compatible - use rustls instead of native-tls)
+self_update = { version = "0.41", default-features = false, features = ["rustls", "archive-tar", "compression-flate2"] }
+
 # Subxt
 subxt = { version = "0.38", features = ["substrate-compat"] }
 subxt-signer = "0.38"
