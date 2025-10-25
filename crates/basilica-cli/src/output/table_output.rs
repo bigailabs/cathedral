@@ -124,49 +124,48 @@ pub fn display_rental_items(
 ) -> Result<()> {
     // Helper to calculate rate and cost for a rental
     let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
-        // First try to get from usage map (has both rate and accumulated cost)
+        // Calculate rate from pricing_map (packages API) for consistency
+        // Only use usage_map for the accumulated cost
+        let gpu_count = rental.gpu_specs.len();
+
+        // Get rate from pricing_map based on GPU type
+        let rate = if let Some(first_gpu) = rental.gpu_specs.first() {
+            let category = GpuCategory::from_str(&first_gpu.name).unwrap();
+            let lookup_key = category.to_string().to_lowercase();
+
+            pricing_map
+                .get(&lookup_key)
+                .and_then(|rate_str| {
+                    rate_str.parse::<Decimal>().ok().map(|r| {
+                        let total_rate = r * Decimal::from(gpu_count);
+                        format!("${:.2}/hr", total_rate)
+                    })
+                })
+                .unwrap_or_else(|| "-".to_string())
+        } else {
+            "-".to_string()
+        };
+
+        // Get cost from usage map if available
         // Strip "rental-" prefix if present to match usage API format
         let lookup_id = rental
             .rental_id
             .strip_prefix("rental-")
             .unwrap_or(&rental.rental_id);
 
-        if let Some(usage) = usage_map.get(lookup_id) {
-            // Format rate with 2 decimal places
-            let rate = usage
-                .hourly_rate
-                .parse::<Decimal>()
-                .ok()
-                .map(|r| format!("${:.2}/hr", r))
-                .unwrap_or_else(|| format!("${}/hr", usage.hourly_rate));
+        let cost = usage_map
+            .get(lookup_id)
+            .map(|usage| {
+                usage
+                    .current_cost
+                    .parse::<Decimal>()
+                    .ok()
+                    .map(|c| format!("${:.2}", c))
+                    .unwrap_or_else(|| format!("${}", usage.current_cost))
+            })
+            .unwrap_or_else(|| "-".to_string());
 
-            // Format cost with 2 decimal places
-            let cost = usage
-                .current_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|c| format!("${:.2}", c))
-                .unwrap_or_else(|| format!("${}", usage.current_cost));
-
-            return (rate, cost);
-        }
-
-        // If not in usage map, calculate rate from pricing_map based on GPU type
-        if let Some(first_gpu) = rental.gpu_specs.first() {
-            let category = GpuCategory::from_str(&first_gpu.name).unwrap();
-            let gpu_count = rental.gpu_specs.len();
-            let lookup_key = category.to_string().to_lowercase();
-
-            if let Some(rate_str) = pricing_map.get(&lookup_key) {
-                if let Ok(rate) = rate_str.parse::<f64>() {
-                    let total_rate = rate * gpu_count as f64;
-                    return (format!("${:.2}/hr", total_rate), "-".to_string());
-                }
-            }
-        }
-
-        // No data available
-        ("-".to_string(), "-".to_string())
+        (rate, cost)
     };
 
     // Helper to calculate rental duration
@@ -922,9 +921,10 @@ pub fn display_available_nodes_detailed(
             pricing_map
                 .get(&lookup_key)
                 .and_then(|rate| {
-                    rate.parse::<f64>()
-                        .ok()
-                        .map(|r| format!("${:.2}/hr", r * gpu_count as f64))
+                    rate.parse::<Decimal>().ok().map(|r| {
+                        let total_rate = r * Decimal::from(gpu_count);
+                        format!("${:.2}/hr", total_rate)
+                    })
                 })
                 .unwrap_or_else(|| "-".to_string())
         } else {
