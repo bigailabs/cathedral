@@ -3,10 +3,12 @@
 //! Checks for new versions once per day and displays a notification if available.
 //! Inspired by Deno's upgrade notification system.
 
+use crate::cli::handlers::upgrade::MIN_SUPPORTED_VERSION;
 use chrono::{DateTime, Duration, Utc};
 use console::style;
 use etcetera::{choose_base_strategy, BaseStrategy};
 use self_update::cargo_crate_version;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::IsTerminal;
@@ -15,10 +17,76 @@ use std::path::PathBuf;
 const UPDATE_CHECK_FILE: &str = "update_check.json";
 const CHECK_INTERVAL_HOURS: i64 = 24;
 
+/// Check if a version is supported for auto-updates
+fn is_version_supported(version: &str) -> bool {
+    let min_version = match Version::parse(MIN_SUPPORTED_VERSION) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    let check_version = match Version::parse(version) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+
+    check_version >= min_version
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdateCheckCache {
     last_check: DateTime<Utc>,
     latest_version: Option<String>,
+    last_prompt: Option<DateTime<Utc>>,
+}
+
+/// Check the cache and show update notification if appropriate.
+/// This should be called at CLI startup, before executing the command.
+pub fn check_cache_and_show_notification() {
+    // Skip if explicitly disabled
+    if std::env::var("BASILICA_NO_UPDATE_CHECK").is_ok() {
+        return;
+    }
+
+    // Skip if not running in a TTY (avoid polluting scripts/CI output)
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+
+    let cache_path = match get_cache_path() {
+        Ok(path) => path,
+        Err(_) => return, // Silently fail if we can't determine cache path
+    };
+
+    let mut cache = match load_cache(&cache_path) {
+        Ok(Some(c)) => c,
+        _ => return, // No cache or error reading it
+    };
+
+    // Check if we have a newer version available
+    if let Some(latest_version) = &cache.latest_version {
+        let current_version = cargo_crate_version!();
+
+        // Only show if the latest version is different from current
+        if latest_version != current_version {
+            // Show the notification
+            eprintln!(
+                "{} {} → {}",
+                style("A new version of Basilica is available:").yellow(),
+                style(current_version).cyan(),
+                style(latest_version).green().bold()
+            );
+            eprintln!(
+                "{} {}",
+                style("Run").dim(),
+                style("basilica upgrade").cyan().bold()
+            );
+            eprintln!(); // Empty line for spacing
+
+            // Update last_prompt time
+            cache.last_prompt = Some(Utc::now());
+            let _ = save_cache(&cache_path, &cache);
+        }
+    }
 }
 
 /// Check for updates and display a notification if a new version is available.
@@ -51,12 +119,7 @@ pub fn check_and_notify_update() {
     };
 
     if !should_check {
-        // Already checked recently, try to show notification from cache
-        if let Ok(Some(cache)) = load_cache(&cache_path) {
-            if let Some(latest) = cache.latest_version {
-                show_update_notification(&latest);
-            }
-        }
+        // Already checked recently, skip background check
         return;
     }
 
@@ -77,18 +140,17 @@ pub fn check_and_notify_update() {
                 let cache = UpdateCheckCache {
                     last_check: Utc::now(),
                     latest_version: Some(latest_version.clone()),
+                    last_prompt: None, // Will be set when notification is shown
                 };
 
-                // Save cache
+                // Save cache (notification will be shown on next CLI invocation)
                 let _ = save_cache(&cache_path, &cache);
-
-                // Show notification
-                show_update_notification(&latest_version);
             } else {
                 // Even if fetch fails, update the last check time to avoid spamming
                 let cache = UpdateCheckCache {
                     last_check: Utc::now(),
                     latest_version: None,
+                    last_prompt: None,
                 };
                 let _ = save_cache(&cache_path, &cache);
             }
@@ -104,15 +166,38 @@ async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
         .build()?
         .fetch()?;
 
+    let current_version = cargo_crate_version!();
+
     // Filter releases that match our tag pattern (basilica-cli-v*)
     // Note: r.version contains the tag name, r.name contains the release title
     let cli_releases: Vec<_> = releases
         .iter()
-        .filter(|r| r.version.starts_with("basilica-cli-v"))
+        .filter(|r| {
+            if !r.version.starts_with("basilica-cli-v") {
+                return false;
+            }
+
+            // Extract version and check if it's supported
+            let version = r
+                .version
+                .trim_start_matches("basilica-cli-v")
+                .trim_start_matches('v');
+
+            // Filter out unsupported versions (< 0.5.4)
+            if !is_version_supported(version) {
+                return false;
+            }
+
+            // Only include versions newer than current
+            match (Version::parse(version), Version::parse(current_version)) {
+                (Ok(v), Ok(current)) => v > current,
+                _ => false,
+            }
+        })
         .collect();
 
     if cli_releases.is_empty() {
-        return Err("No CLI releases found".into());
+        return Err("No newer CLI releases found".into());
     }
 
     // Get latest release version
@@ -124,27 +209,6 @@ async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
         .to_string();
 
     Ok(version)
-}
-
-/// Display update notification if a newer version is available
-fn show_update_notification(latest_version: &str) {
-    let current_version = cargo_crate_version!();
-
-    // Only show if the latest version is different from current
-    if latest_version != current_version {
-        eprintln!(
-            "{} {} → {}",
-            style("A new version of Basilica is available:").yellow(),
-            style(current_version).cyan(),
-            style(latest_version).green().bold()
-        );
-        eprintln!(
-            "{} {}",
-            style("Run").dim(),
-            style("basilica upgrade").cyan().bold()
-        );
-        eprintln!(); // Empty line for spacing
-    }
 }
 
 /// Get the path to the update check cache file

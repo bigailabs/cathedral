@@ -1,7 +1,7 @@
 //! Main entry point for the Basilica CLI
 
 use basilica_cli::cli::Args;
-// use basilica_cli::update_check;
+use basilica_cli::update_check;
 use clap::{CommandFactory, Parser};
 use clap_complete::env::CompleteEnv;
 use clap_verbosity_flag::{LevelFilter, OffLevel, Verbosity};
@@ -15,10 +15,12 @@ async fn main() -> Result<()> {
     // Parse args
     let args = Args::parse();
 
-    // Check for updates in the background (non-blocking)
-    // This will show a notification if a new version is available
-    // TODO: Temporarily disabled due to runtime conflicts, needs investigation
-    // update_check::check_and_notify_update();
+    // Check cache for updates and show notification if a new version is available
+    // This must happen BEFORE running the command to ensure notification appears first
+    update_check::check_cache_and_show_notification();
+
+    // Start background check for updates (non-blocking, will update cache for next run)
+    update_check::check_and_notify_update();
 
     // Configure color-eyre with custom settings
     // Disable location display (file paths and line numbers)

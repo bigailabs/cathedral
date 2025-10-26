@@ -4,6 +4,10 @@ use crate::error::CliError;
 use color_eyre::eyre::eyre;
 use console::style;
 use self_update::cargo_crate_version;
+use semver::Version;
+
+/// Minimum supported version for auto-updates (first release with new CI binary format)
+pub const MIN_SUPPORTED_VERSION: &str = "0.5.5";
 
 /// Handle the upgrade command
 /// Note: This function uses blocking operations from self_update crate
@@ -17,6 +21,28 @@ pub async fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<()
 /// Blocking version of the upgrade handler
 fn handle_upgrade_blocking(version: Option<String>, dry_run: bool) -> Result<(), CliError> {
     let current_version = cargo_crate_version!();
+
+    // Validate version if specified
+    if let Some(ref ver) = version {
+        let target_version = ver.trim_start_matches('v');
+
+        // Check if the version is supported
+        let min_version =
+            Version::parse(MIN_SUPPORTED_VERSION).expect("MIN_SUPPORTED_VERSION is valid");
+        let requested_version = Version::parse(target_version).map_err(|e| {
+            CliError::Internal(eyre!("Invalid version format '{}': {}", target_version, e))
+        })?;
+
+        if requested_version < min_version {
+            return Err(CliError::Internal(eyre!(
+                "Version {} is not supported for auto-updates.\n\
+                 Minimum version is {} due to binary format changes introduced in that release.\n\
+                 Please upgrade to a newer version or build from source.",
+                target_version,
+                MIN_SUPPORTED_VERSION
+            )));
+        }
+    }
 
     // Handle dry-run mode: check for updates without installing
     if dry_run {
@@ -113,18 +139,45 @@ fn handle_dry_run(current_version: &str) -> Result<(), CliError> {
         .build()
         .map_err(|e| CliError::Internal(eyre!("Failed to configure release list: {}", e)))?
         .fetch()
-        .map_err(|e| {
-            CliError::Internal(eyre!("Failed to fetch releases from GitHub: {}", e))
-        })?;
+        .map_err(|e| CliError::Internal(eyre!("Failed to fetch releases from GitHub: {}", e)))?;
 
-    // Filter releases that match our tag pattern (basilica-cli-v*)
+    let min_version =
+        Version::parse(MIN_SUPPORTED_VERSION).expect("MIN_SUPPORTED_VERSION is valid");
+    let current = Version::parse(current_version).ok();
+
+    // Filter releases that match our tag pattern (basilica-cli-v*) and are supported
     let cli_releases: Vec<_> = releases
         .iter()
-        .filter(|r| r.version.starts_with("basilica-cli-v"))
+        .filter(|r| {
+            if !r.version.starts_with("basilica-cli-v") {
+                return false;
+            }
+
+            let version = r
+                .version
+                .trim_start_matches("basilica-cli-v")
+                .trim_start_matches('v');
+
+            // Filter out unsupported versions (< 0.5.4)
+            if let Ok(v) = Version::parse(version) {
+                if v < min_version {
+                    return false;
+                }
+
+                // Only include versions newer than or equal to current
+                if let Some(ref cur) = current {
+                    v >= *cur
+                } else {
+                    true
+                }
+            } else {
+                false
+            }
+        })
         .collect();
 
     if cli_releases.is_empty() {
-        println!("No CLI releases found");
+        println!("No newer CLI releases found");
         return Ok(());
     }
 
