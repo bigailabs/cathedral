@@ -156,14 +156,6 @@ jobs:
           # Display file info
           ls -lh "$ARCHIVE_NAME"
 
-          # Also create the old format for backward compatibility (until all users upgrade)
-          cp ./basilica ./basilica-${{ matrix.suffix }}
-          if command -v shasum &> /dev/null; then
-            shasum -a 256 ./basilica-${{ matrix.suffix }} > ./basilica-${{ matrix.suffix }}.sha256
-          else
-            sha256sum ./basilica-${{ matrix.suffix }} > ./basilica-${{ matrix.suffix }}.sha256
-          fi
-
       # Upload binary
       - name: Upload Release Binary
         uses: softprops/action-gh-release@v2
@@ -172,7 +164,5 @@ jobs:
           files: |
             basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
             basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
-            basilica-${{ matrix.suffix }}
-            basilica-${{ matrix.suffix }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
