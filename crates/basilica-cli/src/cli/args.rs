@@ -246,8 +246,8 @@ impl Args {
             }
 
             // Upgrade command
-            Commands::Upgrade { version } => {
-                handlers::upgrade::handle_upgrade(version.clone()).await?;
+            Commands::Upgrade { version, dry_run } => {
+                handlers::upgrade::handle_upgrade(version.clone(), *dry_run).await?;
             }
         }
         Ok(())

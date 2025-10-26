@@ -170,7 +170,10 @@ fn load_cache(path: &PathBuf) -> Result<Option<UpdateCheckCache>, Box<dyn std::e
 }
 
 /// Save the update check cache
-fn save_cache(path: &PathBuf, cache: &UpdateCheckCache) -> Result<(), Box<dyn std::error::Error>> {
+fn save_cache(
+    path: &PathBuf,
+    cache: &UpdateCheckCache,
+) -> Result<(), Box<dyn std::error::Error>> {
     let content = serde_json::to_string_pretty(cache)?;
     fs::write(path, content)?;
     Ok(())

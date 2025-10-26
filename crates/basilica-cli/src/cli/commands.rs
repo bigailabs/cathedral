@@ -161,6 +161,10 @@ pub enum Commands {
         /// Specific version to upgrade to (e.g., "0.5.4")
         #[arg(long)]
         version: Option<String>,
+
+        /// Check for updates without installing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
