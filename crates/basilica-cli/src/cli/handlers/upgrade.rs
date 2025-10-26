@@ -35,11 +35,8 @@ fn handle_upgrade_blocking(version: Option<String>, dry_run: bool) -> Result<(),
 
         if requested_version < min_version {
             return Err(CliError::Internal(eyre!(
-                "Version {} is not supported for auto-updates.\n\
-                 Minimum version is {} due to binary format changes introduced in that release.\n\
-                 Please upgrade to a newer version or build from source.",
-                target_version,
-                MIN_SUPPORTED_VERSION
+                "Version {} is not supported for auto-updates.",
+                target_version
             )));
         }
     }
