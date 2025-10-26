@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - New `upgrade` command for automatic CLI updates
 
+### Fixed
+- Fixed issue where rental price was not displayed correctly in the `basilica ps` command.
+
 ## [0.5.4]
 
 ### Changed
