@@ -183,7 +183,6 @@ async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
                 .trim_start_matches("basilica-cli-v")
                 .trim_start_matches('v');
 
-            // Filter out unsupported versions (< 0.5.4)
             if !is_version_supported(version) {
                 return false;
             }

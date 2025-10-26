@@ -1,5 +1,6 @@
 //! Main entry point for the Basilica CLI
 
+use basilica_cli::cli::commands::Commands;
 use basilica_cli::cli::Args;
 use basilica_cli::update_check;
 use clap::{CommandFactory, Parser};
@@ -7,14 +8,35 @@ use clap_complete::env::CompleteEnv;
 use clap_verbosity_flag::{LevelFilter, OffLevel, Verbosity};
 use color_eyre::eyre::{eyre, Result};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     // Handle shell completions first (must be before argument parsing)
     CompleteEnv::with_factory(Args::command).complete();
 
     // Parse args
     let args = Args::parse();
 
+    // Handle upgrade command WITHOUT Tokio runtime to avoid conflicts with self_update
+    if let Commands::Upgrade { version, dry_run } = &args.command {
+        use basilica_cli::cli::handlers;
+
+        // Configure color-eyre first
+        color_eyre::config::HookBuilder::default()
+            .display_location_section(false)
+            .display_env_section(false)
+            .install()?;
+
+        return handlers::upgrade::handle_upgrade(version.clone(), *dry_run).map_err(|e| match e {
+            basilica_cli::CliError::Internal(report) => report,
+            other => eyre!("{}", other),
+        });
+    }
+
+    // For all other commands, run in Tokio runtime
+    run_async(args)
+}
+
+#[tokio::main]
+async fn run_async(args: Args) -> Result<()> {
     // Check cache for updates and show notification if a new version is available
     // This must happen BEFORE running the command to ensure notification appears first
     update_check::check_cache_and_show_notification();

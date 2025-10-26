@@ -11,15 +11,7 @@ pub const MIN_SUPPORTED_VERSION: &str = "0.5.5";
 
 /// Handle the upgrade command
 /// Note: This function uses blocking operations from self_update crate
-pub async fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliError> {
-    // Run the blocking upgrade code in a tokio blocking task to avoid runtime conflicts
-    tokio::task::spawn_blocking(move || handle_upgrade_blocking(version, dry_run))
-        .await
-        .map_err(|e| CliError::Internal(eyre!("Failed to execute upgrade task: {}", e)))?
-}
-
-/// Blocking version of the upgrade handler
-fn handle_upgrade_blocking(version: Option<String>, dry_run: bool) -> Result<(), CliError> {
+pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliError> {
     let current_version = cargo_crate_version!();
 
     // Validate version if specified
@@ -49,7 +41,58 @@ fn handle_upgrade_blocking(version: Option<String>, dry_run: bool) -> Result<(),
     println!("Current version: {}", style(current_version).cyan());
     println!("Checking for updates...");
 
-    // Configure the updater with self_update's defaults
+    let target_tag = if let Some(ref ver) = version {
+        format!("basilica-cli-v{}", ver.trim_start_matches('v'))
+    } else {
+        let releases = self_update::backends::github::ReleaseList::configure()
+            .repo_owner("one-covenant")
+            .repo_name("basilica")
+            .build()
+            .map_err(|e| CliError::Internal(eyre!("Failed to configure release list: {}", e)))?
+            .fetch()
+            .map_err(|e| {
+                CliError::Internal(eyre!("Failed to fetch releases from GitHub: {}", e))
+            })?;
+
+        let min_version =
+            Version::parse(MIN_SUPPORTED_VERSION).expect("MIN_SUPPORTED_VERSION is valid");
+        let current = Version::parse(current_version)
+            .map_err(|e| CliError::Internal(eyre!("Invalid current version: {}", e)))?;
+
+        let latest_tag = releases
+            .iter()
+            .filter_map(|r| {
+                if !r.version.starts_with("basilica-cli-v") {
+                    return None;
+                }
+
+                let version_str = r
+                    .version
+                    .trim_start_matches("basilica-cli-v")
+                    .trim_start_matches('v');
+
+                if let Ok(v) = Version::parse(version_str) {
+                    if v >= min_version && v > current {
+                        Some(r.version.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .next();
+
+        match latest_tag {
+            Some(tag) => tag,
+            None => {
+                println!("{}", style("Already up to date!").green());
+                println!("Current version: {}", style(current_version).cyan());
+                return Ok(());
+            }
+        }
+    };
+
     let mut update_builder = self_update::backends::github::Update::configure();
 
     update_builder
@@ -58,19 +101,8 @@ fn handle_upgrade_blocking(version: Option<String>, dry_run: bool) -> Result<(),
         .bin_name("basilica")
         .current_version(current_version)
         .show_download_progress(true)
-        .no_confirm(true); // We'll handle confirmation ourselves if needed
-
-    // Set specific version if requested
-    // Note: We use the basilica-cli-v* tag format, so we need to tell self_update
-    // to look for releases with that prefix
-    if let Some(ref ver) = version {
-        let target_tag = format!("basilica-cli-v{}", ver.trim_start_matches('v'));
-        update_builder.target_version_tag(&target_tag);
-    } else {
-        // For latest version, we need to filter for basilica-cli-v* tags
-        // This is handled by the identifier which matches against tag names
-        update_builder.identifier("basilica-cli-v");
-    }
+        .no_confirm(true)
+        .target_version_tag(&target_tag);
 
     // Build and execute the update
     let status = update_builder
@@ -155,7 +187,6 @@ fn handle_dry_run(current_version: &str) -> Result<(), CliError> {
                 .trim_start_matches("basilica-cli-v")
                 .trim_start_matches('v');
 
-            // Filter out unsupported versions (< 0.5.4)
             if let Ok(v) = Version::parse(version) {
                 if v < min_version {
                     return false;

@@ -245,9 +245,9 @@ impl Args {
                 handlers::packages::handle_packages(*json, config).await?;
             }
 
-            // Upgrade command
-            Commands::Upgrade { version, dry_run } => {
-                handlers::upgrade::handle_upgrade(version.clone(), *dry_run).await?;
+            // Upgrade command is handled in main.rs before entering async runtime
+            Commands::Upgrade { .. } => {
+                unreachable!("Upgrade command should be handled in main.rs")
             }
         }
         Ok(())
