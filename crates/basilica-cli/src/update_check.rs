@@ -161,7 +161,7 @@ pub fn check_and_notify_update() {
 /// Fetch the latest version from GitHub
 async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
     let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner("itslambda")
+        .repo_owner("itzlambda")
         .repo_name("basilica")
         .build()?
         .fetch()?;
