@@ -270,16 +270,18 @@ get_latest_cli_release() {
     # 2. grep -B1 '"prerelease": false' - Find non-prerelease entries and include 1 line before (the tag_name)
     # 3. grep 'tag_name' - Filter to only tag_name lines from the previous output
     # 4. grep 'basilica-cli-v' - Keep only tags starting with basilica-cli-v
-    # 5. head -1 - Take the first match (GitHub API returns releases in newest-first order)
-    # 6. cut -d '"' -f 4 - Extract the tag value between quotes
+    # 5. cut -d '"' -f 4 - Extract the tag value between quotes
+    # 6. sort -V -r - Sort by version number (descending)
+    # 7. head -1 - Take the highest version
     local latest_tag
     latest_tag=$(echo "$releases_json" | \
         grep -E '"tag_name"|"prerelease"' | \
         grep -B1 '"prerelease": false' | \
         grep 'tag_name' | \
         grep 'basilica-cli-v' | \
-        head -1 | \
-        cut -d '"' -f 4)
+        cut -d '"' -f 4 | \
+        sort -V -r | \
+        head -1)
 
     if [ -z "$latest_tag" ]; then
         print_error "No stable basilica-cli releases found" >&2
