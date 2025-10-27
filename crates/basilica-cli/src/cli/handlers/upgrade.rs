@@ -73,7 +73,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
 
                 if let Ok(v) = Version::parse(version_str) {
                     if v >= min_version && v > current {
-                        Some(r.version.clone())
+                        Some((v, r.version.clone()))
                     } else {
                         None
                     }
@@ -81,7 +81,8 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
                     None
                 }
             })
-            .next();
+            .max_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, tag)| tag);
 
         match latest_tag {
             Some(tag) => tag,
