@@ -144,6 +144,11 @@ pub fn find_latest_cli_release(
             // Extract and parse version
             let version = extract_version_from_tag(&r.version)?;
 
+            // Skip prerelease versions (rc, beta, alpha, etc.)
+            if !version.pre.is_empty() {
+                return None;
+            }
+
             // Must be supported version
             if !is_version_supported(&version) {
                 return None;
