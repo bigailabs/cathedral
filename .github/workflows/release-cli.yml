@@ -127,31 +127,34 @@ jobs:
           BASILICA_AUTH0_DOMAIN: ${{ vars.BASILICA_AUTH0_DOMAIN }}
         run: |
           cargo build --release --locked --target ${{ matrix.target }} -p basilica-cli
-          cp target/${{ matrix.target }}/release/basilica ./basilica-${{ matrix.suffix }}
 
-      # Make binary executable and generate checksums
-      - name: Prepare binary
+      # Package binary in self_update compatible format: basilica-<version>-<target>.tar.gz
+      - name: Package binary
         run: |
-          chmod +x ./basilica-${{ matrix.suffix }}
+          # Copy binary to working directory
+          cp target/${{ matrix.target }}/release/basilica ./basilica
+          chmod +x ./basilica
 
           # Strip debug symbols to reduce size
           if [[ "${{ runner.os }}" == "Linux" ]]; then
-            # Use --strip-all for musl static binaries (maximum size reduction)
-            strip --strip-all ./basilica-${{ matrix.suffix }}
+            strip --strip-all ./basilica
           else
-            # macOS strip (uses different flags)
-            strip ./basilica-${{ matrix.suffix }}
+            strip ./basilica
           fi
+
+          # Create tar.gz archive with self_update expected naming: basilica-<version>-<target>.tar.gz
+          ARCHIVE_NAME="basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar czf "$ARCHIVE_NAME" basilica
 
           # Generate checksum
           if command -v shasum &> /dev/null; then
-            shasum -a 256 ./basilica-${{ matrix.suffix }} > ./basilica-${{ matrix.suffix }}.sha256
+            shasum -a 256 "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256"
           else
-            sha256sum ./basilica-${{ matrix.suffix }} > ./basilica-${{ matrix.suffix }}.sha256
+            sha256sum "$ARCHIVE_NAME" > "${ARCHIVE_NAME}.sha256"
           fi
 
           # Display file info
-          ls -lh ./basilica-${{ matrix.suffix }}
+          ls -lh "$ARCHIVE_NAME"
 
       # Upload binary
       - name: Upload Release Binary
@@ -159,7 +162,7 @@ jobs:
         with:
           tag_name: ${{ needs.create-release.outputs.tag }}
           files: |
-            basilica-${{ matrix.suffix }}
-            basilica-${{ matrix.suffix }}.sha256
+            basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz
+            basilica-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

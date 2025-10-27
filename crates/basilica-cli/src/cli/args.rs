@@ -244,6 +244,11 @@ impl Args {
             Commands::Packages { json } => {
                 handlers::packages::handle_packages(*json, config).await?;
             }
+
+            // Upgrade command is handled in main.rs before entering async runtime
+            Commands::Upgrade { .. } => {
+                unreachable!("Upgrade command should be handled in main.rs")
+            }
         }
         Ok(())
     }
