@@ -175,7 +175,7 @@ pub fn find_latest_cli_release(
 ///
 /// This is a convenience wrapper around find_latest_cli_release that returns
 /// just the version string, suitable for caching.
-pub async fn fetch_latest_version_string(current_version: &str) -> Result<String> {
+pub fn fetch_latest_version_string(current_version: &str) -> Result<String> {
     match find_latest_cli_release(current_version, true)? {
         Some(release) => Ok(release.version.to_string()),
         None => Err(eyre!("No newer CLI releases found")),

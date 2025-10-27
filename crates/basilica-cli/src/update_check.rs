@@ -111,7 +111,7 @@ pub fn check_and_notify_update() {
         rt.block_on(async {
             let current_version = cargo_crate_version!();
 
-            if let Ok(latest_version) = fetch_latest_version_string(current_version).await {
+            if let Ok(latest_version) = fetch_latest_version_string(current_version) {
                 let cache = UpdateCheckCache {
                     last_check: Utc::now(),
                     latest_version: Some(latest_version.clone()),
