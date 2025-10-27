@@ -172,7 +172,8 @@ impl SqlCreditRepository {
 
         let rows = sqlx::query(
             r#"
-            SELECT transaction_id, user_id, amount, transaction_type, payment_method, metadata, created_at
+            SELECT id, user_id, amount, transaction_type, balance_before, balance_after,
+                   reference_id, reference_type, description, metadata, created_at
             FROM billing.credit_transactions
             WHERE user_id = $1
             ORDER BY created_at DESC
@@ -191,12 +192,16 @@ impl SqlCreditRepository {
         Ok(rows
             .into_iter()
             .map(|row| CreditTransactionRecord {
-                transaction_id: row.get("transaction_id"),
+                id: row.get("id"),
                 user_id: UserId::new(row.get("user_id")),
                 amount: CreditBalance::from_decimal(row.get("amount")),
                 transaction_type: row.get("transaction_type"),
-                payment_method: row.get("payment_method"),
-                metadata: serde_json::from_value(row.get("metadata")).unwrap_or_default(),
+                balance_before: CreditBalance::from_decimal(row.get("balance_before")),
+                balance_after: CreditBalance::from_decimal(row.get("balance_after")),
+                reference_id: row.get("reference_id"),
+                reference_type: row.get("reference_type"),
+                description: row.get("description"),
+                metadata: row.get("metadata"),
                 created_at: row.get("created_at"),
             })
             .collect())
@@ -206,12 +211,16 @@ impl SqlCreditRepository {
 // Simple transaction record for querying history
 #[derive(Debug, Clone)]
 pub struct CreditTransactionRecord {
-    pub transaction_id: String,
+    pub id: uuid::Uuid,
     pub user_id: UserId,
     pub amount: CreditBalance,
     pub transaction_type: String,
-    pub payment_method: Option<String>,
-    pub metadata: std::collections::HashMap<String, String>,
+    pub balance_before: CreditBalance,
+    pub balance_after: CreditBalance,
+    pub reference_id: Option<String>,
+    pub reference_type: Option<String>,
+    pub description: String,
+    pub metadata: Option<serde_json::Value>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -382,7 +391,9 @@ impl SqlCreditRepository {
             transaction = transaction.with_description(desc);
         }
 
-        self.audit.record_transaction(&transaction).await?;
+        self.audit
+            .record_transaction_tx(&mut *tx, &transaction)
+            .await?;
 
         self.record_deduction_event(&mut **tx, user_id, user_uuid, amount)
             .await?;

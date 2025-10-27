@@ -35,7 +35,7 @@ END $$;
 
 -- Step 4: Add comment for documentation
 COMMENT ON COLUMN billing.usage_events.idempotency_key IS
-    'Unique key to prevent duplicate processing of same telemetry event. Format: {rental_uuid}:{timestamp_ms}:{hash}';
+    'Unique key to prevent duplicate processing of same telemetry event. Format: {rental_uuid}:{timestamp}:{sha256_first_8_chars}';
 
 -- Note: No backfill needed - existing events remain NULL and are not affected
 -- Only new events will have idempotency keys set

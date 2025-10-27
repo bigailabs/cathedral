@@ -142,14 +142,31 @@ impl TelemetryProcessor {
             UsageMetrics::zero()
         };
 
+        let (cpu_percent, memory_mb, rx_bytes, tx_bytes, read_bytes, write_bytes) =
+            if let Some(u) = data.resource_usage.as_ref() {
+                (
+                    u.cpu_percent,
+                    u.memory_mb,
+                    u.network_rx_bytes,
+                    u.network_tx_bytes,
+                    u.disk_read_bytes,
+                    u.disk_write_bytes,
+                )
+            } else {
+                (0.0, 0u64, 0u64, 0u64, 0u64, 0u64)
+            };
+
         let event_data = json!({
             "gpu_hours": usage_metrics.gpu_hours.to_f64(),
-            "cpu_percent": usage_metrics.cpu_hours.to_f64(),
-            "memory_mb": data.resource_usage.as_ref().map(|u| u.memory_mb).unwrap_or(0),
-            "network_rx_bytes": data.resource_usage.as_ref().map(|u| u.network_rx_bytes).unwrap_or(0),
-            "network_tx_bytes": data.resource_usage.as_ref().map(|u| u.network_tx_bytes).unwrap_or(0),
-            "disk_read_bytes": data.resource_usage.as_ref().map(|u| u.disk_read_bytes).unwrap_or(0),
-            "disk_write_bytes": data.resource_usage.as_ref().map(|u| u.disk_write_bytes).unwrap_or(0),
+            "cpu_percent": cpu_percent,
+            "memory_mb": memory_mb,
+            "memory_gb": (memory_mb as f64) / 1024.0,
+            "network_rx_bytes": rx_bytes,
+            "network_tx_bytes": tx_bytes,
+            "network_gb": ((rx_bytes + tx_bytes) as f64) / 1_073_741_824.0,
+            "disk_read_bytes": read_bytes,
+            "disk_write_bytes": write_bytes,
+            "disk_io_gb": ((read_bytes + write_bytes) as f64) / 1_073_741_824.0,
             "gpu_metrics": data.resource_usage.as_ref()
                 .map(|u| json!({
                     "gpu_count": u.gpu_usage.len(),

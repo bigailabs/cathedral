@@ -3,12 +3,18 @@ use crate::domain::types::{CreditBalance, UserId};
 use crate::error::{BillingError, Result};
 use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use std::sync::Arc;
 
 #[async_trait]
 pub trait AuditRepository: Send + Sync {
     async fn record_transaction(&self, transaction: &CreditTransaction) -> Result<()>;
+
+    async fn record_transaction_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        transaction: &CreditTransaction,
+    ) -> Result<()>;
 
     async fn get_transaction_history(
         &self,
@@ -85,6 +91,40 @@ impl AuditRepository for SqlAuditRepository {
         .await
         .map_err(|e| BillingError::DatabaseError {
             operation: "record_transaction".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(())
+    }
+
+    async fn record_transaction_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        transaction: &CreditTransaction,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO billing.credit_transactions
+                (id, user_id, transaction_type, amount, balance_before, balance_after,
+                 reference_id, reference_type, description, metadata, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(transaction.id)
+        .bind(transaction.user_id)
+        .bind(transaction.transaction_type.as_str())
+        .bind(transaction.amount.as_decimal())
+        .bind(transaction.balance_before.as_decimal())
+        .bind(transaction.balance_after.as_decimal())
+        .bind(&transaction.reference_id)
+        .bind(&transaction.reference_type)
+        .bind(&transaction.description)
+        .bind(&transaction.metadata)
+        .bind(transaction.created_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "record_transaction_tx".to_string(),
             source: Box::new(e),
         })?;
 

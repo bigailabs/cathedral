@@ -1,4 +1,3 @@
-use crate::domain::idempotency::generate_idempotency_key;
 use crate::domain::processor::{
     CostUpdateData, EventHandlers, RentalEndData, StatusChangeData, TelemetryData,
 };
@@ -132,19 +131,6 @@ impl EventHandlers for BillingEventHandlers {
         );
 
         let rental_id = RentalId::from_uuid(event.rental_id);
-        let idempotency_key = generate_idempotency_key(event.rental_id, &event.event_data);
-
-        if self
-            .event_repository
-            .is_event_processed(&idempotency_key)
-            .await?
-        {
-            warn!(
-                "Skipping duplicate event with idempotency key: {}",
-                idempotency_key
-            );
-            return Ok(());
-        }
 
         let telemetry = Self::parse_telemetry_data(&event.event_data)?;
         let usage_metrics = Self::telemetry_to_usage_metrics(&telemetry);

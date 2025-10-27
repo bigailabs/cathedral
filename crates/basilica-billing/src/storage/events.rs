@@ -412,6 +412,7 @@ impl EventRepository for SqlEventRepository {
                 SELECT 1
                 FROM billing.usage_events
                 WHERE idempotency_key = $1
+                  AND processed = true
             )
             "#,
         )

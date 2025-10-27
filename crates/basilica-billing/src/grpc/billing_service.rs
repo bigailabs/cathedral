@@ -409,7 +409,11 @@ impl BillingService for BillingServiceImpl {
                 "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
             });
 
-            let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
+            let mut event_data_for_key = event_data.clone();
+            if let serde_json::Value::Object(ref mut m) = event_data_for_key {
+                m.remove("timestamp");
+            }
+            let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
             let rental_start_event = UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
@@ -504,7 +508,11 @@ impl BillingService for BillingServiceImpl {
             "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
         });
 
-        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
+        let mut event_data_for_key = event_data.clone();
+        if let serde_json::Value::Object(ref mut m) = event_data_for_key {
+            m.remove("timestamp");
+        }
+        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
         let status_change_event = UsageEvent {
             event_id: uuid::Uuid::new_v4(),
@@ -704,7 +712,11 @@ impl BillingService for BillingServiceImpl {
                 map.insert("timestamp".to_string(), serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()));
             }
 
-            let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data);
+            let mut event_data_for_key = event_data.clone();
+            if let serde_json::Value::Object(ref mut m) = event_data_for_key {
+                m.remove("timestamp");
+            }
+            let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data_for_key);
 
             let usage_event = crate::storage::UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
