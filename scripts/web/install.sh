@@ -395,14 +395,12 @@ download_binary() {
         exit 1
     fi
 
-    # Move the extracted binary to the expected location
-    if [ ! -f "$TEMP_DIR/basilica" ]; then
+    # Verify the extracted binary exists
+    if [ ! -f "$TEMP_BINARY" ]; then
         print_error "Binary not found in archive"
         print_info "Expected to find 'basilica' in the archive"
         exit 1
     fi
-
-    mv "$TEMP_DIR/basilica" "$TEMP_BINARY"
 }
 
 # Verify binary
