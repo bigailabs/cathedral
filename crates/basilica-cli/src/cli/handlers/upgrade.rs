@@ -45,7 +45,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
         format!("basilica-cli-v{}", ver.trim_start_matches('v'))
     } else {
         let releases = self_update::backends::github::ReleaseList::configure()
-            .repo_owner("one-covenant")
+            .repo_owner("itslambda")
             .repo_name("basilica")
             .build()
             .map_err(|e| CliError::Internal(eyre!("Failed to configure release list: {}", e)))?
@@ -96,7 +96,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
     let mut update_builder = self_update::backends::github::Update::configure();
 
     update_builder
-        .repo_owner("one-covenant")
+        .repo_owner("itslambda")
         .repo_name("basilica")
         .bin_name("basilica")
         .current_version(current_version)
@@ -121,12 +121,12 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
             } else if error_msg.contains("not found") || error_msg.contains("404") {
                 CliError::Internal(eyre!(
                     "Release not found. Please check that the version exists.\n\
-                     View available releases: https://github.com/one-covenant/basilica/releases"
+                     View available releases: https://github.com/itslambda/basilica/releases"
                 ))
             } else if error_msg.contains("target") || error_msg.contains("asset") {
                 CliError::Internal(eyre!(
                     "No binary available for your platform.\n\
-                     Supported platforms: Linux (x86_64, aarch64), macOS (x86_64, aarch64)\n\
+                     Supported platforms: Linux (x86_64-musl), macOS (aarch64)\n\
                      Error: {}",
                     e
                 ))
@@ -163,7 +163,7 @@ fn handle_dry_run(current_version: &str) -> Result<(), CliError> {
     println!("Checking for updates...");
 
     let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner("one-covenant")
+        .repo_owner("itslambda")
         .repo_name("basilica")
         .build()
         .map_err(|e| CliError::Internal(eyre!("Failed to configure release list: {}", e)))?

@@ -21,7 +21,7 @@ permissions:
 jobs:
   # Detect changes to determine which services need building
   changes:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     outputs:
       validator: ${{ steps.changes.outputs.validator }}
       miner: ${{ steps.changes.outputs.miner }}
@@ -93,7 +93,7 @@ jobs:
               - '.github/workflows/**'
 
   quick-checks:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -132,7 +132,7 @@ jobs:
 
   # Lint complex packages
   lint-complex:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: quick-checks
     steps:
       - uses: actions/checkout@v4
@@ -180,7 +180,7 @@ jobs:
 
   # Build and test validator
   build-validator:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.validator == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -210,8 +210,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
@@ -235,7 +233,7 @@ jobs:
 
   # Build and test miner
   build-miner:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.miner == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -265,8 +263,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
@@ -289,7 +285,7 @@ jobs:
 
   # Build and test basilica-api
   build-api:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.basilica-api == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -319,8 +315,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
       - name: Generate test key
         run: |
           chmod +x scripts/gen-key.sh
@@ -343,7 +337,7 @@ jobs:
 
   # Build and test basilica-cli
   build-cli:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.basilica-cli == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -382,7 +376,7 @@ jobs:
 
   # Build and test billing
   build-billing:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.billing == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -426,8 +420,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
       - name: Wait for Postgres (billing)
         run: |
           : "${BILLING_DB_PASSWORD:=billing_dev_password}"
@@ -482,7 +474,7 @@ jobs:
 
   # Build and test payments
   build-payments:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.payments == 'true' || needs.changes.outputs.workspace == 'true'
     services:
@@ -526,8 +518,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@v1
       - name: Wait for Postgres (payments)
         run: |
           : "${PAYMENTS_DB_PASSWORD:=payments_dev_password}"
@@ -584,7 +574,7 @@ jobs:
 
   # Build and test Python SDK
   test-python-sdk:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.basilica-sdk-python == 'true' || needs.changes.outputs.workspace == 'true'
     strategy:
@@ -653,7 +643,7 @@ jobs:
 
   # Final status check
   ci-success:
-    runs-on: blacksmith-32vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     needs:
       - quick-checks
       - lint-complex

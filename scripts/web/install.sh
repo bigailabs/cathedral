@@ -5,7 +5,7 @@ set -e
 # Usage: curl -sSL https://basilica.ai/install.sh | bash
 
 BINARY_NAME="basilica"
-GITHUB_REPO="one-covenant/basilica"
+GITHUB_REPO="itslambda/basilica"
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do

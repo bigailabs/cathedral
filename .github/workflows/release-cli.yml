@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   create-release:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     outputs:
       upload_url: ${{ steps.create_release.outputs.upload_url }}
       release_id: ${{ steps.create_release.outputs.id }}
@@ -70,16 +70,8 @@ jobs:
         include:
           # Linux x86_64 - musl static build on Ubuntu 24.04 LTS
           - target: x86_64-unknown-linux-musl
-            os: blacksmith-4vcpu-ubuntu-2404
+            os: ubuntu-24.04
             suffix: linux-amd64
-          # Linux ARM64 - musl static build on Blacksmith ARM runner
-          - target: aarch64-unknown-linux-musl
-            os: blacksmith-4vcpu-ubuntu-2404-arm
-            suffix: linux-arm64
-          # macOS Intel build
-          - target: x86_64-apple-darwin
-            os: macos-13 # Use macos-13 for Intel (x86_64) runners
-            suffix: darwin-amd64
           # macOS Apple Silicon build
           - target: aarch64-apple-darwin
             os: macos-14 # Use macos-14 for Apple Silicon (M1) runners
