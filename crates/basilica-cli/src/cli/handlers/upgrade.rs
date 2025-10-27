@@ -101,6 +101,7 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
         .bin_name("basilica")
         .current_version(current_version)
         .show_download_progress(true)
+        .show_output(false)
         .no_confirm(true)
         .target_version_tag(&target_tag);
 
