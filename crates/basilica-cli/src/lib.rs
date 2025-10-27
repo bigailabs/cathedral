@@ -20,6 +20,7 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod github_releases;
 pub mod interactive;
 pub mod output;
 pub mod progress;

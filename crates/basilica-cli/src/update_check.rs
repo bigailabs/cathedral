@@ -3,34 +3,17 @@
 //! Checks for new versions once per day and displays a notification if available.
 //! Inspired by Deno's upgrade notification system.
 
-use crate::cli::handlers::upgrade::MIN_SUPPORTED_VERSION;
+use crate::github_releases::{fetch_latest_version_string, should_check_for_updates};
 use chrono::{DateTime, Duration, Utc};
 use console::style;
 use etcetera::{choose_base_strategy, BaseStrategy};
 use self_update::cargo_crate_version;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 const UPDATE_CHECK_FILE: &str = "update_check.json";
 const CHECK_INTERVAL_HOURS: i64 = 24;
-
-/// Check if a version is supported for auto-updates
-fn is_version_supported(version: &str) -> bool {
-    let min_version = match Version::parse(MIN_SUPPORTED_VERSION) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let check_version = match Version::parse(version) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    check_version >= min_version
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdateCheckCache {
@@ -42,13 +25,8 @@ struct UpdateCheckCache {
 /// Check the cache and show update notification if appropriate.
 /// This should be called at CLI startup, before executing the command.
 pub fn check_cache_and_show_notification() {
-    // Skip if explicitly disabled
-    if std::env::var("BASILICA_NO_UPDATE_CHECK").is_ok() {
-        return;
-    }
-
-    // Skip if not running in a TTY (avoid polluting scripts/CI output)
-    if !std::io::stdout().is_terminal() {
+    // Skip if update checks are disabled
+    if !should_check_for_updates() {
         return;
     }
 
@@ -92,13 +70,8 @@ pub fn check_cache_and_show_notification() {
 /// Check for updates and display a notification if a new version is available.
 /// This runs at most once per day and respects the BASILICA_NO_UPDATE_CHECK env var.
 pub fn check_and_notify_update() {
-    // Skip if explicitly disabled
-    if std::env::var("BASILICA_NO_UPDATE_CHECK").is_ok() {
-        return;
-    }
-
-    // Skip if not running in a TTY (avoid polluting scripts/CI output)
-    if !std::io::stdout().is_terminal() {
+    // Skip if update checks are disabled
+    if !should_check_for_updates() {
         return;
     }
 
@@ -136,7 +109,9 @@ pub fn check_and_notify_update() {
         };
 
         rt.block_on(async {
-            if let Ok(latest_version) = fetch_latest_version().await {
+            let current_version = cargo_crate_version!();
+
+            if let Ok(latest_version) = fetch_latest_version_string(current_version).await {
                 let cache = UpdateCheckCache {
                     last_check: Utc::now(),
                     latest_version: Some(latest_version.clone()),
@@ -156,58 +131,6 @@ pub fn check_and_notify_update() {
             }
         });
     });
-}
-
-/// Fetch the latest version from GitHub
-async fn fetch_latest_version() -> Result<String, Box<dyn std::error::Error>> {
-    let releases = self_update::backends::github::ReleaseList::configure()
-        .repo_owner("one-covenant")
-        .repo_name("basilica")
-        .build()?
-        .fetch()?;
-
-    let current_version = cargo_crate_version!();
-
-    // Filter releases that match our tag pattern (basilica-cli-v*)
-    // Note: r.version contains the tag name, r.name contains the release title
-    let cli_releases: Vec<_> = releases
-        .iter()
-        .filter(|r| {
-            if !r.version.starts_with("basilica-cli-v") {
-                return false;
-            }
-
-            // Extract version and check if it's supported
-            let version = r
-                .version
-                .trim_start_matches("basilica-cli-v")
-                .trim_start_matches('v');
-
-            if !is_version_supported(version) {
-                return false;
-            }
-
-            // Only include versions newer than current
-            match (Version::parse(version), Version::parse(current_version)) {
-                (Ok(v), Ok(current)) => v > current,
-                _ => false,
-            }
-        })
-        .collect();
-
-    if cli_releases.is_empty() {
-        return Err("No newer CLI releases found".into());
-    }
-
-    // Get latest release version
-    let latest = cli_releases[0];
-    let version = latest
-        .version
-        .trim_start_matches("basilica-cli-v")
-        .trim_start_matches('v')
-        .to_string();
-
-    Ok(version)
 }
 
 /// Get the path to the update check cache file
