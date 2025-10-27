@@ -1,3 +1,4 @@
+use crate::domain::idempotency::generate_idempotency_key;
 use crate::domain::types::{RentalId, UsageMetrics};
 use crate::error::{BillingError, Result};
 use crate::storage::events::{EventType, UsageEvent};
@@ -141,6 +142,26 @@ impl TelemetryProcessor {
             UsageMetrics::zero()
         };
 
+        let event_data = json!({
+            "gpu_hours": usage_metrics.gpu_hours.to_f64(),
+            "cpu_percent": usage_metrics.cpu_hours.to_f64(),
+            "memory_mb": data.resource_usage.as_ref().map(|u| u.memory_mb).unwrap_or(0),
+            "network_rx_bytes": data.resource_usage.as_ref().map(|u| u.network_rx_bytes).unwrap_or(0),
+            "network_tx_bytes": data.resource_usage.as_ref().map(|u| u.network_tx_bytes).unwrap_or(0),
+            "disk_read_bytes": data.resource_usage.as_ref().map(|u| u.disk_read_bytes).unwrap_or(0),
+            "disk_write_bytes": data.resource_usage.as_ref().map(|u| u.disk_write_bytes).unwrap_or(0),
+            "gpu_metrics": data.resource_usage.as_ref()
+                .map(|u| json!({
+                    "gpu_count": u.gpu_usage.len(),
+                    "utilization": u.gpu_usage.iter().map(|g| g.utilization_percent).collect::<Vec<_>>(),
+                    "memory_used": u.gpu_usage.iter().map(|g| g.memory_used_mb).collect::<Vec<_>>(),
+                })),
+            "custom_metrics": data.custom_metrics,
+            "timestamp": telemetry_timestamp.timestamp_millis().to_string(),
+        });
+
+        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
+
         let telemetry_event = UsageEvent {
             event_id: Uuid::new_v4(),
             rental_id: rental_id.as_uuid(),
@@ -148,26 +169,12 @@ impl TelemetryProcessor {
             node_id: data.node_id.clone(),
             validator_id: rental.validator_id.clone(),
             event_type: EventType::Telemetry,
-            event_data: json!({
-                "gpu_hours": usage_metrics.gpu_hours.to_f64(),
-                "cpu_percent": usage_metrics.cpu_hours.to_f64(),
-                "memory_mb": data.resource_usage.as_ref().map(|u| u.memory_mb).unwrap_or(0),
-                "network_rx_bytes": data.resource_usage.as_ref().map(|u| u.network_rx_bytes).unwrap_or(0),
-                "network_tx_bytes": data.resource_usage.as_ref().map(|u| u.network_tx_bytes).unwrap_or(0),
-                "disk_read_bytes": data.resource_usage.as_ref().map(|u| u.disk_read_bytes).unwrap_or(0),
-                "disk_write_bytes": data.resource_usage.as_ref().map(|u| u.disk_write_bytes).unwrap_or(0),
-                "gpu_metrics": data.resource_usage.as_ref()
-                    .map(|u| json!({
-                        "gpu_count": u.gpu_usage.len(),
-                        "utilization": u.gpu_usage.iter().map(|g| g.utilization_percent).collect::<Vec<_>>(),
-                        "memory_used": u.gpu_usage.iter().map(|g| g.memory_used_mb).collect::<Vec<_>>(),
-                    })),
-                "custom_metrics": data.custom_metrics,
-            }),
+            event_data,
             timestamp: telemetry_timestamp,
             processed: false,
             processed_at: None,
             batch_id: None,
+            idempotency_key: Some(idempotency_key),
         };
 
         self.event_store

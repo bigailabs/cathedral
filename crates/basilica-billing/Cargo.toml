@@ -44,6 +44,8 @@ uuid = { workspace = true }
 
 urlencoding = { workspace = true }
 
+sha2 = "0.10"
+
 tracing = { workspace = true }
 
 thiserror = { workspace = true }

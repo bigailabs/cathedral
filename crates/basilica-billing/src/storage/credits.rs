@@ -1,8 +1,10 @@
+use crate::domain::audit::CreditTransaction;
 use crate::domain::{
     credits::CreditAccount,
     types::{CreditBalance, UserId},
 };
 use crate::error::{BillingError, Result};
+use crate::storage::audit::AuditRepository;
 use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
 use sqlx::{Postgres, Row, Transaction};
@@ -20,11 +22,12 @@ pub trait CreditRepository: Send + Sync {
 
 pub struct SqlCreditRepository {
     connection: Arc<RdsConnection>,
+    audit: Arc<dyn AuditRepository>,
 }
 
 impl SqlCreditRepository {
-    pub fn new(connection: Arc<RdsConnection>) -> Self {
-        Self { connection }
+    pub fn new(connection: Arc<RdsConnection>, audit: Arc<dyn AuditRepository>) -> Self {
+        Self { connection, audit }
     }
 
     pub fn pool(&self) -> &sqlx::PgPool {
@@ -76,6 +79,87 @@ impl SqlCreditRepository {
             operation: "ensure_user_uuid".to_string(),
             source: Box::new(e),
         })
+    }
+
+    async fn record_deduction_event(
+        &self,
+        executor: impl sqlx::Executor<'_, Database = Postgres>,
+        user_id: &UserId,
+        user_uuid: Uuid,
+        amount: CreditBalance,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO billing.billing_events
+                (event_id, event_type, entity_type, entity_id, user_id,
+                 event_data, created_by, created_at)
+            VALUES ($1, 'credit_deduction', 'user', $2, $3, $4, 'credit_repository', NOW())
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id.as_str())
+        .bind(user_uuid)
+        .bind(serde_json::json!({ "amount": amount.to_string() }))
+        .execute(executor)
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "record_deduction_event".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(())
+    }
+
+    async fn deduct_credits_atomic(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        user_uuid: Uuid,
+        amount: CreditBalance,
+    ) -> Result<(CreditBalance, CreditBalance)> {
+        let row = sqlx::query(
+            r#"
+            UPDATE billing.credits
+            SET balance = balance - $2,
+                lifetime_spent = lifetime_spent + $2,
+                updated_at = NOW()
+            WHERE user_id = $1 AND balance >= $2
+            RETURNING (balance + $2) as balance_before, balance as balance_after
+            "#,
+        )
+        .bind(user_uuid)
+        .bind(amount.as_decimal())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "deduct_credits_atomic".to_string(),
+            source: Box::new(e),
+        })?;
+
+        match row {
+            Some(r) => {
+                let balance_before = CreditBalance::from_decimal(r.get("balance_before"));
+                let balance_after = CreditBalance::from_decimal(r.get("balance_after"));
+                Ok((balance_before, balance_after))
+            }
+            None => {
+                let current = sqlx::query_scalar::<_, rust_decimal::Decimal>(
+                    "SELECT balance FROM billing.credits WHERE user_id = $1",
+                )
+                .bind(user_uuid)
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(|e| BillingError::DatabaseError {
+                    operation: "fetch_balance_for_error".to_string(),
+                    source: Box::new(e),
+                })?
+                .unwrap_or(rust_decimal::Decimal::ZERO);
+
+                Err(BillingError::InsufficientCredits {
+                    available: current,
+                    required: amount.as_decimal(),
+                })
+            }
+        }
     }
 
     // Transaction history for testing - returns raw transaction data
@@ -242,62 +326,28 @@ impl CreditRepository for SqlCreditRepository {
     }
 
     async fn deduct_credits(&self, user_id: &UserId, amount: CreditBalance) -> Result<()> {
-        let account =
-            self.get_account(user_id)
-                .await?
-                .ok_or_else(|| BillingError::AccountNotFound {
-                    id: user_id.to_string(),
+        let mut tx =
+            self.connection
+                .pool()
+                .begin()
+                .await
+                .map_err(|e| BillingError::DatabaseError {
+                    operation: "begin_transaction".to_string(),
+                    source: Box::new(e),
                 })?;
 
-        if account.balance < amount {
-            return Err(BillingError::InsufficientCredits {
-                available: account.balance.as_decimal(),
-                required: amount.as_decimal(),
-            });
-        }
-
-        let user_uuid = self.require_user_uuid(user_id).await?;
-
-        let result = sqlx::query(
-            r#"
-            UPDATE billing.credits
-            SET balance = balance - $2,
-                lifetime_spent = lifetime_spent + $2,
-                updated_at = NOW()
-            WHERE user_id = $1 AND balance >= $2
-            "#,
+        self.deduct_credits_tx(
+            &mut tx,
+            user_id,
+            amount,
+            None,
+            Some("system"),
+            Some("Credit deduction"),
         )
-        .bind(user_uuid)
-        .bind(amount.as_decimal())
-        .execute(self.connection.pool())
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "deduct_credits".to_string(),
-            source: Box::new(e),
-        })?;
+        .await?;
 
-        if result.rows_affected() == 0 {
-            return Err(BillingError::InsufficientCredits {
-                available: account.balance.as_decimal(),
-                required: amount.as_decimal(),
-            });
-        }
-
-        sqlx::query(
-            r#"
-            INSERT INTO billing.billing_events
-                (event_id, event_type, entity_type, entity_id, user_id, event_data, created_by, created_at)
-            VALUES ($1, 'credit_deduction', 'user', $2, $3, $4, 'credit_repository', NOW())
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(user_id.as_str())
-        .bind(user_uuid)
-        .bind(serde_json::json!({ "amount": amount.to_string() }))
-        .execute(self.connection.pool())
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "record_credit_deduction".to_string(),
+        tx.commit().await.map_err(|e| BillingError::DatabaseError {
+            operation: "commit_transaction".to_string(),
             source: Box::new(e),
         })?;
 
@@ -311,65 +361,31 @@ impl SqlCreditRepository {
         tx: &mut Transaction<'_, Postgres>,
         user_id: &UserId,
         amount: CreditBalance,
+        reference_id: Option<&str>,
+        reference_type: Option<&str>,
+        description: Option<&str>,
     ) -> Result<()> {
-        let account =
-            self.get_account(user_id)
-                .await?
-                .ok_or_else(|| BillingError::AccountNotFound {
-                    id: user_id.to_string(),
-                })?;
-
-        if account.balance < amount {
-            return Err(BillingError::InsufficientCredits {
-                available: account.balance.as_decimal(),
-                required: amount.as_decimal(),
-            });
-        }
-
         let user_uuid = self.require_user_uuid(user_id).await?;
 
-        let result = sqlx::query(
-            r#"
-            UPDATE billing.credits
-            SET balance = balance - $2,
-                lifetime_spent = lifetime_spent + $2,
-                updated_at = NOW()
-            WHERE user_id = $1 AND balance >= $2
-            "#,
-        )
-        .bind(user_uuid)
-        .bind(amount.as_decimal())
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "deduct_credits_tx".to_string(),
-            source: Box::new(e),
-        })?;
+        let (balance_before, balance_after) = self
+            .deduct_credits_atomic(&mut *tx, user_uuid, amount)
+            .await?;
 
-        if result.rows_affected() == 0 {
-            return Err(BillingError::InsufficientCredits {
-                available: account.balance.as_decimal(),
-                required: amount.as_decimal(),
-            });
+        let mut transaction =
+            CreditTransaction::new_debit(user_uuid, amount, balance_before, balance_after);
+
+        if let Some(ref_id) = reference_id {
+            transaction = transaction.with_reference(ref_id, reference_type.unwrap_or("rental"));
         }
 
-        sqlx::query(
-            r#"
-            INSERT INTO billing.billing_events
-                (event_id, event_type, entity_type, entity_id, user_id, event_data, created_by, created_at)
-            VALUES ($1, 'credit_deduction', 'user', $2, $3, $4, 'credit_repository', NOW())
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(user_id.as_str())
-        .bind(user_uuid)
-        .bind(serde_json::json!({ "amount": amount.to_string() }))
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "record_credit_deduction_tx".to_string(),
-            source: Box::new(e),
-        })?;
+        if let Some(desc) = description {
+            transaction = transaction.with_description(desc);
+        }
+
+        self.audit.record_transaction(&transaction).await?;
+
+        self.record_deduction_event(&mut **tx, user_id, user_uuid, amount)
+            .await?;
 
         Ok(())
     }

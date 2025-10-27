@@ -1,7 +1,9 @@
 pub mod aggregations;
+pub mod audit;
 pub mod billing_handlers;
 pub mod credits;
 pub mod events;
+pub mod idempotency;
 pub mod packages;
 pub mod processor;
 pub mod rentals;
@@ -9,6 +11,7 @@ pub mod rules_engine;
 pub mod types;
 
 pub use aggregations::AggregationJobs;
+pub use audit::{CreditTransaction, TransactionType};
 pub use billing_handlers::BillingEventHandlers;
 pub use credits::{CreditManager, CreditOperations};
 pub use events::{EventStore, EventStoreOperations};
