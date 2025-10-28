@@ -8,8 +8,9 @@ use crate::domain::{
 use crate::error::{BillingError, Result};
 use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
-use sqlx::Row;
+use sqlx::{Postgres, Row, Transaction};
 use std::sync::Arc;
+use tracing::warn;
 
 #[async_trait]
 pub trait RentalRepository: Send + Sync {
@@ -30,6 +31,10 @@ impl SqlRentalRepository {
         Self { connection }
     }
 
+    pub fn pool(&self) -> &sqlx::PgPool {
+        self.connection.pool()
+    }
+
     fn parse_rental_state(state_str: &str) -> RentalState {
         match state_str {
             "pending" => RentalState::Pending,
@@ -46,28 +51,49 @@ impl SqlRentalRepository {
         let status_str: String = r.get("status");
         let state = Self::parse_rental_state(&status_str);
 
-        Rental {
-            id: RentalId::from_uuid(r.get("rental_id")),
-            user_id: UserId::new(r.get("user_id")),
-            executor_id: r.get("executor_id"),
-            validator_id: r
-                .get::<Option<String>, _>("validator_id")
-                .unwrap_or_default(),
-            package_id: r
-                .get::<Option<String>, _>("package_id")
-                .map(PackageId::new)
-                .unwrap_or_else(PackageId::custom),
-            reservation_id: None, // No reservation_id in rentals table
-            state,
-            resource_spec: serde_json::from_value(r.get("resource_spec")).unwrap_or(ResourceSpec {
+        let resource_spec: ResourceSpec =
+            serde_json::from_value(r.get("resource_spec")).unwrap_or(ResourceSpec {
                 gpu_specs: vec![],
                 cpu_cores: 0,
                 memory_gb: 0,
                 storage_gb: 0,
                 disk_iops: 0,
                 network_bandwidth_mbps: 0,
-            }),
-            usage_metrics: UsageMetrics::zero(), // Not stored in rentals table
+            });
+
+        let package_id = match r.get::<Option<String>, _>("package_id") {
+            Some(pkg_id) => PackageId::new(pkg_id),
+            None => {
+                let rental_id: uuid::Uuid = r.get("rental_id");
+                if !resource_spec.gpu_specs.is_empty() {
+                    let gpu_model = &resource_spec.gpu_specs[0].model;
+                    let inferred_pkg = PackageId::from_gpu_model(gpu_model);
+                    warn!(
+                        "Rental {} has NULL package_id, inferring '{}' from GPU model '{}'",
+                        rental_id, inferred_pkg, gpu_model
+                    );
+                    inferred_pkg
+                } else {
+                    warn!(
+                        "Rental {} has NULL package_id and no GPU specs, defaulting to 'h100'",
+                        rental_id
+                    );
+                    PackageId::h100()
+                }
+            }
+        };
+
+        Rental {
+            id: RentalId::from_uuid(r.get("rental_id")),
+            user_id: UserId::new(r.get("user_id")),
+            node_id: r.get("node_id"),
+            validator_id: r
+                .get::<Option<String>, _>("validator_id")
+                .unwrap_or_default(),
+            package_id,
+            state,
+            resource_spec,
+            usage_metrics: UsageMetrics::zero(),
             cost_breakdown: {
                 let hourly_rate = r.get::<rust_decimal::Decimal, _>("hourly_rate");
                 let total_cost = r
@@ -76,6 +102,7 @@ impl SqlRentalRepository {
                 CostBreakdown {
                     base_cost: CreditBalance::from_decimal(hourly_rate),
                     usage_cost: CreditBalance::zero(),
+                    volume_discount: CreditBalance::zero(),
                     discounts: CreditBalance::zero(),
                     overage_charges: CreditBalance::zero(),
                     total_cost: CreditBalance::from_decimal(total_cost),
@@ -107,14 +134,14 @@ impl RentalRepository for SqlRentalRepository {
         sqlx::query(
             r#"
             INSERT INTO billing.rentals
-            (rental_id, user_id, executor_id, validator_id, package_id, status,
-             resource_spec, hourly_rate, start_time, max_duration_hours, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            (rental_id, user_id, node_id, validator_id, package_id, status,
+             resource_spec, hourly_rate, start_time, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(rental.id.as_uuid())
         .bind(rental.user_id.as_str())
-        .bind(&rental.executor_id)
+        .bind(&rental.node_id)
         .bind(if rental.validator_id.is_empty() {
             None
         } else {
@@ -125,7 +152,6 @@ impl RentalRepository for SqlRentalRepository {
         .bind(resource_spec_json)
         .bind(hourly_rate)
         .bind(rental.started_at)
-        .bind(24i32) // Default max duration
         .bind(metadata_json)
         .execute(self.connection.pool())
         .await
@@ -140,7 +166,7 @@ impl RentalRepository for SqlRentalRepository {
     async fn get_rental(&self, id: &RentalId) -> Result<Option<Rental>> {
         let row = sqlx::query(
             r#"
-            SELECT rental_id, user_id, executor_id, validator_id, package_id, status,
+            SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at
             FROM billing.rentals
@@ -204,7 +230,7 @@ impl RentalRepository for SqlRentalRepository {
         let query = if let Some(uid) = user_id {
             sqlx::query(
                 r#"
-                SELECT rental_id, user_id, executor_id, validator_id, package_id, status,
+                SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at
                 FROM billing.rentals
@@ -216,7 +242,7 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             sqlx::query(
                 r#"
-                SELECT rental_id, user_id, executor_id, validator_id, package_id, status,
+                SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at
                 FROM billing.rentals
@@ -239,7 +265,7 @@ impl RentalRepository for SqlRentalRepository {
     async fn get_rentals_by_state(&self, state: RentalState) -> Result<Vec<Rental>> {
         let rows = sqlx::query(
             r#"
-            SELECT rental_id, user_id, executor_id, validator_id, package_id, status,
+            SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at
             FROM billing.rentals
@@ -310,5 +336,53 @@ impl RentalRepository for SqlRentalRepository {
             ),
             average_duration_hours: row.get::<f64, _>("avg_duration_hours"),
         })
+    }
+}
+
+impl SqlRentalRepository {
+    pub async fn update_rental_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        rental: &Rental,
+    ) -> Result<()> {
+        let resource_spec_json = serde_json::to_value(&rental.resource_spec)?;
+        let metadata_json = serde_json::to_value(&rental.metadata)?;
+        let hourly_rate = rental.cost_breakdown.base_cost.as_decimal();
+        let total_cost = rental.actual_cost.as_decimal();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE billing.rentals
+            SET status = $2, resource_spec = $3, hourly_rate = $4,
+                updated_at = $5, end_time = $6, metadata = $7, total_cost = $8
+            WHERE rental_id = $1
+            "#,
+        )
+        .bind(rental.id.as_uuid())
+        .bind(rental.state.to_string())
+        .bind(resource_spec_json)
+        .bind(hourly_rate)
+        .bind(chrono::Utc::now())
+        .bind(rental.ended_at)
+        .bind(metadata_json)
+        .bind(if total_cost == rust_decimal::Decimal::ZERO {
+            None
+        } else {
+            Some(total_cost)
+        })
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "update_rental_tx".to_string(),
+            source: Box::new(e),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(BillingError::RentalNotFound {
+                id: rental.id.to_string(),
+            });
+        }
+
+        Ok(())
     }
 }

@@ -1,24 +1,15 @@
 use crate::bdd::TestContext;
 use basilica_protocol::billing::{
     get_active_rentals_request::Filter, FinalizeRentalRequest, GetActiveRentalsRequest, GpuSpec,
-    ReleaseReservationRequest, RentalStatus, ResourceSpec, TrackRentalRequest,
-    UpdateRentalStatusRequest,
+    RentalStatus, ResourceSpec, TrackRentalRequest, UpdateRentalStatusRequest,
 };
 use uuid::Uuid;
 
-// Helper function to convert hours to protobuf Duration
-fn hours_to_duration(hours: u32) -> prost_types::Duration {
-    prost_types::Duration {
-        seconds: (hours as i64) * 3600,
-        nanos: 0,
-    }
-}
-
 #[tokio::test]
-async fn test_track_rental_creates_new_rental_with_reservation() {
+async fn test_track_rental_creates_new_rental() {
     let mut context = TestContext::new().await;
     let user_id = "test_rental_track_001";
-    let executor_id = "executor_001";
+    let node_id = "node_001";
     let validator_id = "validator_001";
 
     context.create_test_user(user_id, "1000.0").await;
@@ -27,10 +18,9 @@ async fn test_track_rental_creates_new_rental_with_reservation() {
     let request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        executor_id: executor_id.to_string(),
+        node_id: node_id.to_string(),
         validator_id: validator_id.to_string(),
         hourly_rate: "10.0".to_string(),
-        max_duration: Some(hours_to_duration(24)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: Some(ResourceSpec {
@@ -58,29 +48,10 @@ async fn test_track_rental_creates_new_rental_with_reservation() {
         !response.tracking_id.is_empty(),
         "Should return tracking ID"
     );
-    assert!(
-        !response.reservation_id.is_empty(),
-        "Should return reservation ID"
-    );
-    assert_eq!(
-        response.estimated_cost, "240",
-        "Estimated cost should be 10 * 24"
-    );
 
     assert!(
         context.rental_exists(&response.tracking_id).await,
         "Rental should exist in database"
-    );
-    assert!(
-        context.reservation_exists(&response.reservation_id).await,
-        "Reservation should exist"
-    );
-
-    let reserved = context.get_reserved_balance(user_id).await;
-    assert_eq!(
-        reserved,
-        rust_decimal::Decimal::from(240),
-        "Should reserve estimated cost"
     );
 
     context.cleanup().await;
@@ -92,32 +63,43 @@ async fn test_track_rental_fails_with_insufficient_balance() {
     let user_id = "test_rental_insufficient";
 
     context.create_test_user(user_id, "10.0").await;
+    let initial_balance = context.get_user_balance(user_id).await;
 
     let rental_id = Uuid::new_v4().to_string();
     let request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        executor_id: "executor_002".to_string(),
+        node_id: "node_002".to_string(),
         validator_id: "validator_002".to_string(),
         hourly_rate: "100.0".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
     };
 
     let result = context.client.track_rental(request).await;
-
-    assert!(result.is_err(), "Should fail with insufficient balance");
-    let error = result.unwrap_err();
     assert!(
-        error.message().contains("Insufficient balance"),
-        "Error should mention insufficient balance"
+        result.is_ok(),
+        "Pay-as-you-go: rental creation should succeed even with low balance"
     );
 
+    let tracking_id = result.unwrap().into_inner().tracking_id;
     assert!(
-        !context.rental_exists(&rental_id).await,
-        "Rental should not be created"
+        context.rental_exists(&tracking_id).await,
+        "Rental should be created"
+    );
+
+    let status = context.get_rental_status(&tracking_id).await;
+    assert_eq!(
+        status,
+        Some("pending".to_string()),
+        "Rental should start in pending state"
+    );
+
+    let final_balance = context.get_user_balance(user_id).await;
+    assert_eq!(
+        final_balance, initial_balance,
+        "Balance unchanged - pay-as-you-go deducts on telemetry, not at creation"
     );
 
     context.cleanup().await;
@@ -134,10 +116,9 @@ async fn test_update_rental_status_transitions() {
     let track_request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        executor_id: "executor_003".to_string(),
+        node_id: "node_003".to_string(),
         validator_id: "validator_003".to_string(),
         hourly_rate: "5.0".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -215,10 +196,9 @@ async fn test_get_active_rentals_by_user() {
         let request = TrackRentalRequest {
             rental_id,
             user_id: user_id.to_string(),
-            executor_id: format!("executor_{}", i),
+            node_id: format!("node_{}", i),
             validator_id: format!("validator_{}", i),
             hourly_rate: "2.0".to_string(),
-            max_duration: Some(hours_to_duration(5)),
             start_time: None,
             metadata: std::collections::HashMap::new(),
             resource_spec: None,
@@ -260,25 +240,37 @@ async fn test_get_active_rentals_by_user() {
         .expect("Failed to get active rentals")
         .into_inner();
 
-    assert_eq!(response.rentals.len(), 2, "Should return 2 active rentals");
-    assert_eq!(response.total_count, 2, "Total count should be 2");
+    assert_eq!(
+        response.rentals.len(),
+        3,
+        "Should return 3 rentals (2 active + 1 pending)"
+    );
+    assert_eq!(response.total_count, 3, "Total count should be 3");
+
+    let mut active_count = 0;
+    let mut pending_count = 0;
 
     for rental in &response.rentals {
         assert_eq!(rental.user_id, user_id);
-        assert!(
-            rental.status() == RentalStatus::Active || rental.status() == RentalStatus::Pending
-        );
+        match rental.status() {
+            RentalStatus::Active => active_count += 1,
+            RentalStatus::Pending => pending_count += 1,
+            _ => panic!("Unexpected rental status"),
+        }
         assert!(rental.start_time.is_some());
         assert!(rental.last_updated.is_some());
     }
+
+    assert_eq!(active_count, 2, "Should have 2 active rentals");
+    assert_eq!(pending_count, 1, "Should have 1 pending rental");
 
     context.cleanup().await;
 }
 
 #[tokio::test]
-async fn test_get_active_rentals_by_executor() {
+async fn test_get_active_rentals_by_node() {
     let mut context = TestContext::new().await;
-    let executor_id = "executor_specific_001";
+    let node_id = "node_specific_001";
 
     for i in 0..2 {
         let user_id = format!("user_{}", i);
@@ -288,10 +280,9 @@ async fn test_get_active_rentals_by_executor() {
         let request = TrackRentalRequest {
             rental_id: rental_id.clone(),
             user_id: user_id.clone(),
-            executor_id: executor_id.to_string(),
+            node_id: node_id.to_string(),
             validator_id: "validator_001".to_string(),
             hourly_rate: "3.0".to_string(),
-            max_duration: Some(hours_to_duration(8)),
             start_time: None,
             metadata: std::collections::HashMap::new(),
             resource_spec: None,
@@ -322,23 +313,23 @@ async fn test_get_active_rentals_by_executor() {
     let request = GetActiveRentalsRequest {
         limit: 100,
         offset: 0,
-        filter: Some(Filter::ExecutorId(executor_id.to_string())),
+        filter: Some(Filter::NodeId(node_id.to_string())),
     };
 
     let response = context
         .client
         .get_active_rentals(request)
         .await
-        .expect("Failed to get rentals by executor")
+        .expect("Failed to get rentals by node")
         .into_inner();
 
     assert!(
         response.rentals.len() >= 2,
-        "Should return at least 2 rentals for executor"
+        "Should return at least 2 rentals for node"
     );
 
     for rental in &response.rentals {
-        assert_eq!(rental.executor_id, executor_id);
+        assert_eq!(rental.node_id, node_id);
     }
 
     context.cleanup().await;
@@ -355,10 +346,9 @@ async fn test_finalize_rental_charges_correct_amount() {
     let track_request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        executor_id: "executor_final".to_string(),
+        node_id: "node_final".to_string(),
         validator_id: "validator_final".to_string(),
         hourly_rate: "10.0".to_string(),
-        max_duration: Some(hours_to_duration(10)),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
@@ -372,12 +362,6 @@ async fn test_finalize_rental_charges_correct_amount() {
         .into_inner();
 
     let initial_balance = context.get_user_balance(user_id).await;
-    let reserved_amount = context.get_reserved_balance(user_id).await;
-    assert_eq!(
-        reserved_amount,
-        rust_decimal::Decimal::from(100),
-        "Should reserve 10 * 10"
-    );
 
     let activate_request = UpdateRentalStatusRequest {
         rental_id: track_response.tracking_id.clone(),
@@ -409,28 +393,22 @@ async fn test_finalize_rental_charges_correct_amount() {
         .into_inner();
 
     assert!(finalize_response.success, "Finalization should succeed");
+    // finalize_rental is now a no-op that returns telemetry-based charges
+    // It doesn't charge anything itself - all charging happens via telemetry events
     assert_eq!(
-        finalize_response.total_cost, "25",
-        "Total cost should match requested"
+        finalize_response.charged_amount, "0.00",
+        "No additional charge at finalization"
     );
-    assert_eq!(finalize_response.charged_amount, "25", "Should charge 25");
     assert_eq!(
-        finalize_response.refunded_amount, "75",
-        "Should refund 75 (100 - 25)"
+        finalize_response.refunded_amount, "0.00",
+        "No refund in pay-as-you-go model"
     );
 
+    // Balance should remain unchanged since finalize_rental doesn't charge
     let final_balance = context.get_user_balance(user_id).await;
-    let expected_balance = initial_balance - rust_decimal::Decimal::from(25);
     assert_eq!(
-        final_balance, expected_balance,
-        "Balance should be reduced by 25"
-    );
-
-    let final_reserved = context.get_reserved_balance(user_id).await;
-    assert_eq!(
-        final_reserved.to_string(),
-        "0",
-        "Reserved amount should be cleared"
+        final_balance, initial_balance,
+        "Balance unchanged - charging happens via telemetry"
     );
 
     let rental_status = context.get_rental_status(&track_response.tracking_id).await;
@@ -438,97 +416,6 @@ async fn test_finalize_rental_charges_correct_amount() {
         rental_status,
         Some("completed".to_string()),
         "Rental should be completed"
-    );
-
-    context.cleanup().await;
-}
-
-#[tokio::test]
-async fn test_finalize_rental_without_reservation_charges_directly() {
-    let mut context = TestContext::new().await;
-    let user_id = "test_finalize_no_reservation";
-
-    context.create_test_user(user_id, "1000.0").await;
-
-    let rental_id = Uuid::new_v4().to_string();
-
-    // Create rental normally with reservation
-    let track_request = TrackRentalRequest {
-        rental_id: rental_id.clone(),
-        user_id: user_id.to_string(),
-        executor_id: "executor_direct".to_string(),
-        validator_id: "validator_direct".to_string(),
-        hourly_rate: "5.0".to_string(),
-        max_duration: Some(hours_to_duration(2)), // Small duration to ensure we have enough balance
-        start_time: None,
-        metadata: std::collections::HashMap::new(),
-        resource_spec: None,
-    };
-
-    let track_response = context
-        .client
-        .track_rental(track_request)
-        .await
-        .expect("Failed to track rental")
-        .into_inner();
-
-    // Activate the rental
-    let activate_request = UpdateRentalStatusRequest {
-        rental_id: track_response.tracking_id.clone(),
-        status: RentalStatus::Active.into(),
-        timestamp: None,
-        reason: String::new(),
-    };
-
-    context
-        .client
-        .update_rental_status(activate_request)
-        .await
-        .expect("Failed to activate rental");
-
-    // Now simulate a scenario where the reservation was already released/lost
-    // by manually releasing it through the API
-    let release_request = ReleaseReservationRequest {
-        reservation_id: track_response.reservation_id.clone(),
-        final_amount: "0".to_string(), // Release with no charge
-    };
-
-    context
-        .client
-        .release_reservation(release_request)
-        .await
-        .expect("Failed to release reservation");
-
-    let initial_balance = context.get_user_balance(user_id).await;
-
-    // Now finalize the rental - it should charge directly since reservation is gone
-    let finalize_request = FinalizeRentalRequest {
-        rental_id: track_response.tracking_id.clone(),
-        final_cost: "15.0".to_string(),
-        end_time: None,
-        termination_reason: String::new(),
-    };
-
-    let finalize_response = context
-        .client
-        .finalize_rental(finalize_request)
-        .await
-        .expect("Failed to finalize rental")
-        .into_inner();
-
-    assert!(finalize_response.success);
-    assert_eq!(finalize_response.total_cost, "15");
-    assert_eq!(finalize_response.charged_amount, "15");
-    assert_eq!(
-        finalize_response.refunded_amount, "0",
-        "No refund without reservation"
-    );
-
-    let final_balance = context.get_user_balance(user_id).await;
-    let expected_balance = initial_balance - rust_decimal::Decimal::from(15);
-    assert_eq!(
-        final_balance, expected_balance,
-        "Balance should be reduced by 15"
     );
 
     context.cleanup().await;

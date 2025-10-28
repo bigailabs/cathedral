@@ -159,10 +159,9 @@ impl BanManager {
 
     /// Check if ban should be triggered based on recent misbehaviours
     async fn check_ban_trigger(&self, miner_uid: u16, executor_id: &str) -> Result<bool> {
-        let one_hour_ago = Utc::now() - Duration::hours(1);
         let logs = self
             .persistence
-            .get_misbehaviour_logs(miner_uid, executor_id, one_hour_ago)
+            .get_misbehaviour_logs(miner_uid, executor_id, Duration::hours(1))
             .await?;
 
         // Trigger ban if 2 or more misbehaviours within 1 hour
@@ -176,9 +175,8 @@ impl BanManager {
         executor_id: &str,
         window: Duration,
     ) -> Result<Vec<MisbehaviourLog>> {
-        let since = Utc::now() - window;
         self.persistence
-            .get_misbehaviour_logs(miner_uid, executor_id, since)
+            .get_misbehaviour_logs(miner_uid, executor_id, window)
             .await
     }
 
@@ -206,8 +204,7 @@ impl BanManager {
             let failures_in_window = sorted_logs
                 .iter()
                 .filter(|log| {
-                    log.recorded_at >= one_hour_before &&
-                    log.recorded_at <= current_log.recorded_at
+                    log.recorded_at >= one_hour_before && log.recorded_at <= current_log.recorded_at
                 })
                 .count();
 
@@ -353,8 +350,7 @@ mod tests {
             let failures_in_window = sorted_logs
                 .iter()
                 .filter(|log| {
-                    log.recorded_at >= one_hour_before &&
-                    log.recorded_at <= current_log.recorded_at
+                    log.recorded_at >= one_hour_before && log.recorded_at <= current_log.recorded_at
                 })
                 .count();
 
@@ -418,7 +414,11 @@ mod tests {
         let now = Utc::now();
         let logs = vec![
             create_test_log(1, "executor1", now - Duration::hours(3)),
-            create_test_log(1, "executor1", now - Duration::hours(3) + Duration::minutes(30)),
+            create_test_log(
+                1,
+                "executor1",
+                now - Duration::hours(3) + Duration::minutes(30),
+            ),
             create_test_log(1, "executor1", now - Duration::minutes(40)),
             create_test_log(1, "executor1", now - Duration::minutes(20)),
         ];
@@ -435,14 +435,11 @@ mod tests {
         // Three logs: first two trigger a ban, third is outside the window
         let logs = vec![
             create_test_log(1, "executor1", now - Duration::minutes(90)),
-            create_test_log(1, "executor1", now - Duration::minutes(50)),  // Triggers ban
+            create_test_log(1, "executor1", now - Duration::minutes(50)), // Triggers ban
             create_test_log(1, "executor1", now),
         ];
         // The last two logs also form a trigger (50 mins apart)
-        assert_eq!(
-            test_find_ban_trigger(&logs),
-            Some(now)
-        );
+        assert_eq!(test_find_ban_trigger(&logs), Some(now));
     }
 
     #[test]
@@ -515,14 +512,23 @@ mod tests {
         // Current time is log2.recorded_at + 85 minutes
         // Ban should still be active (85 minutes < 120 minutes)
 
-        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
+        let is_banned = ban_manager
+            .is_executor_banned(miner_uid, executor_id)
+            .await
+            .unwrap();
 
         // This assertion would fail with the old implementation
         // but passes with the fixed implementation
-        assert!(is_banned, "Executor should still be banned after 85 minutes (ban duration is 2 hours)");
+        assert!(
+            is_banned,
+            "Executor should still be banned after 85 minutes (ban duration is 2 hours)"
+        );
 
         // Check ban expiry is correct
-        let ban_expiry = ban_manager.get_ban_expiry(miner_uid, executor_id).await.unwrap();
+        let ban_expiry = ban_manager
+            .get_ban_expiry(miner_uid, executor_id)
+            .await
+            .unwrap();
         assert!(ban_expiry.is_some(), "Ban expiry should be set");
 
         let expected_expiry = log2.recorded_at + Duration::hours(2);
@@ -530,7 +536,10 @@ mod tests {
 
         // Allow small time difference for test execution
         let diff = (expected_expiry - actual_expiry).num_seconds().abs();
-        assert!(diff < 5, "Ban expiry should be approximately 2 hours from trigger time");
+        assert!(
+            diff < 5,
+            "Ban expiry should be approximately 2 hours from trigger time"
+        );
     }
 
     #[tokio::test]
@@ -580,11 +589,20 @@ mod tests {
         // Ban duration for 2 offenses is 2 hours
         // Ban was triggered 2h50m ago, so it should have expired
 
-        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
+        let is_banned = ban_manager
+            .is_executor_banned(miner_uid, executor_id)
+            .await
+            .unwrap();
         assert!(!is_banned, "Ban should have expired after 2 hours");
 
-        let ban_expiry = ban_manager.get_ban_expiry(miner_uid, executor_id).await.unwrap();
-        assert!(ban_expiry.is_none(), "No ban expiry should be returned for expired ban");
+        let ban_expiry = ban_manager
+            .get_ban_expiry(miner_uid, executor_id)
+            .await
+            .unwrap();
+        assert!(
+            ban_expiry.is_none(),
+            "No ban expiry should be returned for expired ban"
+        );
     }
 
     #[tokio::test]
@@ -608,10 +626,18 @@ mod tests {
         let logs = vec![
             // First pair triggers 1st ban
             create_test_log(miner_uid, executor_id, now - Duration::days(6)),
-            create_test_log(miner_uid, executor_id, now - Duration::days(6) + Duration::minutes(10)),
+            create_test_log(
+                miner_uid,
+                executor_id,
+                now - Duration::days(6) + Duration::minutes(10),
+            ),
             // Second pair triggers 2nd ban
             create_test_log(miner_uid, executor_id, now - Duration::days(3)),
-            create_test_log(miner_uid, executor_id, now - Duration::days(3) + Duration::minutes(10)),
+            create_test_log(
+                miner_uid,
+                executor_id,
+                now - Duration::days(3) + Duration::minutes(10),
+            ),
             // Recent trigger
             create_test_log(miner_uid, executor_id, now - Duration::minutes(30)),
         ];
@@ -621,17 +647,35 @@ mod tests {
         }
 
         // With 5 offenses in 7 days, ban duration should be 24 hours (max)
-        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
-        assert!(!is_banned, "Should not be banned as no trigger in last logs");
+        let is_banned = ban_manager
+            .is_executor_banned(miner_uid, executor_id)
+            .await
+            .unwrap();
+        assert!(
+            !is_banned,
+            "Should not be banned as no trigger in last logs"
+        );
 
         // Add another log to trigger ban
         let trigger_log = create_test_log(miner_uid, executor_id, now);
-        persistence.insert_misbehaviour_log(&trigger_log).await.unwrap();
+        persistence
+            .insert_misbehaviour_log(&trigger_log)
+            .await
+            .unwrap();
 
-        let is_banned = ban_manager.is_executor_banned(miner_uid, executor_id).await.unwrap();
-        assert!(is_banned, "Should be banned with 6 offenses and recent trigger");
+        let is_banned = ban_manager
+            .is_executor_banned(miner_uid, executor_id)
+            .await
+            .unwrap();
+        assert!(
+            is_banned,
+            "Should be banned with 6 offenses and recent trigger"
+        );
 
-        let ban_expiry = ban_manager.get_ban_expiry(miner_uid, executor_id).await.unwrap();
+        let ban_expiry = ban_manager
+            .get_ban_expiry(miner_uid, executor_id)
+            .await
+            .unwrap();
         assert!(ban_expiry.is_some());
 
         // With 6 offenses, duration should be 24 hours (max)

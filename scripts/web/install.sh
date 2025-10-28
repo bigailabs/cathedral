@@ -201,6 +201,33 @@ detect_os() {
     esac
 }
 
+# Get Rust target triple for the current platform
+get_rust_target() {
+    local os
+    local arch
+    os=$(detect_os)
+    arch=$(detect_arch)
+
+    case "${os}-${arch}" in
+        linux-amd64)
+            echo "x86_64-unknown-linux-musl"
+            ;;
+        linux-arm64)
+            echo "aarch64-unknown-linux-musl"
+            ;;
+        darwin-amd64)
+            echo "x86_64-apple-darwin"
+            ;;
+        darwin-arm64)
+            echo "aarch64-apple-darwin"
+            ;;
+        *)
+            print_error "Unsupported platform: ${os}-${arch}"
+            exit 1
+            ;;
+    esac
+}
+
 # Check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -243,16 +270,18 @@ get_latest_cli_release() {
     # 2. grep -B1 '"prerelease": false' - Find non-prerelease entries and include 1 line before (the tag_name)
     # 3. grep 'tag_name' - Filter to only tag_name lines from the previous output
     # 4. grep 'basilica-cli-v' - Keep only tags starting with basilica-cli-v
-    # 5. head -1 - Take the first match (GitHub API returns releases in newest-first order)
-    # 6. cut -d '"' -f 4 - Extract the tag value between quotes
+    # 5. cut -d '"' -f 4 - Extract the tag value between quotes
+    # 6. sort -V -r - Sort by version number (descending)
+    # 7. head -1 - Take the highest version
     local latest_tag
     latest_tag=$(echo "$releases_json" | \
         grep -E '"tag_name"|"prerelease"' | \
         grep -B1 '"prerelease": false' | \
         grep 'tag_name' | \
         grep 'basilica-cli-v' | \
-        head -1 | \
-        cut -d '"' -f 4)
+        cut -d '"' -f 4 | \
+        sort -V -r | \
+        head -1)
 
     if [ -z "$latest_tag" ]; then
         print_error "No stable basilica-cli releases found" >&2
@@ -276,6 +305,7 @@ check_dependencies() {
 download_binary() {
     local arch
     local os
+    local target
     local latest_tag
 
     # Get latest release tag first (this will print "Fetching latest release information...")
@@ -293,10 +323,12 @@ download_binary() {
     # Detect platform
     arch=$(detect_arch)
     os=$(detect_os)
-    local binary_name="basilica-${os}-${arch}"
-    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${latest_tag}/${binary_name}"
+    target=$(get_rust_target)
+    local archive_name="basilica-${version}-${target}.tar.gz"
+    local download_url="https://github.com/${GITHUB_REPO}/releases/download/${latest_tag}/${archive_name}"
+    local temp_archive="$TEMP_DIR/archive.tar.gz"
 
-    print_step "Checking availability for ${os}-${arch}..."
+    print_step "Checking availability for ${os}-${arch} (${target})..."
 
     # Check if the binary exists on GitHub first
     local http_status
@@ -309,12 +341,12 @@ download_binary() {
     fi
 
     if [ "$http_status" = "404" ]; then
-        print_error "Binary not found for your platform: ${os}-${arch}"
+        print_error "Archive not found for your platform: ${target}"
         print_info "This combination may not be supported in release $latest_tag"
-        print_info "Check available binaries at: https://github.com/$GITHUB_REPO/releases/tag/$latest_tag"
+        print_info "Check available archives at: https://github.com/$GITHUB_REPO/releases/tag/$latest_tag"
         exit 1
     elif [ "$http_status" = "403" ]; then
-        print_error "Access denied to binary (HTTP 403)"
+        print_error "Access denied to archive (HTTP 403)"
         print_info "The release may be private or access may be restricted"
         print_info "URL attempted: $download_url"
         exit 1
@@ -326,11 +358,11 @@ download_binary() {
     print_step "Downloading Basilica CLI v$version..."
 
     if command_exists curl; then
-        if ! curl -fsSL -L "$download_url" -o "$TEMP_BINARY" 2>/dev/null; then
+        if ! curl -fsSL -L "$download_url" -o "$temp_archive" 2>/dev/null; then
             local curl_exit_code=$?
             if [ $curl_exit_code -eq 22 ]; then
                 print_error "HTTP error from GitHub (likely 403 or 404)"
-                print_info "The binary may not be available for ${os}-${arch} in release $latest_tag"
+                print_info "The archive may not be available for ${target} in release $latest_tag"
                 exit 1
             else
                 print_error "Download failed"
@@ -340,7 +372,7 @@ download_binary() {
             fi
         fi
     elif command_exists wget; then
-        if ! wget -q "$download_url" -O "$TEMP_BINARY" 2>/dev/null; then
+        if ! wget -q "$download_url" -O "$temp_archive" 2>/dev/null; then
             print_error "Download failed"
             print_info "URL attempted: $download_url"
             print_info "Please check your network connection and try again"
@@ -348,11 +380,27 @@ download_binary() {
         fi
     fi
 
-    if [ ! -f "$TEMP_BINARY" ] || [ ! -s "$TEMP_BINARY" ]; then
-        print_error "Download failed - file is missing or empty"
+    if [ ! -f "$temp_archive" ] || [ ! -s "$temp_archive" ]; then
+        print_error "Download failed - archive is missing or empty"
         print_info "URL attempted: $download_url"
-        print_info "Please verify the binary is available for your platform at:"
+        print_info "Please verify the archive is available for your platform at:"
         print_info "  https://github.com/$GITHUB_REPO/releases/tag/$latest_tag"
+        exit 1
+    fi
+
+    print_step "Extracting binary from archive..."
+
+    # Extract the binary from the tarball
+    if ! tar -xzf "$temp_archive" -C "$TEMP_DIR" 2>/dev/null; then
+        print_error "Failed to extract archive"
+        print_info "The downloaded archive may be corrupted"
+        exit 1
+    fi
+
+    # Verify the extracted binary exists
+    if [ ! -f "$TEMP_BINARY" ]; then
+        print_error "Binary not found in archive"
+        print_info "Expected to find 'basilica' in the archive"
         exit 1
     fi
 }
@@ -412,6 +460,7 @@ check_existing_installation() {
             # Check if versions match
             if [ "$current_version_clean" = "$latest_version_clean" ]; then
                 print_info "You already have the latest version!"
+                exit 0
             elif [ "$current_version_clean" != "unknown" ]; then
                 print_warning "Update available!"
             fi
@@ -430,12 +479,8 @@ check_existing_installation() {
             return 0
         fi
 
-        # Adjust prompt based on version comparison
-        if [ "$current_version_clean" = "$latest_version_clean" ] && [ "$latest_version_clean" != "unable to fetch" ]; then
-            printf "Do you want to reinstall? [y/N]: "
-        else
-            printf "Do you want to update? [y/N]: "
-        fi
+        # Prompt for update
+        printf "Do you want to update? [y/N]: "
 
         if read -r response < /dev/tty 2>/dev/null; then
             case "$response" in

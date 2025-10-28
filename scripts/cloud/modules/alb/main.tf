@@ -217,4 +217,13 @@ resource "aws_lb_listener_rule" "additional" {
       values = each.value.path_patterns
     }
   }
+
+  dynamic "condition" {
+    for_each = length(var.validator_allowed_ips) > 0 && each.key == "billing-grpc" ? [1] : []
+    content {
+      source_ip {
+        values = var.validator_allowed_ips
+      }
+    }
+  }
 }

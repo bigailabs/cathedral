@@ -111,6 +111,15 @@ pub async fn auth_middleware(
                     "API key authentication successful for user: {}",
                     verified.user_id
                 );
+
+                // Record successful auth attempt
+                if let Some(metrics) = &state.metrics {
+                    let api_metrics = metrics.api_metrics();
+                    tokio::spawn(async move {
+                        api_metrics.record_auth_attempt("api_key", true).await;
+                    });
+                }
+
                 AuthContext {
                     user_id: verified.user_id,
                     scopes: verified.scopes,
@@ -119,6 +128,15 @@ pub async fn auth_middleware(
             }
             Err(e) => {
                 warn!("API key authentication failed: {}", e);
+
+                // Record failed auth attempt
+                if let Some(metrics) = &state.metrics {
+                    let api_metrics = metrics.api_metrics();
+                    tokio::spawn(async move {
+                        api_metrics.record_auth_attempt("api_key", false).await;
+                    });
+                }
+
                 return Err((
                     StatusCode::UNAUTHORIZED,
                     ApiError::Authentication {
@@ -148,6 +166,15 @@ pub async fn auth_middleware(
         // Validate the JWT token
         let claims = validate_jwt_with_options(token, &jwks, None).map_err(|e| {
             warn!("JWT validation failed: {}", e);
+
+            // Record failed JWT auth
+            if let Some(metrics) = &state.metrics {
+                let api_metrics = metrics.api_metrics();
+                tokio::spawn(async move {
+                    api_metrics.record_auth_attempt("jwt", false).await;
+                });
+            }
+
             (
                 StatusCode::UNAUTHORIZED,
                 ApiError::Authentication {
@@ -185,6 +212,14 @@ pub async fn auth_middleware(
             "JWT authentication successful for user: {}. Scopes: {:?}",
             claims.sub, claims.scope
         );
+
+        // Record successful JWT auth
+        if let Some(metrics) = &state.metrics {
+            let api_metrics = metrics.api_metrics();
+            tokio::spawn(async move {
+                api_metrics.record_auth_attempt("jwt", true).await;
+            });
+        }
 
         // Parse scopes from space-separated string
         let scopes = claims

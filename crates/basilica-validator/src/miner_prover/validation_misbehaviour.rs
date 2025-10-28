@@ -60,10 +60,9 @@ impl Misbehaviour {
         };
 
         // Get recent misbehaviours count (last 7 days)
-        let seven_days_ago = Utc::now() - chrono::Duration::days(7);
         let recent_logs = self
             .persistence
-            .get_misbehaviour_logs(miner_uid, executor_id, seven_days_ago)
+            .get_misbehaviour_logs(miner_uid, executor_id, chrono::Duration::days(7))
             .await
             .unwrap_or_default();
         let recent_misbehaviours = recent_logs.len();

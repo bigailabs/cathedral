@@ -170,6 +170,10 @@ module "billing_service" {
     BILLING_AWS__SECRET_NAME             = ""
     BILLING_AWS__ENDPOINT_URL            = ""
 
+    # Dynamic Pricing Configuration
+    BILLING_DYNAMIC_PRICING__ENABLED              = "true"
+    BILLING_DYNAMIC_PRICING__MARKETPLACE_API_KEY  = var.marketplace_api_key
+
     # Logging
     RUST_LOG = "basilica_billing=info,basilica_protocol=info"
   }
@@ -244,7 +248,7 @@ module "payments_service" {
     PAYMENTS_GRPC__PORT             = "50061"
 
     # Blockchain Configuration
-    PAYMENTS_BLOCKCHAIN__WEBSOCKET_URL = "wss://entrypoint-finney.opentensor.ai:443"
+    PAYMENTS_BLOCKCHAIN__WEBSOCKET_URL = var.payments_blockchain_websocket_url
     PAYMENTS_BLOCKCHAIN__SS58_PREFIX   = "42"
 
     # Treasury Configuration
@@ -255,8 +259,18 @@ module "payments_service" {
     PAYMENTS_PRICE_ORACLE__MAX_PRICE_AGE_SECONDS   = "600"
     PAYMENTS_PRICE_ORACLE__REQUEST_TIMEOUT_SECONDS = "30"
 
+    # Reconciliation Configuration
+    PAYMENTS_RECONCILIATION__ENABLED                   = tostring(var.payments_reconciliation_enabled)
+    PAYMENTS_RECONCILIATION__SWEEP_INTERVAL_SECONDS    = "300"
+    PAYMENTS_RECONCILIATION__COLDWALLET_ADDRESS_SS58   = var.payments_reconciliation_coldwallet_address
+    PAYMENTS_RECONCILIATION__MINIMUM_THRESHOLD_PLANCKS = "10000000"
+    PAYMENTS_RECONCILIATION__TARGET_BALANCE_PLANCKS    = "5000000"
+    PAYMENTS_RECONCILIATION__ESTIMATED_FEE_PLANCKS     = "1000000"
+    PAYMENTS_RECONCILIATION__DRY_RUN_MODE              = tostring(var.payments_reconciliation_dry_run)
+    PAYMENTS_RECONCILIATION__MAX_RETRIES               = "3"
+
     # Logging
-    RUST_LOG = "basilica_payments=info,basilica_protocol=info"
+    RUST_LOG = "basilica_payments=info,bittensor=info,basilica_protocol=info"
   }
 
   # Secrets from AWS Secrets Manager
@@ -351,6 +365,15 @@ module "basilica_api_service" {
     BASILICA_API_RATE_LIMIT__BURST_SIZE                  = "100"
     BASILICA_API_RATE_LIMIT__PER_IP_LIMITING             = "true"
     BASILICA_API_RATE_LIMIT__PREMIUM_REQUESTS_PER_MINUTE = "600"
+
+    # Payments Service Integration
+    BASILICA_API_PAYMENTS__ENABLED  = "true"
+    BASILICA_API_PAYMENTS__ENDPOINT = "http://payments-v3.${aws_service_discovery_private_dns_namespace.main.name}:50061"
+
+    # Billing Service Integration
+    BASILICA_API_BILLING__ENABLED                = "true"
+    BASILICA_API_BILLING__ENDPOINT               = "http://billing-v3.${aws_service_discovery_private_dns_namespace.main.name}:50051"
+    BASILICA_API_BILLING__ENFORCE_BALANCE_CHECKS = "true"
 
     # Logging
     RUST_LOG = "basilica_api=info,basilica_protocol=info"

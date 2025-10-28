@@ -10,18 +10,19 @@ use crate::output::{
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use crate::ssh::{parse_ssh_credentials, SshClient};
 use crate::CliError;
+use basilica_common::types::GpuCategory;
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
-    ExecutorSelection, GpuRequirements, ListAvailableExecutorsQuery, ListRentalsQuery,
-    LocationProfile, RentalState, RentalStatusResponse, ResourceRequirementsRequest, SshAccess,
-    StartRentalApiRequest,
+    GpuRequirements, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile, NodeSelection,
+    RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
-use basilica_validator::gpu::categorization::GpuCategory;
 use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
+use rust_decimal::Decimal;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -29,11 +30,11 @@ use std::time::Duration;
 use tracing::debug;
 use uuid::Uuid;
 
-/// Represents the target for the `up` command - either an executor ID or GPU category
+/// Represents the target for the `up` command - either an node ID or GPU category
 #[derive(Debug, Clone)]
 pub enum TargetType {
-    /// A specific executor ID
-    ExecutorId(String),
+    /// A specific node ID
+    NodeId(String),
     /// A GPU category (h100, h200, b200, etc.)
     GpuCategory(GpuCategory),
 }
@@ -48,7 +49,7 @@ impl fmt::Display for TargetTypeParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "'{}' is not a valid executor ID (UUID) or GPU type (h100, b200, etc...)",
+            "'{}' is not a valid node ID (UUID) or GPU type (h100, b200, etc...)",
             self.value
         )
     }
@@ -60,9 +61,9 @@ impl FromStr for TargetType {
     type Err = TargetTypeParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // First check if it's a valid UUID v4 (executor ID)
+        // First check if it's a valid UUID v4 (node ID)
         if Uuid::parse_str(s).is_ok() {
-            return Ok(TargetType::ExecutorId(s.to_string()));
+            return Ok(TargetType::NodeId(s.to_string()));
         }
 
         // Then check if it's a known GPU type
@@ -81,7 +82,7 @@ impl FromStr for TargetType {
     }
 }
 
-/// Handle the `ls` command - list available executors for rental
+/// Handle the `ls` command - list available nodes for rental
 pub async fn handle_ls(
     gpu_category: Option<GpuCategory>,
     filters: ListFilters,
@@ -94,8 +95,8 @@ pub async fn handle_ls(
     let gpu_type = gpu_category.map(|gc| gc.as_str());
 
     // Build query from filters
-    let query = ListAvailableExecutorsQuery {
-        available: Some(true), // Filter for available executors only
+    let query = ListAvailableNodesQuery {
+        available: Some(true), // Filter for available nodes only
         min_gpu_memory: filters.memory_min,
         gpu_type,
         min_gpu_count: Some(filters.gpu_min.unwrap_or(0)),
@@ -108,17 +109,39 @@ pub async fn handle_ls(
 
     let spinner = create_spinner("Scanning global GPU availability...");
 
-    let response = api_client
-        .list_available_executors(Some(query))
-        .await
-        .map_err(|e| -> CliError {
-            complete_spinner_error(spinner.clone(), "Failed to fetch executors");
-            CliError::Internal(
-                eyre!(e)
-                    .suggestion("Check your internet connection and try again")
-                    .note("If this persists, executors may be temporarily unavailable"),
-            )
-        })?;
+    // Fetch both available nodes and pricing data in parallel
+    let (response, packages_result) = tokio::join!(
+        api_client.list_available_nodes(Some(query)),
+        api_client.get_packages()
+    );
+
+    let response = response.map_err(|e| -> CliError {
+        complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
+        CliError::Internal(
+            eyre!(e)
+                .suggestion("Check your internet connection and try again")
+                .note("If this persists, nodes may be temporarily unavailable"),
+        )
+    })?;
+
+    // Build pricing map: GPU type -> hourly rate
+    // Package names are like "H100 GPU Package", we need to extract just "h100"
+    let pricing_map: HashMap<String, String> = match packages_result {
+        Ok(packages) => {
+            packages
+                .packages
+                .into_iter()
+                .filter(|p| p.is_active)
+                .filter_map(|p| {
+                    // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
+                    let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
+
+                    gpu_type.map(|t| (t, p.hourly_rate))
+                })
+                .collect()
+        }
+        Err(_e) => HashMap::new(),
+    };
 
     complete_spinner_and_clear(spinner);
 
@@ -128,14 +151,15 @@ pub async fn handle_ls(
         // Use table_output module for consistent styling
         if filters.compact {
             // Compact view: grouped by country and GPU type
-            table_output::display_available_executors_compact(&response.available_executors)?;
+            table_output::display_available_nodes_compact(&response.available_nodes, &pricing_map)?;
         } else {
-            // Default or detailed view: show individual executors
-            // Detailed view includes executor IDs
-            table_output::display_available_executors_detailed(
-                &response.available_executors,
+            // Default or detailed view: show individual nodes
+            // Detailed view includes node IDs
+            table_output::display_available_nodes_detailed(
+                &response.available_nodes,
                 true,
                 filters.detailed,
+                &pricing_map,
             )?;
         }
     }
@@ -151,20 +175,20 @@ pub async fn handle_up(
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    // Parse the target to determine executor selection strategy
-    let executor_selection = if let Some(target_type) = target {
+    // Parse the target to determine node selection strategy
+    let node_selection = if let Some(target_type) = target {
         match target_type {
-            TargetType::ExecutorId(executor_id) => {
-                // Direct executor ID provided
-                ExecutorSelection::ExecutorId { executor_id }
+            TargetType::NodeId(node_id) => {
+                // Direct node ID provided
+                NodeSelection::NodeId { node_id }
             }
             TargetType::GpuCategory(gpu_category) => {
                 // GPU category specified - use automatic selection with exact matching
                 let spinner =
-                    create_spinner(&format!("Finding available {} executors...", gpu_category));
+                    create_spinner(&format!("Finding available {} nodes...", gpu_category));
                 complete_spinner_and_clear(spinner);
 
-                ExecutorSelection::ExactGpuConfiguration {
+                NodeSelection::ExactGpuConfiguration {
                     gpu_requirements: GpuRequirements {
                         min_memory_gb: 0, // Default, no minimum memory requirement
                         gpu_type: Some(gpu_category.as_str()),
@@ -175,10 +199,10 @@ pub async fn handle_up(
         }
     } else {
         // No target specified - use interactive selection
-        let spinner = create_spinner("Fetching available executors...");
+        let spinner = create_spinner("Fetching available nodes...");
 
         // Build query from options
-        let query = ListAvailableExecutorsQuery {
+        let query = ListAvailableNodesQuery {
             available: Some(true),
             min_gpu_memory: None,
             gpu_type: None,
@@ -190,22 +214,21 @@ pub async fn handle_up(
             }),
         };
 
-        let response = api_client
-            .list_available_executors(Some(query))
-            .await
-            .map_err(|e| -> crate::error::CliError {
-                complete_spinner_error(spinner.clone(), "Failed to fetch executors");
-                eyre!("API request failed for list available executors: {}", e).into()
-            })?;
+        let response = api_client.list_available_nodes(Some(query)).await.map_err(
+            |e| -> crate::error::CliError {
+                complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
+                eyre!("API request failed for list available nodes: {}", e).into()
+            },
+        )?;
 
         complete_spinner_and_clear(spinner);
 
-        // Use interactive selector to choose an executor
+        // Use interactive selector to choose an node
         // Compact mode uses grouped selector, otherwise use detailed selector
         let selector = crate::interactive::InteractiveSelector::new();
         let use_detailed = !options.compact;
-        selector.select_executor(
-            &response.available_executors,
+        selector.select_node(
+            &response.available_nodes,
             use_detailed,
             options.detailed,
             options.gpu_count,
@@ -246,10 +269,10 @@ pub async fn handle_up(
     };
 
     // Determine the selection mode for error messaging
-    let is_direct_executor_id = matches!(executor_selection, ExecutorSelection::ExecutorId { .. });
+    let is_direct_node_id = matches!(node_selection, NodeSelection::NodeId { .. });
 
     let request = StartRentalApiRequest {
-        executor_selection,
+        node_selection,
         container_image,
         ssh_public_key,
         environment: env_vars,
@@ -274,12 +297,12 @@ pub async fn handle_up(
             complete_spinner_error(spinner.clone(), "Failed to create rental");
             CliError::Internal(
                 eyre!(e)
-                    .note("The selected executor is experiencing issues.")
+                    .note("The selected node is experiencing issues.")
                     .with_suggestion(|| {
-                        if is_direct_executor_id {
-                            "Try using a different executor ID (e.g., 'basilica up <different-executor-id>')."
+                        if is_direct_node_id {
+                            "Try using a different node ID (e.g., 'basilica up <different-node-id>')."
                         } else {
-                            "Simply rerun the same command to automatically try a different executor."
+                            "Simply rerun the same command to automatically try a different node."
                         }
                     })
             )
@@ -374,30 +397,122 @@ pub async fn handle_up(
 pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    let spinner = create_spinner("Loading active rentals...");
+    let spinner = if filters.history {
+        create_spinner("Loading rental history...")
+    } else {
+        create_spinner("Loading active rentals...")
+    };
 
     // Build query from filters - default to "active" if no status specified
     let query = Some(ListRentalsQuery {
-        status: filters.status.or(Some(RentalState::Active)),
-        gpu_type: filters.gpu_type,
+        status: if filters.history {
+            None // No filter - get all rentals
+        } else {
+            filters.status.or(Some(RentalState::Active)) // Default to active
+        },
+        gpu_type: filters.gpu_type.clone(),
         min_gpu_count: filters.min_gpu_count,
     });
 
-    let rentals_list = api_client
-        .list_rentals(query)
-        .await
+    // Fetch rentals, usage history, and pricing packages in parallel
+    // Use a reasonable limit for usage history to cover active rentals
+    let (rentals_result, usage_result, packages_result) = tokio::join!(
+        api_client.list_rentals(query),
+        api_client.list_usage_history(Some(100), None),
+        api_client.get_packages()
+    );
+
+    let rentals_list = rentals_result
         .inspect_err(|_| complete_spinner_error(spinner.clone(), "Failed to load rentals"))?;
+
+    // Build usage map: rental_id -> usage record
+    // If usage fetch fails, continue with empty map (graceful degradation)
+    let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> = usage_result
+        .ok()
+        .map(|usage| {
+            usage
+                .rentals
+                .into_iter()
+                .map(|record| (record.rental_id.clone(), record))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Build pricing map: GPU type -> hourly rate
+    // Package names are like "H100 GPU Package", we need to extract just "h100"
+    let pricing_map: HashMap<String, String> = match packages_result {
+        Ok(packages) => {
+            packages
+                .packages
+                .into_iter()
+                .filter(|p| p.is_active)
+                .filter_map(|p| {
+                    // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
+                    let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
+
+                    gpu_type.map(|t| (t, p.hourly_rate))
+                })
+                .collect()
+        }
+        Err(_e) => HashMap::new(),
+    };
 
     complete_spinner_and_clear(spinner);
 
     if json {
         json_output(&rentals_list)?;
+    } else if filters.history {
+        // History mode: use usage_map data and filter out active rentals
+        // Create a set of active rental IDs from the current rentals list
+        let active_rental_ids: std::collections::HashSet<String> = rentals_list
+            .rentals
+            .iter()
+            .filter(|r| {
+                // Only include rentals that are currently active or provisioning
+                matches!(r.state, RentalState::Active | RentalState::Provisioning)
+            })
+            .map(|r| {
+                // Strip "rental-" prefix to match usage_map format
+                r.rental_id
+                    .strip_prefix("rental-")
+                    .unwrap_or(&r.rental_id)
+                    .to_string()
+            })
+            .collect();
+
+        // Filter usage_map to exclude active rentals
+        let historical_rentals: Vec<_> = usage_map
+            .values()
+            .filter(|r| !active_rental_ids.contains(&r.rental_id))
+            .collect();
+
+        table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
+
+        let total_cost: Decimal = historical_rentals
+            .iter()
+            .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
+            .sum();
+
+        println!();
+        println!(
+            "{}: {}",
+            style("Total Cost").cyan(),
+            style(format!("${:.2}", total_cost)).green().bold()
+        );
+
+        println!("\nTotal: {} rentals", historical_rentals.len());
+
+        display_ps_quick_start_commands();
     } else {
         table_output::display_rental_items(
             &rentals_list.rentals[..],
             !filters.compact,
             filters.detailed,
+            &usage_map,
+            &pricing_map,
+            false,
         )?;
+
         println!("\nTotal: {} active rentals", rentals_list.rentals.len());
 
         display_ps_quick_start_commands();
@@ -438,15 +553,7 @@ pub async fn handle_status(
     if json {
         json_output(&status)?;
     } else {
-        // Convert to validator's RentalStatusResponse for display (without SSH credentials)
-        let display_status = RentalStatusResponse {
-            rental_id: status.rental_id,
-            status: status.status,
-            executor: status.executor,
-            created_at: status.created_at,
-            updated_at: status.updated_at,
-        };
-        display_rental_status(&display_status);
+        display_rental_status_with_details(&status, config);
     }
 
     Ok(())
@@ -507,7 +614,7 @@ pub async fn handle_logs(
 
     // Parse and display SSE stream
     use eventsource_stream::Eventsource;
-    use futures::StreamExt;
+    use futures_util::StreamExt;
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -526,7 +633,7 @@ pub async fn handle_logs(
         println!("Following log output - press Ctrl+C to stop");
     }
 
-    futures::pin_mut!(stream);
+    futures_util::pin_mut!(stream);
 
     while let Some(event) = stream.next().await {
         match event {
@@ -1017,10 +1124,13 @@ fn split_remote_path(path: &str) -> (Option<String>, String) {
     }
 }
 
-fn display_rental_status(status: &RentalStatusResponse) {
+fn display_rental_status_with_details(
+    status: &basilica_sdk::types::RentalStatusWithSshResponse,
+    config: &CliConfig,
+) {
     println!("Rental Status: {}", status.rental_id);
     println!("  Status: {:?}", status.status);
-    println!("  Executor: {}", status.executor.id);
+    println!("  Node: {}", status.node.id);
     println!(
         "  Created: {}",
         status.created_at.format("%Y-%m-%d %H:%M:%S UTC")
@@ -1030,20 +1140,53 @@ fn display_rental_status(status: &RentalStatusResponse) {
         status.updated_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
 
-    // println!("\nExecutor Details:");
-    // println!("  GPUs: {} available", status.executor.gpu_specs.len());
-    // for gpu in &status.executor.gpu_specs {
-    //     println!("    - {} ({} GB)", gpu.name, gpu.memory_gb);
-    // }
-    // println!(
-    //     "  CPU: {} cores ({})",
-    //     status.executor.cpu_specs.cores, status.executor.cpu_specs.model
-    // );
-    // println!("  Memory: {} GB", status.executor.cpu_specs.memory_gb);
+    // Display port mappings if available
+    if let Some(ref port_mappings) = status.port_mappings {
+        if !port_mappings.is_empty() {
+            println!("\nPort Mappings (Host → Container):");
+            let port_strings: Vec<String> = port_mappings
+                .iter()
+                .map(|p| format!("{}→{}", p.host_port, p.container_port))
+                .collect();
+            println!("  {}", port_strings.join(", "));
+        }
+    }
 
-    // if let Some(location) = &status.executor.location {
-    //     println!("  Location: {location}");
-    // }
+    // Display SSH connection instructions if available
+    if let Some(ref ssh_credentials) = status.ssh_credentials {
+        if let Ok((host, port, username)) = parse_ssh_credentials(ssh_credentials) {
+            let private_key_path = &config.ssh.private_key_path;
+
+            println!();
+            print_info("SSH Connection:");
+            println!();
+
+            // Option 1: Using basilica CLI (simplest)
+            println!("  1. Using Basilica CLI:");
+            println!(
+                "     {}",
+                console::style(format!("basilica ssh {}", status.rental_id))
+                    .cyan()
+                    .bold()
+            );
+            println!();
+
+            // Option 2: Using standard SSH command
+            println!("  2. Using standard SSH:");
+            println!(
+                "     {}",
+                console::style(format!(
+                    "ssh -i {} -p {} {}@{}",
+                    compress_path(private_key_path),
+                    port,
+                    username,
+                    host
+                ))
+                .cyan()
+                .bold()
+            );
+        }
+    }
 }
 
 /// Display quick start commands after ps output
@@ -1072,12 +1215,12 @@ fn display_ps_quick_start_commands() {
     println!(
         "  {} {}",
         style("basilica status").yellow().bold(),
-        style("- Check detailed status").dim()
+        style("- Check status of a specific rental").dim()
     );
 
     println!(
         "  {} {}",
         style("basilica down").yellow().bold(),
-        style("- Stop this rental").dim()
+        style("- Stop a GPU rental").dim()
     );
 }

@@ -34,6 +34,7 @@ prost-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
+csv = "1.3"
 
 figment = { workspace = true, features = ["toml", "env", "json"] }
 
@@ -58,7 +59,17 @@ clap-verbosity-flag = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
+reqwest = { workspace = true }
+
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
 [dev-dependencies]
+rust_decimal_macros = "1.36"
+bollard = "0.17"
+portpicker = "0.1"
+futures-util = { workspace = true }
+once_cell = { workspace = true }
 
 [[bin]]
 name = "basilica-billing"

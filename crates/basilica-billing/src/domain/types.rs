@@ -68,37 +68,8 @@ impl FromStr for RentalId {
     type Err = uuid::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Self(Uuid::parse_str(s)?))
-    }
-}
-
-/// Credit reservation identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ReservationId(Uuid);
-
-impl ReservationId {
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        Self(uuid)
-    }
-
-    pub fn as_uuid(&self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for ReservationId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for ReservationId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+        let uuid_str = s.strip_prefix("rental-").unwrap_or(s);
+        Ok(Self(Uuid::parse_str(uuid_str)?))
     }
 }
 
@@ -220,7 +191,10 @@ pub enum RentalState {
 
 impl RentalState {
     pub fn is_active(&self) -> bool {
-        matches!(self, RentalState::Active | RentalState::Suspended)
+        matches!(
+            self,
+            RentalState::Active | RentalState::Suspended | RentalState::Pending
+        )
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -305,6 +279,7 @@ pub struct ResourceSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UsageMetrics {
     pub gpu_hours: Decimal,
+    pub gpu_count: u32,
     pub cpu_hours: Decimal,
     pub memory_gb_hours: Decimal,
     pub storage_gb_hours: Decimal,
@@ -316,6 +291,7 @@ impl UsageMetrics {
     pub fn zero() -> Self {
         Self {
             gpu_hours: Decimal::ZERO,
+            gpu_count: 0,
             cpu_hours: Decimal::ZERO,
             memory_gb_hours: Decimal::ZERO,
             storage_gb_hours: Decimal::ZERO,
@@ -327,6 +303,7 @@ impl UsageMetrics {
     pub fn add(&self, other: &UsageMetrics) -> Self {
         Self {
             gpu_hours: self.gpu_hours + other.gpu_hours,
+            gpu_count: self.gpu_count.max(other.gpu_count),
             cpu_hours: self.cpu_hours + other.cpu_hours,
             memory_gb_hours: self.memory_gb_hours + other.memory_gb_hours,
             storage_gb_hours: self.storage_gb_hours + other.storage_gb_hours,
@@ -341,6 +318,7 @@ impl UsageMetrics {
 pub struct CostBreakdown {
     pub base_cost: CreditBalance,
     pub usage_cost: CreditBalance,
+    pub volume_discount: CreditBalance,
     pub discounts: CreditBalance,
     pub overage_charges: CreditBalance,
     pub total_cost: CreditBalance,
@@ -353,8 +331,103 @@ impl CostBreakdown {
             .add(self.usage_cost)
             .add(self.overage_charges);
         subtotal
-            .subtract(self.discounts)
+            .subtract(self.volume_discount)
+            .and_then(|after_volume| after_volume.subtract(self.discounts))
             .unwrap_or(CreditBalance::zero())
+    }
+}
+
+/// User tier for discount eligibility
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserTier {
+    Standard,
+    Student,
+    Enterprise,
+    Custom,
+}
+
+impl UserTier {
+    pub fn default_discount_percentage(&self) -> Option<Decimal> {
+        match self {
+            UserTier::Standard => None,
+            UserTier::Student => Decimal::from_str("0.20").ok(),
+            UserTier::Enterprise => Decimal::from_str("0.15").ok(),
+            UserTier::Custom => None,
+        }
+    }
+}
+
+impl fmt::Display for UserTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UserTier::Standard => write!(f, "standard"),
+            UserTier::Student => write!(f, "student"),
+            UserTier::Enterprise => write!(f, "enterprise"),
+            UserTier::Custom => write!(f, "custom"),
+        }
+    }
+}
+
+impl FromStr for UserTier {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "standard" => Ok(UserTier::Standard),
+            "student" => Ok(UserTier::Student),
+            "enterprise" => Ok(UserTier::Enterprise),
+            "custom" => Ok(UserTier::Custom),
+            _ => Err(format!("Invalid user tier: {}", s)),
+        }
+    }
+}
+
+/// User metadata for pricing and discounts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserMetadata {
+    pub user_id: UserId,
+    pub user_tier: UserTier,
+    pub discount_percentage: Option<Decimal>,
+    pub promo_codes: Vec<String>,
+    pub tier_updated_at: DateTime<Utc>,
+    pub custom_attributes: std::collections::HashMap<String, String>,
+}
+
+impl UserMetadata {
+    pub fn effective_discount_percentage(&self) -> Decimal {
+        self.discount_percentage
+            .or_else(|| self.user_tier.default_discount_percentage())
+            .unwrap_or(Decimal::ZERO)
+    }
+}
+
+/// Discount type for promotional codes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscountType {
+    Percentage,
+    FixedAmount,
+}
+
+impl fmt::Display for DiscountType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DiscountType::Percentage => write!(f, "percentage"),
+            DiscountType::FixedAmount => write!(f, "fixed_amount"),
+        }
+    }
+}
+
+impl FromStr for DiscountType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "percentage" => Ok(DiscountType::Percentage),
+            "fixed_amount" | "fixedamount" => Ok(DiscountType::FixedAmount),
+            _ => Err(format!("Invalid discount type: {}", s)),
+        }
     }
 }
 
@@ -392,5 +465,32 @@ mod tests {
 
         assert_eq!(BillingPeriod::Hourly.calculate_periods(start, end), 25);
         assert_eq!(BillingPeriod::Daily.calculate_periods(start, end), 2);
+    }
+
+    #[test]
+    fn test_rental_id_from_str_plain_uuid() {
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000";
+        let rental_id = RentalId::from_str(uuid_str).unwrap();
+        assert_eq!(rental_id.to_string(), uuid_str);
+    }
+
+    #[test]
+    fn test_rental_id_from_str_with_prefix() {
+        let prefixed_str = "rental-550e8400-e29b-41d4-a716-446655440000";
+        let expected_uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let rental_id = RentalId::from_str(prefixed_str).unwrap();
+        assert_eq!(rental_id.to_string(), expected_uuid);
+    }
+
+    #[test]
+    fn test_rental_id_from_str_invalid() {
+        let invalid_str = "not-a-uuid";
+        assert!(RentalId::from_str(invalid_str).is_err());
+    }
+
+    #[test]
+    fn test_rental_id_from_str_invalid_with_prefix() {
+        let invalid_str = "rental-not-a-uuid";
+        assert!(RentalId::from_str(invalid_str).is_err());
     }
 }

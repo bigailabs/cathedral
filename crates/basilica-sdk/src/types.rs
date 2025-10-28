@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 // Re-export types from basilica-validator that are used by the client
 pub use basilica_validator::api::types::{
-    AvailabilityInfo, AvailableExecutor, CpuSpec, ExecutorDetails, GpuRequirements, GpuSpec,
-    ListAvailableExecutorsQuery, ListAvailableExecutorsResponse, LogQuery, NetworkSpeedInfo,
-    RentCapacityRequest, RentCapacityResponse, RentalListItem, RentalStatus,
+    AvailabilityInfo, AvailableNode, CpuSpec, GpuRequirements, GpuSpec, ListAvailableNodesQuery,
+    ListAvailableNodesResponse, LogQuery, NetworkSpeedInfo, NodeDetails, RentCapacityRequest,
+    RentCapacityResponse, RentalListItem, RentalStatus,
     RentalStatusResponse as ValidatorRentalStatusResponse, SshAccess, TerminateRentalRequest,
 };
 
@@ -14,7 +14,7 @@ pub use basilica_validator::api::types::{
 pub use basilica_common::LocationProfile;
 
 // Re-export rental-specific types from validator
-pub use basilica_validator::api::rental_routes::{
+pub use basilica_validator::api::routes::rentals::{
     PortMappingRequest, ResourceRequirementsRequest, StartRentalRequest, VolumeMountRequest,
 };
 
@@ -65,7 +65,7 @@ pub type RentalStatusResponse = ValidatorRentalStatusResponse;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiRentalListItem {
     pub rental_id: String,
-    pub executor_id: String,
+    pub node_id: String,
     pub container_id: String,
     pub state: RentalState,
     pub created_at: String,
@@ -84,6 +84,9 @@ pub struct ApiRentalListItem {
     /// Optional network speed information
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_speed: Option<NetworkSpeedInfo>,
+    /// Port mappings for this rental
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
 }
 
 /// API list rentals response with GPU information
@@ -107,21 +110,21 @@ pub struct LogStreamQuery {
     pub tail: Option<u32>,
 }
 
-/// Executor selection strategy for rental requests
+/// Node selection strategy for rental requests
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum ExecutorSelection {
-    /// Select a specific executor by ID
-    ExecutorId { executor_id: String },
-    /// Select executor with exact GPU configuration (exact count match)
+pub enum NodeSelection {
+    /// Select a specific node by ID
+    NodeId { node_id: String },
+    /// Select node with exact GPU configuration (exact count match)
     ExactGpuConfiguration { gpu_requirements: GpuRequirements },
 }
 
-/// Start rental request with flexible executor selection
+/// Start rental request with flexible node selection
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StartRentalApiRequest {
-    /// How to select the executor for this rental
-    pub executor_selection: ExecutorSelection,
+    /// How to select the node for this rental
+    pub node_selection: NodeSelection,
 
     /// Container image to run
     pub container_image: String,
@@ -163,12 +166,16 @@ pub struct RentalStatusWithSshResponse {
     /// Current rental status
     pub status: RentalStatus,
 
-    /// Executor details
-    pub executor: ExecutorDetails,
+    /// Node details
+    pub node: NodeDetails,
 
     /// SSH credentials (from database, not validator)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_credentials: Option<String>,
+
+    /// Port mappings (from database)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
 
     /// Creation timestamp
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -178,16 +185,18 @@ pub struct RentalStatusWithSshResponse {
 }
 
 impl RentalStatusWithSshResponse {
-    /// Create from validator response and database SSH credentials
+    /// Create from validator response, database SSH credentials, and port mappings
     pub fn from_validator_response(
         response: ValidatorRentalStatusResponse,
         ssh_credentials: Option<String>,
+        port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
     ) -> Self {
         Self {
             rental_id: response.rental_id,
             status: response.status,
-            executor: response.executor,
+            node: response.node,
             ssh_credentials,
+            port_mappings,
             created_at: response.created_at,
             updated_at: response.updated_at,
         }
@@ -234,4 +243,139 @@ pub struct ApiKeyInfo {
 
     /// Last usage timestamp
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+// Payment Management Types
+
+/// Deposit account response from API
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepositAccountResponse {
+    pub user_id: String,
+    pub address: String,
+    pub exists: bool,
+}
+
+/// Response after creating a deposit account
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateDepositAccountResponse {
+    pub user_id: String,
+    pub address: String,
+}
+
+/// Deposit status
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DepositStatus {
+    Pending,
+    Finalized,
+    Credited,
+    Failed,
+}
+
+/// Individual deposit record
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DepositRecord {
+    pub tx_hash: String,
+    pub block_number: u64,
+    pub event_index: u32,
+    pub from_address: String,
+    pub to_address: String,
+    pub amount_tao: String,
+    pub status: DepositStatus,
+    pub observed_at: chrono::DateTime<chrono::Utc>,
+    pub finalized_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub credited_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// List deposits response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListDepositsResponse {
+    pub deposits: Vec<DepositRecord>,
+    pub total_count: usize,
+}
+
+/// Query parameters for listing deposits
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ListDepositsQuery {
+    #[serde(default)]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+// Billing Management Types
+
+/// Balance response from billing service
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BalanceResponse {
+    pub available: String,
+    pub total: String,
+    pub last_updated: String,
+}
+
+/// Billing package information
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BillingPackageInfo {
+    pub package_id: String,
+    pub name: String,
+    pub description: String,
+    pub hourly_rate: String,
+    pub is_active: bool,
+}
+
+/// Packages response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PackagesResponse {
+    pub packages: Vec<BillingPackageInfo>,
+    pub current_package_id: String,
+}
+
+// Usage History Types
+
+/// Individual rental usage record
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RentalUsageRecord {
+    pub rental_id: String,
+    pub node_id: String,
+    pub status: String,
+    pub hourly_rate: String,
+    pub current_cost: String,
+    pub start_time: chrono::DateTime<chrono::Utc>,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+/// Usage history response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsageHistoryResponse {
+    pub rentals: Vec<RentalUsageRecord>,
+    pub total_count: u64,
+}
+
+/// Time-series usage data point
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsageDataPoint {
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub cpu_percent: f64,
+    pub memory_mb: u64,
+    pub cost: String,
+}
+
+/// Aggregated usage summary
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UsageSummary {
+    pub avg_cpu_percent: f64,
+    pub avg_memory_mb: u64,
+    pub total_network_bytes: u64,
+    pub total_disk_bytes: u64,
+    pub avg_gpu_utilization: f64,
+    pub duration_secs: u64,
+}
+
+/// Detailed rental usage response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RentalUsageResponse {
+    pub rental_id: String,
+    pub data_points: Vec<UsageDataPoint>,
+    pub summary: Option<UsageSummary>,
+    pub total_cost: String,
 }

@@ -1,0 +1,274 @@
+name: Release Python SDK
+
+on:
+  push:
+    tags:
+      - "basilica-sdk-python-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., basilica-sdk-python-v0.1.0)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+  id-token: write  # Required for trusted publishing to PyPI
+
+jobs:
+  extract-version:
+    name: Extract version from tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+            if [[ ! "$TAG" =~ ^basilica-sdk-python-v ]]; then
+              echo "Error: Tag must start with 'basilica-sdk-python-v' prefix"
+              echo "Example: basilica-sdk-python-v0.1.0"
+              exit 1
+            fi
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          VERSION="${TAG#basilica-sdk-python-v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Releasing Python SDK version: $VERSION"
+
+  build-wheels-linux:
+    name: Build wheels on Linux (${{ matrix.target }})
+    needs: extract-version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+          sccache: 'true'
+          manylinux: auto
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: dist/*.whl
+
+  build-wheels-macos:
+    name: Build wheels on macOS (${{ matrix.target }})
+    needs: extract-version
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: brew install protobuf
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+          sccache: 'true'
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/*.whl
+
+  build-wheels-windows:
+    name: Build wheels on Windows
+    needs: extract-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: choco install protoc
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+          sccache: 'true'
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: dist/*.whl
+
+  build-sdist:
+    name: Build source distribution
+    needs: extract-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: [extract-version, build-wheels-linux, build-wheels-macos, build-wheels-windows, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # Required for trusted publishing
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: List distributions
+        run: |
+          ls -lh dist/
+          echo "Total files to upload: $(ls -1 dist/ | wc -l)"
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+          print-hash: true
+
+  create-github-release:
+    name: Create GitHub Release
+    needs: [extract-version, publish-to-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.extract-version.outputs.tag }}
+          name: Basilica Python SDK v${{ needs.extract-version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            # Basilica Python SDK v${{ needs.extract-version.outputs.version }}
+
+            ## Installation
+
+            ```bash
+            pip install basilica-sdk==${{ needs.extract-version.outputs.version }}
+            ```
+
+            ## Quick Start
+
+            ```python
+            import basilica
+
+            # Client auto-detects BASILICA_API_TOKEN environment variable
+            client = basilica.BasilicaClient("https://api.basilica.ai")
+
+            # List available nodes
+            nodes = client.list_nodes()
+            print(f"Found {len(nodes)} available GPU nodes")
+
+            # Start a rental
+            rental = client.start_rental(
+                basilica.StartRentalApiRequest(
+                    node_selection=basilica.node_by_gpu(
+                        basilica.GpuRequirements(gpu_type="h100", gpu_count=1)
+                    )
+                )
+            )
+            print(f"Rental ID: {rental.rental_id}")
+            ```
+
+            ## Documentation
+
+            - [Python SDK Documentation](https://docs.basilica.ai/python-sdk)
+            - [API Reference](https://docs.basilica.ai/api)
+            - [Examples](https://github.com/one-covenant/basilica/tree/main/crates/basilica-sdk-python/examples)
+            - [Changelog](https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md)
+
+            ## PyPI Package
+
+            https://pypi.org/project/basilica-sdk/${{ needs.extract-version.outputs.version }}/
+
+            ## Supported Platforms
+
+            - Linux: x86_64, aarch64 (ARM64)
+            - macOS: x86_64 (Intel), aarch64 (Apple Silicon)
+            - Windows: x86_64
+            - Python: 3.10, 3.11, 3.12, 3.13
+
+            ## What's Changed
+
+            See [CHANGELOG.md](https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md) for detailed changes.
+          files: |
+            dist/*
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

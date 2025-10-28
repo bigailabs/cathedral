@@ -10,12 +10,6 @@ pub enum BillingError {
         required: Decimal,
     },
 
-    #[error("Credit reservation not found: {id}")]
-    ReservationNotFound { id: String },
-
-    #[error("Credit reservation already released: {id}")]
-    ReservationAlreadyReleased { id: String },
-
     #[error("User not found: {id}")]
     UserNotFound { id: String },
 
@@ -94,6 +88,9 @@ pub enum BillingError {
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] serde_json::Error),
+
+    #[error("External API error from {provider}: {details}")]
+    ExternalApiError { provider: String, details: String },
 }
 
 impl BasilicaError for BillingError {}

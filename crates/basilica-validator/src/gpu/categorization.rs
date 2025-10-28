@@ -1,11 +1,9 @@
 use basilica_common::identity::MinerUid;
+use basilica_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqliteRow;
 use sqlx::Row;
 use std::collections::HashMap;
-use std::convert::Infallible;
-use std::fmt;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -64,69 +62,6 @@ impl sqlx::FromRow<'_, SqliteRow> for MinerGpuProfile {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Hash, Eq)]
-pub enum GpuCategory {
-    A100,
-    H100,
-    B200,
-    Other(String),
-}
-
-impl GpuCategory {
-    /// Get the use case description for this GPU category
-    pub fn description(&self) -> &'static str {
-        match self {
-            GpuCategory::A100 => "High-end training & inference",
-            GpuCategory::H100 => "Flagship AI training & inference",
-            GpuCategory::B200 => "Next-gen AI acceleration",
-            GpuCategory::Other(_) => "General GPU compute",
-        }
-    }
-
-    /// Get the display string for this GPU category (e.g., "A100", "H100", "OTHER")
-    pub fn as_str(&self) -> String {
-        match self {
-            GpuCategory::A100 => "A100".to_string(),
-            GpuCategory::H100 => "H100".to_string(),
-            GpuCategory::B200 => "B200".to_string(),
-            GpuCategory::Other(_) => "OTHER".to_string(),
-        }
-    }
-}
-
-impl fmt::Display for GpuCategory {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for GpuCategory {
-    type Err = Infallible;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let model = s.to_uppercase();
-
-        // Remove common prefixes and clean up
-        let cleaned = model
-            .replace("NVIDIA", "")
-            .replace("GEFORCE", "")
-            .replace("TESLA", "")
-            .trim()
-            .to_string();
-
-        // Check for known GPU models
-        if cleaned.contains("A100") {
-            Ok(GpuCategory::A100)
-        } else if cleaned.contains("H100") {
-            Ok(GpuCategory::H100)
-        } else if cleaned.contains("B200") {
-            Ok(GpuCategory::B200)
-        } else {
-            Ok(GpuCategory::Other(s.to_string()))
-        }
-    }
-}
-
 pub struct GpuCategorizer;
 
 impl GpuCategorizer {
@@ -139,18 +74,18 @@ impl GpuCategorizer {
     /// Determine primary GPU model from validation results
     /// Calculate GPU model distribution for a miner
     pub fn calculate_gpu_distribution(
-        executor_validations: &[ExecutorValidationResult],
+        node_validations: &[NodeValidationResult],
     ) -> HashMap<String, u32> {
         let mut gpu_counts = HashMap::new();
-        let mut seen_executors = std::collections::HashSet::new();
+        let mut seen_nodes = std::collections::HashSet::new();
 
-        // Count GPUs per unique executor to avoid double-counting
-        for validation in executor_validations
+        // Count GPUs per unique node to avoid double-counting
+        for validation in node_validations
             .iter()
-            .filter(|v| v.is_valid && v.attestation_valid)
+            .filter(|v| v.is_valid && v.attestation_valid && v.gpu_count > 0)
         {
-            // Only count each executor once
-            if seen_executors.insert(&validation.executor_id) {
+            // Only count each node once
+            if seen_nodes.insert(&validation.node_id) {
                 let category = GpuCategory::from_str(&validation.gpu_model).unwrap();
                 let normalized = category.to_string();
                 *gpu_counts.entry(normalized).or_insert(0) += validation.gpu_count as u32;
@@ -165,11 +100,11 @@ impl MinerGpuProfile {
     /// Create a new GPU profile for a miner
     pub fn new(
         miner_uid: MinerUid,
-        executor_validations: &[ExecutorValidationResult],
+        node_validations: &[NodeValidationResult],
         total_score: f64,
     ) -> Self {
-        let gpu_counts = GpuCategorizer::calculate_gpu_distribution(executor_validations);
-        let verification_count = executor_validations.len() as u32;
+        let gpu_counts = GpuCategorizer::calculate_gpu_distribution(node_validations);
+        let verification_count = node_validations.len() as u32;
 
         Self {
             miner_uid,
@@ -184,12 +119,12 @@ impl MinerGpuProfile {
     /// Update the profile with new validation results
     pub fn update_with_validations(
         &mut self,
-        executor_validations: &[ExecutorValidationResult],
+        node_validations: &[NodeValidationResult],
         new_score: f64,
     ) {
-        self.gpu_counts = GpuCategorizer::calculate_gpu_distribution(executor_validations);
+        self.gpu_counts = GpuCategorizer::calculate_gpu_distribution(node_validations);
         self.total_score = new_score;
-        self.verification_count = executor_validations.len() as u32;
+        self.verification_count = node_validations.len() as u32;
         self.last_updated = Utc::now();
     }
 
@@ -221,11 +156,11 @@ impl MinerGpuProfile {
     }
 }
 
-/// Executor validation result for GPU categorization
+/// Node validation result for GPU categorization
 /// This is a simplified version focused on GPU information
 #[derive(Debug, Clone)]
-pub struct ExecutorValidationResult {
-    pub executor_id: String,
+pub struct NodeValidationResult {
+    pub node_id: String,
     pub is_valid: bool,
     pub gpu_model: String,
     pub gpu_count: usize,
@@ -234,17 +169,17 @@ pub struct ExecutorValidationResult {
     pub validation_timestamp: DateTime<Utc>,
 }
 
-impl ExecutorValidationResult {
+impl NodeValidationResult {
     /// Create a new validation result for testing
     pub fn new_for_testing(
-        executor_id: String,
+        node_id: String,
         gpu_model: String,
         gpu_count: usize,
         is_valid: bool,
         attestation_valid: bool,
     ) -> Self {
         Self {
-            executor_id,
+            node_id,
             is_valid,
             gpu_model,
             gpu_count,

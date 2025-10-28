@@ -85,14 +85,14 @@
     "name": "deposit",
     "inputs": [
       { "name": "hotkey", "type": "bytes32", "internalType": "bytes32" },
-      { "name": "executorId", "type": "bytes16", "internalType": "bytes16" }
+      { "name": "nodeId", "type": "bytes16", "internalType": "bytes16" }
     ],
     "outputs": [],
     "stateMutability": "payable"
   },
   {
     "type": "function",
-    "name": "executorToMiner",
+    "name": "nodeToMiner",
     "inputs": [
       { "name": "", "type": "bytes32", "internalType": "bytes32" },
       { "name": "", "type": "bytes16", "internalType": "bytes16" }
@@ -182,7 +182,7 @@
     "name": "reclaimCollateral",
     "inputs": [
       { "name": "hotkey", "type": "bytes32", "internalType": "bytes32" },
-      { "name": "executorId", "type": "bytes16", "internalType": "bytes16" },
+      { "name": "nodeId", "type": "bytes16", "internalType": "bytes16" },
       { "name": "url", "type": "string", "internalType": "string" },
       {
         "name": "urlContentMd5Checksum",
@@ -199,7 +199,7 @@
     "inputs": [{ "name": "", "type": "uint256", "internalType": "uint256" }],
     "outputs": [
       { "name": "hotkey", "type": "bytes32", "internalType": "bytes32" },
-      { "name": "executorId", "type": "bytes16", "internalType": "bytes16" },
+      { "name": "nodeId", "type": "bytes16", "internalType": "bytes16" },
       { "name": "miner", "type": "address", "internalType": "address" },
       { "name": "amount", "type": "uint256", "internalType": "uint256" },
       { "name": "denyTimeout", "type": "uint64", "internalType": "uint64" }
@@ -235,7 +235,7 @@
     "name": "slashCollateral",
     "inputs": [
       { "name": "hotkey", "type": "bytes32", "internalType": "bytes32" },
-      { "name": "executorId", "type": "bytes16", "internalType": "bytes16" },
+      { "name": "nodeId", "type": "bytes16", "internalType": "bytes16" },
       { "name": "url", "type": "string", "internalType": "string" },
       {
         "name": "urlContentMd5Checksum",
@@ -374,7 +374,7 @@
         "internalType": "bytes32"
       },
       {
-        "name": "executorId",
+        "name": "nodeId",
         "type": "bytes16",
         "indexed": true,
         "internalType": "bytes16"
@@ -443,7 +443,7 @@
         "internalType": "bytes32"
       },
       {
-        "name": "executorId",
+        "name": "nodeId",
         "type": "bytes16",
         "indexed": true,
         "internalType": "bytes16"
@@ -498,7 +498,7 @@
         "internalType": "bytes32"
       },
       {
-        "name": "executorId",
+        "name": "nodeId",
         "type": "bytes16",
         "indexed": true,
         "internalType": "bytes16"
@@ -604,7 +604,7 @@
         "internalType": "bytes32"
       },
       {
-        "name": "executorId",
+        "name": "nodeId",
         "type": "bytes16",
         "indexed": true,
         "internalType": "bytes16"
@@ -698,7 +698,7 @@
     ]
   },
   { "type": "error", "name": "ERC1967NonPayable", "inputs": [] },
-  { "type": "error", "name": "ExecutorNotOwned", "inputs": [] },
+  { "type": "error", "name": "NodeNotOwned", "inputs": [] },
   { "type": "error", "name": "FailedCall", "inputs": [] },
   { "type": "error", "name": "InsufficientAmount", "inputs": [] },
   {

@@ -2,11 +2,15 @@
 
 mod auth;
 mod auth0;
+mod balance;
+mod metrics;
 mod rate_limit;
 mod scope;
 
 pub use auth::{auth_middleware, get_auth_context, AuthContext, AuthDetails};
 pub use auth0::{auth0_middleware, get_auth0_claims, Auth0Claims};
+pub use balance::balance_validation_middleware;
+pub use metrics::metrics_middleware;
 pub use rate_limit::RateLimitMiddleware;
 pub use scope::scope_validation_middleware;
 
@@ -36,7 +40,12 @@ pub fn apply_middleware(router: Router<AppState>, state: AppState) -> Router<App
         .layer(TimeoutLayer::new(state.config.request_timeout()))
         // Add CORS
         .layer(cors)
-        // Add custom middleware layers
+        // Add metrics middleware (first, to track all requests)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics_middleware,
+        ))
+        // Add rate limit middleware
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rate_limit_handler,
@@ -57,7 +66,16 @@ async fn rate_limit_handler(
     // Check rate limit
     match rate_limit::rate_limit_middleware(storage, req, next).await {
         Ok(response) => Ok(response),
-        Err(StatusCode::TOO_MANY_REQUESTS) => Err(crate::error::ApiError::RateLimitExceeded),
+        Err(StatusCode::TOO_MANY_REQUESTS) => {
+            // Record rate limit event
+            if let Some(metrics) = &state.metrics {
+                let api_metrics = metrics.api_metrics();
+                tokio::spawn(async move {
+                    api_metrics.record_rate_limited("unknown").await;
+                });
+            }
+            Err(crate::error::ApiError::RateLimitExceeded)
+        }
         Err(_) => Err(crate::error::ApiError::Internal {
             message: "Rate limit check failed".to_string(),
         }),

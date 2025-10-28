@@ -44,64 +44,9 @@ pub struct GetBalanceResponse {
     pub available_balance: ::prost::alloc::string::String,
     /// Decimal string
     #[prost(string, tag = "2")]
-    pub reserved_balance: ::prost::alloc::string::String,
-    /// Decimal string
-    #[prost(string, tag = "3")]
     pub total_balance: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "4")]
+    #[prost(message, optional, tag = "3")]
     pub last_updated: ::core::option::Option<::prost_types::Timestamp>,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReserveCreditsRequest {
-    #[prost(string, tag = "1")]
-    pub user_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "2")]
-    pub rental_id: ::prost::alloc::string::String,
-    /// Decimal string
-    #[prost(string, tag = "3")]
-    pub amount: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "4")]
-    pub duration: ::core::option::Option<::prost_types::Duration>,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReserveCreditsResponse {
-    #[prost(bool, tag = "1")]
-    pub success: bool,
-    #[prost(string, tag = "2")]
-    pub reservation_id: ::prost::alloc::string::String,
-    /// Decimal string
-    #[prost(string, tag = "3")]
-    pub reserved_amount: ::prost::alloc::string::String,
-    #[prost(message, optional, tag = "4")]
-    pub reserved_until: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(string, tag = "5")]
-    pub error_message: ::prost::alloc::string::String,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReleaseReservationRequest {
-    #[prost(string, tag = "1")]
-    pub reservation_id: ::prost::alloc::string::String,
-    /// Decimal string - actual amount to charge
-    #[prost(string, tag = "2")]
-    pub final_amount: ::prost::alloc::string::String,
-}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ReleaseReservationResponse {
-    #[prost(bool, tag = "1")]
-    pub success: bool,
-    /// Decimal string
-    #[prost(string, tag = "2")]
-    pub charged_amount: ::prost::alloc::string::String,
-    /// Decimal string
-    #[prost(string, tag = "3")]
-    pub refunded_amount: ::prost::alloc::string::String,
-    /// Decimal string
-    #[prost(string, tag = "4")]
-    pub new_balance: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -111,7 +56,7 @@ pub struct TrackRentalRequest {
     #[prost(string, tag = "2")]
     pub user_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub executor_id: ::prost::alloc::string::String,
+    pub node_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub validator_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
@@ -121,9 +66,7 @@ pub struct TrackRentalRequest {
     pub hourly_rate: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "7")]
     pub start_time: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(message, optional, tag = "8")]
-    pub max_duration: ::core::option::Option<::prost_types::Duration>,
-    #[prost(map = "string, string", tag = "9")]
+    #[prost(map = "string, string", tag = "8")]
     pub metadata: ::std::collections::HashMap<
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
@@ -161,11 +104,6 @@ pub struct TrackRentalResponse {
     pub success: bool,
     #[prost(string, tag = "2")]
     pub tracking_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub reservation_id: ::prost::alloc::string::String,
-    /// Decimal string
-    #[prost(string, tag = "4")]
-    pub estimated_cost: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -210,7 +148,7 @@ pub mod get_active_rentals_request {
         #[prost(string, tag = "2")]
         ValidatorId(::prost::alloc::string::String),
         #[prost(string, tag = "3")]
-        ExecutorId(::prost::alloc::string::String),
+        NodeId(::prost::alloc::string::String),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -229,7 +167,7 @@ pub struct ActiveRental {
     #[prost(string, tag = "2")]
     pub user_id: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
-    pub executor_id: ::prost::alloc::string::String,
+    pub node_id: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub validator_id: ::prost::alloc::string::String,
     #[prost(enumeration = "RentalStatus", tag = "5")]
@@ -288,7 +226,7 @@ pub struct TelemetryData {
     #[prost(string, tag = "1")]
     pub rental_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
-    pub executor_id: ::prost::alloc::string::String,
+    pub node_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "3")]
     pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(message, optional, tag = "4")]
@@ -502,6 +440,123 @@ pub struct ErrorDetail {
         ::prost::alloc::string::String,
     >,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SyncPricesRequest {
+    /// Force immediate sync even if recently synced
+    #[prost(bool, tag = "1")]
+    pub force_sync: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SyncPricesResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(uint32, tag = "2")]
+    pub prices_synced: u32,
+    #[prost(message, optional, tag = "3")]
+    pub sync_started_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "4")]
+    pub sync_completed_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "5")]
+    pub next_scheduled_sync: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(string, tag = "7")]
+    pub error_message: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCachedPricesRequest {
+    /// Filter by GPU models (empty = all)
+    #[prost(string, repeated, tag = "1")]
+    pub gpu_models: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Filter by providers (empty = all)
+    #[prost(string, repeated, tag = "2")]
+    pub providers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Include expired cache entries
+    #[prost(bool, tag = "3")]
+    pub include_expired: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetCachedPricesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub prices: ::prost::alloc::vec::Vec<GpuPrice>,
+    #[prost(message, optional, tag = "2")]
+    pub cached_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GpuPrice {
+    #[prost(string, tag = "1")]
+    pub gpu_model: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub vram_gb: u32,
+    /// Decimal string
+    #[prost(string, tag = "3")]
+    pub market_price_per_hour: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "4")]
+    pub discounted_price_per_hour: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "5")]
+    pub discount_percent: ::prost::alloc::string::String,
+    #[prost(string, tag = "6")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "7")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(string, tag = "8")]
+    pub location: ::prost::alloc::string::String,
+    #[prost(string, tag = "9")]
+    pub instance_name: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "10")]
+    pub updated_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "11")]
+    pub expires_at: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(bool, tag = "12")]
+    pub is_spot: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPriceHistoryRequest {
+    /// Required
+    #[prost(string, tag = "1")]
+    pub gpu_model: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "2")]
+    pub start_time: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "3")]
+    pub end_time: ::core::option::Option<::prost_types::Timestamp>,
+    /// Filter by providers (empty = all)
+    #[prost(string, repeated, tag = "4")]
+    pub providers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Max number of results (default: 100)
+    #[prost(uint32, tag = "5")]
+    pub limit: u32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPriceHistoryResponse {
+    #[prost(string, tag = "1")]
+    pub gpu_model: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag = "2")]
+    pub entries: ::prost::alloc::vec::Vec<PriceHistoryEntry>,
+    #[prost(uint64, tag = "3")]
+    pub total_count: u64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PriceHistoryEntry {
+    #[prost(string, tag = "1")]
+    pub gpu_model: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "2")]
+    pub price_per_hour: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub provider: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "5")]
+    pub recorded_at: ::core::option::Option<::prost_types::Timestamp>,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RentalStatus {
@@ -710,66 +765,6 @@ pub mod billing_service_client {
             req.extensions_mut()
                 .insert(
                     GrpcMethod::new("basilica.billing.v1.BillingService", "GetBalance"),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn reserve_credits(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ReserveCreditsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReserveCreditsResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/ReserveCredits",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
-                        "ReserveCredits",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
-        pub async fn release_reservation(
-            &mut self,
-            request: impl tonic::IntoRequest<super::ReleaseReservationRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReleaseReservationResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::new(
-                        tonic::Code::Unknown,
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/basilica.billing.v1.BillingService/ReleaseReservation",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "basilica.billing.v1.BillingService",
-                        "ReleaseReservation",
-                    ),
                 );
             self.inner.unary(req, path, codec).await
         }
@@ -1010,6 +1005,94 @@ pub mod billing_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Dynamic GPU pricing
+        pub async fn sync_prices(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SyncPricesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SyncPricesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/SyncPrices",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("basilica.billing.v1.BillingService", "SyncPrices"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_cached_prices(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetCachedPricesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCachedPricesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/GetCachedPrices",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "GetCachedPrices",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_price_history(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPriceHistoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPriceHistoryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/GetPriceHistory",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "GetPriceHistory",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1032,20 +1115,6 @@ pub mod billing_service_server {
             request: tonic::Request<super::GetBalanceRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetBalanceResponse>,
-            tonic::Status,
-        >;
-        async fn reserve_credits(
-            &self,
-            request: tonic::Request<super::ReserveCreditsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReserveCreditsResponse>,
-            tonic::Status,
-        >;
-        async fn release_reservation(
-            &self,
-            request: tonic::Request<super::ReleaseReservationRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReleaseReservationResponse>,
             tonic::Status,
         >;
         /// Rental tracking
@@ -1102,6 +1171,28 @@ pub mod billing_service_server {
             request: tonic::Request<super::SetUserPackageRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SetUserPackageResponse>,
+            tonic::Status,
+        >;
+        /// Dynamic GPU pricing
+        async fn sync_prices(
+            &self,
+            request: tonic::Request<super::SyncPricesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SyncPricesResponse>,
+            tonic::Status,
+        >;
+        async fn get_cached_prices(
+            &self,
+            request: tonic::Request<super::GetCachedPricesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCachedPricesResponse>,
+            tonic::Status,
+        >;
+        async fn get_price_history(
+            &self,
+            request: tonic::Request<super::GetPriceHistoryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPriceHistoryResponse>,
             tonic::Status,
         >;
     }
@@ -1262,100 +1353,6 @@ pub mod billing_service_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = GetBalanceSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/basilica.billing.v1.BillingService/ReserveCredits" => {
-                    #[allow(non_camel_case_types)]
-                    struct ReserveCreditsSvc<T: BillingService>(pub Arc<T>);
-                    impl<
-                        T: BillingService,
-                    > tonic::server::UnaryService<super::ReserveCreditsRequest>
-                    for ReserveCreditsSvc<T> {
-                        type Response = super::ReserveCreditsResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ReserveCreditsRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as BillingService>::reserve_credits(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let inner = inner.0;
-                        let method = ReserveCreditsSvc(inner);
-                        let codec = tonic::codec::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/basilica.billing.v1.BillingService/ReleaseReservation" => {
-                    #[allow(non_camel_case_types)]
-                    struct ReleaseReservationSvc<T: BillingService>(pub Arc<T>);
-                    impl<
-                        T: BillingService,
-                    > tonic::server::UnaryService<super::ReleaseReservationRequest>
-                    for ReleaseReservationSvc<T> {
-                        type Response = super::ReleaseReservationResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::ReleaseReservationRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as BillingService>::release_reservation(&inner, request)
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let inner = inner.0;
-                        let method = ReleaseReservationSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1733,6 +1730,146 @@ pub mod billing_service_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = SetUserPackageSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/SyncPrices" => {
+                    #[allow(non_camel_case_types)]
+                    struct SyncPricesSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::SyncPricesRequest>
+                    for SyncPricesSvc<T> {
+                        type Response = super::SyncPricesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SyncPricesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::sync_prices(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = SyncPricesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/GetCachedPrices" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCachedPricesSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::GetCachedPricesRequest>
+                    for GetCachedPricesSvc<T> {
+                        type Response = super::GetCachedPricesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetCachedPricesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::get_cached_prices(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = GetCachedPricesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/GetPriceHistory" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPriceHistorySvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::GetPriceHistoryRequest>
+                    for GetPriceHistorySvc<T> {
+                        type Response = super::GetPriceHistoryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetPriceHistoryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::get_price_history(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = GetPriceHistorySvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

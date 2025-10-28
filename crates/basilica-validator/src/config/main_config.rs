@@ -74,6 +74,10 @@ pub struct ValidatorConfig {
     /// Database cleanup configuration
     #[serde(default)]
     pub cleanup: crate::persistence::cleanup_task::CleanupConfig,
+
+    /// Billing telemetry streaming configuration
+    #[serde(default)]
+    pub billing: BillingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,7 +99,7 @@ pub struct VerificationConfig {
     pub min_verification_interval: Duration,
     /// Network ID for the subnet
     pub netuid: u16,
-    /// Enable dynamic discovery of executor SSH details from miners
+    /// Enable dynamic discovery of node SSH details from miners
     #[serde(default = "default_use_dynamic_discovery")]
     pub use_dynamic_discovery: bool,
     /// Timeout for miner discovery operations
@@ -122,10 +126,10 @@ pub struct VerificationConfig {
     /// Collateral event scan interval
     #[serde(default = "default_collateral_event_scan_interval")]
     pub collateral_event_scan_interval: Duration,
-    /// Interval between full binary validations per executor
-    #[serde(default = "default_executor_validation_interval")]
-    pub executor_validation_interval: Duration,
-    /// Time period for cleaning up GPU assignments from offline executors (min 2 hours)
+    /// Interval between full binary validations per node
+    #[serde(default = "default_node_validation_interval")]
+    pub node_validation_interval: Duration,
+    /// Time period for cleaning up GPU assignments from offline nodes (min 2 hours)
     #[serde(default = "default_gpu_assignment_cleanup_ttl")]
     pub gpu_assignment_cleanup_ttl: Option<Duration>,
     /// Enable worker queue for decoupled validation execution
@@ -153,7 +157,7 @@ fn default_collateral_event_scan_interval() -> Duration {
     Duration::from_secs(12) // one block time
 }
 
-fn default_executor_validation_interval() -> Duration {
+fn default_node_validation_interval() -> Duration {
     Duration::from_secs(6 * 3600) // 6 hours
 }
 
@@ -189,7 +193,7 @@ impl VerificationConfig {
             binary_validation: BinaryValidationConfig::default(),
             docker_validation: DockerValidationConfig::default(),
             collateral_event_scan_interval: Duration::from_secs(12),
-            executor_validation_interval: Duration::from_secs(3600),
+            node_validation_interval: Duration::from_secs(3600),
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(7200)),
             enable_worker_queue: false,
             storage_validation: StorageValidationConfig::default(),
@@ -212,9 +216,9 @@ pub struct BinaryValidationConfig {
     pub enabled: bool,
     /// Binary validation weight in final score calculation
     pub score_weight: f64,
-    /// Default executor port for SSH tunnel cleanup
-    #[serde(default = "default_executor_port")]
-    pub executor_port: u16,
+    /// Default node port for SSH tunnel cleanup
+    #[serde(default = "default_node_port")]
+    pub node_port: u16,
     /// Server mode configuration
     #[serde(default)]
     pub server_mode: ValidationServerConfig,
@@ -250,6 +254,12 @@ pub struct ValidationServerConfig {
     /// Interval between server readiness checks (milliseconds)
     #[serde(default = "default_server_ready_check_interval_ms")]
     pub server_ready_check_interval_ms: u64,
+    /// Maximum workflow retry attempts on persistent 404 errors
+    #[serde(default = "default_max_workflow_retry_attempts")]
+    pub max_workflow_retry_attempts: u32,
+    /// Base delay for workflow retry backoff (milliseconds)
+    #[serde(default = "default_workflow_retry_base_delay_ms")]
+    pub workflow_retry_base_delay_ms: u64,
 }
 
 impl Default for ValidationServerConfig {
@@ -264,6 +274,8 @@ impl Default for ValidationServerConfig {
             max_poll_attempts: default_max_poll_attempts(),
             server_ready_timeout_secs: default_server_ready_timeout_secs(),
             server_ready_check_interval_ms: default_server_ready_check_interval_ms(),
+            max_workflow_retry_attempts: default_max_workflow_retry_attempts(),
+            workflow_retry_base_delay_ms: default_workflow_retry_base_delay_ms(),
         }
     }
 }
@@ -351,7 +363,15 @@ fn default_server_ready_check_interval_ms() -> u64 {
     500 // Check every 500ms
 }
 
-fn default_executor_port() -> u16 {
+fn default_max_workflow_retry_attempts() -> u32 {
+    3 // Retry entire workflow up to 3 times
+}
+
+fn default_workflow_retry_base_delay_ms() -> u64 {
+    2000 // 2 seconds base delay, with exponential backoff
+}
+
+fn default_node_port() -> u16 {
     3000
 }
 
@@ -364,7 +384,7 @@ impl Default for BinaryValidationConfig {
             output_format: "json".to_string(),
             enabled: true,
             score_weight: 0.8,
-            executor_port: default_executor_port(),
+            node_port: default_node_port(),
             server_mode: ValidationServerConfig::default(),
         }
     }
@@ -486,6 +506,115 @@ fn default_known_hosts_file() -> Option<PathBuf> {
 
 fn default_rental_session_duration() -> u64 {
     0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingConfig {
+    /// Enable billing telemetry streaming
+    #[serde(default = "default_billing_enabled")]
+    pub enabled: bool,
+
+    /// Billing service gRPC endpoint
+    #[serde(default = "default_billing_endpoint")]
+    pub billing_endpoint: String,
+
+    /// Request timeout in seconds
+    #[serde(default = "default_billing_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Use TLS for billing connection
+    #[serde(default = "default_billing_use_tls")]
+    pub use_tls: bool,
+
+    /// Maximum telemetry batch size
+    #[serde(default = "default_billing_batch_size")]
+    pub batch_size: usize,
+
+    /// Billing telemetry collection interval in seconds
+    #[serde(default = "default_billing_collection_interval_secs")]
+    pub collection_interval_secs: u64,
+
+    /// Telemetry flush interval in seconds
+    #[serde(default = "default_billing_flush_interval_secs")]
+    pub flush_interval_secs: u64,
+
+    /// Maximum retry attempts for failed telemetry
+    #[serde(default = "default_billing_max_retries")]
+    pub max_retries: u32,
+
+    /// Circuit breaker failure threshold
+    #[serde(default = "default_billing_circuit_failure_threshold")]
+    pub circuit_failure_threshold: u32,
+
+    /// Circuit breaker recovery timeout in seconds
+    #[serde(default = "default_billing_circuit_recovery_timeout_secs")]
+    pub circuit_recovery_timeout_secs: u64,
+
+    /// Circuit breaker failure window duration in seconds
+    #[serde(default = "default_billing_circuit_window_duration_secs")]
+    pub circuit_window_duration_secs: u64,
+}
+
+fn default_billing_enabled() -> bool {
+    false
+}
+
+fn default_billing_endpoint() -> String {
+    "http://127.0.0.1:50051".to_string()
+}
+
+fn default_billing_timeout_secs() -> u64 {
+    30
+}
+
+fn default_billing_use_tls() -> bool {
+    false
+}
+
+fn default_billing_batch_size() -> usize {
+    100
+}
+
+fn default_billing_collection_interval_secs() -> u64 {
+    30
+}
+
+fn default_billing_flush_interval_secs() -> u64 {
+    30
+}
+
+fn default_billing_max_retries() -> u32 {
+    10
+}
+
+fn default_billing_circuit_failure_threshold() -> u32 {
+    5
+}
+
+fn default_billing_circuit_recovery_timeout_secs() -> u64 {
+    30
+}
+
+fn default_billing_circuit_window_duration_secs() -> u64 {
+    60
+}
+
+impl Default for BillingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_billing_enabled(),
+            billing_endpoint: default_billing_endpoint(),
+            timeout_secs: default_billing_timeout_secs(),
+            use_tls: default_billing_use_tls(),
+            batch_size: default_billing_batch_size(),
+            collection_interval_secs: default_billing_collection_interval_secs(),
+            flush_interval_secs: default_billing_flush_interval_secs(),
+            max_retries: default_billing_max_retries(),
+            circuit_failure_threshold: default_billing_circuit_failure_threshold(),
+            circuit_recovery_timeout_secs: default_billing_circuit_recovery_timeout_secs(),
+            circuit_window_duration_secs: default_billing_circuit_window_duration_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -659,7 +788,7 @@ impl Default for ValidatorConfig {
                 docker_validation: DockerValidationConfig::default(),
                 storage_validation: StorageValidationConfig::default(),
                 collateral_event_scan_interval: default_collateral_event_scan_interval(),
-                executor_validation_interval: default_executor_validation_interval(),
+                node_validation_interval: default_node_validation_interval(),
                 gpu_assignment_cleanup_ttl: default_gpu_assignment_cleanup_ttl(),
                 enable_worker_queue: default_enable_worker_queue(),
             },
@@ -676,6 +805,7 @@ impl Default for ValidatorConfig {
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
+            billing: BillingConfig::default(),
         }
     }
 }
@@ -748,6 +878,49 @@ impl ConfigValidation for ValidatorConfig {
                 value: "emission_config".to_string(),
                 reason: e.to_string(),
             });
+        }
+
+        // Validate billing configuration
+        if self.billing.enabled {
+            if self.billing.billing_endpoint.is_empty() {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.billing_endpoint".to_string(),
+                    value: self.billing.billing_endpoint.clone(),
+                    reason: "Billing endpoint cannot be empty when billing is enabled".to_string(),
+                });
+            }
+
+            if self.billing.timeout_secs == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.timeout_secs".to_string(),
+                    value: self.billing.timeout_secs.to_string(),
+                    reason: "Timeout must be greater than 0".to_string(),
+                });
+            }
+
+            if self.billing.batch_size == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.batch_size".to_string(),
+                    value: self.billing.batch_size.to_string(),
+                    reason: "Batch size must be greater than 0".to_string(),
+                });
+            }
+
+            if self.billing.collection_interval_secs == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.collection_interval_secs".to_string(),
+                    value: self.billing.collection_interval_secs.to_string(),
+                    reason: "Collection interval must be greater than 0".to_string(),
+                });
+            }
+
+            if self.billing.flush_interval_secs == 0 {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "billing.flush_interval_secs".to_string(),
+                    value: self.billing.flush_interval_secs.to_string(),
+                    reason: "Flush interval must be greater than 0".to_string(),
+                });
+            }
         }
 
         Ok(())

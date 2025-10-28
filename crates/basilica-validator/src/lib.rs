@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod ban_system;
+pub mod billing;
 pub mod bittensor_core;
 pub mod cli;
 pub mod collateral;
@@ -16,6 +17,7 @@ pub mod miner_prover;
 pub mod os_process;
 pub mod persistence;
 pub mod rental;
+pub mod service;
 pub mod ssh;
 
 // Main public API exports
@@ -32,7 +34,7 @@ pub use metrics::{
 // Journal functionality temporarily disabled for testing
 pub use miner_prover::types::ValidationError;
 pub use miner_prover::{
-    types::{ExecutorInfo, MinerInfo},
+    types::{MinerInfo, NodeInfo},
     MinerProver,
 };
 pub use persistence::entities::{
@@ -41,7 +43,8 @@ pub use persistence::entities::{
 };
 pub use persistence::SimplePersistence;
 pub use rental::{RentalInfo, RentalManager, RentalRequest, RentalResponse};
-pub use ssh::{ExecutorSshDetails, ValidatorSshClient};
+pub use service::{ServiceStatus, ValidatorService};
+pub use ssh::{NodeSshDetails, ValidatorSshClient};
 
 /// Validator library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

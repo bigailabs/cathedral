@@ -11,8 +11,9 @@ use tracing::error;
 
 use crate::{
     api::{types::ApiError, ApiState},
-    gpu::{GpuCategorizer, GpuCategory, MinerGpuProfile},
+    gpu::{GpuCategorizer, MinerGpuProfile},
 };
+use basilica_common::types::GpuCategory;
 
 pub async fn list_gpu_profiles(
     State(state): State<ApiState>,

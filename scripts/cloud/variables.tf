@@ -58,3 +58,45 @@ variable "basilica_auth0_issuer" {
   type    = string
   default = "your-auth0-issuer"
 }
+
+variable "validator_allowed_ips" {
+  type        = list(string)
+  description = "List of validator IP addresses/CIDR blocks allowed to access billing gRPC endpoint"
+  default     = []
+}
+
+variable "route53_zone_id" {
+  type        = string
+  description = "Route53 hosted zone ID for DNS records (optional, leave empty to skip DNS management)"
+  default     = ""
+}
+
+variable "payments_reconciliation_coldwallet_address" {
+  type        = string
+  description = "SS58 address of the cold wallet for hotwallet reconciliation sweeps"
+  default     = ""
+}
+
+variable "payments_reconciliation_enabled" {
+  type        = bool
+  description = "Enable automatic hotwallet-to-coldwallet reconciliation sweeps"
+  default     = false
+}
+
+variable "payments_reconciliation_dry_run" {
+  type        = bool
+  description = "Run reconciliation in dry-run mode (no actual transfers)"
+  default     = true
+}
+
+variable "marketplace_api_key" {
+  type        = string
+  description = "API key for Shadeform marketplace pricing API"
+  sensitive   = true
+}
+
+variable "payments_blockchain_websocket_url" {
+  type        = string
+  description = "WebSocket URL for blockchain connectivity (payments service)"
+  default     = "wss://entrypoint-finney.opentensor.ai:443"
+}

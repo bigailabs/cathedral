@@ -2,7 +2,7 @@
 name = "basilica-miner"
 version = "0.1.0"
 edition = "2021"
-description = "Basilca Miner - Bittensor neuron that manages executor fleets"
+description = "Basilca Miner - Bittensor neuron that manages node fleets"
 rust-version = "1.70"
 
 [lib]
@@ -19,6 +19,7 @@ tokio = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_with = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
@@ -45,15 +46,8 @@ basilica-protocol = { path = "../basilica-protocol" }
 bittensor = { path = "../bittensor" }
 
 # Miner-specific dependencies
-# HTTP client for external communications
-reqwest = { workspace = true }
-
 # Configuration
 toml = { workspace = true }
-url = { workspace = true }
-
-# JSON Web Tokens for authentication
-jsonwebtoken = { workspace = true }
 
 # Background job processing
 async-trait = { workspace = true }
@@ -61,11 +55,5 @@ async-trait = { workspace = true }
 # Random number generation
 rand = { workspace = true }
 
-[dev-dependencies]
-tempfile = { workspace = true }
-futures = { workspace = true }
-
 [features]
 default = []
-# Enable test utilities for executor communication
-test-utils = []

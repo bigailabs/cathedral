@@ -7,6 +7,8 @@ use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
+use crate::miner_prover::types::ValidationType;
+use crate::miner_prover::validation_states::{StateResult, ValidationState};
 use crate::persistence::SimplePersistence;
 
 /// Core Prometheus metrics collector for Validator
@@ -31,7 +33,7 @@ impl ValidatorPrometheusMetrics {
         );
         describe_histogram!(
             "basilica_validator_validation_score",
-            "Validation scores assigned to executors"
+            "Validation scores assigned to nodes"
         );
         describe_counter!(
             "basilica_validator_validation_errors_total",
@@ -109,8 +111,8 @@ impl ValidatorPrometheusMetrics {
 
         // Business metrics
         describe_gauge!(
-            "basilica_validator_executor_health_status",
-            "Executor health status (1=healthy, 0=unhealthy)"
+            "basilica_validator_node_health_status",
+            "Node health status (1=healthy, 0=unhealthy)"
         );
         describe_counter!(
             "basilica_validator_consensus_weight_sets_total",
@@ -134,10 +136,7 @@ impl ValidatorPrometheusMetrics {
             "basilica_validator_miner_gpu_weighted_score",
             "GPU count weighted scores for miners"
         );
-        describe_gauge!(
-            "basilica_validator_executor_gpu_count",
-            "GPU count per executor"
-        );
+        describe_gauge!("basilica_validator_node_gpu_count", "GPU count per node");
 
         // Weight metrics
         describe_gauge!(
@@ -157,10 +156,20 @@ impl ValidatorPrometheusMetrics {
             "GPU profiles for miners"
         );
 
+        // Node uptime metrics
+        describe_gauge!(
+            "basilica_node_uptime_minutes",
+            "Node uptime in minutes for ramp-up calculation"
+        );
+        describe_gauge!(
+            "basilica_node_uptime_multiplier",
+            "Node uptime-based reward multiplier (0.0-1.0)"
+        );
+
         // Rental metrics
         describe_gauge!(
-            "basilica_validator_executor_rental_status",
-            "Executor rental status (1=rented, 0=available)"
+            "basilica_validator_node_rental_status",
+            "Node rental status (1=rented, 0=available)"
         );
         describe_counter!(
             "basilica_validator_rentals_created_total",
@@ -173,6 +182,52 @@ impl ValidatorPrometheusMetrics {
             "Total RPC failures after all retry attempts exhausted"
         );
 
+        // Discovered miners metrics
+        describe_gauge!(
+            "basilica_validator_discovered_miners_total",
+            "Total number of miners currently discovered from metagraph"
+        );
+
+        // Validation state tracking metrics
+        describe_gauge!(
+            "basilica_validator_node_validation_state",
+            "Current validation state of nodes (0=not in state, 1=current, 2=failed)"
+        );
+
+        // Billing telemetry metrics
+        describe_counter!(
+            "basilica_validator_billing_telemetry_collected_total",
+            "Total billing telemetry records collected"
+        );
+        describe_counter!(
+            "basilica_validator_billing_telemetry_sent_total",
+            "Total billing telemetry records successfully sent"
+        );
+        describe_counter!(
+            "basilica_validator_billing_telemetry_dropped_total",
+            "Total billing telemetry records dropped"
+        );
+        describe_gauge!(
+            "basilica_validator_billing_queue_depth",
+            "Current depth of billing telemetry queue"
+        );
+        describe_gauge!(
+            "basilica_validator_billing_channel_utilization_percent",
+            "Channel buffer utilization percentage"
+        );
+        describe_gauge!(
+            "basilica_validator_billing_circuit_breaker_state",
+            "Circuit breaker state (0=closed, 1=half_open, 2=open)"
+        );
+        describe_histogram!(
+            "basilica_validator_billing_retry_attempts",
+            "Number of retry attempts before success or final failure"
+        );
+        describe_histogram!(
+            "basilica_validator_billing_telemetry_latency_seconds",
+            "End-to-end latency from collection to successful send"
+        );
+
         Ok(Self {
             last_collection: Arc::new(RwLock::new(SystemTime::now())),
             persistence,
@@ -182,7 +237,7 @@ impl ValidatorPrometheusMetrics {
     /// Record validation operation
     pub fn record_validation(
         &self,
-        _executor_id: &str,
+        _node_id: &str,
         success: bool,
         duration: Duration,
         score: Option<f64>,
@@ -246,9 +301,9 @@ impl ValidatorPrometheusMetrics {
         histogram!("basilica_validator_http_response_size_bytes").record(response_size as f64);
     }
 
-    /// Set executor health status
-    pub fn set_executor_health(&self, _executor_id: &str, healthy: bool) {
-        gauge!("basilica_validator_executor_health_status").set(if healthy { 1.0 } else { 0.0 });
+    /// Set node health status
+    pub fn set_node_health(&self, _node_id: &str, healthy: bool) {
+        gauge!("basilica_validator_node_health_status").set(if healthy { 1.0 } else { 0.0 });
     }
 
     /// Record consensus weight set operation
@@ -280,17 +335,17 @@ impl ValidatorPrometheusMetrics {
             .record(weighted_score);
     }
 
-    /// Record GPU count for an executor
-    pub fn record_executor_gpu_count(
+    /// Record GPU count for an node
+    pub fn record_node_gpu_count(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         gpu_model: &str,
         gpu_count: usize,
     ) {
-        gauge!("basilica_validator_executor_gpu_count",
+        gauge!("basilica_validator_node_gpu_count",
             "miner_uid" => miner_uid.to_string(),
-            "executor_id" => executor_id.to_string(),
+            "node_id" => node_id.to_string(),
             "gpu_model" => gpu_model.to_string()
         )
         .set(gpu_count as f64);
@@ -305,10 +360,10 @@ impl ValidatorPrometheusMetrics {
     }
 
     /// Record successful validation for a miner
-    pub fn record_miner_successful_validation(&self, miner_uid: u16, executor_id: &str) {
+    pub fn record_miner_successful_validation(&self, miner_uid: u16, node_id: &str) {
         counter!("basilica_validator_miner_successful_validations",
             "miner_uid" => miner_uid.to_string(),
-            "executor_id" => executor_id.to_string()
+            "node_id" => node_id.to_string()
         )
         .increment(1);
     }
@@ -318,27 +373,69 @@ impl ValidatorPrometheusMetrics {
         &self,
         miner_uid: u16,
         gpu_profile: &str,
-        executor_id: &str,
+        node_id: &str,
         count: u32,
     ) {
         gauge!("basilica_validator_miner_gpu_profiles",
             "miner_uid" => miner_uid.to_string(),
             "gpu_profile" => gpu_profile.to_string(),
-            "executor_id" => executor_id.to_string()
+            "node_id" => node_id.to_string()
         )
         .set(count as f64);
     }
 
-    /// Record executor rental status
-    pub fn record_executor_rental_status(
+    /// Record node uptime metrics for ramp-up tracking
+    pub fn record_node_uptime_metrics(
         &self,
-        executor_id: &str,
+        miner_uid: u16,
+        node_id: &str,
+        uptime_minutes: f64,
+        multiplier: f64,
+    ) {
+        gauge!("basilica_node_uptime_minutes",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(uptime_minutes);
+
+        gauge!("basilica_node_uptime_multiplier",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(multiplier);
+    }
+
+    /// Reset node uptime metrics for a node that has been removed
+    pub fn reset_node_uptime_metrics(&self, miner_uid: u16, node_id: &str) {
+        gauge!("basilica_node_uptime_minutes",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(0.0);
+
+        gauge!("basilica_node_uptime_multiplier",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(0.0);
+
+        debug!(
+            miner_uid = miner_uid,
+            node_id = node_id,
+            "Reset node uptime metrics after node removal"
+        );
+    }
+
+    /// Record node rental status
+    pub fn record_node_rental_status(
+        &self,
+        node_id: &str,
         miner_uid: u16,
         gpu_type: &str,
         is_rented: bool,
     ) {
-        gauge!("basilica_validator_executor_rental_status",
-            "executor_id" => executor_id.to_string(),
+        gauge!("basilica_validator_node_rental_status",
+            "node_id" => node_id.to_string(),
             "miner_uid" => miner_uid.to_string(),
             "gpu_type" => gpu_type.to_string()
         )
@@ -464,31 +561,31 @@ impl ValidatorPrometheusMetrics {
                 .and_then(|uid_str| uid_str.parse::<u16>().ok())
                 .unwrap_or(0);
 
-            let executor_gpu_counts = self
+            let node_gpu_counts = self
                 .persistence
                 .get_miner_gpu_uuid_assignments(&miner.miner_id)
                 .await
                 .unwrap();
 
             debug!(
-                "Miner {} (UID: {}) has {} executors with GPU assignments",
+                "Miner {} (UID: {}) has {} nodes with GPU assignments",
                 miner.miner_id,
                 miner_uid,
-                executor_gpu_counts.len()
+                node_gpu_counts.len()
             );
 
-            // Only set metrics for executors that have GPU assignments
-            for (executor_id, gpu_count, gpu_model, gpu_memory_gb) in &executor_gpu_counts {
-                let executor_uuid = executor_id.as_str();
+            // Only set metrics for nodes that have GPU assignments
+            for (node_id, gpu_count, gpu_model, gpu_memory_gb) in &node_gpu_counts {
+                let node_uuid = node_id.as_str();
 
                 debug!(
-                    "Setting executor GPU count: miner_uid={}, executor_id={}, gpu_model={}, gpu_count={}, gpu_memory_gb={}",
-                    miner_uid, executor_uuid, gpu_model, gpu_count, gpu_memory_gb
+                    "Setting node GPU count: miner_uid={}, node_id={}, gpu_model={}, gpu_count={}, gpu_memory_gb={}",
+                    miner_uid, node_uuid, gpu_model, gpu_count, gpu_memory_gb
                 );
 
-                gauge!("basilica_validator_executor_gpu_count",
+                gauge!("basilica_validator_node_gpu_count",
                     "miner_uid" => miner_uid.to_string(),
-                    "executor_id" => executor_uuid.to_string(),
+                    "node_id" => node_uuid.to_string(),
                     "gpu_model" => gpu_model.to_string()
                 )
                 .set(*gpu_count as f64);
@@ -526,5 +623,115 @@ impl ValidatorPrometheusMetrics {
             "RPC critical failure recorded: method={}, error_type={}",
             method, error_type
         );
+    }
+
+    /// Set total discovered miners count
+    pub fn set_discovered_miners_total(&self, count: u64) {
+        gauge!("basilica_validator_discovered_miners_total").set(count as f64);
+    }
+
+    /// Sets node validation state atomically, clearing all other states for the validation type
+    pub fn set_node_validation_state(
+        &self,
+        node_id: &str,
+        miner_uid: u16,
+        validation_type: ValidationType,
+        current_state: ValidationState,
+        result: StateResult,
+    ) {
+        let validation_type_str = match validation_type {
+            ValidationType::Full => "full",
+            ValidationType::Lightweight => "lightweight",
+        };
+
+        // Get all possible states for this validation type
+        let all_states = ValidationState::states_for_type(validation_type);
+
+        // Set metrics for all states
+        for state in all_states {
+            let value = if *state == current_state {
+                result.to_metric_value()
+            } else {
+                0.0
+            };
+
+            gauge!("basilica_validator_node_validation_state",
+                "node_id" => node_id.to_string(),
+                "miner_uid" => miner_uid.to_string(),
+                "validation_type" => validation_type_str.to_string(),
+                "state" => state.as_str().to_string()
+            )
+            .set(value);
+        }
+    }
+
+    /// Clears all validation states for an node (sets all to 0.0)
+    pub fn clear_node_validation_states(
+        &self,
+        node_id: &str,
+        miner_uid: u16,
+        validation_type: ValidationType,
+    ) {
+        let validation_type_str = match validation_type {
+            ValidationType::Full => "full",
+            ValidationType::Lightweight => "lightweight",
+        };
+
+        let all_states = ValidationState::states_for_type(validation_type);
+
+        for state in all_states {
+            gauge!("basilica_validator_node_validation_state",
+                "node_id" => node_id.to_string(),
+                "miner_uid" => miner_uid.to_string(),
+                "validation_type" => validation_type_str.to_string(),
+                "state" => state.as_str().to_string()
+            )
+            .set(0.0);
+        }
+    }
+
+    pub fn record_billing_telemetry_collected(&self, rental_id: &str) {
+        counter!("basilica_validator_billing_telemetry_collected_total",
+            "rental_id" => rental_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn record_billing_telemetry_sent(&self, count: usize) {
+        counter!("basilica_validator_billing_telemetry_sent_total").increment(count as u64);
+    }
+
+    pub fn record_billing_telemetry_dropped(&self, reason: &str, count: usize) {
+        counter!("basilica_validator_billing_telemetry_dropped_total",
+            "reason" => reason.to_string()
+        )
+        .increment(count as u64);
+    }
+
+    pub fn set_billing_queue_depth(&self, depth: usize) {
+        gauge!("basilica_validator_billing_queue_depth").set(depth as f64);
+    }
+
+    pub fn set_billing_channel_utilization(&self, utilization_percent: f64) {
+        gauge!("basilica_validator_billing_channel_utilization_percent").set(utilization_percent);
+    }
+
+    pub fn set_billing_circuit_breaker_state(&self, state: &str) {
+        let state_value = match state {
+            "closed" => 0.0,
+            "half_open" => 1.0,
+            "open" => 2.0,
+            _ => -1.0,
+        };
+        gauge!("basilica_validator_billing_circuit_breaker_state").set(state_value);
+    }
+
+    pub fn record_billing_retry_attempts(&self, attempts: u32) {
+        histogram!("basilica_validator_billing_retry_attempts").record(attempts as f64);
+    }
+
+    pub fn record_billing_telemetry_latency(&self, latency: Duration) {
+        histogram!("basilica_validator_billing_telemetry_latency_seconds")
+            .record(latency.as_secs_f64());
     }
 }

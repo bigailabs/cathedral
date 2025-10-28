@@ -1,9 +1,11 @@
 use anyhow::Result;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+use tracing::info;
 
 use crate::{
     domain::types::Treasury,
+    metrics::PaymentsMetricsSystem,
     storage::{DepositAccountsRepo, ObservedDepositsRepo, PgRepos},
 };
 use basilica_common::crypto::Aead;
@@ -17,14 +19,21 @@ pub struct PaymentsServer<T: Treasury + 'static> {
     repos: PgRepos,
     treasury: Arc<T>,
     aead: Arc<Aead>,
+    metrics: Option<Arc<PaymentsMetricsSystem>>,
 }
 
 impl<T: Treasury> PaymentsServer<T> {
-    pub fn new(repos: PgRepos, treasury: Arc<T>, aead: Arc<Aead>) -> Self {
+    pub fn new(
+        repos: PgRepos,
+        treasury: Arc<T>,
+        aead: Arc<Aead>,
+        metrics: Option<Arc<PaymentsMetricsSystem>>,
+    ) -> Self {
         Self {
             repos,
             treasury,
             aead,
+            metrics,
         }
     }
 
@@ -39,6 +48,11 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
         &self,
         req: Request<CreateDepositAccountRequest>,
     ) -> Result<Response<CreateDepositAccountResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.payment_metrics().start_grpc_timer());
+
         let user_id = req.into_inner().user_id;
 
         if let Some((addr, _, pub_hex, _mn_ct)) =
@@ -62,6 +76,29 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
             .map_err(internal)?;
         tx.commit().await.map_err(internal)?;
 
+        // Log successful account creation for debugging
+        info!(
+            "Successfully created deposit account for user {}: address={} (ss58), account_hex={}...{}",
+            &user_id,
+            &addr,
+            &acct_hex[..8.min(acct_hex.len())],
+            if acct_hex.len() > 4 { &acct_hex[acct_hex.len()-4..] } else { "" }
+        );
+
+        // Record success metrics
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                metrics
+                    .payment_metrics()
+                    .record_grpc_request(timer, "CreateDepositAccount", "success")
+                    .await;
+            }
+            metrics
+                .business_metrics()
+                .record_treasury_operation("create_deposit_account")
+                .await;
+        }
+
         Ok(Response::new(CreateDepositAccountResponse {
             user_id,
             address_ss58: addr,
@@ -73,6 +110,11 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
         &self,
         req: Request<GetDepositAccountRequest>,
     ) -> Result<Response<GetDepositAccountResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.payment_metrics().start_grpc_timer());
+
         let user_id = req.into_inner().user_id;
 
         let resp = match self.repos.get_by_user(&user_id).await.map_err(internal)? {
@@ -88,6 +130,16 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
             },
         };
 
+        // Record success metrics
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                metrics
+                    .payment_metrics()
+                    .record_grpc_request(timer, "GetDepositAccount", "success")
+                    .await;
+            }
+        }
+
         Ok(Response::new(resp))
     }
 
@@ -95,6 +147,11 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
         &self,
         req: Request<ListDepositsRequest>,
     ) -> Result<Response<ListDepositsResponse>, Status> {
+        let timer = self
+            .metrics
+            .as_ref()
+            .map(|m| m.payment_metrics().start_grpc_timer());
+
         let q = req.into_inner();
         let rows = self
             .repos
@@ -121,6 +178,16 @@ impl<T: Treasury + Send + Sync> PaymentsService for PaymentsServer<T> {
                 credited_at: r.credited_at_rfc3339,
             })
             .collect();
+
+        // Record success metrics
+        if let Some(ref metrics) = self.metrics {
+            if let Some(timer) = timer {
+                metrics
+                    .payment_metrics()
+                    .record_grpc_request(timer, "ListDeposits", "success")
+                    .await;
+            }
+        }
 
         Ok(Response::new(ListDepositsResponse { items }))
     }

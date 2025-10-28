@@ -4,7 +4,7 @@
 //!
 //! This crate provides a comprehensive CLI that combines:
 //! - GPU rental operations (ls, up, down, exec, ssh, etc.)
-//! - Network component management (validator, miner, executor)
+//! - Network component management (validator, miner, node)
 //! - Configuration and wallet management
 //!
 //! ## Architecture
@@ -20,10 +20,12 @@ pub mod cli;
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod github_releases;
 pub mod interactive;
 pub mod output;
 pub mod progress;
 pub mod ssh;
+pub mod update_check;
 
 pub use cli::*;
 pub use error::*;

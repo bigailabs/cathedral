@@ -10,9 +10,9 @@ pub mod state;
 
 // Re-export core types from submodules
 pub use crate::error::RetryConfig;
-pub use crate::retry::{CircuitBreaker, ExponentialBackoff, RetryExecutor};
+pub use crate::retry::{CircuitBreaker, ExponentialBackoff, RetryNode};
 pub use health::{ConnectionPoolTrait, HealthCheckMetrics, HealthChecker};
-pub use monitor::{BlockchainEventHandler, BlockchainMonitor};
+pub use monitor::{BlockchainMonitor, TransferInfo};
 pub use pool::{ConnectionPool, ConnectionPoolBuilder};
 pub use state::{ConnectionManager, ConnectionMetricsSnapshot, ConnectionState};
 
@@ -21,6 +21,6 @@ pub mod prelude {
     pub use super::{
         BlockchainMonitor, CircuitBreaker, ConnectionManager, ConnectionMetricsSnapshot,
         ConnectionPool, ConnectionPoolBuilder, ConnectionPoolTrait, ConnectionState,
-        ExponentialBackoff, HealthCheckMetrics, HealthChecker, RetryConfig, RetryExecutor,
+        ExponentialBackoff, HealthCheckMetrics, HealthChecker, RetryConfig, RetryNode,
     };
 }

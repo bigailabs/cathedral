@@ -15,19 +15,18 @@ url = { workspace = true }
 # Internal dependencies
 basilica-validator = { path = "../basilica-validator" }
 basilica-miner = { path = "../basilica-miner" }
-basilica-executor = { path = "../basilica-executor" }
 basilica-protocol = { path = "../basilica-protocol" }
 basilica-common = { path = "../basilica-common" }
+basilica-billing = { path = "../basilica-billing" }
 uuid = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true, features = ["tls", "tls-roots"] }
 sqlx = { workspace = true }
+rust_decimal = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 
-[[test]]
-name = "miner_executor_flow"
-path = "tests/miner_executor_flow.rs"
 
 [[test]]
 name = "bdd_payment_billing_flow"

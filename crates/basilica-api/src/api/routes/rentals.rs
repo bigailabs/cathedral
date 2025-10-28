@@ -3,7 +3,7 @@
 use crate::{
     api::{
         extractors::ownership::{
-            archive_rental_ownership, get_user_rentals_with_ssh, store_rental_ownership,
+            archive_rental_ownership, get_user_rentals_with_details, store_rental_ownership,
             OwnedRental,
         },
         middleware::AuthContext,
@@ -20,13 +20,13 @@ use axum::{
 };
 use basilica_common::utils::validate_docker_image;
 use basilica_sdk::types::{
-    ApiListRentalsResponse, ApiRentalListItem, ExecutorSelection, ListRentalsQuery, LogStreamQuery,
+    ApiListRentalsResponse, ApiRentalListItem, ListRentalsQuery, LogStreamQuery, NodeSelection,
     RentalStatusWithSshResponse, StartRentalApiRequest, TerminateRentalRequest,
 };
 use basilica_validator::{
     api::{
-        rental_routes::StartRentalRequest,
-        types::{AvailableExecutor, ListAvailableExecutorsQuery, ListAvailableExecutorsResponse},
+        routes::rentals::StartRentalRequest,
+        types::{AvailableNode, ListAvailableNodesQuery, ListAvailableNodesResponse},
     },
     RentalResponse,
 };
@@ -44,10 +44,16 @@ pub async fn get_rental_status(
     let client = &state.validator_client;
     let validator_response = client.get_rental_status(&owned_rental.rental_id).await?;
 
-    // Create extended response with SSH credentials from database
+    // Deserialize port mappings from JSON
+    let port_mappings = owned_rental.port_mappings.and_then(|json| {
+        serde_json::from_value::<Vec<basilica_validator::rental::PortMapping>>(json).ok()
+    });
+
+    // Create extended response with SSH credentials and port mappings from database
     let response_with_ssh = RentalStatusWithSshResponse::from_validator_response(
         validator_response,
         owned_rental.ssh_credentials,
+        port_mappings,
     );
 
     Ok(Json(response_with_ssh))
@@ -80,20 +86,25 @@ pub async fn start_rental(
         });
     }
 
-    // Determine executor_id based on the selection strategy
-    let executor_id = match &request.executor_selection {
-        ExecutorSelection::ExecutorId { executor_id } => {
-            info!("Starting rental with specified executor: {}", executor_id);
-            executor_id.clone()
+    // Capture resource values before any moves
+    let cpu_cores = request.resources.cpu_cores;
+    let memory_mb = request.resources.memory_mb;
+    let storage_mb = request.resources.storage_mb;
+
+    // Determine node_id based on the selection strategy
+    let node_id = match &request.node_selection {
+        NodeSelection::NodeId { node_id } => {
+            info!("Starting rental with specified node: {}", node_id);
+            node_id.clone()
         }
-        ExecutorSelection::ExactGpuConfiguration { gpu_requirements } => {
+        NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
             info!(
-                "Selecting executor based on GPU requirements (exact): {:?}",
+                "Selecting node based on GPU requirements (exact): {:?}",
                 gpu_requirements
             );
 
-            // Query available executors with filters based on requirements
-            let query = ListAvailableExecutorsQuery {
+            // Query available nodes with filters based on requirements
+            let query = ListAvailableNodesQuery {
                 available: Some(true),
                 min_gpu_memory: Some(gpu_requirements.min_memory_gb),
                 gpu_type: gpu_requirements.gpu_type.clone(),
@@ -101,41 +112,40 @@ pub async fn start_rental(
                 location: None,
             };
 
-            let executors_response = state
+            let nodes_response = state
                 .validator_client
-                .list_available_executors(Some(query))
+                .list_available_nodes(Some(query))
                 .await
                 .map_err(|e| crate::error::ApiError::Internal {
-                    message: format!("Failed to query available executors: {}", e),
+                    message: format!("Failed to query available nodes: {}", e),
                 })?;
 
             // Filter for exact GPU count
             let exact_count = gpu_requirements.gpu_count as usize;
-            let executors: Vec<_> = executors_response
-                .available_executors
+            let nodes: Vec<_> = nodes_response
+                .available_nodes
                 .into_iter()
-                .filter(|exec| exec.executor.gpu_specs.len() == exact_count)
+                .filter(|exec| exec.node.gpu_specs.len() == exact_count)
                 .collect();
 
-            if executors.is_empty() {
-                error!("No executors with exactly {} GPU(s) available", exact_count);
+            if nodes.is_empty() {
+                error!("No nodes with exactly {} GPU(s) available", exact_count);
                 return Err(crate::error::ApiError::NotFound {
                     message: format!(
-                        "No executors with exactly {} GPU(s) matching requirements",
+                        "No nodes with exactly {} GPU(s) matching requirements",
                         exact_count
                     ),
                 });
             }
 
-            // Randomly select an executor from the filtered list
-            let selected_id = select_best_executor(executors).ok_or_else(|| {
-                crate::error::ApiError::Internal {
-                    message: "Failed to select executor".into(),
-                }
-            })?;
+            // Randomly select an node from the filtered list
+            let selected_id =
+                select_best_node(nodes).ok_or_else(|| crate::error::ApiError::Internal {
+                    message: "Failed to select node".into(),
+                })?;
 
             info!(
-                "Selected executor {} with exactly {} GPU(s)",
+                "Selected node {} with exactly {} GPU(s)",
                 selected_id, exact_count
             );
             selected_id
@@ -144,7 +154,7 @@ pub async fn start_rental(
 
     // Convert to validator's StartRentalRequest format
     let validator_request = StartRentalRequest {
-        executor_id,
+        node_id: node_id.clone(),
         container_image: request.container_image,
         ssh_public_key: request.ssh_public_key,
         environment: request.environment,
@@ -161,12 +171,26 @@ pub async fn start_rental(
         .start_rental(validator_request)
         .await?;
 
-    // Store ownership record in database with SSH credentials
+    // Get rental status to extract actual GPU specs from the assigned node
+    let rental_status = state
+        .validator_client
+        .get_rental_status(&validator_response.rental_id)
+        .await?;
+
+    // Serialize port mappings from validator response
+    let port_mappings_json = if !validator_response.container_info.mapped_ports.is_empty() {
+        Some(serde_json::to_value(&validator_response.container_info.mapped_ports).ok())
+    } else {
+        None
+    };
+
+    // Store ownership record in database with SSH credentials and port mappings
     if let Err(e) = store_rental_ownership(
         &state.db,
         &validator_response.rental_id,
         user_id,
         validator_response.ssh_credentials.as_deref(),
+        port_mappings_json.flatten(),
     )
     .await
     {
@@ -196,10 +220,108 @@ pub async fn start_rental(
             );
         }
 
-        // Return error to the user
         return Err(crate::error::ApiError::Internal {
             message: "Failed to create rental: unable to store ownership record".into(),
         });
+    }
+
+    // Notify billing service to start tracking this rental
+    if let Some(billing_client) = &state.billing_client {
+        use basilica_protocol::billing::{GpuSpec, ResourceSpec, TrackRentalRequest};
+
+        let now = chrono::Utc::now();
+        let timestamp = prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        };
+
+        // Build resource spec from actual node GPU specs
+        let mut gpus = Vec::new();
+        for gpu_spec in &rental_status.node.gpu_specs {
+            gpus.push(GpuSpec {
+                model: gpu_spec.name.clone(),
+                memory_mb: (gpu_spec.memory_gb * 1024) as u64,
+                count: 1,
+            });
+        }
+
+        let resource_spec = Some(ResourceSpec {
+            cpu_cores: cpu_cores.ceil() as u32,
+            memory_mb: memory_mb.max(0) as u64,
+            gpus,
+            disk_gb: (storage_mb.max(0) / 1024) as u64,
+            network_bandwidth_mbps: 0,
+        });
+
+        let track_request = TrackRentalRequest {
+            rental_id: validator_response.rental_id.clone(),
+            user_id: user_id.clone(),
+            node_id,
+            validator_id: state.validator_hotkey.clone(),
+            resource_spec,
+            hourly_rate: "0.00".to_string(),
+            start_time: Some(timestamp.clone()),
+            metadata: Default::default(),
+        };
+
+        match billing_client.track_rental(track_request).await {
+            Ok(_) => {
+                info!(
+                    "Successfully registered rental {} with billing service",
+                    validator_response.rental_id
+                );
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to register rental with billing service: {}", e);
+                error!("{}", error_msg);
+
+                if state.config.billing.enforce_balance_checks {
+                    // Rollback: remove ownership record and terminate rental
+                    if let Err(archive_err) = archive_rental_ownership(
+                        &state.db,
+                        &validator_response.rental_id,
+                        Some("Failed to register with billing service - automatic rollback"),
+                    )
+                    .await
+                    {
+                        error!(
+                            "Failed to archive ownership for rental {} during rollback: {}",
+                            validator_response.rental_id, archive_err
+                        );
+                    }
+
+                    let rollback_request = TerminateRentalRequest {
+                        reason: Some(
+                            "Failed to register with billing service - automatic rollback"
+                                .to_string(),
+                        ),
+                    };
+
+                    if let Err(rollback_err) = state
+                        .validator_client
+                        .terminate_rental(&validator_response.rental_id, rollback_request)
+                        .await
+                    {
+                        error!(
+                            "CRITICAL: Failed to rollback rental {} after billing registration failure: {}. Manual cleanup required.",
+                            validator_response.rental_id, rollback_err
+                        );
+                    } else {
+                        info!(
+                            "Successfully rolled back rental {} after billing registration failure",
+                            validator_response.rental_id
+                        );
+                    }
+
+                    return Err(crate::error::ApiError::Internal {
+                        message: format!(
+                            "Failed to create rental: billing service unavailable - {}",
+                            e
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     info!(
@@ -220,7 +342,6 @@ pub async fn stop_rental(
         owned_rental.user_id, owned_rental.rental_id
     );
 
-    // Use terminate_rental API from validator
     let request = TerminateRentalRequest {
         reason: Some("User requested stop".to_string()),
     };
@@ -229,6 +350,31 @@ pub async fn stop_rental(
         .validator_client
         .terminate_rental(&owned_rental.rental_id, request.clone())
         .await?;
+
+    // Notify billing service that rental is stopping
+    if let Some(billing_client) = &state.billing_client {
+        use basilica_protocol::billing::{RentalStatus, UpdateRentalStatusRequest};
+
+        let now = chrono::Utc::now();
+        let timestamp = prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        };
+
+        let update_request = UpdateRentalStatusRequest {
+            rental_id: owned_rental.rental_id.clone(),
+            status: RentalStatus::Stopped as i32,
+            timestamp: Some(timestamp),
+            reason: request.reason.clone().unwrap_or_default(),
+        };
+
+        if let Err(e) = billing_client.update_rental_status(update_request).await {
+            error!(
+                "Failed to update rental status in billing service for {}: {}",
+                owned_rental.rental_id, e
+            );
+        }
+    }
 
     // Archive ownership record to terminated_user_rentals table
     if let Err(e) = archive_rental_ownership(
@@ -239,7 +385,6 @@ pub async fn stop_rental(
     .await
     {
         error!("Failed to archive rental ownership record: {}", e);
-        // Note: We don't fail the request if ownership archiving fails
     }
 
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
@@ -279,8 +424,8 @@ pub async fn stream_rental_logs(
 
     // Convert validator Event stream to axum SSE Events
     let stream = async_stream::stream! {
-        use futures::StreamExt;
-        futures::pin_mut!(validator_stream);
+        use futures_util::StreamExt;
+        futures_util::pin_mut!(validator_stream);
 
         while let Some(result) = validator_stream.next().await {
             match result {
@@ -324,17 +469,19 @@ pub async fn list_rentals_validator(
     // Get user ID from auth context (already extracted via Extension)
     let user_id = &auth_context.user_id;
 
-    // Get user's rental IDs with SSH status from database
-    let user_rentals_with_ssh = get_user_rentals_with_ssh(&state.db, user_id)
+    // Get user's rental IDs with SSH status and port mappings from database
+    let user_rentals_with_details = get_user_rentals_with_details(&state.db, user_id)
         .await
         .map_err(|e| crate::error::ApiError::Internal {
             message: format!("Failed to get user rentals: {}", e),
         })?;
 
-    // Create a map for quick lookup of SSH status
+    // Create maps for quick lookup of SSH status and port mappings
     let mut ssh_status_map = std::collections::HashMap::new();
-    for rental in &user_rentals_with_ssh {
+    let mut port_mappings_map = std::collections::HashMap::new();
+    for rental in &user_rentals_with_details {
         ssh_status_map.insert(rental.rental_id.clone(), rental.has_ssh);
+        port_mappings_map.insert(rental.rental_id.clone(), rental.port_mappings.clone());
     }
 
     // Get all rentals from validator
@@ -346,7 +493,7 @@ pub async fn list_rentals_validator(
             message: format!("Failed to list rentals: {e}"),
         })?;
 
-    // Filter to only include user's rentals and use executor details from validator response
+    // Filter to only include user's rentals and use node details from validator response
     let mut api_rentals = Vec::new();
 
     for rental in all_rentals.rentals {
@@ -356,10 +503,19 @@ pub async fn list_rentals_validator(
             None => continue, // User doesn't own this rental
         };
 
-        // Create API rental item with executor details from validator response
+        // Get port mappings from database and deserialize
+        let port_mappings = port_mappings_map
+            .get(&rental.rental_id)
+            .and_then(|json_opt| json_opt.as_ref())
+            .and_then(|json| {
+                serde_json::from_value::<Vec<basilica_validator::rental::PortMapping>>(json.clone())
+                    .ok()
+            });
+
+        // Create API rental item with node details from validator response
         api_rentals.push(ApiRentalListItem {
             rental_id: rental.rental_id,
-            executor_id: rental.executor_id,
+            node_id: rental.node_id,
             container_id: rental.container_id,
             state: rental.state,
             created_at: rental.created_at,
@@ -370,6 +526,7 @@ pub async fn list_rentals_validator(
             cpu_specs: rental.cpu_specs,
             location: rental.location,
             network_speed: rental.network_speed,
+            port_mappings,
         });
     }
 
@@ -409,14 +566,14 @@ fn is_valid_ssh_public_key(key: &str) -> bool {
     true
 }
 
-/// List available executors for rentals
-pub async fn list_available_executors(
+/// List available nodes for rentals
+pub async fn list_available_nodes(
     State(state): State<AppState>,
-    Query(mut query): Query<ListAvailableExecutorsQuery>,
+    Query(mut query): Query<ListAvailableNodesQuery>,
     uri: Uri,
-) -> Result<Json<ListAvailableExecutorsResponse>> {
-    // Default to available=true for /executors endpoint
-    if query.available.is_none() && uri.path() == "/executors" {
+) -> Result<Json<ListAvailableNodesResponse>> {
+    // Default to available=true for /nodes endpoint
+    if query.available.is_none() && uri.path() == "/nodes" {
         query.available = Some(true);
     }
 
@@ -427,24 +584,24 @@ pub async fn list_available_executors(
         }
     }
 
-    info!("Listing executors with filters: {:?}", query);
+    info!("Listing nodes with filters: {:?}", query);
 
     let response = state
         .validator_client
-        .list_available_executors(Some(query))
+        .list_available_nodes(Some(query))
         .await?;
 
     Ok(Json(response))
 }
 
-/// Select a random executor from a list of available executors to distribute
-/// load and allow users to retry with different executors if issues occur
-fn select_best_executor(executors: Vec<AvailableExecutor>) -> Option<String> {
-    if executors.is_empty() {
+/// Select a random node from a list of available nodes to distribute
+/// load and allow users to retry with different nodes if issues occur
+fn select_best_node(nodes: Vec<AvailableNode>) -> Option<String> {
+    if nodes.is_empty() {
         return None;
     }
 
-    // Randomly select an executor from the available list
+    // Randomly select an node from the available list
     let mut rng = rand::thread_rng();
-    executors.choose(&mut rng).map(|e| e.executor.id.clone())
+    nodes.choose(&mut rng).map(|e| e.node.id.clone())
 }

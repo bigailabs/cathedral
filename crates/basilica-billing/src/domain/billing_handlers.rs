@@ -7,8 +7,8 @@ use crate::domain::types::{
 };
 use crate::error::{BillingError, Result};
 use crate::storage::{
-    BillingEvent, CreditRepository, EventRepository, PackageRepository, RentalRepository,
-    UsageEvent, UsageRepository,
+    rentals::RentalRepository, BillingEvent, EventRepository, PackageRepository,
+    SqlCreditRepository, SqlRentalRepository, UsageEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -20,25 +20,22 @@ use uuid::Uuid;
 
 /// Concrete implementation of EventHandlers for billing operations
 pub struct BillingEventHandlers {
-    rental_repository: Arc<dyn RentalRepository + Send + Sync>,
-    credit_repository: Arc<dyn CreditRepository + Send + Sync>,
-    usage_repository: Arc<dyn UsageRepository + Send + Sync>,
+    rental_repository: Arc<SqlRentalRepository>,
+    credit_repository: Arc<SqlCreditRepository>,
     package_repository: Arc<dyn PackageRepository + Send + Sync>,
     event_repository: Arc<dyn EventRepository + Send + Sync>,
 }
 
 impl BillingEventHandlers {
     pub fn new(
-        rental_repository: Arc<dyn RentalRepository + Send + Sync>,
-        credit_repository: Arc<dyn CreditRepository + Send + Sync>,
-        usage_repository: Arc<dyn UsageRepository + Send + Sync>,
+        rental_repository: Arc<SqlRentalRepository>,
+        credit_repository: Arc<SqlCreditRepository>,
         package_repository: Arc<dyn PackageRepository + Send + Sync>,
         event_repository: Arc<dyn EventRepository + Send + Sync>,
     ) -> Self {
         Self {
             rental_repository,
             credit_repository,
-            usage_repository,
             package_repository,
             event_repository,
         }
@@ -47,6 +44,10 @@ impl BillingEventHandlers {
     /// Parse telemetry data from event JSON
     fn parse_telemetry_data(event_data: &serde_json::Value) -> Result<TelemetryData> {
         let telemetry = TelemetryData {
+            gpu_hours: event_data
+                .get("gpu_hours")
+                .and_then(|v| v.as_f64())
+                .and_then(Decimal::from_f64),
             cpu_percent: event_data
                 .get("cpu_percent")
                 .and_then(|v| v.as_f64())
@@ -64,25 +65,27 @@ impl BillingEventHandlers {
 
     /// Convert telemetry data to usage metrics
     fn telemetry_to_usage_metrics(telemetry: &TelemetryData) -> UsageMetrics {
+        let gpu_count = telemetry
+            .gpu_metrics
+            .as_ref()
+            .and_then(|m| m.get("gpu_count"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1) as u32;
+
         UsageMetrics {
+            gpu_hours: telemetry.gpu_hours.unwrap_or(Decimal::ZERO),
+            gpu_count,
             cpu_hours: telemetry.cpu_percent.unwrap_or(Decimal::ZERO) / Decimal::from(100),
             memory_gb_hours: telemetry
                 .memory_mb
                 .map(|mb| Decimal::from(mb) / Decimal::from(1024))
                 .unwrap_or(Decimal::ZERO),
-            gpu_hours: telemetry
-                .gpu_metrics
-                .as_ref()
-                .and_then(|m| m.get("utilization"))
-                .and_then(|v| v.as_f64())
-                .map(|v| Decimal::from_f64_retain(v / 100.0).unwrap_or(Decimal::ZERO))
-                .unwrap_or(Decimal::ONE), // Assume full GPU usage if no metrics
             network_gb: (telemetry.network_rx_bytes.unwrap_or(0)
                 + telemetry.network_tx_bytes.unwrap_or(0))
             .checked_div(1_073_741_824)
             .map(Decimal::from)
             .unwrap_or(Decimal::ZERO),
-            storage_gb_hours: Decimal::ZERO, // Not tracked in telemetry yet
+            storage_gb_hours: Decimal::ZERO,
             disk_io_gb: (telemetry.disk_read_bytes.unwrap_or(0)
                 + telemetry.disk_write_bytes.unwrap_or(0))
             .checked_div(1_073_741_824)
@@ -131,7 +134,7 @@ impl EventHandlers for BillingEventHandlers {
         let usage_metrics = Self::telemetry_to_usage_metrics(&telemetry);
 
         let rental_id = RentalId::from_uuid(event.rental_id);
-        let rental = self
+        let mut rental = self
             .rental_repository
             .get_rental(&rental_id)
             .await?
@@ -139,8 +142,30 @@ impl EventHandlers for BillingEventHandlers {
                 id: rental_id.to_string(),
             })?;
 
-        if rental.state != RentalState::Active {
-            debug!("Skipping telemetry for non-active rental {}", rental_id);
+        if rental.state == RentalState::Pending {
+            info!(
+                "Auto-activating rental {} on first telemetry receipt",
+                rental_id
+            );
+            rental.state = RentalState::Active;
+            rental.actual_start_time = Some(Utc::now());
+            self.rental_repository.update_rental(&rental).await?;
+
+            self.record_billing_event(
+                "rental_auto_activated",
+                &rental_id.to_string(),
+                rental.user_id.as_uuid().ok(),
+                serde_json::json!({
+                    "reason": "first_telemetry_received",
+                    "timestamp": Utc::now(),
+                }),
+            )
+            .await?;
+        } else if rental.state != RentalState::Active {
+            debug!(
+                "Skipping telemetry for rental {} in state {:?}",
+                rental_id, rental.state
+            );
             return Ok(());
         }
 
@@ -149,34 +174,89 @@ impl EventHandlers for BillingEventHandlers {
             .get_package(&rental.package_id)
             .await?;
 
-        let cost_breakdown = package.calculate_cost(&usage_metrics);
+        let cost_breakdown =
+            package.calculate_cost_with_gpu_count(&usage_metrics, usage_metrics.gpu_count);
 
-        let user_id = UserId::new(event.user_id.clone());
-        self.usage_repository
-            .update_usage(
-                &rental_id,
-                &user_id,
-                &usage_metrics,
-                cost_breakdown.total_cost,
-            )
-            .await?;
+        let incremental_cost = cost_breakdown.total_cost;
 
-        self.record_billing_event(
-            "telemetry_processed",
-            &rental_id.to_string(),
-            rental.user_id.as_uuid().ok(),
-            serde_json::json!({
-                "usage_metrics": usage_metrics,
-                "cost": cost_breakdown.total_cost.to_string(),
-                "timestamp": event.timestamp,
-            }),
-        )
-        .await?;
+        let mut tx = self.credit_repository.pool().begin().await.map_err(|e| {
+            BillingError::DatabaseError {
+                operation: "begin_billing_transaction".to_string(),
+                source: Box::new(e),
+            }
+        })?;
 
-        info!(
-            "Processed telemetry for rental {} - cost: {}",
-            rental_id, cost_breakdown.total_cost
-        );
+        match self
+            .credit_repository
+            .deduct_credits_tx(&mut tx, &rental.user_id, incremental_cost)
+            .await
+        {
+            Ok(()) => {
+                rental.actual_cost = rental.actual_cost.add(incremental_cost);
+
+                if let Err(e) = self
+                    .rental_repository
+                    .update_rental_tx(&mut tx, &rental)
+                    .await
+                {
+                    error!(
+                        "Failed to update rental in transaction: {}. Rolling back.",
+                        e
+                    );
+                    return Err(e);
+                }
+
+                tx.commit().await.map_err(|e| BillingError::DatabaseError {
+                    operation: "commit_billing_transaction".to_string(),
+                    source: Box::new(e),
+                })?;
+
+                self.record_billing_event(
+                    "telemetry_processed",
+                    &rental_id.to_string(),
+                    rental.user_id.as_uuid().ok(),
+                    serde_json::json!({
+                        "usage_metrics": usage_metrics,
+                        "incremental_cost": incremental_cost.to_string(),
+                        "total_cost": rental.actual_cost.to_string(),
+                        "credits_deducted": true,
+                        "timestamp": event.timestamp,
+                    }),
+                )
+                .await?;
+
+                info!(
+                    "Processed telemetry for rental {} - incremental cost: {}, total cost: {}, transaction committed",
+                    rental_id, incremental_cost, rental.actual_cost
+                );
+            }
+            Err(e) => {
+                error!(
+                    "Failed to deduct credits for rental {}: {}. Transaction auto-rolled back.",
+                    rental_id, e
+                );
+
+                rental.state = RentalState::Failed;
+                rental.actual_end_time = Some(Utc::now());
+                self.rental_repository.update_rental(&rental).await?;
+
+                self.record_billing_event(
+                    "telemetry_billing_failed",
+                    &rental_id.to_string(),
+                    rental.user_id.as_uuid().ok(),
+                    serde_json::json!({
+                        "usage_metrics": usage_metrics,
+                        "attempted_cost": incremental_cost.to_string(),
+                        "error": e.to_string(),
+                        "rental_state": "failed",
+                        "timestamp": event.timestamp,
+                    }),
+                )
+                .await?;
+
+                return Err(e);
+            }
+        }
 
         Ok(())
     }
@@ -219,48 +299,16 @@ impl EventHandlers for BillingEventHandlers {
 
         match (&old_state, &new_state) {
             (RentalState::Pending, RentalState::Active) => {
-                if let Some(reservation_id) = &rental.reservation_id {
-                    debug!(
-                        "Rental {} activated with reservation {}",
-                        rental_id, reservation_id
-                    );
-                }
                 rental.actual_start_time = Some(Utc::now());
             }
             (RentalState::Active, RentalState::Completed)
             | (RentalState::Active, RentalState::Failed) => {
                 rental.actual_end_time = Some(Utc::now());
 
-                let usage = self
-                    .usage_repository
-                    .get_usage_for_rental(&rental_id)
-                    .await?;
-
-                let package = self
-                    .package_repository
-                    .get_package(&rental.package_id)
-                    .await?;
-
-                let final_cost = package.calculate_cost(&usage);
-                rental.actual_cost = final_cost.total_cost;
-
-                if let Err(e) = self
-                    .credit_repository
-                    .deduct_credits(&rental.user_id, final_cost.total_cost)
-                    .await
-                {
-                    error!("Failed to deduct credits for rental {}: {}", rental_id, e);
-                }
-
-                if let Some(reservation_id) = &rental.reservation_id {
-                    if let Err(e) = self
-                        .credit_repository
-                        .release_reservation(reservation_id)
-                        .await
-                    {
-                        warn!("Failed to release reservation {}: {}", reservation_id, e);
-                    }
-                }
+                info!(
+                    "Rental {} completed/failed with total cost: {} (credits deducted incrementally)",
+                    rental_id, rental.actual_cost
+                );
             }
             _ => {
                 debug!(
@@ -362,24 +410,6 @@ impl EventHandlers for BillingEventHandlers {
             .map(|s| PackageId::new(s.to_string()))
             .unwrap_or_else(PackageId::h100); // Default to H100 if not specified
 
-        let package = self.package_repository.get_package(&package_id).await?;
-
-        let estimated_usage = UsageMetrics {
-            gpu_hours: Decimal::ONE,
-            cpu_hours: Decimal::ZERO,
-            memory_gb_hours: Decimal::ZERO,
-            storage_gb_hours: Decimal::ZERO,
-            network_gb: Decimal::ZERO,
-            disk_io_gb: Decimal::ZERO,
-        };
-
-        let estimated_cost = package.calculate_cost(&estimated_usage).total_cost;
-
-        let reservation = self
-            .credit_repository
-            .reserve_credits(&user_id, estimated_cost, &rental_id)
-            .await?;
-
         let resource_spec = ResourceSpec {
             gpu_specs: vec![],
             cpu_cores: 1,
@@ -391,11 +421,10 @@ impl EventHandlers for BillingEventHandlers {
 
         let mut rental = Rental::new(
             user_id.clone(),
-            event.executor_id.clone(),
+            event.node_id.clone(),
             event.validator_id.clone(),
-            package_id,
+            package_id.clone(),
             resource_spec,
-            Some(reservation.id),
         );
         rental.id = rental_id;
 
@@ -404,20 +433,15 @@ impl EventHandlers for BillingEventHandlers {
 
         self.rental_repository.create_rental(&rental).await?;
 
-        self.usage_repository
-            .initialize_rental(&rental_id, &user_id)
-            .await?;
-
         self.record_billing_event(
             "rental_started",
             &rental_id.to_string(),
             user_id.as_uuid().ok(),
             serde_json::json!({
                 "package_id": rental.package_id.to_string(),
-                "executor_id": event.executor_id,
+                "node_id": event.node_id,
                 "validator_id": event.validator_id,
-                "estimated_cost": estimated_cost.to_string(),
-                "reservation_id": reservation.id.to_string(),
+                "billing_model": "pay_as_you_go",
                 "timestamp": event.timestamp,
             }),
         )
@@ -460,26 +484,15 @@ impl EventHandlers for BillingEventHandlers {
             return Ok(());
         }
 
-        let usage = self
-            .usage_repository
-            .get_usage_for_rental(&rental_id)
-            .await?;
-
-        let package = self
-            .package_repository
-            .get_package(&rental.package_id)
-            .await?;
-
-        let cost_breakdown = package.calculate_cost(&usage);
-        let computed_cost = cost_breakdown.total_cost;
-
         let client_provided_cost = CreditBalance::from_decimal(end_data.final_cost);
-        if (computed_cost.as_decimal() - client_provided_cost.as_decimal()).abs()
+        let server_tracked_cost = rental.actual_cost;
+
+        if (server_tracked_cost.as_decimal() - client_provided_cost.as_decimal()).abs()
             > Decimal::from_f64(0.01).unwrap()
         {
             warn!(
-                "Client-provided final_cost ({}) differs from computed cost ({}) for rental {}",
-                client_provided_cost, computed_cost, rental_id
+                "Client-provided final_cost ({}) differs from server-tracked cost ({}) for rental {}",
+                client_provided_cost, server_tracked_cost, rental_id
             );
         }
 
@@ -488,34 +501,7 @@ impl EventHandlers for BillingEventHandlers {
         } else {
             RentalState::Completed
         };
-        // Use server time as authoritative end timestamp
         rental.actual_end_time = Some(Utc::now());
-        rental.actual_cost = computed_cost;
-
-        let charge_result = self
-            .credit_repository
-            .deduct_credits(&rental.user_id, computed_cost)
-            .await;
-
-        if let Err(e) = &charge_result {
-            error!(
-                "Failed to charge final cost for rental {}: {}",
-                rental_id, e
-            );
-        }
-
-        if let Some(reservation_id) = &rental.reservation_id {
-            if let Err(e) = self
-                .credit_repository
-                .release_reservation(reservation_id)
-                .await
-            {
-                warn!(
-                    "Failed to release reservation {} for rental {}: {}",
-                    reservation_id, rental_id, e
-                );
-            }
-        }
 
         self.rental_repository.update_rental(&rental).await?;
 
@@ -524,20 +510,19 @@ impl EventHandlers for BillingEventHandlers {
             &rental_id.to_string(),
             rental.user_id.as_uuid().ok(),
             serde_json::json!({
-                "computed_cost": computed_cost.to_string(),
+                "server_tracked_cost": server_tracked_cost.to_string(),
                 "client_provided_cost": client_provided_cost.to_string(),
                 "end_time": end_data.end_time,
                 "termination_reason": end_data.termination_reason,
-                "usage_metrics": usage,
-                "charge_success": charge_result.is_ok(),
+                "billing_model": "incremental",
                 "timestamp": event.timestamp,
             }),
         )
         .await?;
 
         info!(
-            "Ended rental {} with computed cost {} (client provided: {}, reason: {:?})",
-            rental_id, computed_cost, client_provided_cost, end_data.termination_reason
+            "Ended rental {} with final cost {} (client provided: {}, reason: {:?}, credits deducted incrementally)",
+            rental_id, server_tracked_cost, client_provided_cost, end_data.termination_reason
         );
 
         Ok(())

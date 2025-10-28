@@ -1,6 +1,6 @@
 use crate::domain::types::{
-    CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ReservationId, ResourceSpec,
-    UsageMetrics, UserId,
+    CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
+    UserId,
 };
 use crate::error::{BillingError, Result};
 use async_trait::async_trait;
@@ -15,10 +15,9 @@ use std::sync::Arc;
 pub struct Rental {
     pub id: RentalId,
     pub user_id: UserId,
-    pub executor_id: String,
+    pub node_id: String,
     pub validator_id: String,
     pub package_id: PackageId,
-    pub reservation_id: Option<ReservationId>,
     pub state: RentalState,
     pub resource_spec: ResourceSpec,
     pub usage_metrics: UsageMetrics,
@@ -39,26 +38,25 @@ pub struct Rental {
 impl Rental {
     pub fn new(
         user_id: UserId,
-        executor_id: String,
+        node_id: String,
         validator_id: String,
         package_id: PackageId,
         resource_spec: ResourceSpec,
-        reservation_id: Option<ReservationId>,
     ) -> Self {
         let now = Utc::now();
         Self {
             id: RentalId::new(),
             user_id,
-            executor_id,
+            node_id,
             validator_id,
             package_id,
-            reservation_id,
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
             cost_breakdown: CostBreakdown {
                 base_cost: CreditBalance::zero(),
                 usage_cost: CreditBalance::zero(),
+                volume_discount: CreditBalance::zero(),
                 discounts: CreditBalance::zero(),
                 overage_charges: CreditBalance::zero(),
                 total_cost: CreditBalance::zero(),
@@ -134,18 +132,20 @@ pub struct RentalStatistics {
     pub average_duration_hours: f64,
 }
 
+/// Parameters for creating a new rental
+#[derive(Debug, Clone)]
+pub struct CreateRentalParams {
+    pub user_id: UserId,
+    pub node_id: String,
+    pub validator_id: String,
+    pub package_id: PackageId,
+    pub resource_spec: ResourceSpec,
+}
+
 /// Rental management operations
 #[async_trait]
 pub trait RentalOperations: Send + Sync {
-    async fn create_rental(
-        &self,
-        user_id: UserId,
-        executor_id: String,
-        validator_id: String,
-        package_id: PackageId,
-        resource_spec: ResourceSpec,
-        reservation_id: Option<ReservationId>,
-    ) -> Result<RentalId>;
+    async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId>;
 
     async fn get_rental(&self, rental_id: &RentalId) -> Result<Rental>;
 
@@ -183,22 +183,13 @@ impl RentalManager {
 
 #[async_trait]
 impl RentalOperations for RentalManager {
-    async fn create_rental(
-        &self,
-        user_id: UserId,
-        executor_id: String,
-        validator_id: String,
-        package_id: PackageId,
-        resource_spec: ResourceSpec,
-        reservation_id: Option<ReservationId>,
-    ) -> Result<RentalId> {
+    async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
         let rental = Rental::new(
-            user_id,
-            executor_id,
-            validator_id,
-            package_id,
-            resource_spec,
-            reservation_id,
+            params.user_id,
+            params.node_id,
+            params.validator_id,
+            params.package_id,
+            params.resource_spec,
         );
         let rental_id = rental.id;
 

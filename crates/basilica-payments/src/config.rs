@@ -19,6 +19,7 @@ pub struct PaymentsConfig {
     pub treasury: TreasuryConfig,
     pub price_oracle: PriceOracleConfig,
     pub billing: BillingConfig,
+    pub reconciliation: ReconciliationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +98,83 @@ pub struct BillingConfig {
     pub request_timeout_seconds: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconciliationConfig {
+    pub enabled: bool,
+    pub sweep_interval_seconds: u64,
+    pub coldwallet_address_ss58: String,
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub minimum_threshold_plancks: String,
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub target_balance_plancks: String,
+    #[serde(deserialize_with = "deserialize_string_or_number")]
+    pub estimated_fee_plancks: String,
+    pub dry_run_mode: bool,
+    pub max_retries: u32,
+}
+
+fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+    use std::fmt;
+
+    struct StringOrNumber;
+
+    impl<'de> Visitor<'de> for StringOrNumber {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string or number")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<String, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<String, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<String, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<String, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_u128<E>(self, value: u128) -> Result<String, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.to_string())
+        }
+
+        fn visit_i128<E>(self, value: i128) -> Result<String, E>
+        where
+            E: de::Error,
+        {
+            Ok(value.to_string())
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumber)
+}
+
 impl Default for PaymentsConfig {
     fn default() -> Self {
         Self {
@@ -158,6 +236,16 @@ impl Default for PaymentsConfig {
                 grpc_endpoint: "http://localhost:50051".to_string(),
                 connection_timeout_seconds: 30,
                 request_timeout_seconds: 60,
+            },
+            reconciliation: ReconciliationConfig {
+                enabled: false,
+                sweep_interval_seconds: 300,
+                coldwallet_address_ss58: String::new(),
+                minimum_threshold_plancks: "10000000".to_string(),
+                target_balance_plancks: "5000000".to_string(),
+                estimated_fee_plancks: "1000000".to_string(),
+                dry_run_mode: true,
+                max_retries: 3,
             },
         }
     }
@@ -253,6 +341,44 @@ impl PaymentsConfig {
             });
         }
 
+        if self.reconciliation.enabled && self.reconciliation.coldwallet_address_ss58.is_empty() {
+            return Err(ConfigurationError::ValidationFailed {
+                details: "reconciliation.coldwallet_address_ss58 required when enabled".to_string(),
+            });
+        }
+
+        if self.reconciliation.enabled {
+            let min_threshold: u128 = self
+                .reconciliation
+                .minimum_threshold_plancks
+                .parse()
+                .map_err(|_| ConfigurationError::ValidationFailed {
+                    details: "Invalid reconciliation.minimum_threshold_plancks".to_string(),
+                })?;
+            let target: u128 =
+                self.reconciliation
+                    .target_balance_plancks
+                    .parse()
+                    .map_err(|_| ConfigurationError::ValidationFailed {
+                        details: "Invalid reconciliation.target_balance_plancks".to_string(),
+                    })?;
+            let estimated_fee: u128 =
+                self.reconciliation
+                    .estimated_fee_plancks
+                    .parse()
+                    .map_err(|_| ConfigurationError::ValidationFailed {
+                        details: "Invalid reconciliation.estimated_fee_plancks".to_string(),
+                    })?;
+
+            if target + estimated_fee >= min_threshold {
+                return Err(ConfigurationError::ValidationFailed {
+                    details:
+                        "reconciliation.target_balance + estimated_fee must be < minimum_threshold"
+                            .to_string(),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -319,5 +445,56 @@ impl PaymentsConfig {
 
     pub fn billing_request_timeout(&self) -> Duration {
         Duration::from_secs(self.billing.request_timeout_seconds)
+    }
+
+    pub fn reconciliation_sweep_interval(&self) -> Duration {
+        Duration::from_secs(self.reconciliation.sweep_interval_seconds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reconciliation_config_deserialize_numeric_string() {
+        let json = r#"{
+            "enabled": true,
+            "sweep_interval_seconds": 300,
+            "coldwallet_address_ss58": "5FUE3WJ438ymnLYmSpkGcagFrFWaMBuVr28VMgZRAqTJD62e",
+            "minimum_threshold_plancks": 1000000000,
+            "target_balance_plancks": "550000000",
+            "estimated_fee_plancks": 50000000,
+            "dry_run_mode": false,
+            "max_retries": 3
+        }"#;
+
+        let config: ReconciliationConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.minimum_threshold_plancks, "1000000000");
+        assert_eq!(config.target_balance_plancks, "550000000");
+        assert_eq!(config.estimated_fee_plancks, "50000000");
+        assert!(config.enabled);
+        assert!(!config.dry_run_mode);
+    }
+
+    #[test]
+    fn test_reconciliation_config_deserialize_string_only() {
+        let json = r#"{
+            "enabled": false,
+            "sweep_interval_seconds": 300,
+            "coldwallet_address_ss58": "5FUE3WJ438ymnLYmSpkGcagFrFWaMBuVr28VMgZRAqTJD62e",
+            "minimum_threshold_plancks": "1000000000",
+            "target_balance_plancks": "550000000",
+            "estimated_fee_plancks": "50000000",
+            "dry_run_mode": true,
+            "max_retries": 3
+        }"#;
+
+        let config: ReconciliationConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.minimum_threshold_plancks, "1000000000");
+        assert_eq!(config.target_balance_plancks, "550000000");
+        assert_eq!(config.estimated_fee_plancks, "50000000");
     }
 }

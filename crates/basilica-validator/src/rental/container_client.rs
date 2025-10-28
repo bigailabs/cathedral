@@ -1,58 +1,105 @@
 //! SSH-based Docker container client
 //!
 //! This module provides a client for executing Docker commands over SSH
-//! to manage containers on remote executor machines.
+//! to manage containers on remote node machines.
 
 use anyhow::{Context, Result};
+use basilica_common::ssh::{
+    SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
+};
 use serde_json::Value;
-use std::process::Stdio;
-use tokio::process::Command;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, info};
 
 use super::types::{ContainerInfo, ContainerSpec, ContainerStatus, PortMapping, ResourceUsage};
-use std::path::PathBuf;
 
 /// SSH-based Docker client for container management
 #[derive(Clone)]
 pub struct ContainerClient {
-    /// SSH connection string (user@host:port)
-    pub(crate) ssh_connection: String,
-    /// SSH private key path for validator authentication
-    pub(crate) ssh_private_key_path: Option<PathBuf>,
-    /// Enable strict host key checking
-    pub(crate) strict_host_key_checking: bool,
-    /// Path to known hosts file
-    pub(crate) known_hosts_file: Option<PathBuf>,
+    /// SSH client for command execution
+    ssh_client: Arc<StandardSshClient>,
+    /// SSH connection details for command execution
+    ssh_details: SshConnectionDetails,
     /// SSH log level to control verbosity (ERROR, QUIET, FATAL, INFO, VERBOSE, DEBUG)
-    pub(crate) ssh_log_level: Option<String>,
+    ssh_log_level: Option<String>,
 }
 
 impl ContainerClient {
-    /// Parse SSH connection string to extract host and port
-    /// Handles formats like "user@host:port" or "user@host"
-    fn parse_ssh_connection(connection: &str) -> (String, Option<u16>) {
-        if let Some(at_pos) = connection.rfind('@') {
-            let user_part = &connection[..=at_pos];
-            let host_port = &connection[at_pos + 1..];
+    /// Parse SSH connection string to extract components
+    /// Handles formats like "user@host:port", "user@host", "user@[ipv6]:port", "user@[ipv6]"
+    fn parse_ssh_connection(connection: &str) -> Result<(String, String, u16)> {
+        let (username, host_port) = connection
+            .split_once('@')
+            .ok_or_else(|| anyhow::anyhow!("Invalid SSH connection format: missing '@'"))?;
 
-            if let Some(colon_pos) = host_port.rfind(':') {
-                let host = &host_port[..colon_pos];
-                let port_str = &host_port[colon_pos + 1..];
-                if let Ok(port_num) = port_str.parse::<u16>() {
-                    return (format!("{user_part}{host}"), Some(port_num));
-                }
+        let (host, port) = if host_port.starts_with('[') {
+            let closing_bracket = host_port
+                .find(']')
+                .ok_or_else(|| anyhow::anyhow!("Invalid IPv6 format: missing closing bracket"))?;
+
+            let host = &host_port[1..closing_bracket];
+
+            let port =
+                match host_port.get(closing_bracket + 1..) {
+                    Some(rest) if rest.starts_with(':') && rest.len() > 1 => rest[1..]
+                        .parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("Invalid port number: {}", &rest[1..]))?,
+                    Some("") | None => 22,
+                    Some(rest) => {
+                        return Err(anyhow::anyhow!(
+                        "Invalid IPv6 format: unexpected characters after closing bracket: '{}'",
+                        rest
+                    ))
+                    }
+                };
+
+            (host.to_string(), port)
+        } else if let Some((h, p)) = host_port.rsplit_once(':') {
+            if h.contains(':') {
+                (host_port.to_string(), 22)
+            } else {
+                let port_num = p
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("Invalid port number: {}", p))?;
+                (h.to_string(), port_num)
             }
-        }
-        (connection.to_string(), None)
+        } else {
+            (host_port.to_string(), 22)
+        };
+
+        Ok((username.to_string(), host, port))
     }
 
     /// Create a new container client with validator's private key
     pub fn new(ssh_connection: String, ssh_private_key_path: Option<PathBuf>) -> Result<Self> {
-        Ok(Self {
-            ssh_connection,
-            ssh_private_key_path,
+        let (username, host, port) = Self::parse_ssh_connection(&ssh_connection)?;
+
+        let private_key_path = ssh_private_key_path
+            .ok_or_else(|| anyhow::anyhow!("SSH private key path is required"))?;
+
+        let ssh_config = SshConnectionConfig {
             strict_host_key_checking: false,
             known_hosts_file: None,
+            connection_timeout: Duration::from_secs(10),
+            execution_timeout: Duration::from_secs(300),
+            ..Default::default()
+        };
+
+        let ssh_client = Arc::new(StandardSshClient::with_config(ssh_config));
+
+        let ssh_details = SshConnectionDetails {
+            host,
+            username,
+            port,
+            private_key_path,
+            timeout: Duration::from_secs(10),
+        };
+
+        Ok(Self {
+            ssh_client,
+            ssh_details,
             ssh_log_level: Some("ERROR".to_string()),
         })
     }
@@ -65,11 +112,56 @@ impl ContainerClient {
         known_hosts_file: Option<PathBuf>,
         ssh_log_level: Option<String>,
     ) -> Result<Self> {
-        Ok(Self {
-            ssh_connection,
-            ssh_private_key_path,
+        let (username, host, port) = Self::parse_ssh_connection(&ssh_connection)?;
+
+        let private_key_path = ssh_private_key_path
+            .ok_or_else(|| anyhow::anyhow!("SSH private key path is required"))?;
+
+        let ssh_config = SshConnectionConfig {
             strict_host_key_checking,
-            known_hosts_file,
+            known_hosts_file: known_hosts_file.clone(),
+            connection_timeout: Duration::from_secs(10),
+            execution_timeout: Duration::from_secs(300),
+            ..Default::default()
+        };
+
+        let ssh_client = Arc::new(StandardSshClient::with_config(ssh_config));
+
+        let ssh_details = SshConnectionDetails {
+            host,
+            username,
+            port,
+            private_key_path,
+            timeout: Duration::from_secs(10),
+        };
+
+        Ok(Self {
+            ssh_client,
+            ssh_details,
+            ssh_log_level,
+        })
+    }
+
+    /// Create a container client with an existing SSH client (for dependency injection)
+    pub fn with_ssh_client(
+        ssh_connection: String,
+        ssh_client: Arc<StandardSshClient>,
+        ssh_private_key_path: PathBuf,
+        ssh_log_level: Option<String>,
+    ) -> Result<Self> {
+        let (username, host, port) = Self::parse_ssh_connection(&ssh_connection)?;
+
+        let ssh_details = SshConnectionDetails {
+            host,
+            username,
+            port,
+            private_key_path: ssh_private_key_path,
+            timeout: Duration::from_secs(10),
+        };
+
+        Ok(Self {
+            ssh_client,
+            ssh_details,
             ssh_log_level,
         })
     }
@@ -79,62 +171,14 @@ impl ContainerClient {
         self.ssh_log_level = log_level;
     }
 
-    /// Execute a command over SSH
+    /// Execute a command over SSH using StandardSshClient
     pub async fn execute_ssh_command(&self, command: &str) -> Result<String> {
-        let mut ssh_cmd = Command::new("ssh");
-
-        // Add SSH options based on configuration
-        if self.strict_host_key_checking {
-            ssh_cmd.arg("-o").arg("StrictHostKeyChecking=yes");
-
-            if let Some(ref known_hosts) = self.known_hosts_file {
-                ssh_cmd
-                    .arg("-o")
-                    .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
-            }
-        } else {
-            ssh_cmd.arg("-o").arg("StrictHostKeyChecking=no");
-            ssh_cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
-        }
-
-        ssh_cmd.arg("-o").arg("ConnectTimeout=10");
-        ssh_cmd.arg("-o").arg("BatchMode=yes");
-
-        // Add SSH log level if specified to control verbosity
-        if let Some(ref log_level) = self.ssh_log_level {
-            ssh_cmd.arg("-o").arg(format!("LogLevel={}", log_level));
-        }
-
-        // Add SSH private key if provided
-        if let Some(ref key_path) = self.ssh_private_key_path {
-            ssh_cmd.arg("-i").arg(key_path);
-        }
-
-        // Parse connection string to handle user@host:port format
-        let (connection_str, port) = Self::parse_ssh_connection(&self.ssh_connection);
-
-        // Add port if specified
-        if let Some(port) = port {
-            ssh_cmd.arg("-p").arg(port.to_string());
-        }
-
-        // Add connection and command
-        ssh_cmd.arg(&connection_str);
-        ssh_cmd.arg(command);
-
         debug!("Executing SSH command: {}", command);
 
-        let output = ssh_cmd
-            .output()
+        self.ssh_client
+            .execute_command(&self.ssh_details, command, true)
             .await
-            .context("Failed to execute SSH command")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("SSH command failed: {}", stderr));
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            .context("Failed to execute SSH command")
     }
 
     /// Deploy a container based on the specification
@@ -143,7 +187,10 @@ impl ContainerClient {
         spec: &ContainerSpec,
         rental_id: &str,
     ) -> Result<ContainerInfo> {
-        info!("Deploying container for rental {rental_id}");
+        info!(
+            rental_id = rental_id,
+            "Deploying container for rental {rental_id}"
+        );
 
         // Build docker run command as a string directly
         let mut docker_cmd_parts = vec!["docker", "run", "-d"];
@@ -155,7 +202,7 @@ impl ContainerClient {
 
         // Add container name with sanitized rental ID
         let sanitized_rental_id = self.sanitize_rental_id(rental_id);
-        let container_name = format!("basilica-rental-{sanitized_rental_id}");
+        let container_name = format!("basilica-{sanitized_rental_id}");
         docker_cmd_parts.push("--name");
         docker_cmd_parts.push(&container_name);
 
@@ -331,8 +378,11 @@ impl ContainerClient {
             .to_string();
 
         info!(
+            rental_id = rental_id,
+            container_id = container_id,
             "Container {} created with ID: {}",
-            container_name, container_id
+            container_name,
+            container_id
         );
 
         // Get container info
@@ -352,8 +402,11 @@ impl ContainerClient {
 
         let container_data = &inspect_data[0];
 
-        // Extract port mappings
+        // Extract port mappings and deduplicate
+        // Docker returns multiple bindings per port (typically IPv4 and IPv6)
         let mut mapped_ports = Vec::new();
+        let mut seen_ports = std::collections::HashSet::new();
+
         if let Some(ports) = container_data["NetworkSettings"]["Ports"].as_object() {
             for (container_port_proto, bindings) in ports {
                 if let Some(bindings_arr) = bindings.as_array() {
@@ -368,11 +421,20 @@ impl ContainerClient {
                                 .unwrap_or("tcp")
                                 .to_string();
 
-                            mapped_ports.push(PortMapping {
-                                container_port: container_port.parse().unwrap_or(0),
-                                host_port: host_port.parse().unwrap_or(0),
-                                protocol,
-                            });
+                            let container_port_num: u32 = container_port.parse().unwrap_or(0);
+                            let host_port_num: u32 = host_port.parse().unwrap_or(0);
+
+                            // Create a unique key for this port mapping
+                            let key = (container_port_num, host_port_num, protocol.clone());
+
+                            // Only add if we haven't seen this exact mapping before
+                            if seen_ports.insert(key) {
+                                mapped_ports.push(PortMapping {
+                                    container_port: container_port_num,
+                                    host_port: host_port_num,
+                                    protocol,
+                                });
+                            }
                         }
                     }
                 }
@@ -496,7 +558,7 @@ impl ContainerClient {
         Ok(())
     }
 
-    /// Stream container logs
+    /// Stream container logs using StandardSshClient streaming
     pub async fn stream_logs(
         &self,
         container_id: &str,
@@ -516,56 +578,17 @@ impl ContainerClient {
 
         docker_cmd_parts.push("--timestamps".to_string());
 
-        // Validate container ID before using it
         let validated_container_id = self.validate_container_id(container_id)?;
         docker_cmd_parts.push(validated_container_id.to_string());
 
         let docker_cmd = docker_cmd_parts.join(" ");
 
-        let mut ssh_cmd = Command::new("ssh");
+        debug!("Streaming container logs: {}", docker_cmd);
 
-        // Add SSH options based on configuration
-        if self.strict_host_key_checking {
-            ssh_cmd.arg("-o").arg("StrictHostKeyChecking=yes");
-
-            if let Some(ref known_hosts) = self.known_hosts_file {
-                ssh_cmd
-                    .arg("-o")
-                    .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
-            }
-        } else {
-            ssh_cmd.arg("-o").arg("StrictHostKeyChecking=no");
-            ssh_cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
-        }
-
-        ssh_cmd.arg("-o").arg("BatchMode=yes");
-
-        // Add SSH log level if specified to control verbosity
-        if let Some(ref log_level) = self.ssh_log_level {
-            ssh_cmd.arg("-o").arg(format!("LogLevel={}", log_level));
-        }
-
-        if let Some(ref key_path) = self.ssh_private_key_path {
-            ssh_cmd.arg("-i").arg(key_path);
-        }
-
-        // Parse connection string to handle user@host:port format
-        let (connection_str, port) = Self::parse_ssh_connection(&self.ssh_connection);
-
-        // Add port if specified
-        if let Some(port) = port {
-            ssh_cmd.arg("-p").arg(port.to_string());
-        }
-
-        ssh_cmd.arg(&connection_str);
-        ssh_cmd.arg(docker_cmd);
-
-        ssh_cmd.stdout(Stdio::piped());
-        ssh_cmd.stderr(Stdio::piped());
-
-        let child = ssh_cmd.spawn().context("Failed to start log streaming")?;
-
-        Ok(child)
+        self.ssh_client
+            .execute_command_streaming(&self.ssh_details, &docker_cmd)
+            .await
+            .context("Failed to start log streaming")
     }
 
     /// Parse memory usage string (e.g., "100MiB / 1GiB")
@@ -644,5 +667,227 @@ impl ContainerClient {
         };
 
         (num * multiplier as f64) as i64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ssh_connection_ipv4_with_port() {
+        let result = ContainerClient::parse_ssh_connection("user@192.168.1.100:2222");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "192.168.1.100");
+        assert_eq!(port, 2222);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv4_default_port() {
+        let result = ContainerClient::parse_ssh_connection("user@192.168.1.100");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "192.168.1.100");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_hostname_with_port() {
+        let result = ContainerClient::parse_ssh_connection("admin@example.com:3000");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "admin");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_hostname_default_port() {
+        let result = ContainerClient::parse_ssh_connection("admin@example.com");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "admin");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bracketed_with_port() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]:2222");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 2222);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bracketed_default_port() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_full_address_bracketed() {
+        let result = ContainerClient::parse_ssh_connection(
+            "root@[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080",
+        );
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "root");
+        assert_eq!(host, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bare_default_port() {
+        let result = ContainerClient::parse_ssh_connection("user@2001:db8::1");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 22);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_localhost_bracketed() {
+        let result = ContainerClient::parse_ssh_connection("user@[::1]:3000");
+        assert!(result.is_ok());
+        let (username, host, port) = result.unwrap();
+        assert_eq!(username, "user");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_missing_at_sign() {
+        let result = ContainerClient::parse_ssh_connection("user-example.com:2222");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing '@'"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_invalid_port() {
+        let result = ContainerClient::parse_ssh_connection("user@example.com:abc");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_port_out_of_range() {
+        let result = ContainerClient::parse_ssh_connection("user@example.com:99999");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_missing_closing_bracket() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1:2222");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("missing closing bracket"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_invalid_characters_after_bracket() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]abc");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unexpected characters after closing bracket"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_ipv6_bracketed_invalid_port() {
+        let result = ContainerClient::parse_ssh_connection("user@[2001:db8::1]:invalid");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_parse_ssh_connection_hostname_with_invalid_port() {
+        let result = ContainerClient::parse_ssh_connection("user@host:name");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port number"));
+    }
+
+    #[test]
+    fn test_validate_container_id_valid() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new("user@example.com".to_string(), Some(key_path)).unwrap();
+
+        let result = client.validate_container_id("abc123def456");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "abc123def456");
+    }
+
+    #[test]
+    fn test_validate_container_id_empty() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new("user@example.com".to_string(), Some(key_path)).unwrap();
+
+        let result = client.validate_container_id("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn test_validate_container_id_invalid_characters() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new("user@example.com".to_string(), Some(key_path)).unwrap();
+
+        let result = client.validate_container_id("abc-123");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid container ID format"));
+    }
+
+    #[test]
+    fn test_sanitize_rental_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let key_path = temp_dir.path().join("test_key");
+        std::fs::write(&key_path, "dummy_key").unwrap();
+
+        let client = ContainerClient::new("user@example.com".to_string(), Some(key_path)).unwrap();
+
+        assert_eq!(client.sanitize_rental_id("rental-123"), "rental-123");
+        assert_eq!(client.sanitize_rental_id("rental@#$123"), "rental123");
+        assert_eq!(
+            client.sanitize_rental_id("a".repeat(40).as_str()),
+            "a".repeat(32)
+        );
     }
 }

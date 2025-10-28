@@ -1,6 +1,6 @@
 [package]
 name = "basilica-cli"
-version = "0.3.5"
+version = "0.5.5"
 edition = "2021"
 authors = ["Basilica Team"]
 description = "Unified CLI for Basilica GPU rental and network management"
@@ -23,10 +23,13 @@ clap = { workspace = true }
 clap-verbosity-flag = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+rust_decimal = { workspace = true }
+semver = { workspace = true }
 
 # HTTP client for API communication
 reqwest = { workspace = true }
 futures = { workspace = true }
+futures-util = { workspace = true }
 eventsource-stream = { workspace = true }
 
 # Terminal UI and interaction
@@ -53,6 +56,9 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 webbrowser = { workspace = true }
 url = { workspace = true }
+
+# Self-update
+self_update = { workspace = true }
 
 
 # Internal crate dependencies
