@@ -115,7 +115,7 @@ enabled = false
 
 [emission]
 # Percentage of total emissions to burn (0.0-100.0)
-burn_percentage = 80.0
+burn_percentage = 100.0
 
 # UID to receive burn allocation
 burn_uid = 204
