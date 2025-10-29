@@ -149,7 +149,7 @@ impl RentalManager {
         let log_streamer = Arc::new(LogStreamer::new());
 
         // Create ban manager
-        let ban_manager = Arc::new(BanManager::new(persistence.clone()));
+        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
 
         // Create health monitor with SSH key manager, metrics, and ban manager
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
@@ -187,7 +187,7 @@ impl RentalManager {
         let ssh_key_manager = Arc::new(ssh_key_manager);
 
         // Create ban manager
-        let ban_manager = Arc::new(BanManager::new(persistence.clone()));
+        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
 
         // Create health monitor
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
@@ -300,6 +300,11 @@ impl RentalManager {
                 metric_data.has_active_rental,
             );
 
+            let _ = self
+                .ban_manager
+                .get_ban_expiry(metric_data.miner_uid, &metric_data.node_id)
+                .await?;
+
             tracing::debug!(
                 "Initialized node metric: node={}, miner_uid={}, gpu_type={}, is_rented={}",
                 metric_data.node_id,
@@ -321,12 +326,14 @@ impl RentalManager {
         // Check if node is banned before attempting rental
         let miner_uid = extract_miner_uid(&miner_id);
         if let Some(miner_uid) = miner_uid {
-            if self
-                .ban_manager
-                .is_executor_banned(miner_uid, &node_id)
-                .await?
-            {
-                let ban_expiry = self.ban_manager.get_ban_expiry(miner_uid, &node_id).await?;
+            if let Some(ban_expiry) = self.ban_manager.get_ban_expiry(miner_uid, &node_id).await? {
+                tracing::warn!(
+                    node_id = %node_id,
+                    miner_id = %miner_id,
+                    miner_uid = miner_uid,
+                    ban_expiry = %ban_expiry,
+                    "Attempted rental on a banned node; rejecting request"
+                );
                 return Err(anyhow::anyhow!(
                     "Node {} is currently banned. Ban expires at: {:?}",
                     node_id,

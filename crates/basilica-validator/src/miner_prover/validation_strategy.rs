@@ -354,7 +354,8 @@ impl ValidationNode {
             persistence.clone(),
             config.storage_validation.min_required_storage_bytes,
         );
-        let misbehaviour_collector = Misbehaviour::new(persistence);
+        let prometheus_metrics = metrics.as_ref().map(|m| m.prometheus());
+        let misbehaviour_collector = Misbehaviour::new(persistence.clone(), prometheus_metrics);
 
         Self {
             ssh_client,

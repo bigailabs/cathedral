@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::ban_system::BanManager;
+use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::SimplePersistence;
 
 /// Misbehaviour validation profile
@@ -27,9 +28,12 @@ pub struct Misbehaviour {
 }
 
 impl Misbehaviour {
-    pub fn new(persistence: Arc<SimplePersistence>) -> Self {
+    pub fn new(
+        persistence: Arc<SimplePersistence>,
+        metrics: Option<Arc<ValidatorPrometheusMetrics>>,
+    ) -> Self {
         Self {
-            ban_manager: Arc::new(BanManager::new(persistence.clone())),
+            ban_manager: Arc::new(BanManager::new(persistence.clone(), metrics)),
             persistence,
         }
     }
@@ -43,21 +47,12 @@ impl Misbehaviour {
         );
 
         // Check if executor is banned
-        let is_banned = self
+        let ban_expiry = self
             .ban_manager
-            .is_executor_banned(miner_uid, executor_id)
+            .get_ban_expiry(miner_uid, executor_id)
             .await
-            .context("Failed to check ban status")?;
-
-        // Get ban expiry if banned
-        let ban_expiry = if is_banned {
-            self.ban_manager
-                .get_ban_expiry(miner_uid, executor_id)
-                .await
-                .unwrap_or(None)
-        } else {
-            None
-        };
+            .context("Failed to determine ban expiry")?;
+        let is_banned = ban_expiry.is_some();
 
         // Get recent misbehaviours count (last 7 days)
         let recent_logs = self

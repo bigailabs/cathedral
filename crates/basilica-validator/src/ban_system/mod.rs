@@ -4,18 +4,26 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::entities::{MisbehaviourLog, MisbehaviourType};
 use crate::persistence::SimplePersistence;
 
 /// Ban manager for handling executor misbehaviour and ban status
 pub struct BanManager {
     persistence: Arc<SimplePersistence>,
+    metrics: Option<Arc<ValidatorPrometheusMetrics>>,
 }
 
 impl BanManager {
     /// Create a new ban manager
-    pub fn new(persistence: Arc<SimplePersistence>) -> Self {
-        Self { persistence }
+    pub fn new(
+        persistence: Arc<SimplePersistence>,
+        metrics: Option<Arc<ValidatorPrometheusMetrics>>,
+    ) -> Self {
+        Self {
+            persistence,
+            metrics,
+        }
     }
 
     /// Log a misbehaviour for an executor
@@ -83,44 +91,39 @@ impl BanManager {
             );
         }
 
+        // Refresh ban metric after recording misbehaviour
+        if let Err(err) = self
+            .compute_current_ban(miner_uid, executor_id)
+            .await
+            .map(|_| ())
+        {
+            warn!(
+                miner_uid = miner_uid,
+                executor_id = executor_id,
+                error = %err,
+                "Failed to refresh ban metric after logging misbehaviour"
+            );
+        }
+
         Ok(())
     }
 
     /// Check if an executor is currently banned
     pub async fn is_executor_banned(&self, miner_uid: u16, executor_id: &str) -> Result<bool> {
-        // Get recent misbehaviour logs from the last 7 days
-        let logs = self
-            .get_recent_misbehaviours(miner_uid, executor_id, Duration::days(7))
-            .await?;
+        let status = self.compute_current_ban(miner_uid, executor_id).await?;
 
-        if logs.is_empty() {
-            return Ok(false);
+        if let (Some(ban_expiry), Some(ban_trigger)) = (&status.ban_expiry, &status.ban_trigger) {
+            debug!(
+                miner_uid = miner_uid,
+                executor_id = executor_id,
+                ban_trigger = %ban_trigger,
+                ban_expiry = %ban_expiry,
+                offense_count = status.offense_count,
+                "Executor is currently banned"
+            );
         }
 
-        // Find the latest ban trigger (if any)
-        let ban_trigger = self.find_ban_trigger_timestamp(&logs);
-
-        if let Some(trigger_time) = ban_trigger {
-            // Calculate ban duration based on total offense count in 7 days
-            let ban_duration = self.calculate_ban_duration(logs.len());
-            let ban_expiry = trigger_time + ban_duration;
-            let is_banned = Utc::now() < ban_expiry;
-
-            if is_banned {
-                debug!(
-                    miner_uid = miner_uid,
-                    executor_id = executor_id,
-                    ban_trigger = %trigger_time,
-                    ban_expiry = %ban_expiry,
-                    offense_count = logs.len(),
-                    "Executor is currently banned"
-                );
-            }
-
-            Ok(is_banned)
-        } else {
-            Ok(false)
-        }
+        Ok(status.ban_expiry.is_some())
     }
 
     /// Get ban expiry time for an executor
@@ -129,31 +132,60 @@ impl BanManager {
         miner_uid: u16,
         executor_id: &str,
     ) -> Result<Option<DateTime<Utc>>> {
-        // Get recent misbehaviour logs from the last 7 days
+        let status = self.compute_current_ban(miner_uid, executor_id).await?;
+        Ok(status.ban_expiry)
+    }
+
+    async fn compute_current_ban(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+    ) -> Result<BanComputation> {
         let logs = self
             .get_recent_misbehaviours(miner_uid, executor_id, Duration::days(7))
             .await?;
 
-        if logs.is_empty() {
-            return Ok(None);
+        let offense_count = logs.len();
+
+        if offense_count == 0 {
+            self.record_ban_metric(miner_uid, executor_id, None);
+            return Ok(BanComputation {
+                ban_expiry: None,
+                ban_trigger: None,
+                offense_count,
+            });
         }
 
-        // Find the latest ban trigger
         let ban_trigger = self.find_ban_trigger_timestamp(&logs);
 
-        if let Some(trigger_time) = ban_trigger {
-            // Calculate ban duration based on total offense count
-            let ban_duration = self.calculate_ban_duration(logs.len());
-            let ban_expiry = trigger_time + ban_duration;
+        let ban_expiry = ban_trigger.and_then(|trigger_time| {
+            let ban_duration = self.calculate_ban_duration(offense_count);
+            let expiry = trigger_time + ban_duration;
 
-            // Only return expiry if ban is still active
-            if Utc::now() < ban_expiry {
-                Ok(Some(ban_expiry))
+            if Utc::now() < expiry {
+                Some(expiry)
             } else {
-                Ok(None)
+                None
             }
-        } else {
-            Ok(None)
+        });
+
+        self.record_ban_metric(miner_uid, executor_id, ban_expiry);
+
+        Ok(BanComputation {
+            ban_expiry,
+            ban_trigger,
+            offense_count,
+        })
+    }
+
+    fn record_ban_metric(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        ban_expiry: Option<DateTime<Utc>>,
+    ) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_node_ban_till(executor_id, miner_uid, ban_expiry);
         }
     }
 
@@ -305,6 +337,12 @@ impl BanManager {
         })
         .to_string()
     }
+}
+
+struct BanComputation {
+    ban_expiry: Option<DateTime<Utc>>,
+    ban_trigger: Option<DateTime<Utc>>,
+    offense_count: usize,
 }
 
 #[cfg(test)]
@@ -470,7 +508,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone());
+        let ban_manager = BanManager::new(persistence.clone(), None);
         let miner_uid = 1;
         let executor_id = "executor1";
 
@@ -554,7 +592,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone());
+        let ban_manager = BanManager::new(persistence.clone(), None);
         let miner_uid = 1;
         let executor_id = "executor1";
 
@@ -617,7 +655,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone());
+        let ban_manager = BanManager::new(persistence.clone(), None);
         let miner_uid = 1;
         let executor_id = "executor1";
 
