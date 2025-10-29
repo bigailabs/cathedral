@@ -14,7 +14,6 @@ pub struct RentCapacityRequest {
     pub ssh_public_key: String,
     pub docker_image: String,
     pub env_vars: Option<HashMap<String, String>>,
-    pub max_duration_hours: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

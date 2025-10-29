@@ -1,5 +1,5 @@
 # Build stage
-FROM rustlang/rust:nightly-slim AS builder
+FROM rust:1.87-bookworm AS builder
 
 # Install build dependencies and rustfmt
 RUN apt-get update && apt-get install -y \

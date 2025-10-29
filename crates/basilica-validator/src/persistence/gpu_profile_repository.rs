@@ -9,9 +9,10 @@ use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 use std::collections::{hash_map::Entry as HashMapEntry, HashMap};
 use tracing::{debug, info, warn};
 
-use crate::gpu::{categorization::GpuCategory, MinerGpuProfile};
+use crate::gpu::MinerGpuProfile;
 use crate::persistence::SimplePersistence;
 use basilica_common::identity::MinerUid;
+use basilica_common::types::GpuCategory;
 use std::str::FromStr;
 
 /// Repository for GPU profile operations

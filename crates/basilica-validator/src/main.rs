@@ -9,6 +9,8 @@ use clap::Parser;
 
 mod agent_installer;
 mod api;
+mod ban_system;
+mod billing;
 mod bittensor_core;
 mod cli;
 mod collateral;

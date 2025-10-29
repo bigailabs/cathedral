@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use super::container_client::ContainerClient;
 use super::types::{LogEntry, RentalInfo, RentalState};
+use crate::ban_system::BanManager;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
@@ -27,6 +28,8 @@ pub struct DatabaseHealthMonitor {
     ssh_key_manager: Arc<ValidatorSshKeyManager>,
     /// Metrics for tracking rental status (required)
     metrics: Arc<ValidatorPrometheusMetrics>,
+    /// Ban manager for logging misbehaviours
+    ban_manager: Arc<BanManager>,
     /// Health check configuration
     config: HealthCheckConfig,
     /// Cancellation token for the monitoring loop
@@ -57,11 +60,13 @@ impl DatabaseHealthMonitor {
         persistence: Arc<SimplePersistence>,
         ssh_key_manager: Arc<ValidatorSshKeyManager>,
         metrics: Arc<ValidatorPrometheusMetrics>,
+        ban_manager: Arc<BanManager>,
     ) -> Self {
         Self {
             persistence,
             ssh_key_manager,
             metrics,
+            ban_manager,
             config: HealthCheckConfig::default(),
             cancellation_token: CancellationToken::new(),
         }
@@ -72,12 +77,14 @@ impl DatabaseHealthMonitor {
         persistence: Arc<SimplePersistence>,
         ssh_key_manager: Arc<ValidatorSshKeyManager>,
         metrics: Arc<ValidatorPrometheusMetrics>,
+        ban_manager: Arc<BanManager>,
         config: HealthCheckConfig,
     ) -> Self {
         Self {
             persistence,
             ssh_key_manager,
             metrics,
+            ban_manager,
             config,
             cancellation_token: CancellationToken::new(),
         }
@@ -182,6 +189,30 @@ impl DatabaseHealthMonitor {
                     "Health check error for rental {} in state {:?}: {}",
                     rental.rental_id, current_state, e
                 );
+
+                // Log misbehaviour for health check failure
+                if matches!(
+                    current_state,
+                    RentalState::Active | RentalState::Provisioning
+                ) {
+                    if let Some(miner_uid) = super::extract_miner_uid(&rental.miner_id) {
+                        let details = BanManager::create_health_check_failure_details(
+                            &rental.container_id,
+                            &format!("{:?}", current_state),
+                            &e.to_string(),
+                        );
+
+                        if let Err(log_err) = self.ban_manager.log_misbehaviour(
+                            miner_uid,
+                            &rental.node_id,
+                            crate::persistence::entities::misbehaviour::MisbehaviourType::HaltedRental,
+                            &details,
+                        ).await {
+                            warn!("Failed to log health check misbehaviour: {}", log_err);
+                        }
+                    }
+                }
+
                 match current_state {
                     RentalState::Provisioning => Some(RentalState::Failed),
                     RentalState::Active => Some(RentalState::Stopped),
@@ -199,6 +230,30 @@ impl DatabaseHealthMonitor {
                         "Rental {} is unhealthy in state {:?}",
                         rental.rental_id, current_state
                     );
+
+                    // Log misbehaviour for unhealthy container
+                    if matches!(
+                        current_state,
+                        RentalState::Active | RentalState::Provisioning
+                    ) {
+                        if let Some(miner_uid) = super::extract_miner_uid(&rental.miner_id) {
+                            let details = BanManager::create_health_check_failure_details(
+                                &rental.container_id,
+                                &format!("{:?}", current_state),
+                                "Container unhealthy",
+                            );
+
+                            if let Err(log_err) = self.ban_manager.log_misbehaviour(
+                                miner_uid,
+                                &rental.node_id,
+                                crate::persistence::entities::misbehaviour::MisbehaviourType::HaltedRental,
+                                &details,
+                            ).await {
+                                warn!("Failed to log unhealthy container misbehaviour: {}", log_err);
+                            }
+                        }
+                    }
+
                     match current_state {
                         RentalState::Provisioning => Some(RentalState::Failed),
                         RentalState::Active => Some(RentalState::Stopped),

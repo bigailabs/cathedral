@@ -41,6 +41,7 @@ impl fmt::Display for LockKey {
 
 impl LockKey {
     pub const PAYMENTS_MONITOR: LockKey = LockKey::new(0x00B1_77A0_0001);
+    pub const RECONCILIATION_SERVICE: LockKey = LockKey::new(0x00B1_77A0_0002);
 }
 
 /// A guard that holds a PostgreSQL advisory lock

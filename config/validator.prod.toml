@@ -109,9 +109,13 @@ ssh_command_timeout = { secs = 60, nanos = 0 }
 ssh_retry_attempts = 3
 ssh_retry_delay = { secs = 2, nanos = 0 }
 
+# Billing - default to false as only one validator is running billing service
+[billing]
+enabled = false
+
 [emission]
 # Percentage of total emissions to burn (0.0-100.0)
-burn_percentage = 80.0
+burn_percentage = 100.0
 
 # UID to receive burn allocation
 burn_uid = 204

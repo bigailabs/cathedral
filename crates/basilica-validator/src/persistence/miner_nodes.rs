@@ -6,6 +6,7 @@ use crate::miner_prover::types::MinerInfo;
 use crate::persistence::types::{AvailableNodeData, NodeData};
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
+use basilica_common::types::GpuCategory;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::str::FromStr;
@@ -215,11 +216,13 @@ impl SimplePersistence {
         &self,
         consecutive_failures_threshold: i32,
         gpu_assignment_cleanup_ttl: Option<Duration>,
-    ) -> Result<()> {
+    ) -> Result<Vec<(String, String)>> {
         info!(
             "Running node cleanup - checking for {} consecutive failures",
             consecutive_failures_threshold
         );
+
+        let mut removed_nodes: Vec<(String, String)> = Vec::new();
 
         let offline_with_gpus_query = r#"
             SELECT DISTINCT me.node_id, me.miner_id, COUNT(ga.gpu_uuid) as gpu_count
@@ -335,8 +338,7 @@ impl SimplePersistence {
 
         let cleanup_minutes = gpu_assignment_cleanup_ttl
             .map(|d| d.as_secs() / 60)
-            .unwrap_or(120)
-            .max(120);
+            .unwrap_or(120);
 
         info!(
             "Cleaning GPU assignments from nodes offline >{} minutes",
@@ -347,11 +349,11 @@ impl SimplePersistence {
             r#"
             SELECT DISTINCT me.node_id, me.miner_id, COUNT(ga.gpu_uuid) as gpu_count
             FROM miner_nodes me
-            INNER JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
+            LEFT JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
             WHERE me.status = 'offline'
             AND (
-                me.last_health_check < datetime('now', '-{cleanup_minutes} minutes')
-                OR (me.last_health_check IS NULL AND me.updated_at < datetime('now', '-{cleanup_minutes} minutes'))
+                datetime(me.last_health_check) < datetime('now', '-{cleanup_minutes} minutes')
+                OR (me.last_health_check IS NULL AND datetime(me.updated_at) < datetime('now', '-{cleanup_minutes} minutes'))
             )
             GROUP BY me.node_id, me.miner_id
             "#
@@ -450,6 +452,7 @@ impl SimplePersistence {
 
             tx.commit().await?;
             deleted += 1;
+            removed_nodes.push((miner_id.clone(), node_id.clone()));
         }
 
         let stale_delete_query = format!(
@@ -457,8 +460,8 @@ impl SimplePersistence {
             DELETE FROM miner_nodes
             WHERE status = 'offline'
             AND (
-                last_health_check < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND updated_at < datetime('now', '-{} minutes'))
+                datetime(last_health_check) < datetime('now', '-{} minutes')
+                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
             )
             "#,
             cleanup_minutes, cleanup_minutes
@@ -469,11 +472,41 @@ impl SimplePersistence {
             cleanup_minutes
         );
 
-        let stale_result = sqlx::query(&stale_delete_query)
-            .execute(self.pool())
+        let stale_nodes_query = format!(
+            r#"
+            SELECT node_id, miner_id
+            FROM miner_nodes
+            WHERE status = 'offline'
+            AND (
+                datetime(last_health_check) < datetime('now', '-{} minutes')
+                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
+            )
+            "#,
+            cleanup_minutes, cleanup_minutes
+        );
+
+        let mut stale_tx = self.pool().begin().await?;
+
+        let stale_rows = sqlx::query(&stale_nodes_query)
+            .fetch_all(&mut *stale_tx)
             .await?;
 
+        let mut stale_pairs = Vec::with_capacity(stale_rows.len());
+        for row in stale_rows {
+            let node_id: String = row.try_get("node_id")?;
+            let miner_id: String = row.try_get("miner_id")?;
+            stale_pairs.push((miner_id, node_id));
+        }
+
+        let stale_result = sqlx::query(&stale_delete_query)
+            .execute(&mut *stale_tx)
+            .await?;
+
+        stale_tx.commit().await?;
+
         let stale_deleted = stale_result.rows_affected();
+
+        removed_nodes.extend(stale_pairs);
 
         let affected_miners_query = r#"
             SELECT DISTINCT miner_uid
@@ -509,8 +542,7 @@ impl SimplePersistence {
             let mut gpu_map: std::collections::HashMap<String, u32> =
                 std::collections::HashMap::new();
             for (_, count, gpu_name, _) in gpu_counts {
-                let category =
-                    crate::gpu::categorization::GpuCategory::from_str(&gpu_name).unwrap();
+                let category = GpuCategory::from_str(&gpu_name).unwrap();
                 let model = category.to_string();
                 *gpu_map.entry(model).or_insert(0) += count;
             }
@@ -571,7 +603,7 @@ impl SimplePersistence {
             debug!("No nodes needed cleanup in this cycle");
         }
 
-        Ok(())
+        Ok(removed_nodes)
     }
 
     /// Get available nodes for rental (not currently rented)

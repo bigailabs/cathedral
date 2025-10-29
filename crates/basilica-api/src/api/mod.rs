@@ -14,10 +14,21 @@ use axum::{
 
 /// Create all API routes
 pub fn routes(state: AppState) -> Router<AppState> {
-    // Unprotected routes (for health checks, etc.)
+    // Unprotected routes (for health checks, metrics, etc.)
     let public_routes = Router::new()
         // Health endpoint - no authentication required for ALB health checks
-        .route("/health", get(routes::health::health_check));
+        .route("/health", get(routes::health::health_check))
+        // Metrics endpoint - no authentication required for Prometheus scraping
+        .route("/metrics", get(routes::metrics::metrics_handler));
+
+    // Routes that require balance validation
+    let rental_creation_route = Router::new()
+        .route("/rentals", post(routes::rentals::start_rental))
+        // Balance validation (after auth, before handler)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::balance_validation_middleware,
+        ));
 
     // Protected routes with unified authentication and scope validation
     let mut protected_routes = Router::new()
@@ -102,8 +113,12 @@ pub fn routes(state: AppState) -> Router<AppState> {
             );
     }
 
-    // Apply middleware layers
+    // Add payment and billing service endpoints
     let protected_routes = protected_routes
+        .nest("/payments", routes::payments::routes())
+        .nest("/billing", routes::billing::routes())
+        // Apply middleware layers
+        // Apply scope validation AFTER auth middleware
         .layer(axum::middleware::from_fn(
             middleware::scope_validation_middleware,
         ))

@@ -1,12 +1,16 @@
 use crate::domain::packages::BillingPackage;
 use crate::domain::types::{BillingPeriod, CostBreakdown, CreditBalance, PackageId, UsageMetrics};
 use crate::error::{BillingError, Result};
+use crate::pricing::service::PricingService;
 use async_trait::async_trait;
+use rust_decimal::Decimal;
 use serde_json;
+use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{debug, warn};
 
 #[async_trait]
 pub trait PackageRepository: Send + Sync {
@@ -38,14 +42,31 @@ pub trait PackageRepository: Send + Sync {
 pub struct SqlPackageRepository {
     pool: PgPool,
     cache: Arc<RwLock<HashMap<PackageId, BillingPackage>>>,
+    pricing_service: Option<Arc<PricingService>>,
 }
+
+const PACKAGE_SELECT_COLUMNS: &str = r#"
+    package_id, name, description, hourly_rate, gpu_model,
+    billing_period, priority, active, metadata,
+    storage_rate_per_gb_hour, network_rate_per_gb, disk_io_rate_per_gb,
+    cpu_rate_per_core_hour, memory_rate_per_gb_hour,
+    included_storage_gb_hours, included_network_gb, included_disk_io_gb,
+    included_cpu_core_hours, included_memory_gb_hours
+"#;
 
 impl SqlPackageRepository {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
             cache: Arc::new(RwLock::new(HashMap::new())),
+            pricing_service: None,
         }
+    }
+
+    /// Set the pricing service for dynamic pricing integration
+    pub fn with_pricing_service(mut self, pricing_service: Arc<PricingService>) -> Self {
+        self.pricing_service = Some(pricing_service);
+        self
     }
 
     /// Initialize the repository by loading packages into cache
@@ -54,54 +75,85 @@ impl SqlPackageRepository {
         Ok(())
     }
 
+    fn row_to_billing_package(row: &PgRow) -> Result<BillingPackage> {
+        let billing_period = match row.get::<String, _>("billing_period").as_str() {
+            "Hourly" => BillingPeriod::Hourly,
+            "Daily" => BillingPeriod::Daily,
+            "Weekly" => BillingPeriod::Weekly,
+            "Monthly" => BillingPeriod::Monthly,
+            _ => BillingPeriod::Hourly,
+        };
+
+        Ok(BillingPackage {
+            id: PackageId::new(row.get("package_id")),
+            name: row.get("name"),
+            description: row.get("description"),
+            hourly_rate: CreditBalance::from_decimal(row.get("hourly_rate")),
+            gpu_model: row.get("gpu_model"),
+            billing_period,
+            priority: row.get::<i32, _>("priority") as u32,
+            active: row.get("active"),
+            metadata: row
+                .try_get::<Option<serde_json::Value>, _>("metadata")
+                .ok()
+                .flatten()
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
+
+            storage_rate_per_gb_hour: CreditBalance::from_decimal(
+                row.try_get("storage_rate_per_gb_hour")
+                    .unwrap_or(Decimal::ZERO),
+            ),
+            network_rate_per_gb: CreditBalance::from_decimal(
+                row.try_get("network_rate_per_gb").unwrap_or(Decimal::ZERO),
+            ),
+            disk_io_rate_per_gb: CreditBalance::from_decimal(
+                row.try_get("disk_io_rate_per_gb").unwrap_or(Decimal::ZERO),
+            ),
+            cpu_rate_per_core_hour: CreditBalance::from_decimal(
+                row.try_get("cpu_rate_per_core_hour")
+                    .unwrap_or(Decimal::ZERO),
+            ),
+            memory_rate_per_gb_hour: CreditBalance::from_decimal(
+                row.try_get("memory_rate_per_gb_hour")
+                    .unwrap_or(Decimal::ZERO),
+            ),
+
+            included_storage_gb_hours: row
+                .try_get("included_storage_gb_hours")
+                .unwrap_or(Decimal::ZERO),
+            included_network_gb: row.try_get("included_network_gb").unwrap_or(Decimal::ZERO),
+            included_disk_io_gb: row.try_get("included_disk_io_gb").unwrap_or(Decimal::ZERO),
+            included_cpu_core_hours: row
+                .try_get("included_cpu_core_hours")
+                .unwrap_or(Decimal::ZERO),
+            included_memory_gb_hours: row
+                .try_get("included_memory_gb_hours")
+                .unwrap_or(Decimal::ZERO),
+        })
+    }
+
     /// Refresh cache from database
     async fn refresh_cache(&self) -> Result<()> {
-        let rows = sqlx::query(
-            r#"
-            SELECT package_id, name, description, hourly_rate, gpu_model,
-                   billing_period, priority, active, metadata
-            FROM billing.billing_packages
-            WHERE active = true
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "fetch_all_packages".to_string(),
-            source: Box::new(e),
-        })?;
+        let query_str = format!(
+            "SELECT {} FROM billing.billing_packages WHERE active = true",
+            PACKAGE_SELECT_COLUMNS
+        );
+
+        let rows = sqlx::query(&query_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| BillingError::DatabaseError {
+                operation: "fetch_all_packages".to_string(),
+                source: Box::new(e),
+            })?;
 
         let mut cache = self.cache.write().await;
         cache.clear();
 
         for row in rows {
-            let package_id = PackageId::new(row.get("package_id"));
-            let billing_period = match row.get::<String, _>("billing_period").as_str() {
-                "Hourly" => BillingPeriod::Hourly,
-                "Daily" => BillingPeriod::Daily,
-                "Weekly" => BillingPeriod::Weekly,
-                "Monthly" => BillingPeriod::Monthly,
-                _ => BillingPeriod::Hourly,
-            };
-
-            let package = BillingPackage {
-                id: package_id.clone(),
-                name: row.get("name"),
-                description: row.get("description"),
-                hourly_rate: CreditBalance::from_decimal(row.get("hourly_rate")),
-                gpu_model: row.get("gpu_model"),
-                billing_period,
-                priority: row.get::<i32, _>("priority") as u32,
-                active: row.get("active"),
-                metadata: row
-                    .try_get::<Option<serde_json::Value>, _>("metadata")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-            };
-
-            cache.insert(package_id, package);
+            let package = Self::row_to_billing_package(&row)?;
+            cache.insert(package.id.clone(), package);
         }
 
         Ok(())
@@ -109,50 +161,21 @@ impl SqlPackageRepository {
 
     /// Load package from database
     async fn load_from_database(&self, package_id: &PackageId) -> Result<Option<BillingPackage>> {
-        let row = sqlx::query(
-            r#"
-            SELECT package_id, name, description, hourly_rate, gpu_model,
-                   billing_period, priority, active, metadata
-            FROM billing.billing_packages
-            WHERE package_id = $1
-            "#,
-        )
-        .bind(package_id.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "fetch_package".to_string(),
-            source: Box::new(e),
-        })?;
+        let query_str = format!(
+            "SELECT {} FROM billing.billing_packages WHERE package_id = $1",
+            PACKAGE_SELECT_COLUMNS
+        );
 
-        if let Some(row) = row {
-            let billing_period = match row.get::<String, _>("billing_period").as_str() {
-                "Hourly" => BillingPeriod::Hourly,
-                "Daily" => BillingPeriod::Daily,
-                "Weekly" => BillingPeriod::Weekly,
-                "Monthly" => BillingPeriod::Monthly,
-                _ => BillingPeriod::Hourly,
-            };
+        let row = sqlx::query(&query_str)
+            .bind(package_id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| BillingError::DatabaseError {
+                operation: "fetch_package".to_string(),
+                source: Box::new(e),
+            })?;
 
-            Ok(Some(BillingPackage {
-                id: PackageId::new(row.get("package_id")),
-                name: row.get("name"),
-                description: row.get("description"),
-                hourly_rate: CreditBalance::from_decimal(row.get("hourly_rate")),
-                gpu_model: row.get("gpu_model"),
-                billing_period,
-                priority: row.get::<i32, _>("priority") as u32,
-                active: row.get("active"),
-                metadata: row
-                    .try_get::<Option<serde_json::Value>, _>("metadata")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-            }))
-        } else {
-            Ok(None)
-        }
+        row.map(|r| Self::row_to_billing_package(&r)).transpose()
     }
 
     /// Persist package to database
@@ -161,8 +184,13 @@ impl SqlPackageRepository {
             r#"
             INSERT INTO billing.billing_packages
                 (package_id, name, description, hourly_rate, gpu_model,
-                 billing_period, priority, active, metadata, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+                 billing_period, priority, active, metadata,
+                 storage_rate_per_gb_hour, network_rate_per_gb, disk_io_rate_per_gb,
+                 cpu_rate_per_core_hour, memory_rate_per_gb_hour,
+                 included_storage_gb_hours, included_network_gb, included_disk_io_gb,
+                 included_cpu_core_hours, included_memory_gb_hours,
+                 updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, NOW())
             ON CONFLICT (package_id) DO UPDATE SET
                 name = EXCLUDED.name,
                 description = EXCLUDED.description,
@@ -172,6 +200,16 @@ impl SqlPackageRepository {
                 priority = EXCLUDED.priority,
                 active = EXCLUDED.active,
                 metadata = EXCLUDED.metadata,
+                storage_rate_per_gb_hour = EXCLUDED.storage_rate_per_gb_hour,
+                network_rate_per_gb = EXCLUDED.network_rate_per_gb,
+                disk_io_rate_per_gb = EXCLUDED.disk_io_rate_per_gb,
+                cpu_rate_per_core_hour = EXCLUDED.cpu_rate_per_core_hour,
+                memory_rate_per_gb_hour = EXCLUDED.memory_rate_per_gb_hour,
+                included_storage_gb_hours = EXCLUDED.included_storage_gb_hours,
+                included_network_gb = EXCLUDED.included_network_gb,
+                included_disk_io_gb = EXCLUDED.included_disk_io_gb,
+                included_cpu_core_hours = EXCLUDED.included_cpu_core_hours,
+                included_memory_gb_hours = EXCLUDED.included_memory_gb_hours,
                 updated_at = NOW()
             "#,
         )
@@ -184,6 +222,16 @@ impl SqlPackageRepository {
         .bind(package.priority as i32)
         .bind(package.active)
         .bind(serde_json::to_value(&package.metadata).unwrap_or(serde_json::json!({})))
+        .bind(package.storage_rate_per_gb_hour.as_decimal())
+        .bind(package.network_rate_per_gb.as_decimal())
+        .bind(package.disk_io_rate_per_gb.as_decimal())
+        .bind(package.cpu_rate_per_core_hour.as_decimal())
+        .bind(package.memory_rate_per_gb_hour.as_decimal())
+        .bind(package.included_storage_gb_hours)
+        .bind(package.included_network_gb)
+        .bind(package.included_disk_io_gb)
+        .bind(package.included_cpu_core_hours)
+        .bind(package.included_memory_gb_hours)
         .execute(&self.pool)
         .await
         .map_err(|e| BillingError::DatabaseError {
@@ -199,69 +247,103 @@ impl SqlPackageRepository {
 impl PackageRepository for SqlPackageRepository {
     async fn get_package(&self, package_id: &PackageId) -> Result<BillingPackage> {
         // Check cache first
-        {
+        let mut package = {
             let cache = self.cache.read().await;
             if let Some(package) = cache.get(package_id) {
-                return Ok(package.clone());
+                package.clone()
+            } else {
+                // Load from database
+                if let Some(package) = self.load_from_database(package_id).await? {
+                    // Update cache
+                    let mut cache = self.cache.write().await;
+                    cache.insert(package_id.clone(), package.clone());
+                    package
+                } else {
+                    return Err(BillingError::PackageNotFound {
+                        id: package_id.to_string(),
+                    });
+                }
+            }
+        };
+
+        // Apply dynamic pricing if pricing service is configured
+        // The pricing service handles the enabled/disabled check internally
+        if let Some(pricing_service) = &self.pricing_service {
+            match pricing_service
+                .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                .await
+            {
+                Ok(dynamic_price) => {
+                    debug!(
+                        "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                        package_id,
+                        dynamic_price,
+                        package.gpu_model,
+                        package.hourly_rate.as_decimal()
+                    );
+                    package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to get price for {}: {}. Using static price ${}/hr",
+                        package.gpu_model,
+                        e,
+                        package.hourly_rate.as_decimal()
+                    );
+                }
             }
         }
 
-        // Load from database
-        if let Some(package) = self.load_from_database(package_id).await? {
-            // Update cache
-            let mut cache = self.cache.write().await;
-            cache.insert(package_id.clone(), package.clone());
-            return Ok(package);
-        }
-
-        Err(BillingError::PackageNotFound {
-            id: package_id.to_string(),
-        })
+        Ok(package)
     }
 
     async fn list_packages(&self) -> Result<Vec<BillingPackage>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT package_id, name, description, hourly_rate, gpu_model,
-                   billing_period, priority, active, metadata
-            FROM billing.billing_packages
-            WHERE active = true
-            ORDER BY priority, package_id
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "list_packages".to_string(),
-            source: Box::new(e),
-        })?;
+        let query_str = format!(
+            "SELECT {} FROM billing.billing_packages WHERE active = true ORDER BY priority, package_id",
+            PACKAGE_SELECT_COLUMNS
+        );
 
-        let mut packages = Vec::new();
-        for row in rows {
-            let billing_period = match row.get::<String, _>("billing_period").as_str() {
-                "Hourly" => BillingPeriod::Hourly,
-                "Daily" => BillingPeriod::Daily,
-                "Weekly" => BillingPeriod::Weekly,
-                "Monthly" => BillingPeriod::Monthly,
-                _ => BillingPeriod::Hourly,
-            };
+        let rows = sqlx::query(&query_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| BillingError::DatabaseError {
+                operation: "list_packages".to_string(),
+                source: Box::new(e),
+            })?;
 
-            packages.push(BillingPackage {
-                id: PackageId::new(row.get("package_id")),
-                name: row.get("name"),
-                description: row.get("description"),
-                hourly_rate: CreditBalance::from_decimal(row.get("hourly_rate")),
-                gpu_model: row.get("gpu_model"),
-                billing_period,
-                priority: row.get::<i32, _>("priority") as u32,
-                active: row.get("active"),
-                metadata: row
-                    .try_get::<Option<serde_json::Value>, _>("metadata")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-            });
+        let mut packages: Vec<BillingPackage> = rows
+            .iter()
+            .map(Self::row_to_billing_package)
+            .collect::<Result<Vec<_>>>()?;
+
+        // Apply dynamic pricing if pricing service is configured
+        // The pricing service handles the enabled/disabled check internally
+        if let Some(pricing_service) = &self.pricing_service {
+            for package in &mut packages {
+                match pricing_service
+                    .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                    .await
+                {
+                    Ok(dynamic_price) => {
+                        debug!(
+                            "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                            package.id,
+                            dynamic_price,
+                            package.gpu_model,
+                            package.hourly_rate.as_decimal()
+                        );
+                        package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get price for {}: {}. Using static price ${}/hr",
+                            package.gpu_model,
+                            e,
+                            package.hourly_rate.as_decimal()
+                        );
+                    }
+                }
+            }
         }
 
         Ok(packages)
@@ -410,10 +492,13 @@ impl PackageRepository for SqlPackageRepository {
     }
 
     async fn find_package_for_gpu_model(&self, gpu_model: &str) -> Result<BillingPackage> {
-        let row = sqlx::query(
+        use tracing::{info, warn};
+
+        info!("Looking up package for GPU model: {}", gpu_model);
+
+        let query_str = format!(
             r#"
-            SELECT package_id, name, description, hourly_rate, gpu_model,
-                   billing_period, priority, active, metadata
+            SELECT {}
             FROM billing.billing_packages
             WHERE active = true
               AND (
@@ -426,42 +511,61 @@ impl PackageRepository for SqlPackageRepository {
                 priority DESC
             LIMIT 1
             "#,
-        )
-        .bind(gpu_model)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| BillingError::DatabaseError {
-            operation: "find_package_for_gpu_model".to_string(),
-            source: Box::new(e),
-        })?;
+            PACKAGE_SELECT_COLUMNS
+        );
+
+        let row = sqlx::query(&query_str)
+            .bind(gpu_model)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| BillingError::DatabaseError {
+                operation: "find_package_for_gpu_model".to_string(),
+                source: Box::new(e),
+            })?;
 
         if let Some(row) = row {
-            let billing_period = match row.get::<String, _>("billing_period").as_str() {
-                "Hourly" => BillingPeriod::Hourly,
-                "Daily" => BillingPeriod::Daily,
-                "Monthly" => BillingPeriod::Monthly,
-                _ => BillingPeriod::Hourly,
-            };
+            let mut package = Self::row_to_billing_package(&row)?;
+            info!(
+                "Found matching package {} for GPU model {}",
+                package.id, gpu_model
+            );
 
-            return Ok(BillingPackage {
-                id: PackageId::new(row.get("package_id")),
-                name: row.get("name"),
-                description: row.get("description"),
-                hourly_rate: CreditBalance::from_decimal(row.get("hourly_rate")),
-                gpu_model: row.get("gpu_model"),
-                billing_period,
-                priority: row.get::<i32, _>("priority") as u32,
-                active: row.get("active"),
-                metadata: row
-                    .try_get::<Option<serde_json::Value>, _>("metadata")
-                    .ok()
-                    .flatten()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default(),
-            });
+            // Apply dynamic pricing if pricing service is configured
+            // The pricing service handles the enabled/disabled check internally
+            if let Some(pricing_service) = &self.pricing_service {
+                match pricing_service
+                    .get_price_with_fallback(&package.gpu_model, package.hourly_rate.as_decimal())
+                    .await
+                {
+                    Ok(dynamic_price) => {
+                        debug!(
+                            "Package {}: using price ${}/hr for {} (static was ${}/hr)",
+                            package.id,
+                            dynamic_price,
+                            package.gpu_model,
+                            package.hourly_rate.as_decimal()
+                        );
+                        package.hourly_rate = CreditBalance::from_decimal(dynamic_price);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get price for {}: {}. Using static price ${}/hr",
+                            package.gpu_model,
+                            e,
+                            package.hourly_rate.as_decimal()
+                        );
+                    }
+                }
+            }
+
+            Ok(package)
+        } else {
+            warn!(
+                "No package found for GPU model '{}', falling back to h100 package",
+                gpu_model
+            );
+            self.get_package(&PackageId::h100()).await
         }
-
-        self.get_package(&PackageId::custom()).await
     }
 
     async fn is_package_compatible_with_gpu(

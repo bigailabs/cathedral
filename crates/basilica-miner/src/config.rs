@@ -191,6 +191,19 @@ impl Default for NodeSshConfig {
     }
 }
 
+/// Expand tilde (~) in path to HOME environment variable
+pub fn expand_tilde_in_path(path: &Path) -> PathBuf {
+    if path.starts_with("~") {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(path.to_string_lossy().replacen('~', &home, 1))
+        } else {
+            path.to_path_buf()
+        }
+    } else {
+        path.to_path_buf()
+    }
+}
+
 impl Default for MinerBittensorConfig {
     fn default() -> Self {
         Self {
@@ -296,6 +309,34 @@ impl ConfigValidation for MinerConfig {
                 value: "None".to_string(),
                 reason: "validator_hotkey is required when using 'fixed_assignment' strategy"
                     .to_string(),
+            });
+        }
+
+        // Validate SSH key path
+        let ssh_key_path = expand_tilde_in_path(&self.ssh_session.miner_node_key_path);
+        if !ssh_key_path.exists() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "ssh_session.miner_node_key_path".to_string(),
+                value: self.ssh_session.miner_node_key_path.display().to_string(),
+                reason: format!(
+                    "SSH private key not found at path: {} (expanded to: {}). \
+                     The miner requires a valid SSH key to access GPU nodes. \
+                     Please ensure the key file exists and is readable.",
+                    self.ssh_session.miner_node_key_path.display(),
+                    ssh_key_path.display()
+                ),
+            });
+        }
+
+        if !ssh_key_path.is_file() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "ssh_session.miner_node_key_path".to_string(),
+                value: self.ssh_session.miner_node_key_path.display().to_string(),
+                reason: format!(
+                    "SSH key path exists but is not a file: {} (expanded to: {})",
+                    self.ssh_session.miner_node_key_path.display(),
+                    ssh_key_path.display()
+                ),
             });
         }
 

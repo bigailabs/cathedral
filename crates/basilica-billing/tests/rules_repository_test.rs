@@ -3,19 +3,15 @@
 use basilica_billing::domain::rules_engine::{BillingRule, RuleAction, RuleCondition};
 use basilica_billing::storage::rules::{RulesRepository, SqlRulesRepository};
 use rust_decimal::Decimal;
-use sqlx::postgres::PgPoolOptions;
+
+mod common;
 
 #[tokio::test]
 async fn test_rules_repository_crud() {
-    let database_url = std::env::var("BILLING_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://billing:billing_dev_password@localhost:5432/basilica_billing".to_string()
-    });
-
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
+    // Use the shared test database pool
+    let pool = common::test_db::get_test_pool()
         .await
-        .expect("Failed to connect to database");
+        .expect("Failed to get test database pool");
 
     let repo = SqlRulesRepository::new(pool);
 

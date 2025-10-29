@@ -12,6 +12,9 @@ basilica-common = { path = "../basilica-common" }
 bittensor = { path = "../bittensor" }
 basilica-validator = { path = "../basilica-validator", features = ["client"] }
 basilica-sdk = { path = "../basilica-sdk" }
+basilica-billing = { path = "../basilica-billing" }
+basilica-payments = { path = "../basilica-payments" }
+basilica-protocol = { path = "../basilica-protocol" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -32,6 +35,7 @@ hyper = { version = "0.14", features = ["client", "http1"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+prost-types = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
@@ -65,7 +69,8 @@ moka = { workspace = true }
 # Concurrent collections
 dashmap = { workspace = true }
 
-# Database
+# Additional dependencies
+rust_decimal = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }

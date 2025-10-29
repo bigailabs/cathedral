@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5]
+
+### Added
+- New `upgrade` command for automatic CLI updates
+
+### Fixed
+- Fixed issue where rental price was not displayed correctly in the `basilica ps` command.
+
+## [0.5.4]
+
+### Changed
+- Removed reserved balance from `basilica balance` command output to align with pay-as-you-go billing model
+- Rental pricing changed from fixed to dynamic model.
+
+## [0.5.3]
+
+### Fixed
+- Use musl instead of gnu build to avoid issues with glibc version in older distributions.
+
+## [0.5.2]
+
+### Added
+- `basilica ps --history` now lists completed rentals with per-rental totals and an overall spend summary to simplify billing reviews.
+- (Debug builds) `basilica packages` exposes the raw billing package feed for troubleshooting pricing mismatches.
+
+### Changed
+- `basilica ls`/`ps` consume live billing package data so hourly USD pricing shows up directly in the tables, including recalculated totals for multi-GPU nodes.
+- Balance and rental cost displays now share the same credit formatter, keeping dollar figures aligned to two decimal places in every view.
+- Table output for rentals highlights hourly rate, accumulated cost, and durations inline, removing the need to cross-reference separate commands.
+
+### Removed
+- Deprecated `basilica price` and `basilica usage` subcommands; their workflows are now part of the enhanced `ls`/`ps` experience.
+
+## [0.5.1]
+
+### Added
+- Account balance management via `basilica balance` to inspect available and reserved compute credits
+- TAO deposit funding with per-user wallet addresses and automatic credit conversion after 12 confirmations
+  - Full deposit history available through `basilica fund list`
+- GPU pricing calculator with `basilica price` showing real-time hourly rates across all GPU types
+  - Adds affordability estimates based on your current balance to project run-time hours
+- Usage tracking and cost monitoring via `basilica usage` for active and completed rentals
+  - Displays resource consumption metrics and accumulated costs across rentals
+
+- Account Balance Management - Check your available and reserved compute credits with the basilica balance command
+
+- TAO Deposit Funding - Fund your account by depositing TAO to a unique (per user) wallet, with automatic credit conversion after 12 confirmations and full deposit history tracking via `basilica fund list`
+
+- GPU Pricing Calculator - View real-time hourly rates for all GPU types with `basilica price`, including affordability calculations that show how many hours you can run based on your current balance.
+
+- Usage Tracking & Cost Monitoring - Track rental costs and resource consumption with `basilica usage`, displaying detailed metrics and accumulated costs for all active and completed rentals
+
+## [0.5.0] - skipped release
+
 ## [0.4.1]
 
 ### Added

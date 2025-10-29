@@ -1,13 +1,14 @@
 use basilica_billing::server::BillingServer;
 use basilica_billing::storage::rds::RdsConnection;
 use basilica_protocol::billing::billing_service_client::BillingServiceClient;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{Pool, Postgres};
+use sqlx::{Pool, Postgres, Row};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tonic::transport::Channel;
-use tracing::info;
+
+// Import the test database utilities from parent module
+use crate::common;
 
 pub struct TestContext {
     pub client: BillingServiceClient<Channel>,
@@ -18,18 +19,19 @@ pub struct TestContext {
 
 impl TestContext {
     pub async fn new() -> Self {
-        let database_url =
-            "postgres://billing:billing_dev_password@localhost:5432/basilica_billing";
-
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect(database_url)
+        // Use the test database pool from the singleton container
+        let pool = common::test_db::get_test_pool()
             .await
-            .expect("Failed to connect to database");
+            .expect("Failed to get test database pool");
 
-        Self::run_migrations(&pool).await;
-        Self::cleanup_database(&pool).await;
+        // Only seed test data (packages) - don't cleanup to allow parallel test execution
+        // Each test uses unique user IDs so they won't conflict
         Self::seed_test_data(&pool).await;
+
+        // Get the database URL from the test container
+        let database_url = common::test_db::get_test_database_url()
+            .await
+            .expect("Failed to get test database URL");
 
         let db_config = basilica_billing::config::DatabaseConfig {
             url: database_url.to_string(),
@@ -78,91 +80,55 @@ impl TestContext {
         }
     }
 
-    async fn run_migrations(pool: &Pool<Postgres>) {
-        let migrations_dir = std::path::Path::new("migrations");
-        if !migrations_dir.exists() {
-            return;
-        }
-
-        let mut entries: Vec<_> = std::fs::read_dir(migrations_dir)
-            .expect("Failed to read migrations directory")
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "sql")
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        entries.sort_by_key(|e| e.path());
-
-        for entry in entries {
-            let sql = std::fs::read_to_string(entry.path()).expect("Failed to read migration file");
-
-            if let Err(e) = sqlx::query(&sql).execute(pool).await {
-                info!("Migration already applied or error: {}", e);
-            }
-        }
-    }
-
-    async fn cleanup_database(pool: &Pool<Postgres>) {
-        // Clean up all test data - order matters due to foreign key constraints
-        let queries = vec![
-            "TRUNCATE TABLE billing.usage_events CASCADE",
-            "TRUNCATE TABLE billing.credit_reservations CASCADE",
-            "TRUNCATE TABLE billing.rentals CASCADE",
-            "TRUNCATE TABLE billing.user_preferences CASCADE",
-            "TRUNCATE TABLE billing.credits CASCADE",
-            "TRUNCATE TABLE billing.users CASCADE",
-            "DELETE FROM billing.billing_packages WHERE package_id NOT IN ('h100', 'a100', 'rtx4090', 'custom')",
-        ];
-
-        for query in queries {
-            let _ = sqlx::query(query).execute(pool).await;
-        }
-    }
+    // Note: cleanup_database was removed to enable parallel test execution
+    // Each test uses unique user IDs, so they don't interfere with each other
+    // The shared test database accumulates test data but tests are isolated by user_id
 
     async fn seed_test_data(pool: &Pool<Postgres>) {
+        // Test packages matching production pricing from migration 005_billing_packages.sql
+        // h100: $3.50/hour (production default)
+        // h200: $5.00/hour (production)
+        // custom: $0.00/hour (production - for custom deals)
+        // a100: Test-only package for additional coverage
         let packages = vec![
             (
                 "h100",
                 "NVIDIA H100",
                 "80",
-                "8.0",
-                "1.0",
-                "0.5",
-                "0.05",
+                "3.5", // Matches production pricing
+                "0.0",
+                "0.0",
+                "0.0",
+                true,
+            ),
+            (
+                "h200",
+                "NVIDIA H200",
+                "141",
+                "5.0", // Matches production pricing
+                "0.0",
+                "0.0",
+                "0.0",
                 true,
             ),
             (
                 "a100",
                 "NVIDIA A100",
                 "40",
-                "5.0",
-                "0.8",
-                "0.4",
-                "0.04",
-                true,
-            ),
-            (
-                "rtx4090",
-                "NVIDIA RTX 4090",
-                "24",
-                "3.0",
-                "0.6",
-                "0.3",
-                "0.03",
+                "2.5", // Test-only package for coverage
+                "0.0",
+                "0.0",
+                "0.0",
                 true,
             ),
             (
                 "custom",
                 "Custom Configuration",
                 "0",
-                "1.0",
-                "0.5",
-                "0.2",
-                "0.02",
+                "0.0", // Matches production pricing (free/custom deals)
+                "0.0",
+                "0.0",
+                "0.0",
                 true,
             ),
         ];
@@ -228,11 +194,10 @@ impl TestContext {
 
         // Then insert/update credits using ON CONFLICT to handle race conditions
         sqlx::query(
-            "INSERT INTO billing.credits (user_id, balance, reserved_balance, lifetime_spent, updated_at)
-             VALUES ($1, $2, 0, 0, NOW())
+            "INSERT INTO billing.credits (user_id, balance, lifetime_spent, updated_at)
+             VALUES ($1, $2, 0, NOW())
              ON CONFLICT (user_id) DO UPDATE SET
                balance = EXCLUDED.balance,
-               reserved_balance = 0,
                updated_at = NOW()",
         )
         .bind(user_uuid)
@@ -247,18 +212,6 @@ impl TestContext {
     pub async fn get_user_balance(&self, user_id: &str) -> rust_decimal::Decimal {
         sqlx::query_scalar::<_, rust_decimal::Decimal>(
             "SELECT c.balance FROM billing.credits c
-             JOIN billing.users u ON c.user_id = u.user_id
-             WHERE u.external_id = $1",
-        )
-        .bind(user_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(rust_decimal::Decimal::ZERO)
-    }
-
-    pub async fn get_reserved_balance(&self, user_id: &str) -> rust_decimal::Decimal {
-        sqlx::query_scalar::<_, rust_decimal::Decimal>(
-            "SELECT COALESCE(c.reserved_balance, 0) FROM billing.credits c
              JOIN billing.users u ON c.user_id = u.user_id
              WHERE u.external_id = $1",
         )
@@ -304,16 +257,6 @@ impl TestContext {
         .unwrap_or(None)
     }
 
-    pub async fn reservation_exists(&self, reservation_id: &str) -> bool {
-        sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM billing.credit_reservations WHERE id = $1::uuid)",
-        )
-        .bind(reservation_id)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap_or(false)
-    }
-
     pub async fn get_user_package(&self, user_id: &str) -> Option<String> {
         sqlx::query_scalar::<_, String>(
             "SELECT package_id FROM billing.user_preferences WHERE user_id = $1",
@@ -332,6 +275,42 @@ impl TestContext {
         .fetch_one(&self.pool)
         .await
         .unwrap_or(0)
+    }
+
+    pub async fn get_usage_for_rental(
+        &self,
+        rental_id: &str,
+    ) -> basilica_billing::domain::types::UsageMetrics {
+        use basilica_billing::domain::types::UsageMetrics;
+        use rust_decimal::Decimal;
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                COALESCE(SUM((event_data->>'gpu_hours')::decimal), 0) as gpu_hours,
+                COALESCE(MAX((event_data->'gpu_metrics'->>'gpu_count')::int), 1) as gpu_count,
+                COALESCE(SUM((event_data->>'cpu_hours')::decimal), 0) as cpu_hours,
+                COALESCE(SUM((event_data->>'memory_gb_hours')::decimal), 0) as memory_gb_hours,
+                COALESCE(SUM((event_data->>'storage_gb_hours')::decimal), 0) as storage_gb_hours,
+                COALESCE(SUM((event_data->>'network_gb')::decimal), 0) as network_gb
+            FROM billing.usage_events
+            WHERE rental_id = $1::uuid AND event_type = 'telemetry'
+            "#,
+        )
+        .bind(rental_id)
+        .fetch_one(&self.pool)
+        .await
+        .expect("Failed to fetch usage metrics");
+
+        UsageMetrics {
+            gpu_hours: row.get("gpu_hours"),
+            gpu_count: row.try_get::<i32, _>("gpu_count").unwrap_or(1) as u32,
+            cpu_hours: row.get("cpu_hours"),
+            memory_gb_hours: row.get("memory_gb_hours"),
+            storage_gb_hours: row.get("storage_gb_hours"),
+            network_gb: row.get("network_gb"),
+            disk_io_gb: Decimal::ZERO,
+        }
     }
 
     pub async fn cleanup(self) {

@@ -11,7 +11,7 @@ use super::validation_strategy::{ValidationNode, ValidationStrategy, ValidationS
 use super::validation_worker::{ValidationWorkerQueue, WorkerQueueConfig};
 use crate::agent_installer::{build_install_commands, build_uninstall_commands, K3sAgentConfig};
 use crate::config::VerificationConfig;
-use crate::gpu::{categorization::GpuCategory, MinerGpuProfile};
+use crate::gpu::MinerGpuProfile;
 use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
@@ -21,9 +21,9 @@ use crate::persistence::{
 use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
 use anyhow::{Context, Result};
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
+use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use futures::future::join_all;
-use sqlx::Row;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -89,6 +89,13 @@ impl VerificationEngine {
         }
 
         false
+    }
+
+    /// Extract miner UID from `miner_###` identifiers
+    fn miner_uid_from_miner_id(miner_id: &str) -> Option<u16> {
+        miner_id
+            .strip_prefix("miner_")
+            .and_then(|uid_str| uid_str.parse::<u16>().ok())
     }
 
     /// Execute complete automated verification workflow with SSH session management (specs-compliant)
@@ -587,13 +594,6 @@ impl VerificationEngine {
         );
 
         Ok(nodes)
-    }
-
-    /// Helper function to clean up active SSH session for a node
-    async fn cleanup_active_session(&self, node_id: &str) {
-        // Direct SSH sessions are now managed at connection level
-        // No explicit release needed
-        let _ = node_id; // Avoid unused parameter warning
     }
 
     /// Store node verification result with actual miner information
@@ -1319,409 +1319,27 @@ impl VerificationEngine {
         &self,
         consecutive_failures_threshold: i32,
     ) -> Result<()> {
-        self.persistence
+        let removed_nodes = self
+            .persistence
             .cleanup_failed_nodes_after_failures(
                 consecutive_failures_threshold,
                 self.config.gpu_assignment_cleanup_ttl,
             )
             .await?;
 
-        Ok(())
-    }
-
-    /// Original cleanup implementation (now moved to persistence layer)
-    #[allow(dead_code)]
-    async fn cleanup_failed_nodes_after_failures_original(
-        &self,
-        consecutive_failures_threshold: i32,
-    ) -> Result<()> {
-        info!(
-            "Running node cleanup - checking for {} consecutive failures",
-            consecutive_failures_threshold
-        );
-
-        // Step 1: Clean up any GPU assignments for offline nodes (immediate fix)
-        let offline_with_gpus_query = r#"
-            SELECT DISTINCT me.node_id, me.miner_id, COUNT(ga.gpu_uuid) as gpu_count
-            FROM miner_nodes me
-            INNER JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
-            WHERE me.status = 'offline'
-            GROUP BY me.node_id, me.miner_id
-        "#;
-
-        let offline_with_gpus = sqlx::query(offline_with_gpus_query)
-            .fetch_all(self.persistence.pool())
-            .await?;
-
-        let mut gpu_assignments_cleaned = 0;
-        for row in offline_with_gpus {
-            let node_id: String = row.try_get("node_id")?;
-            let miner_id: String = row.try_get("miner_id")?;
-            let gpu_count: i64 = row.try_get("gpu_count")?;
-
-            info!(
-                "Cleaning up {} GPU assignments for offline node {} (miner: {})",
-                gpu_count, node_id, miner_id
-            );
-
-            let rows_cleaned = self
-                .persistence
-                .cleanup_gpu_assignments(&node_id, &miner_id, None)
-                .await?;
-            gpu_assignments_cleaned += rows_cleaned;
-        }
-
-        // Step 1b: Clean up nodes with mismatched GPU counts
-        let mismatched_gpu_query = r#"
-            SELECT me.node_id, me.miner_id, me.gpu_count, me.status
-            FROM miner_nodes me
-            WHERE me.gpu_count > 0
-            AND NOT EXISTS (
-                SELECT 1 FROM gpu_uuid_assignments ga
-                WHERE ga.node_id = me.node_id AND ga.miner_id = me.miner_id
-            )
-        "#;
-
-        let mismatched_nodes = sqlx::query(mismatched_gpu_query)
-            .fetch_all(self.persistence.pool())
-            .await?;
-
-        for row in mismatched_nodes {
-            let node_id: String = row.try_get("node_id")?;
-            let miner_id: String = row.try_get("miner_id")?;
-            let gpu_count: i32 = row.try_get("gpu_count")?;
-            let status: String = row.try_get("status")?;
-
-            warn!(
-                "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {}. Resetting GPU count to 0",
-                node_id, miner_id, gpu_count, status
-            );
-
-            // Reset GPU count to 0 to reflect reality
-            sqlx::query(
-                "UPDATE miner_nodes SET gpu_count = 0, updated_at = datetime('now')
-                 WHERE node_id = ? AND miner_id = ?",
-            )
-            .bind(&node_id)
-            .bind(&miner_id)
-            .execute(self.persistence.pool())
-            .await?;
-
-            // Mark offline if they claim GPUs but have none
-            if status == "online" || status == "verified" {
-                sqlx::query(
-                    "UPDATE miner_nodes SET status = 'offline', updated_at = datetime('now')
-                     WHERE node_id = ? AND miner_id = ?",
-                )
-                .bind(&node_id)
-                .bind(&miner_id)
-                .execute(self.persistence.pool())
-                .await?;
-
-                info!(
-                    "Marked node {} as offline (claimed {} GPUs but has 0 assignments)",
-                    node_id, gpu_count
-                );
+        if let Some(ref metrics) = self.metrics {
+            let prometheus = metrics.prometheus();
+            for (miner_id, node_id) in removed_nodes {
+                if let Some(miner_uid) = Self::miner_uid_from_miner_id(&miner_id) {
+                    prometheus.reset_node_uptime_metrics(miner_uid, &node_id);
+                } else {
+                    debug!(
+                        miner_id = %miner_id,
+                        node_id = %node_id,
+                        "Unable to parse miner UID while resetting uptime metrics after cleanup"
+                    );
+                }
             }
-        }
-
-        // Step 1c: Clean up stale GPU assignments (GPUs that haven't been verified recently)
-        // Increased threshold from 1 hour to 6 hours to reduce aggressive cleanup
-        let stale_gpu_cleanup_query = r#"
-            DELETE FROM gpu_uuid_assignments
-            WHERE last_verified < datetime('now', '-6 hours')
-            OR (
-                EXISTS (
-                    SELECT 1 FROM miner_nodes me
-                    WHERE me.node_id = gpu_uuid_assignments.node_id
-                    AND me.miner_id = gpu_uuid_assignments.miner_id
-                    AND me.status = 'offline'
-                    AND (
-                        me.last_health_check < datetime('now', '-2 hours')
-                        OR (me.last_health_check IS NULL AND me.updated_at < datetime('now', '-2 hours'))
-                    )
-                )
-            )
-        "#;
-
-        let stale_gpu_result = sqlx::query(stale_gpu_cleanup_query)
-            .execute(self.persistence.pool())
-            .await?;
-
-        if stale_gpu_result.rows_affected() > 0 {
-            info!(
-                security = true,
-                cleaned_count = stale_gpu_result.rows_affected(),
-                cleanup_reason = "stale_timeout",
-                threshold_hours = 6,
-                "Cleaned up {} stale GPU assignments (not verified in last 6 hours or belonging to offline nodes >2h)",
-                stale_gpu_result.rows_affected()
-            );
-        }
-
-        // Step 1d: Clean up GPU assignments from nodes offline
-        // Increased minimum cleanup time from 30 minutes to 2 hours
-        let cleanup_minutes = self
-            .config
-            .gpu_assignment_cleanup_ttl
-            .map(|d| d.as_secs() / 60)
-            .unwrap_or(120)
-            .max(120); // Ensure minimum 2 hours to reduce aggressive cleanup
-
-        info!(
-            "Cleaning GPU assignments from nodes offline >{} minutes",
-            cleanup_minutes
-        );
-        let stale_offline_query = format!(
-            r#"
-            SELECT DISTINCT me.node_id, me.miner_id, COUNT(ga.gpu_uuid) as gpu_count
-            FROM miner_nodes me
-            INNER JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
-            WHERE me.status = 'offline'
-            AND (
-                me.last_health_check < datetime('now', '-{cleanup_minutes} minutes')
-                OR (me.last_health_check IS NULL AND me.updated_at < datetime('now', '-{cleanup_minutes} minutes'))
-            )
-            GROUP BY me.node_id, me.miner_id
-            "#
-        );
-
-        let stale_offline = sqlx::query(&stale_offline_query)
-            .fetch_all(self.persistence.pool())
-            .await?;
-
-        let mut stale_gpu_cleaned = 0;
-        for row in stale_offline {
-            let node_id: String = row.try_get("node_id")?;
-            let miner_id: String = row.try_get("miner_id")?;
-            let gpu_count: i64 = row.try_get("gpu_count")?;
-
-            info!(
-                security = true,
-                node_id = %node_id,
-                miner_id = %miner_id,
-                gpu_count = gpu_count,
-                cleanup_minutes = cleanup_minutes,
-                "Cleaning GPU assignments from node offline >{}min", cleanup_minutes
-            );
-
-            let cleaned = self
-                .persistence
-                .cleanup_gpu_assignments(&node_id, &miner_id, None)
-                .await?;
-            stale_gpu_cleaned += cleaned;
-        }
-
-        if stale_gpu_cleaned > 0 {
-            info!(
-                security = true,
-                cleaned_count = stale_gpu_cleaned,
-                cleanup_minutes = cleanup_minutes,
-                "Cleaned {} GPU assignments from nodes offline >{}min",
-                stale_gpu_cleaned,
-                cleanup_minutes
-            );
-        }
-
-        // Step 2: Find and delete nodes with consecutive failures
-        let delete_nodes_query = r#"
-            WITH recent_verifications AS (
-                SELECT
-                    vl.node_id,
-                    vl.success,
-                    vl.timestamp,
-                    ROW_NUMBER() OVER (PARTITION BY vl.node_id ORDER BY vl.timestamp DESC) as rn
-                FROM verification_logs vl
-                WHERE vl.timestamp > datetime('now', '-1 hour')
-            )
-            SELECT
-                me.node_id,
-                me.miner_id,
-                me.status,
-                COALESCE(SUM(CASE WHEN rv.success = 0 AND rv.rn <= ? THEN 1 ELSE 0 END), 0) as consecutive_fails,
-                COALESCE(SUM(CASE WHEN rv.success = 1 AND rv.rn <= ? THEN 1 ELSE 0 END), 0) as recent_successes,
-                MAX(rv.timestamp) as last_verification
-            FROM miner_nodes me
-            LEFT JOIN recent_verifications rv ON me.node_id = rv.node_id
-            WHERE me.status = 'offline'
-            GROUP BY me.node_id, me.miner_id, me.status
-            HAVING consecutive_fails >= ? AND recent_successes = 0
-        "#;
-
-        let nodes_to_delete = sqlx::query(delete_nodes_query)
-            .bind(consecutive_failures_threshold)
-            .bind(consecutive_failures_threshold)
-            .bind(consecutive_failures_threshold)
-            .fetch_all(self.persistence.pool())
-            .await?;
-
-        let mut deleted = 0;
-        for row in nodes_to_delete {
-            let node_id: String = row.try_get("node_id")?;
-            let miner_id: String = row.try_get("miner_id")?;
-            let consecutive_fails: i64 = row.try_get("consecutive_fails")?;
-            let last_verification: Option<String> = row.try_get("last_verification").ok();
-
-            info!(
-                "Permanently deleting node {} (miner: {}) after {} consecutive failures, last seen: {}",
-                node_id, miner_id, consecutive_fails,
-                last_verification.as_deref().unwrap_or("never")
-            );
-
-            // Use transaction to ensure atomic deletion
-            let mut tx = self.persistence.pool().begin().await?;
-
-            // Clean up any remaining GPU assignments
-            self.persistence
-                .cleanup_gpu_assignments(&node_id, &miner_id, Some(&mut tx))
-                .await?;
-
-            // Delete the node record
-            sqlx::query("DELETE FROM miner_nodes WHERE node_id = ? AND miner_id = ?")
-                .bind(&node_id)
-                .bind(&miner_id)
-                .execute(&mut *tx)
-                .await?;
-
-            tx.commit().await?;
-            deleted += 1;
-
-            // Clean up any active SSH sessions
-            self.cleanup_active_session(&node_id).await;
-        }
-
-        // Step 3: Delete stale offline nodes
-        let cleanup_minutes = self
-            .config
-            .gpu_assignment_cleanup_ttl
-            .map(|d| d.as_secs() / 60)
-            .unwrap_or(120)
-            .max(120);
-
-        let stale_delete_query = format!(
-            r#"
-            DELETE FROM miner_nodes
-            WHERE status = 'offline'
-            AND (
-                last_health_check < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND updated_at < datetime('now', '-{} minutes'))
-            )
-            "#,
-            cleanup_minutes, cleanup_minutes
-        );
-
-        info!(
-            "Deleting stale offline nodes using {}min timeout (configurable via gpu_assignment_cleanup_ttl)",
-            cleanup_minutes
-        );
-
-        let stale_result = sqlx::query(&stale_delete_query)
-            .execute(self.persistence.pool())
-            .await?;
-
-        let stale_deleted = stale_result.rows_affected();
-
-        // Step 4: Update GPU profiles for all miners with wrong gpu count profile
-        let affected_miners_query = r#"
-            SELECT DISTINCT miner_uid
-            FROM miner_gpu_profiles
-            WHERE miner_uid IN (
-                -- Miners with offline nodes
-                SELECT DISTINCT CAST(SUBSTR(miner_id, 7) AS INTEGER)
-                FROM miner_nodes
-                WHERE status = 'offline'
-
-                UNION
-
-                -- Miners with non-empty GPU profiles but no active nodes
-                SELECT miner_uid
-                FROM miner_gpu_profiles
-                WHERE gpu_counts_json <> '{}'
-                AND NOT EXISTS (
-                    SELECT 1 FROM miner_nodes
-                    WHERE miner_id = 'miner_' || miner_gpu_profiles.miner_uid
-                    AND status NOT IN ('offline', 'failed', 'stale')
-                )
-            )
-        "#;
-
-        let affected_miners = sqlx::query(affected_miners_query)
-            .fetch_all(self.persistence.pool())
-            .await?;
-
-        for row in affected_miners {
-            let miner_uid: i64 = row.try_get("miner_uid")?;
-            let miner_id = format!("miner_{}", miner_uid);
-
-            let gpu_counts = self
-                .persistence
-                .get_miner_gpu_uuid_assignments(&miner_id)
-                .await?;
-
-            let mut gpu_map: std::collections::HashMap<String, u32> =
-                std::collections::HashMap::new();
-            for (_, count, gpu_name, _) in gpu_counts {
-                let category =
-                    crate::gpu::categorization::GpuCategory::from_str(&gpu_name).unwrap();
-                let model = category.to_string();
-                *gpu_map.entry(model).or_insert(0) += count;
-            }
-
-            let update_query = if gpu_map.is_empty() {
-                r#"
-                UPDATE miner_gpu_profiles
-                SET gpu_counts_json = ?,
-                    total_score = 0.0,
-                    verification_count = 0,
-                    last_successful_validation = NULL,
-                    last_updated = datetime('now')
-                WHERE miner_uid = ?
-                "#
-            } else {
-                r#"
-                UPDATE miner_gpu_profiles
-                SET gpu_counts_json = ?,
-                    last_updated = datetime('now')
-                WHERE miner_uid = ?
-                "#
-            };
-
-            let gpu_json = serde_json::to_string(&gpu_map)?;
-            let result = sqlx::query(update_query)
-                .bind(&gpu_json)
-                .bind(miner_uid)
-                .execute(self.persistence.pool())
-                .await?;
-
-            if result.rows_affected() > 0 {
-                info!(
-                    "Updated GPU profile for miner {} after cleanup: {}",
-                    miner_uid, gpu_json
-                );
-            }
-        }
-
-        // Log summary
-        if gpu_assignments_cleaned > 0 {
-            info!(
-                "Deleted {} GPU assignments from offline nodes",
-                gpu_assignments_cleaned
-            );
-        }
-
-        if deleted > 0 {
-            info!(
-                "Deleted {} nodes with {} or more consecutive failures",
-                deleted, consecutive_failures_threshold
-            );
-        }
-
-        if stale_deleted > 0 {
-            info!("Deleted {} stale offline nodes", stale_deleted);
-        }
-
-        if gpu_assignments_cleaned == 0 && deleted == 0 && stale_deleted == 0 {
-            debug!("No nodes needed cleanup in this cycle");
         }
 
         Ok(())

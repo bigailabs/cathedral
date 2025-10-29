@@ -164,18 +164,31 @@ impl ConnectionPool {
     async fn create_connection(&self, endpoint: &str) -> Result<ChainClient, BittensorError> {
         let timeout_duration = Duration::from_secs(30);
 
-        tokio::time::timeout(
-            timeout_duration,
-            OnlineClient::<PolkadotConfig>::from_url(endpoint),
-        )
-        .await
-        .map_err(|_| BittensorError::RpcTimeoutError {
-            message: format!("Connection to {} timed out", endpoint),
-            timeout: timeout_duration,
-        })?
-        .map_err(|e| BittensorError::RpcConnectionError {
-            message: format!("Failed to connect to {}: {}", endpoint, e),
-        })
+        let is_insecure = endpoint.starts_with("ws://") || endpoint.starts_with("http://");
+
+        let result = if is_insecure {
+            debug!("Using insecure connection for endpoint: {}", endpoint);
+            tokio::time::timeout(
+                timeout_duration,
+                OnlineClient::<PolkadotConfig>::from_insecure_url(endpoint),
+            )
+            .await
+        } else {
+            tokio::time::timeout(
+                timeout_duration,
+                OnlineClient::<PolkadotConfig>::from_url(endpoint),
+            )
+            .await
+        };
+
+        result
+            .map_err(|_| BittensorError::RpcTimeoutError {
+                message: format!("Connection to {} timed out", endpoint),
+                timeout: timeout_duration,
+            })?
+            .map_err(|e| BittensorError::RpcConnectionError {
+                message: format!("Failed to connect to {}: {}", endpoint, e),
+            })
     }
 
     /// Get the current number of healthy connections
@@ -389,16 +402,22 @@ mod tests {
     async fn test_create_connection_timeout() {
         let pool = ConnectionPool::new(vec!["wss://10.255.255.1:443".to_string()], 1);
 
-        // This IP should not be routable, causing a timeout
+        // This IP should not be routable, causing a timeout or connection error
         let result = pool.create_connection("wss://10.255.255.1:443").await;
         assert!(result.is_err());
 
         match result {
             Err(BittensorError::RpcTimeoutError { .. })
             | Err(BittensorError::RpcConnectionError { .. }) => {
-                // Either a timeout or a connection error is acceptable in CI environments
+                // Expected - either timeout or connection error is acceptable in CI environments
             }
-            _ => panic!("Expected timeout or connection error"),
+            Err(e) => {
+                panic!(
+                    "Expected RpcTimeoutError or RpcConnectionError, got: {:?}",
+                    e
+                );
+            }
+            Ok(_) => panic!("Expected error but got Ok"),
         }
     }
 }

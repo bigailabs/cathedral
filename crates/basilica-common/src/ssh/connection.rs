@@ -513,6 +513,53 @@ impl StandardSshClient {
         Ok(())
     }
 
+    /// Execute command and return streaming Child process for real-time output
+    /// This is useful for long-running commands like log streaming
+    pub async fn execute_command_streaming(
+        &self,
+        details: &SshConnectionDetails,
+        command: &str,
+    ) -> Result<tokio::process::Child> {
+        self.validate_connection_details(details)?;
+
+        let mut cmd = tokio::process::Command::new("ssh");
+        cmd.arg("-i")
+            .arg(&details.private_key_path)
+            .arg("-p")
+            .arg(details.port.to_string());
+
+        if self.config.strict_host_key_checking {
+            cmd.arg("-o").arg("StrictHostKeyChecking=yes");
+            if let Some(ref known_hosts) = self.config.known_hosts_file {
+                cmd.arg("-o")
+                    .arg(format!("UserKnownHostsFile={}", known_hosts.display()));
+            }
+        } else {
+            cmd.arg("-o").arg("StrictHostKeyChecking=no");
+            cmd.arg("-o").arg("UserKnownHostsFile=/dev/null");
+        }
+
+        cmd.arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!(
+                "ConnectTimeout={}",
+                self.config.connection_timeout.as_secs()
+            ))
+            .arg(format!("{}@{}", details.username, details.host))
+            .arg(command);
+
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        debug!("Spawning SSH streaming command: {:?}", cmd);
+
+        cmd.spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn SSH streaming command: {}", e))
+    }
+
     /// Internal SSH command execution
     async fn execute_ssh_command(
         &self,

@@ -86,6 +86,11 @@ pub async fn start_rental(
         });
     }
 
+    // Capture resource values before any moves
+    let cpu_cores = request.resources.cpu_cores;
+    let memory_mb = request.resources.memory_mb;
+    let storage_mb = request.resources.storage_mb;
+
     // Determine node_id based on the selection strategy
     let node_id = match &request.node_selection {
         NodeSelection::NodeId { node_id } => {
@@ -149,7 +154,7 @@ pub async fn start_rental(
 
     // Convert to validator's StartRentalRequest format
     let validator_request = StartRentalRequest {
-        node_id,
+        node_id: node_id.clone(),
         container_image: request.container_image,
         ssh_public_key: request.ssh_public_key,
         environment: request.environment,
@@ -164,6 +169,12 @@ pub async fn start_rental(
     let validator_response = state
         .validator_client
         .start_rental(validator_request)
+        .await?;
+
+    // Get rental status to extract actual GPU specs from the assigned node
+    let rental_status = state
+        .validator_client
+        .get_rental_status(&validator_response.rental_id)
         .await?;
 
     // Serialize port mappings from validator response
@@ -209,10 +220,108 @@ pub async fn start_rental(
             );
         }
 
-        // Return error to the user
         return Err(crate::error::ApiError::Internal {
             message: "Failed to create rental: unable to store ownership record".into(),
         });
+    }
+
+    // Notify billing service to start tracking this rental
+    if let Some(billing_client) = &state.billing_client {
+        use basilica_protocol::billing::{GpuSpec, ResourceSpec, TrackRentalRequest};
+
+        let now = chrono::Utc::now();
+        let timestamp = prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        };
+
+        // Build resource spec from actual node GPU specs
+        let mut gpus = Vec::new();
+        for gpu_spec in &rental_status.node.gpu_specs {
+            gpus.push(GpuSpec {
+                model: gpu_spec.name.clone(),
+                memory_mb: (gpu_spec.memory_gb * 1024) as u64,
+                count: 1,
+            });
+        }
+
+        let resource_spec = Some(ResourceSpec {
+            cpu_cores: cpu_cores.ceil() as u32,
+            memory_mb: memory_mb.max(0) as u64,
+            gpus,
+            disk_gb: (storage_mb.max(0) / 1024) as u64,
+            network_bandwidth_mbps: 0,
+        });
+
+        let track_request = TrackRentalRequest {
+            rental_id: validator_response.rental_id.clone(),
+            user_id: user_id.clone(),
+            node_id,
+            validator_id: state.validator_hotkey.clone(),
+            resource_spec,
+            hourly_rate: "0.00".to_string(),
+            start_time: Some(timestamp.clone()),
+            metadata: Default::default(),
+        };
+
+        match billing_client.track_rental(track_request).await {
+            Ok(_) => {
+                info!(
+                    "Successfully registered rental {} with billing service",
+                    validator_response.rental_id
+                );
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to register rental with billing service: {}", e);
+                error!("{}", error_msg);
+
+                if state.config.billing.enforce_balance_checks {
+                    // Rollback: remove ownership record and terminate rental
+                    if let Err(archive_err) = archive_rental_ownership(
+                        &state.db,
+                        &validator_response.rental_id,
+                        Some("Failed to register with billing service - automatic rollback"),
+                    )
+                    .await
+                    {
+                        error!(
+                            "Failed to archive ownership for rental {} during rollback: {}",
+                            validator_response.rental_id, archive_err
+                        );
+                    }
+
+                    let rollback_request = TerminateRentalRequest {
+                        reason: Some(
+                            "Failed to register with billing service - automatic rollback"
+                                .to_string(),
+                        ),
+                    };
+
+                    if let Err(rollback_err) = state
+                        .validator_client
+                        .terminate_rental(&validator_response.rental_id, rollback_request)
+                        .await
+                    {
+                        error!(
+                            "CRITICAL: Failed to rollback rental {} after billing registration failure: {}. Manual cleanup required.",
+                            validator_response.rental_id, rollback_err
+                        );
+                    } else {
+                        info!(
+                            "Successfully rolled back rental {} after billing registration failure",
+                            validator_response.rental_id
+                        );
+                    }
+
+                    return Err(crate::error::ApiError::Internal {
+                        message: format!(
+                            "Failed to create rental: billing service unavailable - {}",
+                            e
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     info!(
@@ -233,7 +342,6 @@ pub async fn stop_rental(
         owned_rental.user_id, owned_rental.rental_id
     );
 
-    // Use terminate_rental API from validator
     let request = TerminateRentalRequest {
         reason: Some("User requested stop".to_string()),
     };
@@ -242,6 +350,31 @@ pub async fn stop_rental(
         .validator_client
         .terminate_rental(&owned_rental.rental_id, request.clone())
         .await?;
+
+    // Notify billing service that rental is stopping
+    if let Some(billing_client) = &state.billing_client {
+        use basilica_protocol::billing::{RentalStatus, UpdateRentalStatusRequest};
+
+        let now = chrono::Utc::now();
+        let timestamp = prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        };
+
+        let update_request = UpdateRentalStatusRequest {
+            rental_id: owned_rental.rental_id.clone(),
+            status: RentalStatus::Stopped as i32,
+            timestamp: Some(timestamp),
+            reason: request.reason.clone().unwrap_or_default(),
+        };
+
+        if let Err(e) = billing_client.update_rental_status(update_request).await {
+            error!(
+                "Failed to update rental status in billing service for {}: {}",
+                owned_rental.rental_id, e
+            );
+        }
+    }
 
     // Archive ownership record to terminated_user_rentals table
     if let Err(e) = archive_rental_ownership(
@@ -252,7 +385,6 @@ pub async fn stop_rental(
     .await
     {
         error!("Failed to archive rental ownership record: {}", e);
-        // Note: We don't fail the request if ownership archiving fails
     }
 
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())

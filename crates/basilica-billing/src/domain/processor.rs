@@ -19,6 +19,7 @@ pub struct EventProcessor {
     processing_interval: Duration,
     is_running: Arc<RwLock<bool>>,
     current_batch: Arc<Mutex<Option<ProcessingBatch>>>,
+    metrics: Option<Arc<crate::metrics::BillingMetricsSystem>>,
 }
 
 impl EventProcessor {
@@ -27,6 +28,7 @@ impl EventProcessor {
         event_handlers: Arc<dyn EventHandlers + Send + Sync>,
         batch_size: Option<i64>,
         processing_interval: Duration,
+        metrics: Option<Arc<crate::metrics::BillingMetricsSystem>>,
     ) -> Self {
         Self {
             event_store,
@@ -35,6 +37,7 @@ impl EventProcessor {
             processing_interval,
             is_running: Arc::new(RwLock::new(false)),
             current_batch: Arc::new(Mutex::new(None)),
+            metrics,
         }
     }
 
@@ -49,6 +52,10 @@ impl EventProcessor {
         *running = true;
         drop(running);
 
+        if let Some(ref metrics) = self.metrics {
+            metrics.billing_metrics().set_processor_running(true).await;
+        }
+
         let processor = self.clone();
         tokio::spawn(async move {
             processor.processing_loop().await;
@@ -62,6 +69,10 @@ impl EventProcessor {
     pub async fn stop(&self) -> Result<()> {
         let mut running = self.is_running.write().await;
         *running = false;
+
+        if let Some(ref metrics) = self.metrics {
+            metrics.billing_metrics().set_processor_running(false).await;
+        }
 
         info!("Event processor stopped");
         Ok(())
@@ -98,6 +109,13 @@ impl EventProcessor {
             .get_unprocessed_events(self.batch_size)
             .await?;
 
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .billing_metrics()
+                .set_event_queue_size(events.len())
+                .await;
+        }
+
         if events.is_empty() {
             debug!("No unprocessed events found");
             return Ok(());
@@ -122,14 +140,37 @@ impl EventProcessor {
         let mut processed_ids = Vec::new();
 
         for event in &events {
+            let timer = self
+                .metrics
+                .as_ref()
+                .map(|m| m.billing_metrics().start_event_processing_timer());
+
             match self.process_single_event(event).await {
                 Ok(_) => {
                     processed_count += 1;
                     processed_ids.push(event.event_id);
+
+                    if let Some(ref metrics) = self.metrics {
+                        if let Some(timer) = timer {
+                            metrics
+                                .billing_metrics()
+                                .record_event_processed(timer, &event.event_type.to_string(), true)
+                                .await;
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("Failed to process event {}: {}", event.event_id, e);
                     failed_count += 1;
+
+                    if let Some(ref metrics) = self.metrics {
+                        if let Some(timer) = timer {
+                            metrics
+                                .billing_metrics()
+                                .record_event_processed(timer, &event.event_type.to_string(), false)
+                                .await;
+                        }
+                    }
                 }
             }
         }
@@ -179,6 +220,7 @@ impl Clone for EventProcessor {
             processing_interval: self.processing_interval,
             is_running: self.is_running.clone(),
             current_batch: self.current_batch.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -195,6 +237,7 @@ pub trait EventHandlers: Send + Sync {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TelemetryData {
+    pub gpu_hours: Option<Decimal>,
     pub cpu_percent: Option<Decimal>,
     pub memory_mb: Option<u64>,
     pub network_rx_bytes: Option<u64>,

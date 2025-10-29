@@ -1,9 +1,9 @@
+use basilica_common::types::GpuCategory;
 use basilica_sdk::types::RentalState;
 use clap::{Subcommand, ValueHint};
 use std::path::PathBuf;
 
 use crate::handlers::gpu_rental::TargetType;
-use basilica_validator::gpu::categorization::GpuCategory;
 
 /// Main CLI commands
 #[derive(Subcommand, Debug, Clone)]
@@ -130,6 +130,57 @@ pub enum Commands {
         #[command(subcommand)]
         action: TokenAction,
     },
+
+    /// Fund your account with Bittensor TAO
+    Fund {
+        #[command(subcommand)]
+        action: Option<FundAction>,
+
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
+
+    /// Check your account balance
+    Balance {
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
+
+    /// List available billing packages and pricing
+    #[cfg(debug_assertions)]
+    Packages {
+        /// Output as JSON
+        #[arg(long, global = true)]
+        json: bool,
+    },
+
+    /// Upgrade the Basilica CLI to a newer version
+    Upgrade {
+        /// Specific version to upgrade to (e.g., "0.5.4")
+        #[arg(long)]
+        version: Option<String>,
+
+        /// Check for updates without installing
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// Fund management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum FundAction {
+    /// List deposit history
+    List {
+        /// Limit number of results (default: 50)
+        #[arg(long, default_value = "50")]
+        limit: u32,
+
+        /// Offset for pagination (default: 0)
+        #[arg(long, default_value = "0")]
+        offset: u32,
+    },
 }
 
 /// Token management actions
@@ -169,13 +220,20 @@ impl Commands {
             | Commands::Exec { .. }
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
-            | Commands::Tokens { .. } => true,
+            | Commands::Tokens { .. }
+            | Commands::Fund { .. }
+            | Commands::Balance { .. } => true,
+
+            // Debug commands require authentication
+            #[cfg(debug_assertions)]
+            Commands::Packages { .. } => true,
 
             // Authentication and delegation commands don't require auth
             Commands::Login { .. }
             | Commands::Logout
             | Commands::Validator { .. }
-            | Commands::Miner { .. } => false,
+            | Commands::Miner { .. }
+            | Commands::Upgrade { .. } => false,
 
             // Test auth command requires authentication
             #[cfg(debug_assertions)]
@@ -302,6 +360,10 @@ pub struct PsFilters {
     /// Use detailed view (shows rental and node IDs)
     #[arg(long)]
     pub detailed: bool,
+
+    /// Show all rental history instead of just active rentals
+    #[arg(long)]
+    pub history: bool,
 }
 
 /// Options for viewing logs

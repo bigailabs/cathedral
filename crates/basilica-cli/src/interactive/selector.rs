@@ -1,10 +1,10 @@
 //! Interactive selection utilities
 
 use crate::error::Result;
+use basilica_common::types::GpuCategory;
 use basilica_sdk::types::{ApiRentalListItem, NodeSelection};
 use basilica_sdk::GpuRequirements;
 use basilica_validator::api::types::AvailableNode;
-use basilica_validator::gpu::GpuCategory;
 use color_eyre::eyre::eyre;
 use console::Term;
 use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};

@@ -115,6 +115,7 @@ pub struct RentalInfo {
     pub ssh_credentials: String, // Validator SSH access to node
     pub state: RentalState,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub container_spec: ContainerSpec,
     pub miner_id: String,
     pub node_details: crate::api::types::NodeDetails,

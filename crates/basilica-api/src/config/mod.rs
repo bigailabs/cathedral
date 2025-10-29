@@ -8,7 +8,7 @@ pub use cache::{CacheBackend, CacheConfig};
 pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
-use basilica_common::config::BittensorConfig;
+use basilica_common::config::{types::MetricsConfig, BittensorConfig};
 use basilica_common::ConfigurationError as ConfigError;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Rental health check interval in seconds
-const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
 
 /// Bittensor integration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +71,54 @@ impl Default for DatabaseConfig {
     }
 }
 
+/// Payments service configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaymentsServiceConfig {
+    /// Enable payments service integration
+    pub enabled: bool,
+
+    /// Payments service gRPC endpoint
+    pub endpoint: String,
+}
+
+impl Default for PaymentsServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: "http://localhost:50061".to_string(),
+        }
+    }
+}
+
+/// Billing service configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BillingServiceConfig {
+    /// Enable billing service integration
+    pub enabled: bool,
+
+    /// Billing service gRPC endpoint
+    pub endpoint: String,
+
+    /// Enforce balance checks (block rentals when insufficient balance)
+    /// When false, balance checks are performed and logged but rentals proceed regardless
+    #[serde(default = "default_enforce_balance_checks")]
+    pub enforce_balance_checks: bool,
+}
+
+fn default_enforce_balance_checks() -> bool {
+    false
+}
+
+impl Default for BillingServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: "http://localhost:50051".to_string(),
+            enforce_balance_checks: default_enforce_balance_checks(),
+        }
+    }
+}
+
 /// Main configuration structure for the Basilica API
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -92,6 +140,16 @@ pub struct Config {
     /// Rental backend selection: "legacy" (validator) or "k8s" (CRDs)
     #[serde(default)]
     pub rental_backend: RentalBackend,
+
+    /// Payments service configuration
+    pub payments: PaymentsServiceConfig,
+
+    /// Billing service configuration
+    pub billing: BillingServiceConfig,
+
+    /// Metrics configuration
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 impl Config {
@@ -200,6 +258,49 @@ mod tests {
         assert_eq!(bt_config.network, config.bittensor.network);
         assert_eq!(bt_config.netuid, config.bittensor.netuid);
         assert_eq!(bt_config.wallet_name, "default");
+    }
+
+    #[test]
+    fn test_billing_config_defaults() {
+        let config = BillingServiceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.endpoint, "http://localhost:50051");
+        assert!(!config.enforce_balance_checks);
+    }
+
+    #[test]
+    fn test_billing_config_shadow_mode() {
+        let toml_str = r#"
+            enabled = true
+            endpoint = "https://billing.basilica.ai:50051"
+            enforce_balance_checks = false
+        "#;
+        let config: BillingServiceConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert!(!config.enforce_balance_checks);
+    }
+
+    #[test]
+    fn test_billing_config_enforcement_mode() {
+        let toml_str = r#"
+            enabled = true
+            endpoint = "https://billing.basilica.ai:50051"
+            enforce_balance_checks = true
+        "#;
+        let config: BillingServiceConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.enabled);
+        assert!(config.enforce_balance_checks);
+    }
+
+    #[test]
+    fn test_billing_config_disabled() {
+        let toml_str = r#"
+            enabled = false
+            endpoint = "http://localhost:50051"
+        "#;
+        let config: BillingServiceConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.enabled);
+        assert!(!config.enforce_balance_checks);
     }
 }
 /// Rental backend selector

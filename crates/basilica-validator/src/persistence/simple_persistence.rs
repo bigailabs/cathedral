@@ -1,10 +1,10 @@
-use sqlx::SqlitePool;
+use chrono::{DateTime, Duration, Utc};
+use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 use tracing::info;
 
-use crate::persistence::types::RentalFilter;
-use crate::persistence::ValidatorPersistence;
-use crate::rental::{RentalInfo, RentalState};
-
+// Re-export entities for ban system
+pub use crate::persistence::entities::{MisbehaviourLog, MisbehaviourType};
 #[derive(Debug, Clone)]
 pub struct SimplePersistence {
     pub(crate) pool: SqlitePool,
@@ -112,85 +112,149 @@ impl SimplePersistence {
 
         Ok(())
     }
-}
 
-#[async_trait::async_trait]
-impl ValidatorPersistence for SimplePersistence {
-    async fn save_rental(&self, rental: &RentalInfo) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO rentals (
-                id, validator_hotkey, node_id, container_id, ssh_session_id,
-                ssh_credentials, state, created_at, container_spec, miner_id, metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                state = excluded.state,
-                container_id = excluded.container_id,
-                ssh_session_id = excluded.ssh_session_id,
-                ssh_credentials = excluded.ssh_credentials,
-                miner_id = excluded.miner_id,
-                metadata = excluded.metadata",
-        )
-        .bind(&rental.rental_id)
-        .bind(&rental.validator_hotkey)
-        .bind(&rental.node_id)
-        .bind(&rental.container_id)
-        .bind(&rental.ssh_session_id)
-        .bind(&rental.ssh_credentials)
-        .bind(match &rental.state {
-            RentalState::Provisioning => "provisioning",
-            RentalState::Active => "active",
-            RentalState::Stopping => "stopping",
-            RentalState::Stopped => "stopped",
-            RentalState::Failed => "failed",
-        })
-        .bind(rental.created_at.to_rfc3339())
-        .bind(serde_json::to_string(&rental.container_spec)?)
-        .bind(&rental.miner_id)
-        .bind(serde_json::to_string(&rental.metadata)?)
-        .execute(&self.pool)
-        .await?;
+    // ============================================================================
+    // Misbehaviour tracking methods for ban system
+    // ============================================================================
 
-        Ok(())
-    }
-
-    async fn load_rental(&self, rental_id: &str) -> anyhow::Result<Option<RentalInfo>> {
-        let filter = RentalFilter {
-            rental_id: Some(rental_id.to_string()),
-            ..Default::default()
-        };
-        self.query_rentals(filter)
-            .await
-            .map(|mut rentals| rentals.pop())
-    }
-
-    async fn list_validator_rentals(
+    /// Get GPU UUID for an executor
+    pub async fn get_gpu_uuid_for_executor(
         &self,
-        validator_hotkey: &str,
-    ) -> anyhow::Result<Vec<RentalInfo>> {
-        let filter = RentalFilter {
-            validator_hotkey: Some(validator_hotkey.to_string()),
-            order_by_created_desc: true,
-            ..Default::default()
-        };
-        self.query_rentals(filter).await
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let query = r#"
+            SELECT gpu_uuids
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(miner_id)
+            .bind(executor_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(row) = result {
+            let gpu_uuids: Option<String> = row.get("gpu_uuids");
+            // Return the first GPU UUID if available
+            Ok(gpu_uuids.and_then(|uuids| uuids.split(',').next().map(|s| s.to_string())))
+        } else {
+            Ok(None)
+        }
     }
 
-    async fn query_non_terminated_rentals(&self) -> anyhow::Result<Vec<RentalInfo>> {
-        let filter = RentalFilter {
-            exclude_states: Some(vec![RentalState::Stopped, RentalState::Failed]),
-            order_by_created_desc: true,
-            ..Default::default()
-        };
-        self.query_rentals(filter).await
+    /// Get executor endpoint
+    pub async fn get_executor_endpoint(
+        &self,
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let query = r#"
+            SELECT ssh_endpoint
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(miner_id)
+            .bind(executor_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(result.and_then(|row| row.get("ssh_endpoint")))
     }
 
-    async fn delete_rental(&self, rental_id: &str) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM rentals WHERE id = ?")
-            .bind(rental_id)
+    /// Insert a misbehaviour log entry
+    pub async fn insert_misbehaviour_log(
+        &self,
+        log: &MisbehaviourLog,
+    ) -> Result<(), anyhow::Error> {
+        let query = r#"
+            INSERT INTO executor_misbehaviour_log (
+                miner_uid, executor_id, gpu_uuid, recorded_at,
+                endpoint_executor, type_of_misbehaviour, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        sqlx::query(query)
+            .bind(log.miner_uid as i64)
+            .bind(&log.executor_id)
+            .bind(&log.gpu_uuid)
+            .bind(log.recorded_at.to_rfc3339())
+            .bind(&log.endpoint_executor)
+            .bind(log.type_of_misbehaviour.as_str())
+            .bind(&log.details)
             .execute(&self.pool)
             .await?;
 
         Ok(())
+    }
+
+    /// Get misbehaviour logs for an executor within a time window
+    pub async fn get_misbehaviour_logs(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        since: Duration,
+    ) -> Result<Vec<MisbehaviourLog>, anyhow::Error> {
+        let cutoff_time = Utc::now() - since;
+
+        let query = r#"
+            SELECT
+                miner_uid, executor_id, gpu_uuid, recorded_at,
+                endpoint_executor, type_of_misbehaviour, details,
+                created_at
+            FROM executor_misbehaviour_log
+            WHERE miner_uid = ?
+                AND executor_id = ?
+                AND recorded_at >= ?
+            ORDER BY recorded_at DESC
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(miner_uid as i64)
+            .bind(executor_id)
+            .bind(cutoff_time.to_rfc3339())
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut logs = Vec::new();
+        for row in rows {
+            let miner_uid: i64 = row.get("miner_uid");
+            let executor_id: String = row.get("executor_id");
+            let gpu_uuid: String = row.get("gpu_uuid");
+            let recorded_at_str: String = row.get("recorded_at");
+            let endpoint_executor: String = row.get("endpoint_executor");
+            let type_str: String = row.get("type_of_misbehaviour");
+            let details: String = row.get("details");
+            let created_at_str: String = row.get("created_at");
+
+            let recorded_at = DateTime::parse_from_rfc3339(&recorded_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            let type_of_misbehaviour =
+                MisbehaviourType::from_str(&type_str).unwrap_or(MisbehaviourType::BadRental);
+
+            logs.push(MisbehaviourLog {
+                miner_uid: miner_uid as u16,
+                executor_id,
+                gpu_uuid,
+                recorded_at,
+                endpoint_executor,
+                type_of_misbehaviour,
+                details,
+                created_at,
+                updated_at: created_at, // Use created_at as updated_at
+            });
+        }
+
+        Ok(logs)
     }
 }
 

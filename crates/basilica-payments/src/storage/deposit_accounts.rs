@@ -22,6 +22,28 @@ impl DepositAccountsRepo for PgRepos {
         }))
     }
 
+    async fn get_by_account_hex(
+        &self,
+        account_hex: &str,
+    ) -> Result<Option<(String, String, String, String)>> {
+        let row = sqlx::query(
+            r#"SELECT address_ss58, account_id_hex, hotkey_public_hex, hotkey_mnemonic_ct
+               FROM deposit_accounts WHERE account_id_hex = $1"#,
+        )
+        .bind(account_hex)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            (
+                r.get("address_ss58"),
+                r.get("account_id_hex"),
+                r.get("hotkey_public_hex"),
+                r.get("hotkey_mnemonic_ct"),
+            )
+        }))
+    }
+
     async fn insert_tx(
         &self,
         tx: &mut PgTx<'_>,

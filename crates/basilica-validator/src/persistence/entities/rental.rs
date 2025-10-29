@@ -13,7 +13,6 @@ pub struct Rental {
     pub env_vars: Option<Value>,
     pub gpu_requirements: Value,
     pub ssh_access_info: Value,
-    pub max_duration_hours: u32,
     pub cost_per_hour: f64,
     pub status: RentalStatus,
     pub created_at: DateTime<Utc>,
@@ -41,7 +40,6 @@ impl Rental {
         env_vars: Option<Value>,
         gpu_requirements: Value,
         ssh_access_info: Value,
-        max_duration_hours: u32,
         cost_per_hour: f64,
     ) -> Self {
         let now = Utc::now();
@@ -53,7 +51,6 @@ impl Rental {
             env_vars,
             gpu_requirements,
             ssh_access_info,
-            max_duration_hours,
             cost_per_hour,
             status: RentalStatus::Pending,
             created_at: now,

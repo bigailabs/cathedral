@@ -3,7 +3,6 @@
 //! Handles CLI commands for container rental operations via the Validator API
 
 use anyhow::{Context, Result};
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
@@ -16,44 +15,7 @@ use crate::api::types::{ListAvailableNodesQuery, LogQuery, TerminateRentalReques
 use crate::cli::commands::RentalAction;
 use crate::config::ValidatorConfig;
 use crate::rental::types::RentalState;
-use crate::rental::RentalManager;
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
-
-/// Create rental manager for API server initialization
-/// This is used by the service handler to set up the API with rental capabilities
-pub async fn create_rental_manager(
-    config: &ValidatorConfig,
-    persistence: Arc<crate::persistence::SimplePersistence>,
-    metrics: Arc<crate::metrics::ValidatorPrometheusMetrics>,
-) -> Result<crate::rental::RentalManager> {
-    use crate::ssh::ValidatorSshKeyManager;
-
-    // Create SSH key manager
-    let ssh_key_dir = config.ssh_session.ssh_key_directory.clone();
-    let mut ssh_key_manager = ValidatorSshKeyManager::new(ssh_key_dir).await?;
-    ssh_key_manager
-        .load_or_generate_persistent_key(None)
-        .await?;
-    let ssh_key_manager = Arc::new(ssh_key_manager);
-
-    // Create rental manager
-    let rental_manager = RentalManager::new(persistence, ssh_key_manager, metrics);
-    rental_manager.start_monitor();
-
-    // Initialize metrics for existing rentals
-    rental_manager
-        .initialize_rental_metrics()
-        .await
-        .context("Failed to initialize rental metrics")?;
-
-    // Initialize metrics for all nodes
-    rental_manager
-        .initialize_node_metrics()
-        .await
-        .context("Failed to initialize node metrics")?;
-
-    Ok(rental_manager)
-}
 
 /// Create a ValidatorClient from configuration
 #[cfg(feature = "client")]

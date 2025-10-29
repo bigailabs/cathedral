@@ -48,7 +48,17 @@ NETWORK COMPONENTS:
 AUTHENTICATION:
   basilica login                    # Log in to Basilica
   basilica login --device-code      # Log in using device flow
-  basilica logout                   # Log out of Basilica"
+  basilica logout                   # Log out of Basilica
+
+AUTH TOKEN MANAGEMENT:
+  basilica tokens create <name>     # Create API token
+  basilica tokens list              # List API tokens
+  basilica tokens revoke <name>     # Revoke API token
+
+FUND MANAGEMENT:
+  basilica fund                     # Show deposit address
+  basilica fund list --limit 100    # List deposits
+"
 )]
 pub struct Args {
     /// Configuration file path
@@ -197,6 +207,47 @@ impl Args {
                         handlers::tokens::handle_revoke_token(&client, name.clone(), *yes).await?;
                     }
                 }
+            }
+
+            // Fund management
+            Commands::Fund { action, json } => {
+                use crate::cli::commands::FundAction;
+                use crate::client::create_authenticated_client;
+
+                // Create authenticated client
+                let client = create_authenticated_client(config).await?;
+
+                match action {
+                    None => {
+                        // Default action: show deposit address
+                        handlers::fund::handle_show_deposit_address(&client, *json).await?;
+                    }
+                    Some(FundAction::List { limit, offset }) => {
+                        handlers::fund::handle_list_deposits(&client, *limit, *offset, *json)
+                            .await?;
+                    }
+                }
+            }
+
+            // Balance check
+            Commands::Balance { json } => {
+                use crate::client::create_authenticated_client;
+
+                // Create authenticated client
+                let client = create_authenticated_client(config).await?;
+
+                handlers::balance::handle_check_balance(&client, *json).await?;
+            }
+
+            // Packages listing (debug only)
+            #[cfg(debug_assertions)]
+            Commands::Packages { json } => {
+                handlers::packages::handle_packages(*json, config).await?;
+            }
+
+            // Upgrade command is handled in main.rs before entering async runtime
+            Commands::Upgrade { .. } => {
+                unreachable!("Upgrade command should be handled in main.rs")
             }
         }
         Ok(())

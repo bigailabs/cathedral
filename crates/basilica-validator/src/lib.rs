@@ -5,6 +5,8 @@
 
 pub mod agent_installer;
 pub mod api;
+pub mod ban_system;
+pub mod billing;
 pub mod bittensor_core;
 pub mod cli;
 pub mod collateral;

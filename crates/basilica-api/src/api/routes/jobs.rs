@@ -1,7 +1,7 @@
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 
-use crate::metrics as apimetrics;
+use crate::apimetrics;
 use crate::{
     error::{ApiError, Result},
     k8s_client::{JobSpecDto, JobStatusDto, Resources},

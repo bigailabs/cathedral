@@ -19,10 +19,13 @@ basilica-protocol = { path = "../basilica-protocol" }
 basilica-common = { path = "../basilica-common" }
 basilica-operator = { path = "../basilica-operator" }
 basilica-api = { path = "../basilica-api" }
+basilica-billing = { path = "../basilica-billing" }
 uuid = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true, features = ["tls", "tls-roots"] }
 sqlx = { workspace = true }
+rust_decimal = { workspace = true }
+async-trait = { workspace = true }
 
 # Kubernetes dependencies for integration tests
 kube = { version = "0.88", features = ["derive", "rustls-tls"] }

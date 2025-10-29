@@ -7,7 +7,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::middleware::AuthContext;
-use crate::metrics as apimetrics;
+use crate::apimetrics;
 use crate::{
     error::{ApiError, Result},
     k8s_client::{RentalListItemDto, RentalSpecDto, RentalStatusDto, Resources},
