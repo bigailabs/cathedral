@@ -38,8 +38,8 @@ SELECT
         'original_event_id', be.event_id,
         'telemetry_timestamp', be.event_data->>'timestamp',
         'gpu_count', (be.event_data->'usage_metrics'->>'gpu_count')::int,
-        'gpu_hours', be.event_data->'usage_metrics'->>'gpu_hours',
-        'total_cost', be.event_data->>'total_cost'
+        'gpu_hours', COALESCE(be.event_data->'usage_metrics'->>'gpu_hours', '0'),
+        'total_cost', COALESCE(be.event_data->>'total_cost', '0')
     ) AS metadata,
     be.created_at
 FROM billing.billing_events be
@@ -47,8 +47,12 @@ JOIN billing.rentals r ON r.rental_id = be.entity_id::uuid
 JOIN billing.users u ON r.user_id = u.external_id
 WHERE be.event_type = 'telemetry_processed'
     AND be.entity_type = 'rental'
+    AND be.event_data->>'incremental_cost' IS NOT NULL
+    AND be.event_data->>'credits_deducted' IS NOT NULL
     AND (be.event_data->>'credits_deducted')::boolean = true
     AND be.entity_id IS NOT NULL
+    AND be.event_data->'usage_metrics'->>'gpu_count' IS NOT NULL
+    AND be.event_data->>'timestamp' IS NOT NULL
     -- Only backfill if not already exists (idempotent)
     AND NOT EXISTS (
         SELECT 1 FROM billing.credit_transactions ct

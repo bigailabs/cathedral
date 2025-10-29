@@ -1,4 +1,4 @@
-use crate::domain::idempotency::generate_idempotency_key;
+use crate::domain::idempotency::{generate_idempotency_key, prepare_event_data_for_idempotency};
 use crate::domain::types::{RentalId, UsageMetrics};
 use crate::error::{BillingError, Result};
 use crate::storage::events::{EventType, UsageEvent};
@@ -177,7 +177,8 @@ impl TelemetryProcessor {
             "timestamp": telemetry_timestamp.timestamp_millis().to_string(),
         });
 
-        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
+        let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
+        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
         let telemetry_event = UsageEvent {
             event_id: Uuid::new_v4(),

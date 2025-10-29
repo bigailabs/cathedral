@@ -1,5 +1,5 @@
 use crate::domain::events::EventStore;
-use crate::domain::idempotency::generate_idempotency_key;
+use crate::domain::idempotency::{generate_idempotency_key, prepare_event_data_for_idempotency};
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
     rentals::{RentalManager, RentalOperations},
@@ -409,10 +409,7 @@ impl BillingService for BillingServiceImpl {
                 "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
             });
 
-            let mut event_data_for_key = event_data.clone();
-            if let serde_json::Value::Object(ref mut m) = event_data_for_key {
-                m.remove("timestamp");
-            }
+            let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
             let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
             let rental_start_event = UsageEvent {
@@ -508,10 +505,7 @@ impl BillingService for BillingServiceImpl {
             "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
         });
 
-        let mut event_data_for_key = event_data.clone();
-        if let serde_json::Value::Object(ref mut m) = event_data_for_key {
-            m.remove("timestamp");
-        }
+        let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
         let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
         let status_change_event = UsageEvent {
@@ -712,10 +706,7 @@ impl BillingService for BillingServiceImpl {
                 map.insert("timestamp".to_string(), serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()));
             }
 
-            let mut event_data_for_key = event_data.clone();
-            if let serde_json::Value::Object(ref mut m) = event_data_for_key {
-                m.remove("timestamp");
-            }
+            let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
             let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data_for_key);
 
             let usage_event = crate::storage::UsageEvent {
