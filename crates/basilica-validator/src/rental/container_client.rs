@@ -548,6 +548,8 @@ impl ContainerClient {
     /// Remove a container
     pub async fn remove_container(&self, container_id: &str) -> Result<()> {
         let validated_container_id = self.validate_container_id(container_id)?;
+        // There are some cases where just having `--rm` flag during container creation is
+        // not enough, so we also specify the `-v` flag to remove the volume associated with the container.
         let rm_cmd = format!("docker rm -v -f {validated_container_id}");
 
         self.execute_ssh_command(&rm_cmd)
