@@ -179,7 +179,13 @@ impl BillingServer {
         ));
 
         let rental_repository = Arc::new(SqlRentalRepository::new(self.rds_connection.clone()));
-        let credit_repository = Arc::new(SqlCreditRepository::new(self.rds_connection.clone()));
+        let audit_repository = Arc::new(crate::storage::SqlAuditRepository::new(
+            self.rds_connection.clone(),
+        ));
+        let credit_repository = Arc::new(SqlCreditRepository::new(
+            self.rds_connection.clone(),
+            audit_repository,
+        ));
 
         // Create package repository with shared pricing service
         let mut package_repository = SqlPackageRepository::new(self.rds_connection.pool().clone());

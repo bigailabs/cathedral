@@ -1,4 +1,5 @@
 use crate::domain::events::EventStore;
+use crate::domain::idempotency::{generate_idempotency_key, prepare_event_data_for_idempotency};
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
     rentals::{RentalManager, RentalOperations},
@@ -84,7 +85,13 @@ impl BillingServiceImpl {
         pricing_config: Option<crate::pricing::types::DynamicPricingConfig>,
         price_cache: Arc<dyn PriceCacheRepository>,
     ) -> anyhow::Result<Self> {
-        let credit_repository = Arc::new(SqlCreditRepository::new(rds_connection.clone()));
+        let audit_repository = Arc::new(crate::storage::SqlAuditRepository::new(
+            rds_connection.clone(),
+        ));
+        let credit_repository = Arc::new(SqlCreditRepository::new(
+            rds_connection.clone(),
+            audit_repository,
+        ));
         let rental_repository = Arc::new(SqlRentalRepository::new(rds_connection.clone()));
 
         // Create package repository with shared pricing service if available
@@ -395,6 +402,16 @@ impl BillingService for BillingServiceImpl {
                 .await
                 .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
 
+            let event_data = serde_json::json!({
+                "package_id": package_id_str,
+                "hourly_rate": Self::format_credit_balance(credit_rate),
+                "resource_spec": resource_spec_value,
+                "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
+            });
+
+            let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
+            let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
+
             let rental_start_event = UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
                 rental_id: rental_id.as_uuid(),
@@ -402,15 +419,12 @@ impl BillingService for BillingServiceImpl {
                 node_id: req.node_id.clone(),
                 validator_id: validator_id_copy,
                 event_type: EventType::RentalStart,
-                event_data: serde_json::json!({
-                    "package_id": package_id_str,
-                    "hourly_rate": Self::format_credit_balance(credit_rate),
-                    "resource_spec": resource_spec_value,
-                }),
+                event_data,
                 timestamp: chrono::Utc::now(),
                 processed: false,
                 processed_at: None,
                 batch_id: None,
+                idempotency_key: Some(idempotency_key),
             };
 
             self.event_store
@@ -484,6 +498,16 @@ impl BillingService for BillingServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("Failed to persist status: {}", e)))?;
 
+        let event_data = serde_json::json!({
+            "old_status": req.status().as_str_name(),
+            "new_status": new_status.to_string(),
+            "reason": if req.reason.is_empty() { None } else { Some(&req.reason) },
+            "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
+        });
+
+        let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
+        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
+
         let status_change_event = UsageEvent {
             event_id: uuid::Uuid::new_v4(),
             rental_id: rental_id.as_uuid(),
@@ -491,15 +515,12 @@ impl BillingService for BillingServiceImpl {
             node_id: rental.node_id.clone(),
             validator_id: rental.validator_id.clone(),
             event_type: EventType::StatusChange,
-            event_data: serde_json::json!({
-                "old_status": req.status().as_str_name(),
-                "new_status": new_status.to_string(),
-                "reason": if req.reason.is_empty() { None } else { Some(&req.reason) },
-            }),
+            event_data,
             timestamp: chrono::Utc::now(),
             processed: false,
             processed_at: None,
             batch_id: None,
+            idempotency_key: Some(idempotency_key),
         };
         self.event_store
             .append_usage_event(&status_change_event)
@@ -678,6 +699,16 @@ impl BillingService for BillingServiceImpl {
             info!("Updated rental {} state to completed", rental_id);
 
             // Publish rental_end event for audit purposes
+            let mut event_data = serde_json::to_value(&rental_end_data)
+                .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?;
+
+            if let serde_json::Value::Object(ref mut map) = event_data {
+                map.insert("timestamp".to_string(), serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()));
+            }
+
+            let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
+            let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data_for_key);
+
             let usage_event = crate::storage::UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
                 rental_id: rental.id.as_uuid(),
@@ -685,12 +716,12 @@ impl BillingService for BillingServiceImpl {
                 node_id: rental.node_id.clone(),
                 validator_id: rental.validator_id.clone(),
                 event_type: crate::storage::EventType::RentalEnd,
-                event_data: serde_json::to_value(&rental_end_data)
-                    .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?,
+                event_data,
                 timestamp: chrono::Utc::now(),
                 processed: false,
                 processed_at: None,
                 batch_id: None,
+                idempotency_key: Some(idempotency_key),
             };
 
             self.event_store

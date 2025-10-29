@@ -45,6 +45,7 @@ pub struct UsageEvent {
     pub processed: bool,
     pub processed_at: Option<DateTime<Utc>>,
     pub batch_id: Option<Uuid>,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +82,8 @@ pub trait EventRepository: Send + Sync {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
     ) -> Result<Vec<UsageEvent>>;
+
+    async fn is_event_processed(&self, idempotency_key: &str) -> Result<bool>;
 
     async fn append_billing_event(&self, event: &BillingEvent) -> Result<Uuid>;
     async fn get_events_by_entity(
@@ -245,8 +248,8 @@ impl EventRepository for SqlEventRepository {
             r#"
             INSERT INTO billing.usage_events (
                 event_id, rental_id, user_id, node_id, validator_id, event_type,
-                event_data, timestamp, processed
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                event_data, timestamp, processed, idempotency_key
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(event.event_id)
@@ -258,6 +261,7 @@ impl EventRepository for SqlEventRepository {
         .bind(&event.event_data)
         .bind(event.timestamp)
         .bind(false)
+        .bind(&event.idempotency_key)
         .execute(self.connection.pool())
         .await
         .map_err(|e| BillingError::EventStoreError {
@@ -292,8 +296,8 @@ impl EventRepository for SqlEventRepository {
                 r#"
                 INSERT INTO billing.usage_events (
                     event_id, rental_id, user_id, node_id, validator_id, event_type,
-                    event_data, timestamp, processed
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    event_data, timestamp, processed, idempotency_key
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 "#,
             )
             .bind(event.event_id)
@@ -305,6 +309,7 @@ impl EventRepository for SqlEventRepository {
             .bind(&event.event_data)
             .bind(event.timestamp)
             .bind(false)
+            .bind(&event.idempotency_key)
             .execute(&mut *tx)
             .await
             .map_err(|e| BillingError::EventStoreError {
@@ -332,7 +337,7 @@ impl EventRepository for SqlEventRepository {
             r#"
             SELECT
                 event_id, rental_id, user_id, node_id, validator_id, event_type,
-                event_data, timestamp, processed, processed_at, batch_id
+                event_data, timestamp, processed, processed_at, batch_id, idempotency_key
             FROM billing.usage_events
             WHERE processed = false
             ORDER BY timestamp ASC
@@ -364,6 +369,7 @@ impl EventRepository for SqlEventRepository {
                     processed: row.get("processed"),
                     processed_at: row.get("processed_at"),
                     batch_id: row.get("batch_id"),
+                    idempotency_key: row.get("idempotency_key"),
                 }
             })
             .collect();
@@ -399,6 +405,28 @@ impl EventRepository for SqlEventRepository {
         Ok(())
     }
 
+    async fn is_event_processed(&self, idempotency_key: &str) -> Result<bool> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM billing.usage_events
+                WHERE idempotency_key = $1
+                  AND processed = true
+            )
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_one(self.connection.pool())
+        .await
+        .map_err(|e| BillingError::EventStoreError {
+            message: "Failed to check idempotency key".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(exists)
+    }
+
     async fn get_rental_events(
         &self,
         rental_id: Uuid,
@@ -412,7 +440,7 @@ impl EventRepository for SqlEventRepository {
             r#"
             SELECT
                 event_id, rental_id, user_id, node_id, validator_id, event_type,
-                event_data, timestamp, processed, processed_at, batch_id
+                event_data, timestamp, processed, processed_at, batch_id, idempotency_key
             FROM billing.usage_events
             WHERE rental_id = $1
                 AND timestamp >= $2
@@ -446,6 +474,7 @@ impl EventRepository for SqlEventRepository {
                     processed: row.get("processed"),
                     processed_at: row.get("processed_at"),
                     batch_id: row.get("batch_id"),
+                    idempotency_key: row.get("idempotency_key"),
                 }
             })
             .collect();

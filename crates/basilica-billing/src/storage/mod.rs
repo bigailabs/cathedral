@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod credits;
 pub mod events;
 pub mod packages;
@@ -9,6 +10,8 @@ pub mod rules;
 pub mod usage;
 pub mod user_metadata;
 pub mod user_preferences;
+
+pub use audit::{AuditRepository, SqlAuditRepository};
 
 pub use credits::{CreditRepository, SqlCreditRepository};
 
