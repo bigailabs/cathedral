@@ -8,6 +8,7 @@ use anyhow::Result;
 use clap::Parser;
 
 mod api;
+mod ban_system;
 mod billing;
 mod bittensor_core;
 mod cli;

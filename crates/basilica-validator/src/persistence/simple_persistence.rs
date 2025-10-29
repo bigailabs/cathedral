@@ -1,5 +1,10 @@
-use sqlx::SqlitePool;
+use chrono::{DateTime, Duration, Utc};
+use sqlx::{Row, SqlitePool};
+use std::str::FromStr;
 use tracing::info;
+
+// Re-export entities for ban system
+pub use crate::persistence::entities::{MisbehaviourLog, MisbehaviourType};
 #[derive(Debug, Clone)]
 pub struct SimplePersistence {
     pub(crate) pool: SqlitePool,
@@ -106,6 +111,150 @@ impl SimplePersistence {
         }
 
         Ok(())
+    }
+
+    // ============================================================================
+    // Misbehaviour tracking methods for ban system
+    // ============================================================================
+
+    /// Get GPU UUID for an executor
+    pub async fn get_gpu_uuid_for_executor(
+        &self,
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let query = r#"
+            SELECT gpu_uuids
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(miner_id)
+            .bind(executor_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        if let Some(row) = result {
+            let gpu_uuids: Option<String> = row.get("gpu_uuids");
+            // Return the first GPU UUID if available
+            Ok(gpu_uuids.and_then(|uuids| uuids.split(',').next().map(|s| s.to_string())))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get executor endpoint
+    pub async fn get_executor_endpoint(
+        &self,
+        miner_id: &str,
+        executor_id: &str,
+    ) -> Result<Option<String>, anyhow::Error> {
+        let query = r#"
+            SELECT ssh_endpoint
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+        "#;
+
+        let result = sqlx::query(query)
+            .bind(miner_id)
+            .bind(executor_id)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(result.and_then(|row| row.get("ssh_endpoint")))
+    }
+
+    /// Insert a misbehaviour log entry
+    pub async fn insert_misbehaviour_log(
+        &self,
+        log: &MisbehaviourLog,
+    ) -> Result<(), anyhow::Error> {
+        let query = r#"
+            INSERT INTO executor_misbehaviour_log (
+                miner_uid, executor_id, gpu_uuid, recorded_at,
+                endpoint_executor, type_of_misbehaviour, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        sqlx::query(query)
+            .bind(log.miner_uid as i64)
+            .bind(&log.executor_id)
+            .bind(&log.gpu_uuid)
+            .bind(log.recorded_at.to_rfc3339())
+            .bind(&log.endpoint_executor)
+            .bind(log.type_of_misbehaviour.as_str())
+            .bind(&log.details)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get misbehaviour logs for an executor within a time window
+    pub async fn get_misbehaviour_logs(
+        &self,
+        miner_uid: u16,
+        executor_id: &str,
+        since: Duration,
+    ) -> Result<Vec<MisbehaviourLog>, anyhow::Error> {
+        let cutoff_time = Utc::now() - since;
+
+        let query = r#"
+            SELECT
+                miner_uid, executor_id, gpu_uuid, recorded_at,
+                endpoint_executor, type_of_misbehaviour, details,
+                created_at
+            FROM executor_misbehaviour_log
+            WHERE miner_uid = ?
+                AND executor_id = ?
+                AND recorded_at >= ?
+            ORDER BY recorded_at DESC
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(miner_uid as i64)
+            .bind(executor_id)
+            .bind(cutoff_time.to_rfc3339())
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut logs = Vec::new();
+        for row in rows {
+            let miner_uid: i64 = row.get("miner_uid");
+            let executor_id: String = row.get("executor_id");
+            let gpu_uuid: String = row.get("gpu_uuid");
+            let recorded_at_str: String = row.get("recorded_at");
+            let endpoint_executor: String = row.get("endpoint_executor");
+            let type_str: String = row.get("type_of_misbehaviour");
+            let details: String = row.get("details");
+            let created_at_str: String = row.get("created_at");
+
+            let recorded_at = DateTime::parse_from_rfc3339(&recorded_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            let created_at = DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+
+            let type_of_misbehaviour =
+                MisbehaviourType::from_str(&type_str).unwrap_or(MisbehaviourType::BadRental);
+
+            logs.push(MisbehaviourLog {
+                miner_uid: miner_uid as u16,
+                executor_id,
+                gpu_uuid,
+                recorded_at,
+                endpoint_executor,
+                type_of_misbehaviour,
+                details,
+                created_at,
+                updated_at: created_at, // Use created_at as updated_at
+            });
+        }
+
+        Ok(logs)
     }
 }
 
