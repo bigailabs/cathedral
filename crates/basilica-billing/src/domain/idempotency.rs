@@ -22,7 +22,8 @@ pub fn generate_idempotency_key(rental_id: Uuid, event_data: &serde_json::Value)
         })
         .unwrap_or_default();
 
-    let data_str = serde_json::to_string(event_data).unwrap_or_default();
+    let event_data_for_hash = prepare_event_data_for_idempotency(event_data);
+    let data_str = serde_json::to_string(&event_data_for_hash).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(data_str.as_bytes());
     let hash = format!("{:x}", hasher.finalize());
@@ -85,7 +86,7 @@ mod tests {
     }
 
     #[test]
-    fn test_idempotency_key_ignores_timestamp_in_data() {
+    fn test_idempotency_key_includes_timestamp_but_excludes_from_hash() {
         let rental_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
 
         let data1 = json!({
@@ -100,15 +101,29 @@ mod tests {
             "timestamp": "9876543210"
         });
 
-        let cleaned1 = prepare_event_data_for_idempotency(&data1);
-        let cleaned2 = prepare_event_data_for_idempotency(&data2);
+        let key1 = generate_idempotency_key(rental_id, &data1);
+        let key2 = generate_idempotency_key(rental_id, &data2);
 
-        let key1 = generate_idempotency_key(rental_id, &cleaned1);
-        let key2 = generate_idempotency_key(rental_id, &cleaned2);
+        assert_ne!(
+            key1, key2,
+            "Keys should differ when timestamps differ (timestamp in key format)"
+        );
+
+        assert!(
+            key1.contains("1234567890"),
+            "Key should contain timestamp: {}",
+            key1
+        );
+        assert!(
+            key2.contains("9876543210"),
+            "Key should contain timestamp: {}",
+            key2
+        );
 
         assert_eq!(
-            key1, key2,
-            "Keys should be identical when only timestamp differs"
+            key1.split(':').nth(2),
+            key2.split(':').nth(2),
+            "Hash portion should be identical (timestamp excluded from hash)"
         );
     }
 
@@ -151,5 +166,28 @@ mod tests {
         let key2 = generate_idempotency_key(rental_id2, &cleaned);
 
         assert_ne!(key1, key2, "Keys should differ when rental_id is different");
+    }
+
+    #[test]
+    fn test_idempotency_key_format_with_timestamp() {
+        let rental_id = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+
+        let data = json!({
+            "field": "value",
+            "amount": 100,
+            "timestamp": "1730194445000"
+        });
+
+        let key = generate_idempotency_key(rental_id, &data);
+
+        let parts: Vec<&str> = key.split(':').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "Key should have format rental_id:timestamp:hash"
+        );
+        assert_eq!(parts[0], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(parts[1], "1730194445000");
+        assert_eq!(parts[2].len(), 8, "Hash should be 8 characters");
     }
 }
