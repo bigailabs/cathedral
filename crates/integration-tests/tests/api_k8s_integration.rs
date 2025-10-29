@@ -46,6 +46,8 @@ async fn test_jobs_api_create_get_status() -> Result<()> {
             },
         },
         ttl_seconds: 300,
+        ports: vec![],
+        storage: None,
     };
 
     let job_id = client
@@ -285,6 +287,8 @@ async fn test_jobs_api_with_fixture() -> Result<()> {
             },
         },
         ttl_seconds: 300,
+        ports: vec![],
+        storage: None,
     };
 
     // Create job from fixture
@@ -471,6 +475,8 @@ async fn test_api_resource_specs() -> Result<()> {
             },
         },
         ttl_seconds: 300,
+        ports: vec![],
+        storage: None,
     };
 
     let job_id = client
@@ -516,6 +522,8 @@ async fn test_api_job_commands_args() -> Result<()> {
             },
         },
         ttl_seconds: 300,
+        ports: vec![],
+        storage: None,
     };
 
     let job_id = client

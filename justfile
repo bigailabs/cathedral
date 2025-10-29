@@ -149,6 +149,39 @@ docker-push-operator TAG="latest":
     docker push ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG
     echo "✅ Operator image pushed: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
 
+# Build storage daemon Docker image locally
+docker-build-storage TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/storage-daemon/build.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    echo "Building storage daemon image with tag: $CLEAN_TAG"
+    ./scripts/storage-daemon/build.sh --image-name ghcr.io/one-covenant/basilica/storage-daemon --image-tag "$CLEAN_TAG"
+    echo "✅ Storage daemon image built: ghcr.io/one-covenant/basilica/storage-daemon:$CLEAN_TAG"
+    echo ""
+    echo "To push to registry, run:"
+    echo "  just docker-push-storage $CLEAN_TAG"
+
+# Build and push storage daemon Docker image
+docker-push-storage TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/storage-daemon/push.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    # Build first
+    just docker-build-storage "$CLEAN_TAG"
+    # Push
+    echo "Pushing storage daemon image to registry..."
+    ./scripts/storage-daemon/push.sh \
+      --source-image ghcr.io/one-covenant/basilica/storage-daemon \
+      --target-image ghcr.io/one-covenant/basilica/storage-daemon \
+      --tag "$CLEAN_TAG"
+    echo "✅ Storage daemon image pushed: ghcr.io/one-covenant/basilica/storage-daemon:$CLEAN_TAG"
+
 # =============================================================================
 # DEPLOYMENT COMMANDS
 # =============================================================================
@@ -321,20 +354,100 @@ docs-open:
 # E2E APPLY HELPERS
 # =============================================================================
 
-# Apply the full stack on the remote K3s server with images by tag, and a test Postgres URL.
-# Defaults match config/deploy/postgres.yaml (user=basilica, db=basilica, password=devpassword).
-e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica":
+# Configure R2 storage credentials securely using Ansible Vault
+r2-setup:
     #!/usr/bin/env bash
     set -euo pipefail
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🔐 Secure R2 Storage Credentials Setup"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will:"
+    echo "  1. Prompt for vault password (min 12 chars)"
+    echo "  2. Collect R2 credentials interactively"
+    echo "  3. Encrypt credentials with AES-256"
+    echo "  4. Save to scripts/ansible/group_vars/all/vault.yml"
+    echo ""
+    cd scripts/ansible
+    chmod +x secure-r2-setup.sh
+    ./secure-r2-setup.sh
+    cd ../..
+    echo ""
+    echo "✅ R2 credentials configured!"
+    echo ""
+    echo "To deploy credentials to your cluster:"
+    echo "  just e2e-apply TAG=k3_test"
+
+# Upload R2 credentials directly to cluster (for already-configured credentials)
+r2-upload:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📤 Upload R2 Credentials to Cluster"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will upload your R2 credentials directly to the cluster."
+    echo "Provide credentials via environment variables or interactively."
+    echo ""
+    cd scripts/ansible
+    chmod +x upload-r2-credentials.sh
+    ./upload-r2-credentials.sh
+    cd ../..
+    echo ""
+    echo "✅ Credentials uploaded!"
+
+# Apply the full stack on the remote K3s server with images by tag, and a test Postgres URL.
+# Defaults match config/deploy/postgres.yaml (user=basilica, db=basilica, password=devpassword).
+# Optional: Set SETUP_R2=true to configure R2 storage credentials first
+e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica" SETUP_R2="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Check if R2 setup is requested
+    if [ "{{SETUP_R2}}" = "true" ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔐 R2 Storage Credentials Setup"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Running secure R2 setup before deployment..."
+        echo ""
+        cd scripts/ansible
+        chmod +x secure-r2-setup.sh
+        ./secure-r2-setup.sh
+        cd ../..
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+    fi
+
     DB_HOST="basilica-postgres.basilica-system.svc.cluster.local"
     DB_URL="postgres://{{DB_USER}}:{{DB_PASS}}@${DB_HOST}:5432/{{DB_NAME}}"
     echo "Using DB_URL=${DB_URL}"
     cd scripts/ansible
+
+    # Check if vault file exists and use it
+    VAULT_ARGS=""
+    if [ -f group_vars/all/vault.yml ]; then
+        echo "✅ Found encrypted R2 credentials (group_vars/all/vault.yml)"
+        if [ -f .vault_password ]; then
+            echo "✅ Using vault password file (.vault_password)"
+            VAULT_ARGS="--vault-password-file=.vault_password"
+        else
+            echo "🔑 Enter vault password to decrypt R2 credentials:"
+            VAULT_ARGS="--ask-vault-pass"
+        fi
+    else
+        echo "ℹ️  No R2 credentials found (group_vars/all/vault.yml)"
+        echo "   To set up R2 storage, run: just e2e-apply SETUP_R2=true"
+        echo "   Or run manually: cd scripts/ansible && ./secure-r2-setup.sh"
+    fi
+
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
       -e install_local_subtensor_k8s=true \
       -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
       -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
-      -e api_database_url="${DB_URL}"
+      -e api_database_url="${DB_URL}" \
+      $VAULT_ARGS
     echo
     echo "Look for 'Generated API token' in the output above."
 
@@ -1294,6 +1407,7 @@ localnet-restart:
 
 # Setup complete E2E environment (local subtensor + remote K3s + operator + local validator + local API)
 # Prerequisites: Run 'just ci-build-images' first to build and push images with k3_test tag
+# R2 storage: Automatically deployed if vault credentials exist at scripts/ansible/group_vars/all/vault.yml
 e2e-up TAG="k3_test":
     #!/usr/bin/env bash
     set -euo pipefail

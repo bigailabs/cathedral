@@ -1,7 +1,7 @@
 # Build stage
 FROM rust:1.87-bookworm AS builder
 
-# Install build dependencies
+# Install build dependencies including FUSE
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
     fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install rustfmt (keep in sync with workspace expectations)
+# Install rustfmt
 RUN rustup component add rustfmt
 
 # Set working directory
@@ -32,11 +32,11 @@ ENV CARGO_TARGET_DIR=/tmp/target
 ENV CARGO_INCREMENTAL=0
 ENV RUST_BACKTRACE=1
 
-# Build the operator binary
+# Build the storage daemon binary
 RUN if [ "$BUILD_MODE" = "release" ]; then \
-        cargo build --locked --release -p basilica-operator; \
+        cargo build --locked --release -p basilica-storage --bin basilica-storage-daemon; \
     else \
-        cargo build --locked -p basilica-operator; \
+        cargo build --locked -p basilica-storage --bin basilica-storage-daemon; \
     fi && \
     rm -rf /tmp/target/debug/deps /tmp/target/debug/incremental /tmp/target/release/deps /tmp/target/release/incremental 2>/dev/null || true && \
     find /tmp/target -name "*.rlib" -delete 2>/dev/null || true
@@ -44,7 +44,7 @@ RUN if [ "$BUILD_MODE" = "release" ]; then \
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies including FUSE
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
@@ -54,14 +54,21 @@ RUN apt-get update && apt-get install -y \
 
 # Copy the built binary
 ARG BUILD_MODE=release
-COPY --from=builder /tmp/target/${BUILD_MODE}/basilica-operator /usr/local/bin/basilica-operator
+COPY --from=builder /tmp/target/${BUILD_MODE}/basilica-storage-daemon /usr/local/bin/basilica-storage-daemon
 
 # Make binary executable
-RUN chmod +x /usr/local/bin/basilica-operator
+RUN chmod +x /usr/local/bin/basilica-storage-daemon
 
-# Expose metrics port
-EXPOSE 9400
+# Create mount point
+RUN mkdir -p /data && chmod 755 /data
+
+# Create /etc/mtab symlink (fusermount3 needs this)
+RUN ln -sf /proc/self/mounts /etc/mtab
+
+# Create a user for fusermount3 (it checks username)
+RUN useradd -u 1000 -m -s /bin/bash basilica
+
+# Expose any needed ports (none for FUSE daemon)
 
 # Default command
-ENTRYPOINT ["/usr/local/bin/basilica-operator"]
-
+ENTRYPOINT ["/usr/local/bin/basilica-storage-daemon"]

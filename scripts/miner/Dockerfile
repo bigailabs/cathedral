@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     build-essential \
     protobuf-compiler \
+    libfuse3-dev \
+    fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install rustfmt for code formatting
@@ -74,6 +76,8 @@ RUN apt-get update && apt-get install -y \
     procps \
     iproute2 \
     net-tools \
+    libfuse3-3 \
+    fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary

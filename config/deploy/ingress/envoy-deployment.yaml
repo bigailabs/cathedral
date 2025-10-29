@@ -15,11 +15,13 @@ spec:
       labels:
         app: basilica-envoy
     spec:
-      # Allow envoy to run on control plane nodes
       tolerations:
+        # Allow scheduling on control-plane nodes (for single-node clusters)
         - key: node-role.kubernetes.io/control-plane
+          operator: Exists
           effect: NoSchedule
         - key: node-role.kubernetes.io/master
+          operator: Exists
           effect: NoSchedule
       containers:
         - name: envoy

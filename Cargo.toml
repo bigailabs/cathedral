@@ -14,6 +14,7 @@ members = [
   "crates/integration-tests",
   "crates/collateral-contract",
   "crates/basilica-operator",
+  "crates/basilica-storage",
 ]
 resolver = "2"
 

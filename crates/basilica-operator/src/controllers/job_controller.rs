@@ -1,8 +1,8 @@
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Affinity, Capabilities, Container, EnvFromSource, EnvVar, PodSecurityContext, PodSpec,
-    PodTemplateSpec, ResourceRequirements, SeccompProfile, SecretEnvSource, SecurityContext,
-    Toleration,
+    Affinity, Capabilities, Container, EmptyDirVolumeSource, EnvFromSource, EnvVar,
+    PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements, SeccompProfile,
+    SecretEnvSource, SecurityContext, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::api::core::v1::{
     NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
@@ -144,29 +144,189 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
     (pod_sc, container_sc)
 }
 
+// Phase 3: Added volume support for FUSE mounts
 pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
     let (pod_sc, container_sc) = build_security_contexts();
 
-    let container = Container {
+    // Track persistent storage config for volume mounts
+    let storage_mount_path = spec
+        .storage
+        .as_ref()
+        .and_then(|s| s.persistent.as_ref())
+        .filter(|p| p.enabled)
+        .map(|p| {
+            if p.mount_path.is_empty() {
+                "/data".to_string()
+            } else {
+                p.mount_path.clone()
+            }
+        });
+
+    // Main container with optional storage volume mount
+    // If storage is enabled, wrap user command to wait for FUSE mount
+    let (container_command, container_args) = if storage_mount_path.is_some() {
+        let user_cmd = if !spec.command.is_empty() {
+            spec.command.join(" ")
+        } else {
+            // If no command provided, just wait for FUSE and then sleep
+            "sleep infinity".to_string()
+        };
+        let user_args = if !spec.args.is_empty() {
+            format!(" {}", spec.args.join(" "))
+        } else {
+            String::new()
+        };
+        let mount_path = storage_mount_path.as_ref().unwrap();
+
+        // Inject wait-for-fuse logic before user command
+        let wrapped_cmd = format!(
+            "echo 'Waiting for FUSE mount...'; \
+             while [ ! -f {}/.fuse_ready ]; do sleep 0.1; done; \
+             echo 'FUSE ready, starting workload...'; \
+             {}{}",
+            mount_path, user_cmd, user_args
+        );
+
+        (Some(vec!["sh".into(), "-c".into()]), Some(vec![wrapped_cmd]))
+    } else {
+        // No storage, use original command
+        (
+            if spec.command.is_empty() {
+                None
+            } else {
+                Some(spec.command.clone())
+            },
+            if spec.args.is_empty() {
+                None
+            } else {
+                Some(spec.args.clone())
+            },
+        )
+    };
+
+    let mut main_container = Container {
         name: name.to_string(),
         image: Some(spec.image.clone()),
-        command: if spec.command.is_empty() {
-            None
-        } else {
-            Some(spec.command.clone())
-        },
-        args: if spec.args.is_empty() {
-            None
-        } else {
-            Some(spec.args.clone())
-        },
+        command: container_command,
+        args: container_args,
         env: Some(build_env(&spec.env)),
         resources: Some(build_resources(&spec.resources)),
         security_context: container_sc,
         ..Default::default()
     };
 
-    let mut containers = vec![container];
+    // Add volume mount to main container if storage is enabled
+    if let Some(ref mount_path) = storage_mount_path {
+        main_container.volume_mounts = Some(vec![VolumeMount {
+            name: "basilica-storage".into(),
+            mount_path: mount_path.clone(),
+            ..Default::default()
+        }]);
+    }
+
+    let mut containers = vec![main_container];
+
+    // Optional persistent storage sidecar (FUSE)
+    if let Some(storage) = &spec.storage {
+        if let Some(persistent) = &storage.persistent {
+            if persistent.enabled {
+                let mut env = Vec::new();
+
+                // Experiment ID (use job name as unique identifier)
+                env.push(EnvVar {
+                    name: "EXPERIMENT_ID".into(),
+                    value: Some(name.to_string()),
+                    ..Default::default()
+                });
+
+                // Mount point
+                let mount_path = if persistent.mount_path.is_empty() {
+                    "/data".to_string()
+                } else {
+                    persistent.mount_path.clone()
+                };
+                env.push(EnvVar {
+                    name: "MOUNT_POINT".into(),
+                    value: Some(mount_path.clone()),
+                    ..Default::default()
+                });
+
+                // Sync interval
+                env.push(EnvVar {
+                    name: "SYNC_INTERVAL_MS".into(),
+                    value: Some(persistent.sync_interval_ms.unwrap_or(1000).to_string()),
+                    ..Default::default()
+                });
+
+                // Cache size
+                env.push(EnvVar {
+                    name: "CACHE_SIZE_MB".into(),
+                    value: Some(persistent.cache_size_mb.unwrap_or(2048).to_string()),
+                    ..Default::default()
+                });
+
+                // Enable debug logging for FUSE daemon
+                env.push(EnvVar {
+                    name: "RUST_LOG".into(),
+                    value: Some("basilica_storage=debug".into()),
+                    ..Default::default()
+                });
+
+                // Credentials from secret
+                // Use validator-provided centralized R2 credentials by default
+                // Falls back to user-provided secret for backward compatibility
+                // The secret provides: STORAGE_BACKEND, STORAGE_BUCKET, STORAGE_ENDPOINT,
+                // STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY
+                let storage_secret = persistent
+                    .credentials_secret
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| "basilica-r2-credentials".to_string());
+
+                let env_from = Some(vec![EnvFromSource {
+                    secret_ref: Some(SecretEnvSource {
+                        name: Some(storage_secret),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }]);
+
+                // Phase 3.5: Storage daemon with AWS SDK and fixed account ID extraction
+                let storage_sidecar = Container {
+                    name: format!("basilica-storage-{}", name),
+                    image: Some("ghcr.io/one-covenant/basilica/storage-daemon:k3_sdk_fix".into()),
+                    command: Some(vec!["/usr/local/bin/basilica-storage-daemon".into()]),
+                    args: None, // No --allow-other args needed
+                    env: Some(env),
+                    env_from,
+                    volume_mounts: Some(vec![
+                        VolumeMount {
+                            name: "basilica-storage".into(),
+                            mount_path: mount_path.clone(),
+                            mount_propagation: Some("Bidirectional".into()), // Required for FUSE
+                            ..Default::default()
+                        },
+                    ]),
+                    security_context: Some(SecurityContext {
+                        privileged: Some(true), // Required for FUSE
+                        allow_privilege_escalation: Some(true),
+                        capabilities: Some(Capabilities {
+                            add: Some(vec!["SYS_ADMIN".into()]),
+                            ..Default::default()
+                        }),
+                        seccomp_profile: Some(SeccompProfile {
+                            type_: "RuntimeDefault".into(),
+                            localhost_profile: None,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+                containers.push(storage_sidecar);
+            }
+        }
+    }
+
     // Optional artifact sidecar
     if let Some(art) = &spec.artifacts {
         if art.enabled {
@@ -224,8 +384,20 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         }
     }
 
+    // Add emptyDir volume for shared FUSE mount point if storage is enabled
+    let volumes = if storage_mount_path.is_some() {
+        Some(vec![Volume {
+            name: "basilica-storage".into(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        }])
+    } else {
+        None
+    };
+
     let pod_spec = PodSpec {
         containers,
+        volumes,
         restart_policy: Some("Never".into()),
         tolerations: Some(build_tolerations()),
         security_context: pod_sc,
@@ -531,18 +703,27 @@ mod tests {
         // Affinity
         let aff = pod.affinity.as_ref().unwrap();
         let node_aff = aff.node_affinity.as_ref().unwrap();
-        let req = node_aff
+        let match_exprs = node_aff
             .required_during_scheduling_ignored_during_execution
             .as_ref()
             .unwrap()
             .node_selector_terms[0]
             .match_expressions
             .as_ref()
-            .unwrap()[0]
-            .clone();
-        assert_eq!(req.key, "basilica.ai/gpu-model");
-        assert_eq!(req.operator, "In");
-        assert_eq!(req.values.unwrap()[0], "A100");
+            .unwrap();
+
+        // Verify GPU model requirement exists
+        let gpu_req = match_exprs
+            .iter()
+            .find(|r| r.key == "basilica.ai/gpu-model")
+            .expect("GPU model requirement should exist");
+        assert_eq!(gpu_req.operator, "In");
+        assert_eq!(gpu_req.values.as_ref().unwrap()[0], "A100");
+
+        // Verify other critical requirements exist
+        assert!(match_exprs.iter().any(|r| r.key == "basilica.ai/node-role"));
+        assert!(match_exprs.iter().any(|r| r.key == "basilica.ai/validated"));
+        assert!(match_exprs.iter().any(|r| r.key == "basilica.ai/node-group"));
     }
 
     #[test]
@@ -569,6 +750,70 @@ mod tests {
         let envs = sidecar.env.as_ref().unwrap();
         assert!(envs.iter().any(|e| e.name == "DESTINATION"));
         assert!(envs.iter().any(|e| e.name == "FROM_PATH"));
+    }
+
+    #[test]
+    fn render_includes_storage_sidecar_when_enabled() {
+        let mut spec = sample_spec();
+        spec.storage = Some(crate::crd::basilica_job::StorageSpec {
+            ephemeral: String::new(),
+            persistent: Some(crate::crd::basilica_job::PersistentStorageSpec {
+                enabled: true,
+                backend: String::new(),
+                bucket: String::new(),
+                region: None,
+                endpoint: None,
+                credentials_secret: None,
+                sync_interval_ms: None,
+                cache_size_mb: None,
+                mount_path: String::new(),
+            }),
+        });
+        let job = render_job("storage-job", &spec);
+        let pod = job.spec.unwrap().template.spec.unwrap();
+        assert_eq!(pod.containers.len(), 2, "Should have main container + storage sidecar");
+
+        // Verify shared volume exists
+        assert!(pod.volumes.is_some(), "Should have volumes");
+        let volumes = pod.volumes.as_ref().unwrap();
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0].name, "basilica-storage");
+        assert!(volumes[0].empty_dir.is_some(), "Should use emptyDir");
+
+        // Verify main container has volume mount
+        let main_container = &pod.containers[0];
+        assert!(main_container.volume_mounts.is_some());
+        let main_mounts = main_container.volume_mounts.as_ref().unwrap();
+        assert!(main_mounts.iter().any(|m| m.name == "basilica-storage" && m.mount_path == "/data"));
+
+        // Verify storage sidecar
+        let sidecar = pod
+            .containers
+            .iter()
+            .find(|c| c.name.starts_with("basilica-storage-"))
+            .expect("Storage sidecar should exist");
+        assert_eq!(sidecar.image.as_ref().unwrap(), "ghcr.io/one-covenant/basilica/storage-daemon:k3_sdk_fix");
+
+        // Verify env vars
+        let envs = sidecar.env.as_ref().unwrap();
+        assert!(envs.iter().any(|e| e.name == "EXPERIMENT_ID"));
+        assert!(envs.iter().any(|e| e.name == "MOUNT_POINT"));
+
+        // Verify sidecar has volume mount with bidirectional propagation
+        assert!(sidecar.volume_mounts.is_some());
+        let sidecar_mounts = sidecar.volume_mounts.as_ref().unwrap();
+        let storage_mount = sidecar_mounts.iter().find(|m| m.name == "basilica-storage").expect("Should have storage mount");
+        assert_eq!(storage_mount.mount_path, "/data");
+        assert_eq!(storage_mount.mount_propagation.as_ref().unwrap(), "Bidirectional");
+
+        // Verify envFrom for secret
+        assert!(sidecar.env_from.is_some());
+        let env_from = sidecar.env_from.as_ref().unwrap();
+        assert_eq!(env_from.len(), 1);
+        assert_eq!(
+            env_from[0].secret_ref.as_ref().unwrap().name.as_ref().unwrap(),
+            "basilica-r2-credentials"
+        );
     }
 
     use crate::k8s_client::MockK8sClient;

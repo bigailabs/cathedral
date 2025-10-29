@@ -38,6 +38,11 @@
 use crate::{
     auth::TokenManager,
     error::{ApiError, ErrorResponse, Result},
+    jobs::{
+        CreateJobRequest, CreateJobResponse, DeleteJobResponse, JobLogsResponse,
+        JobStatusResponse, ReadFileRequest, ReadFileResponse, ResumeJobResponse,
+        SuspendJobResponse,
+    },
     types::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, CreateApiKeyRequest,
         HealthCheckResponse, ListAvailableNodesQuery, ListRentalsQuery,
@@ -224,6 +229,57 @@ impl BasilicaClient {
         } else {
             self.handle_error_response(response).await
         }
+    }
+
+    // ===== Jobs API =====
+
+    /// Create a new job
+    pub async fn create_job(&self, request: CreateJobRequest) -> Result<CreateJobResponse> {
+        self.post("/v2/jobs", &request).await
+    }
+
+    /// Get job status
+    pub async fn get_job_status(&self, job_id: &str) -> Result<JobStatusResponse> {
+        let path = format!("/v2/jobs/{}", job_id);
+        self.get(&path).await
+    }
+
+    /// Delete a job
+    pub async fn delete_job(&self, job_id: &str) -> Result<DeleteJobResponse> {
+        let path = format!("/v2/jobs/{}", job_id);
+        let response = self.delete_empty(&path).await?;
+        if response.status().is_success() {
+            response.json().await.map_err(ApiError::HttpClient)
+        } else {
+            self.handle_error_response(response).await
+        }
+    }
+
+    /// Get job logs
+    pub async fn get_job_logs(&self, job_id: &str) -> Result<JobLogsResponse> {
+        let path = format!("/v2/jobs/{}/logs", job_id);
+        self.get(&path).await
+    }
+
+    /// Read a file from a job's container
+    pub async fn read_job_file(&self, job_id: &str, file_path: &str) -> Result<ReadFileResponse> {
+        let path = format!("/v2/jobs/{}/files", job_id);
+        let request = ReadFileRequest {
+            file_path: file_path.to_string(),
+        };
+        self.post(&path, &request).await
+    }
+
+    /// Suspend a job (pause execution)
+    pub async fn suspend_job(&self, job_id: &str) -> Result<SuspendJobResponse> {
+        let path = format!("/v2/jobs/{}/suspend", job_id);
+        self.post(&path, &serde_json::json!({})).await
+    }
+
+    /// Resume a suspended job
+    pub async fn resume_job(&self, job_id: &str) -> Result<ResumeJobResponse> {
+        let path = format!("/v2/jobs/{}/resume", job_id);
+        self.post(&path, &serde_json::json!({})).await
     }
 
     // ===== Private Helper Methods =====
@@ -576,5 +632,145 @@ mod tests {
             .build();
 
         assert!(client.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_create_job() {
+        use crate::jobs::{CreateJobRequest, JobGpuRequirements, JobResources};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v2/jobs"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "job_id": "job-123",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let request = CreateJobRequest {
+            image: "pytorch/pytorch:latest".to_string(),
+            command: vec![],
+            args: vec![],
+            env: vec![],
+            resources: JobResources {
+                cpu: "4".to_string(),
+                memory: "8Gi".to_string(),
+                gpus: JobGpuRequirements {
+                    count: 1,
+                    model: vec!["H100".to_string()],
+                },
+            },
+            ttl_seconds: 3600,
+            name: Some("training-job".to_string()),
+            namespace: None,
+            ports: vec![],
+            storage: None,
+        };
+
+        let response = client.create_job(request).await.unwrap();
+        assert_eq!(response.job_id, "job-123");
+    }
+
+    #[tokio::test]
+    async fn test_get_job_status() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/v2/jobs/job-123"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "job_id": "job-123",
+                "status": {
+                    "phase": "Running",
+                    "message": "Job is running",
+                    "endpoints": ["http://example.com:8080"]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.get_job_status("job-123").await.unwrap();
+        assert_eq!(response.job_id, "job-123");
+        assert_eq!(response.status.phase, "Running");
+        assert_eq!(response.status.endpoints.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_suspend_resume_job() {
+        let mock_server = MockServer::start().await;
+
+        // Mock suspend endpoint
+        Mock::given(method("POST"))
+            .and(path("/v2/jobs/job-123/suspend"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "job_id": "job-123",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock resume endpoint
+        Mock::given(method("POST"))
+            .and(path("/v2/jobs/job-123/resume"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "job_id": "job-123",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        // Test suspend
+        let suspend_response = client.suspend_job("job-123").await.unwrap();
+        assert_eq!(suspend_response.job_id, "job-123");
+
+        // Test resume
+        let resume_response = client.resume_job("job-123").await.unwrap();
+        assert_eq!(resume_response.job_id, "job-123");
+    }
+
+    #[tokio::test]
+    async fn test_read_job_file() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v2/jobs/job-123/files"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": "File contents here",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client
+            .read_job_file("job-123", "/path/to/file.txt")
+            .await
+            .unwrap();
+        assert_eq!(response.content, "File contents here");
     }
 }

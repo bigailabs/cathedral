@@ -149,4 +149,17 @@ jobs:
         run: |
           docker push ghcr.io/one-covenant/basilica/cli:"$TAG"
 
-      
+      - name: Build storage daemon image
+        run: |
+          ./scripts/storage-daemon/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/storage-daemon \
+            --image-tag "$TAG"
+
+      - name: Push storage daemon image
+        run: |
+          ./scripts/storage-daemon/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/storage-daemon \
+            --target-image ghcr.io/one-covenant/basilica/storage-daemon \
+            --tag "$TAG"
+
+

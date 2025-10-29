@@ -21,6 +21,29 @@ pub struct Resources {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortSpec {
+    #[serde(alias = "containerPort")]
+    pub container_port: u16,
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+}
+
+fn default_protocol() -> String {
+    "TCP".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageConfig {
+    pub backend: String, // "s3", "gcs", "r2", etc.
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub prefix: Option<String>,
+    #[serde(default)]
+    pub credentials: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobSpecDto {
     pub image: String,
     #[serde(default)]
@@ -32,12 +55,18 @@ pub struct JobSpecDto {
     pub resources: Resources,
     #[serde(default)]
     pub ttl_seconds: u32,
+    #[serde(default)]
+    pub ports: Vec<PortSpec>,
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JobStatusDto {
     pub phase: String,
     pub pod_name: Option<String>,
+    #[serde(default)]
+    pub endpoints: Vec<String>,
 }
 
 #[async_trait]
@@ -46,6 +75,16 @@ pub trait ApiK8sClient {
     async fn get_job_status(&self, ns: &str, name: &str) -> Result<JobStatusDto>;
     async fn delete_job(&self, ns: &str, name: &str) -> Result<()>;
     async fn get_job_logs(&self, ns: &str, name: &str) -> Result<String>;
+    async fn exec_job(
+        &self,
+        ns: &str,
+        name: &str,
+        command: Vec<String>,
+        stdin: Option<String>,
+        tty: bool,
+    ) -> Result<ExecResultDto>;
+    async fn suspend_job(&self, ns: &str, name: &str) -> Result<()>;
+    async fn resume_job(&self, ns: &str, name: &str) -> Result<()>;
 
     // Rentals (GpuRental) API
     async fn create_rental(&self, ns: &str, name: &str, spec: RentalSpecDto) -> Result<String>;
@@ -88,6 +127,12 @@ pub struct MockK8sClient {
 impl ApiK8sClient for MockK8sClient {
     async fn create_job(&self, ns: &str, name: &str, spec: JobSpecDto) -> Result<String> {
         let mut s = self.specs.write().await;
+        // Generate mock endpoints based on ports
+        let endpoints: Vec<String> = spec
+            .ports
+            .iter()
+            .map(|p| format!("mock-endpoint.local:{}", p.container_port))
+            .collect();
         s.entry(ns.to_string())
             .or_default()
             .insert(name.to_string(), spec);
@@ -98,6 +143,7 @@ impl ApiK8sClient for MockK8sClient {
             JobStatusDto {
                 phase: "Pending".into(),
                 pod_name: None,
+                endpoints,
             },
         );
         Ok(name.to_string())
@@ -129,6 +175,124 @@ impl ApiK8sClient for MockK8sClient {
             .unwrap_or_else(|| "".into()))
     }
 
+    async fn exec_job(
+        &self,
+        _ns: &str,
+        _name: &str,
+        command: Vec<String>,
+        stdin: Option<String>,
+        tty: bool,
+    ) -> Result<ExecResultDto> {
+        let cmd = command.join(" ");
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let mut exit_code = 0;
+
+        // Special handling for cat commands (file reading)
+        if command.len() == 2 && command[0] == "cat" {
+            let file_path = &command[1];
+
+            // Mock metadata file for testing
+            if file_path == "/app/basilica-env.json" || file_path == "/basilica-env.json" {
+                stdout = r#"{
+  "image": "test:latest",
+  "protocol_version": "1.0",
+  "environments": [
+    {
+      "name": "test-env",
+      "description": "Test environment for unit tests",
+      "endpoints": {
+        "reset": {"method": "POST", "path": "/reset", "params": ["seed?"]},
+        "step": {"method": "POST", "path": "/step", "params": ["action"]},
+        "close": {"method": "POST", "path": "/close"}
+      },
+      "action_space": {"type": "discrete", "n": 4},
+      "observation_space": {"type": "box", "shape": [84, 84, 3]}
+    }
+  ]
+}"#.to_string();
+                return Ok(ExecResultDto {
+                    stdout,
+                    stderr,
+                    exit_code: 0,
+                });
+            }
+
+            // File not found
+            stderr = format!("cat: {}: No such file or directory", file_path);
+            return Ok(ExecResultDto {
+                stdout,
+                stderr,
+                exit_code: 1,
+            });
+        }
+
+        // Simulate other command behaviors
+        if cmd.contains("fail") {
+            if tty {
+                stdout.push_str("simulated error");
+            } else {
+                stderr.push_str("simulated error");
+            }
+            exit_code = 1;
+        } else if cmd.contains("stderr-only") {
+            if tty {
+                stdout.push_str("simulated stderr-only output");
+            } else {
+                stderr.push_str("simulated stderr-only output");
+            }
+        } else if tty {
+            stdout = format!("exec(tty): {}", cmd);
+        } else {
+            stdout = format!("exec: {}", cmd);
+        }
+
+        // Handle stdin
+        if let Some(input) = stdin {
+            if tty {
+                if !stdout.is_empty() {
+                    stdout.push('\n');
+                }
+                stdout.push_str(&input);
+            } else {
+                if !stdout.is_empty() {
+                    stdout.push('\n');
+                }
+                stdout.push_str(&format!("stdin: {}", input));
+            }
+        }
+
+        Ok(ExecResultDto {
+            stdout,
+            stderr,
+            exit_code,
+        })
+    }
+
+    async fn suspend_job(&self, ns: &str, name: &str) -> Result<()> {
+        let mut st = self.statuses.write().await;
+        let status = st
+            .get_mut(ns)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(|| ApiError::NotFound {
+                message: "job not found".into(),
+            })?;
+        status.phase = "Suspended".into();
+        Ok(())
+    }
+
+    async fn resume_job(&self, ns: &str, name: &str) -> Result<()> {
+        let mut st = self.statuses.write().await;
+        let status = st
+            .get_mut(ns)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(|| ApiError::NotFound {
+                message: "job not found".into(),
+            })?;
+        status.phase = "Running".into();
+        Ok(())
+    }
+
     async fn create_rental(&self, ns: &str, name: &str, spec: RentalSpecDto) -> Result<String> {
         // Store spec for tests and reuse job stores for simplicity
         {
@@ -137,6 +301,13 @@ impl ApiK8sClient for MockK8sClient {
                 .or_default()
                 .insert(name.to_string(), spec.clone());
         }
+        // Generate mock endpoints based on ingress rules
+        let endpoints: Vec<String> = spec
+            .network_ingress
+            .iter()
+            .map(|r| format!("{}:{}", r.exposure, r.port))
+            .collect();
+
         let mut s = self.specs.write().await;
         s.entry(ns.to_string()).or_default().insert(
             name.to_string(),
@@ -147,6 +318,8 @@ impl ApiK8sClient for MockK8sClient {
                 env: spec.container_env,
                 resources: spec.resources,
                 ttl_seconds: 0,
+                ports: vec![],
+                storage: None,
             },
         );
         let mut st = self.statuses.write().await;
@@ -155,6 +328,7 @@ impl ApiK8sClient for MockK8sClient {
             JobStatusDto {
                 phase: "Provisioning".into(),
                 pod_name: None,
+                endpoints,
             },
         );
         Ok(name.to_string())
@@ -454,19 +628,41 @@ impl ApiK8sClient for K8sClient {
         use kube::api::PostParams;
         use serde_json::json;
         let api = self.cr_api(ns, "basilica.ai", "v1", "BasilicaJob");
+
+        // Convert ports to JSON array
+        let ports_json: Vec<serde_json::Value> = spec
+            .ports
+            .iter()
+            .map(|p| json!({"containerPort": p.container_port, "protocol": p.protocol}))
+            .collect();
+
+        // Build spec with optional storage
+        let mut spec_json = json!({
+            "image": spec.image,
+            "command": spec.command,
+            "args": spec.args,
+            "env": spec.env,
+            "resources": {"cpu": spec.resources.cpu, "memory": spec.resources.memory, "gpus": {"count": spec.resources.gpus.count, "model": spec.resources.gpus.model}},
+            "ttlSeconds": spec.ttl_seconds,
+            "priority": "normal",
+            "ports": ports_json,
+        });
+
+        // Add storage if provided
+        if let Some(storage) = spec.storage {
+            spec_json["storage"] = json!({
+                "backend": storage.backend,
+                "bucket": storage.bucket,
+                "prefix": storage.prefix,
+                "credentials": storage.credentials,
+            });
+        }
+
         let obj = json!({
             "apiVersion": "basilica.ai/v1",
             "kind": "BasilicaJob",
             "metadata": {"name": name, "namespace": ns},
-            "spec": {
-                "image": spec.image,
-                "command": spec.command,
-                "args": spec.args,
-                "env": spec.env,
-                "resources": {"cpu": spec.resources.cpu, "memory": spec.resources.memory, "gpus": {"count": spec.resources.gpus.count, "model": spec.resources.gpus.model}},
-                "ttlSeconds": spec.ttl_seconds,
-                "priority": "normal"
-            }
+            "spec": spec_json
         });
         let dynobj: kube::core::DynamicObject =
             serde_json::from_value(obj).map_err(|e| ApiError::Internal {
@@ -501,7 +697,12 @@ impl ApiK8sClient for K8sClient {
             .and_then(|s| s.get("podName"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        Ok(JobStatusDto { phase, pod_name })
+        let endpoints = Self::parse_status_endpoints(&val);
+        Ok(JobStatusDto {
+            phase,
+            pod_name,
+            endpoints,
+        })
     }
 
     async fn delete_job(&self, ns: &str, name: &str) -> Result<()> {
@@ -539,6 +740,128 @@ impl ApiK8sClient for K8sClient {
                 message: "pod not found".into(),
             })
         }
+    }
+
+    async fn exec_job(
+        &self,
+        ns: &str,
+        job_name: &str,
+        command: Vec<String>,
+        stdin: Option<String>,
+        tty: bool,
+    ) -> Result<ExecResultDto> {
+        use kube::api::{Api, AttachParams};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Find the pod for the job
+        let pod = self
+            .get_pod_by_label(ns, "basilica.ai/job", job_name)
+            .await?
+            .ok_or_else(|| ApiError::NotFound {
+                message: "pod not found".into(),
+            })?;
+
+        let pod_name = pod.metadata.name.unwrap_or_default();
+        let pods: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), ns);
+
+        // Determine container name (first container in spec)
+        let container_name = pod
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.containers.first().map(|c| c.name.clone()));
+
+        let params = AttachParams {
+            stdout: true,
+            stderr: true,
+            stdin: stdin.is_some(),
+            tty,
+            container: container_name,
+            ..Default::default()
+        };
+
+        // Execute command
+        let args: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
+        let mut attached = pods
+            .exec(&pod_name, args, &params)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("exec failed: {e}"),
+            })?;
+
+        // Send stdin if provided
+        if let (Some(input), Some(mut sin)) = (stdin, attached.stdin()) {
+            let _ = sin.write_all(input.as_bytes()).await;
+            let _ = sin.shutdown().await;
+        }
+
+        // Read stdout
+        let mut stdout_buf = Vec::new();
+        if let Some(mut out) = attached.stdout() {
+            out.read_to_end(&mut stdout_buf)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("read stdout failed: {e}"),
+                })?;
+        }
+
+        // Read stderr
+        let mut stderr_buf = Vec::new();
+        if let Some(mut err) = attached.stderr() {
+            err.read_to_end(&mut stderr_buf)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("read stderr failed: {e}"),
+                })?;
+        }
+
+        // Wait for completion
+        let joined = attached.join().await;
+        let exit_code = if joined.is_ok() { 0 } else { 1 };
+
+        Ok(ExecResultDto {
+            stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
+            exit_code,
+        })
+    }
+
+    async fn suspend_job(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        use serde_json::json;
+
+        let api = self.cr_api(ns, "basilica.ai", "v1", "BasilicaJob");
+        let patch = json!({
+            "spec": {
+                "suspended": true
+            }
+        });
+
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("suspend job failed: {e}"),
+            })?;
+        Ok(())
+    }
+
+    async fn resume_job(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        use serde_json::json;
+
+        let api = self.cr_api(ns, "basilica.ai", "v1", "BasilicaJob");
+        let patch = json!({
+            "spec": {
+                "suspended": false
+            }
+        });
+
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("resume job failed: {e}"),
+            })?;
+        Ok(())
     }
 
     async fn create_rental(&self, ns: &str, name: &str, spec: RentalSpecDto) -> Result<String> {
@@ -870,6 +1193,8 @@ mod tests {
                         },
                     },
                     ttl_seconds: 0,
+                    ports: vec![],
+                    storage: None,
                 },
             )
             .await
@@ -877,6 +1202,7 @@ mod tests {
         assert_eq!(name, "job1");
         let st = c.get_job_status("ns", "job1").await.unwrap();
         assert_eq!(st.phase, "Pending");
+        assert!(st.endpoints.is_empty()); // No ports, no endpoints
         c.delete_job("ns", "job1").await.unwrap();
         assert!(matches!(
             c.get_job_status("ns", "job1").await,

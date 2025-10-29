@@ -27,6 +27,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
             get(routes::jobs::get_job_status).delete(routes::jobs::delete_job),
         )
         .route("/jobs/:id/logs", get(routes::jobs::get_job_logs))
+        .route("/jobs/:id/read-file", post(routes::jobs::read_job_file))
+        .route("/jobs/:id/suspend", post(routes::jobs::suspend_job))
+        .route("/jobs/:id/resume", post(routes::jobs::resume_job))
         // v2 rentals namespace is always available when k8s client exists
         .route(
             "/v2/rentals",
