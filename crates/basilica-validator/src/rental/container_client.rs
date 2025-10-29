@@ -193,7 +193,7 @@ impl ContainerClient {
         );
 
         // Build docker run command as a string directly
-        let mut docker_cmd_parts = vec!["docker", "run", "-d"];
+        let mut docker_cmd_parts = vec!["docker", "run", "-d", "--rm"];
 
         // Add interactive and TTY flags if command is /bin/bash
         if spec.command.len() == 1 && spec.command[0] == "/bin/bash" {
@@ -548,7 +548,7 @@ impl ContainerClient {
     /// Remove a container
     pub async fn remove_container(&self, container_id: &str) -> Result<()> {
         let validated_container_id = self.validate_container_id(container_id)?;
-        let rm_cmd = format!("docker rm -f {validated_container_id}");
+        let rm_cmd = format!("docker rm -v -f {validated_container_id}");
 
         self.execute_ssh_command(&rm_cmd)
             .await
