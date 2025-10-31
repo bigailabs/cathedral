@@ -24,9 +24,8 @@ use basilica_protocol::billing::{
     GetPriceHistoryResponse, IngestResponse, RefreshMinerRevenueSummaryRequest,
     RefreshMinerRevenueSummaryResponse, RentalStatus, SetUserPackageRequest,
     SetUserPackageResponse, SyncPricesRequest, SyncPricesResponse, TelemetryData,
-    TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
-    UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest, UsageReportResponse,
-    UsageSummary,
+    TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest, UpdateRentalStatusResponse,
+    UsageDataPoint, UsageReportRequest, UsageReportResponse, UsageSummary,
 };
 
 use rust_decimal::prelude::*;
@@ -1308,9 +1307,7 @@ impl BillingService for BillingServiceImpl {
                 let response = RefreshMinerRevenueSummaryResponse {
                     success: true,
                     summaries_created: summaries_created as u32,
-                    computed_at: Some(prost_types::Timestamp::from(
-                        std::time::SystemTime::now(),
-                    )),
+                    computed_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
                     error_message: String::new(),
                 };
 
@@ -1420,7 +1417,10 @@ impl BillingService for BillingServiceImpl {
                 failed_rentals: s.failed_rentals as u32,
                 total_revenue: Self::format_decimal(s.total_revenue),
                 total_hours: Self::format_decimal(s.total_hours),
-                avg_hourly_rate: s.avg_hourly_rate.map(Self::format_decimal).unwrap_or_default(),
+                avg_hourly_rate: s
+                    .avg_hourly_rate
+                    .map(Self::format_decimal)
+                    .unwrap_or_default(),
                 avg_rental_duration_hours: s
                     .avg_rental_duration_hours
                     .map(Self::format_decimal)

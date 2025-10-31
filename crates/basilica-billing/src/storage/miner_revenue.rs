@@ -148,19 +148,13 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
         // Build WHERE conditions
         if let Some(ref node_ids) = filter.node_ids {
             if !node_ids.is_empty() {
-                conditions.push(format!(
-                    "node_id = ANY(${})",
-                    conditions.len() + 1
-                ));
+                conditions.push(format!("node_id = ANY(${})", conditions.len() + 1));
             }
         }
 
         if let Some(ref validator_ids) = filter.validator_ids {
             if !validator_ids.is_empty() {
-                conditions.push(format!(
-                    "validator_id = ANY(${})",
-                    conditions.len() + 1
-                ));
+                conditions.push(format!("validator_id = ANY(${})", conditions.len() + 1));
             }
         }
 
@@ -235,13 +229,14 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
             sql_query = sql_query.bind(computed_at);
         }
 
-        let rows = sql_query
-            .fetch_all(self.pool())
-            .await
-            .map_err(|e| BillingError::DatabaseError {
-                operation: "get_miner_revenue_summaries".to_string(),
-                source: Box::new(e),
-            })?;
+        let rows =
+            sql_query
+                .fetch_all(self.pool())
+                .await
+                .map_err(|e| BillingError::DatabaseError {
+                    operation: "get_miner_revenue_summaries".to_string(),
+                    source: Box::new(e),
+                })?;
 
         Ok(rows.iter().map(Self::summary_from_row).collect())
     }
@@ -260,19 +255,13 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
         // Build WHERE conditions (same as get_summaries)
         if let Some(ref node_ids) = filter.node_ids {
             if !node_ids.is_empty() {
-                conditions.push(format!(
-                    "node_id = ANY(${})",
-                    conditions.len() + 1
-                ));
+                conditions.push(format!("node_id = ANY(${})", conditions.len() + 1));
             }
         }
 
         if let Some(ref validator_ids) = filter.validator_ids {
             if !validator_ids.is_empty() {
-                conditions.push(format!(
-                    "validator_id = ANY(${})",
-                    conditions.len() + 1
-                ));
+                conditions.push(format!("validator_id = ANY(${})", conditions.len() + 1));
             }
         }
 
@@ -337,13 +326,14 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
             sql_query = sql_query.bind(computed_at);
         }
 
-        let count = sql_query
-            .fetch_one(self.pool())
-            .await
-            .map_err(|e| BillingError::DatabaseError {
-                operation: "count_miner_revenue_summaries".to_string(),
-                source: Box::new(e),
-            })?;
+        let count =
+            sql_query
+                .fetch_one(self.pool())
+                .await
+                .map_err(|e| BillingError::DatabaseError {
+                    operation: "count_miner_revenue_summaries".to_string(),
+                    source: Box::new(e),
+                })?;
 
         Ok(count)
     }

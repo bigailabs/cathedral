@@ -34,10 +34,7 @@ impl MinerRevenueService {
     }
 
     /// Validate period boundaries
-    fn validate_period(
-        period_start: DateTime<Utc>,
-        period_end: DateTime<Utc>,
-    ) -> Result<()> {
+    fn validate_period(period_start: DateTime<Utc>, period_end: DateTime<Utc>) -> Result<()> {
         if period_end <= period_start {
             return Err(BillingError::InvalidState {
                 message: format!(
@@ -112,7 +109,7 @@ impl MinerRevenueOperations for MinerRevenueService {
 
         // Validate pagination
         if let Some(limit) = filter.limit {
-            if limit < 1 || limit > 1000 {
+            if !(1..=1000).contains(&limit) {
                 return Err(BillingError::InvalidState {
                     message: format!("Limit must be between 1 and 1000, got {}", limit),
                 });
