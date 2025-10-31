@@ -1,5 +1,6 @@
 pub mod credits;
 pub mod events;
+pub mod miner_revenue;
 pub mod packages;
 pub mod price_cache;
 pub mod promo_codes;
@@ -37,4 +38,9 @@ pub use rules::{RulesRepository, SqlRulesRepository};
 
 pub use price_cache::{
     PriceCacheRepository, PriceHistoryEntry, PriceHistoryFilter, SqlPriceCacheRepository,
+};
+
+pub use miner_revenue::{
+    MinerRevenueRepository, MinerRevenueSummary, MinerRevenueSummaryFilter,
+    SqlMinerRevenueRepository,
 };

@@ -20,9 +20,11 @@ use basilica_protocol::billing::{
     ApplyCreditsResponse, FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
     GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, GetBillingPackagesRequest,
     GetBillingPackagesResponse, GetCachedPricesRequest, GetCachedPricesResponse,
-    GetPriceHistoryRequest, GetPriceHistoryResponse, IngestResponse, RentalStatus,
-    SetUserPackageRequest, SetUserPackageResponse, SyncPricesRequest, SyncPricesResponse,
-    TelemetryData, TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
+    GetMinerRevenueSummaryRequest, GetMinerRevenueSummaryResponse, GetPriceHistoryRequest,
+    GetPriceHistoryResponse, IngestResponse, RefreshMinerRevenueSummaryRequest,
+    RefreshMinerRevenueSummaryResponse, RentalStatus, SetUserPackageRequest,
+    SetUserPackageResponse, SyncPricesRequest, SyncPricesResponse, TelemetryData,
+    TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
     UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest, UsageReportResponse,
     UsageSummary,
 };
@@ -1241,5 +1243,25 @@ impl BillingService for BillingServiceImpl {
 
         info!("Returned {} price history entries", total_count);
         Ok(Response::new(response))
+    }
+
+    async fn refresh_miner_revenue_summary(
+        &self,
+        _request: Request<RefreshMinerRevenueSummaryRequest>,
+    ) -> std::result::Result<Response<RefreshMinerRevenueSummaryResponse>, Status> {
+        // TODO: Implement in Phase 5
+        Err(Status::unimplemented(
+            "Miner revenue reconciliation not yet implemented",
+        ))
+    }
+
+    async fn get_miner_revenue_summary(
+        &self,
+        _request: Request<GetMinerRevenueSummaryRequest>,
+    ) -> std::result::Result<Response<GetMinerRevenueSummaryResponse>, Status> {
+        // TODO: Implement in Phase 5
+        Err(Status::unimplemented(
+            "Miner revenue reconciliation not yet implemented",
+        ))
     }
 }
