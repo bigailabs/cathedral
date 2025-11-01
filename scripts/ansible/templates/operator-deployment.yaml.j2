@@ -27,7 +27,7 @@ spec:
       containers:
         - name: operator
           image: {{ (operator_image_effective | default(operator_image)) | quote }}
-          imagePullPolicy: Always
+          imagePullPolicy: {{ operator_image_pull_policy | default('IfNotPresent') }}
           env:
             - name: RUST_LOG
               value: info
