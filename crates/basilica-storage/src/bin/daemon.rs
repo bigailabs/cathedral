@@ -96,11 +96,13 @@ async fn main() -> Result<()> {
         "r2" => {
             // Extract account_id from endpoint URL
             // Expected format: https://<account_id>.r2.cloudflarestorage.com
-            let account_id = args.endpoint
+            let account_id = args
+                .endpoint
                 .as_ref()
                 .and_then(|e| {
                     // Remove https:// or http:// prefix
-                    let url_without_scheme = e.strip_prefix("https://")
+                    let url_without_scheme = e
+                        .strip_prefix("https://")
                         .or_else(|| e.strip_prefix("http://"))
                         .unwrap_or(e);
                     // Split by '.' and take first part (account_id)
@@ -109,14 +111,18 @@ async fn main() -> Result<()> {
                 .context("R2 requires account_id from endpoint")?;
 
             let access_key = args.access_key_id.context("R2 requires access_key_id")?;
-            let secret_key = args.secret_access_key.context("R2 requires secret_access_key")?;
+            let secret_key = args
+                .secret_access_key
+                .context("R2 requires secret_access_key")?;
 
             StorageConfig::r2(account_id, &access_key, &secret_key, &args.bucket)
         }
         "s3" => {
             let region = args.region.as_deref().unwrap_or("us-east-1");
             let access_key = args.access_key_id.context("S3 requires access_key_id")?;
-            let secret_key = args.secret_access_key.context("S3 requires secret_access_key")?;
+            let secret_key = args
+                .secret_access_key
+                .context("S3 requires secret_access_key")?;
 
             StorageConfig::s3(region, &access_key, &secret_key, &args.bucket)
         }
@@ -161,8 +167,7 @@ async fn main() -> Result<()> {
 
     // Ensure mount point exists
     if !args.mount_point.exists() {
-        std::fs::create_dir_all(&args.mount_point)
-            .context("Failed to create mount point")?;
+        std::fs::create_dir_all(&args.mount_point).context("Failed to create mount point")?;
     }
 
     info!("Mounting filesystem at: {}", args.mount_point.display());

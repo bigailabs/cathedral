@@ -13,7 +13,8 @@ use crate::error::{Result, StorageError};
 type FileInfo = (String, PathBuf, u64);
 
 /// Type alias for boxed future returning file list
-type BoxedFileFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FileInfo>>> + Send + 'a>>;
+type BoxedFileFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<FileInfo>>> + Send + 'a>>;
 
 /// Metadata for a snapshot
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,9 +236,7 @@ impl SnapshotManager {
 
     /// Recursively collect all files in a directory
     fn collect_files<'a>(&'a self, dir: &'a Path, base: &'a Path) -> BoxedFileFuture<'a> {
-        Box::pin(async move {
-            Self::collect_files_impl(dir, base).await
-        })
+        Box::pin(async move { Self::collect_files_impl(dir, base).await })
     }
 
     /// Implementation of recursive file collection
@@ -281,8 +280,8 @@ impl SnapshotManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::backend::StorageBackend;
+    use async_trait::async_trait;
     use std::collections::HashMap;
     use tokio::sync::RwLock;
 
@@ -431,7 +430,10 @@ mod tests {
             .unwrap();
 
         // Delete snapshot
-        manager.delete_snapshot("job-123", "snap-001").await.unwrap();
+        manager
+            .delete_snapshot("job-123", "snap-001")
+            .await
+            .unwrap();
 
         // Verify it's deleted
         let snapshots = manager.list_snapshots("job-123").await.unwrap();

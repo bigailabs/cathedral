@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::{config::StorageConfig, error::{Result, StorageError}};
+use crate::{
+    config::StorageConfig,
+    error::{Result, StorageError},
+};
 
 /// Trait for storage backends
 #[async_trait]
@@ -47,13 +50,13 @@ impl S3Backend {
         let client = match config.backend.as_str() {
             "s3" | "r2" => {
                 // Get credentials
-                let access_key_id = credentials
-                    .get("access_key_id")
-                    .ok_or_else(|| StorageError::InvalidConfig("access_key_id is required".to_string()))?;
+                let access_key_id = credentials.get("access_key_id").ok_or_else(|| {
+                    StorageError::InvalidConfig("access_key_id is required".to_string())
+                })?;
 
-                let secret_access_key = credentials
-                    .get("secret_access_key")
-                    .ok_or_else(|| StorageError::InvalidConfig("secret_access_key is required".to_string()))?;
+                let secret_access_key = credentials.get("secret_access_key").ok_or_else(|| {
+                    StorageError::InvalidConfig("secret_access_key is required".to_string())
+                })?;
 
                 let region = credentials
                     .get("region")
@@ -64,14 +67,15 @@ impl S3Backend {
                 let aws_creds = aws_sdk_s3::config::Credentials::new(
                     access_key_id,
                     secret_access_key,
-                    None, // session token not used with R2/S3 static credentials
-                    None, // expiry
+                    None,               // session token not used with R2/S3 static credentials
+                    None,               // expiry
                     "basilica-storage", // provider name
                 );
 
-                let mut config_builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .credentials_provider(aws_creds)
-                    .region(aws_sdk_s3::config::Region::new(region.to_string()));
+                let mut config_builder =
+                    aws_config::defaults(aws_config::BehaviorVersion::latest())
+                        .credentials_provider(aws_creds)
+                        .region(aws_sdk_s3::config::Region::new(region.to_string()));
 
                 // For R2 or custom S3 endpoints, set endpoint URL
                 if let Some(endpoint) = credentials.get("endpoint") {
@@ -133,7 +137,8 @@ impl StorageBackend for S3Backend {
     async fn get(&self, key: &str) -> Result<Bytes> {
         let object_key = self.object_key(key);
 
-        let resp = self.client
+        let resp = self
+            .client
             .get_object()
             .bucket(&self.bucket)
             .key(&object_key)
@@ -141,11 +146,9 @@ impl StorageBackend for S3Backend {
             .await
             .map_err(|e| StorageError::BackendError(format!("Failed to get object: {}", e)))?;
 
-        let data = resp
-            .body
-            .collect()
-            .await
-            .map_err(|e| StorageError::BackendError(format!("Failed to read object body: {}", e)))?;
+        let data = resp.body.collect().await.map_err(|e| {
+            StorageError::BackendError(format!("Failed to read object body: {}", e))
+        })?;
 
         Ok(Bytes::from(data.into_bytes()))
     }
@@ -153,7 +156,8 @@ impl StorageBackend for S3Backend {
     async fn exists(&self, key: &str) -> Result<bool> {
         let object_key = self.object_key(key);
 
-        match self.client
+        match self
+            .client
             .head_object()
             .bucket(&self.bucket)
             .key(&object_key)
@@ -167,7 +171,10 @@ impl StorageBackend for S3Backend {
                 if err_str.contains("NotFound") || err_str.contains("404") {
                     Ok(false)
                 } else {
-                    Err(StorageError::BackendError(format!("Failed to check object existence: {}", e)))
+                    Err(StorageError::BackendError(format!(
+                        "Failed to check object existence: {}",
+                        e
+                    )))
                 }
             }
         }
@@ -190,7 +197,8 @@ impl StorageBackend for S3Backend {
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let object_prefix = self.object_key(prefix);
 
-        let resp = self.client
+        let resp = self
+            .client
             .list_objects_v2()
             .bucket(&self.bucket)
             .prefix(&object_prefix)
@@ -234,7 +242,10 @@ mod tests {
         let creds = config.credentials.unwrap();
         assert_eq!(creds.get("access_key_id"), Some(&"key".to_string()));
         assert_eq!(creds.get("secret_access_key"), Some(&"secret".to_string()));
-        assert!(creds.get("endpoint").unwrap().contains("r2.cloudflarestorage.com"));
+        assert!(creds
+            .get("endpoint")
+            .unwrap()
+            .contains("r2.cloudflarestorage.com"));
     }
 
     #[test]

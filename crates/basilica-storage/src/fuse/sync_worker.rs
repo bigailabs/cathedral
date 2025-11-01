@@ -77,14 +77,9 @@ impl SyncWorker {
 
                 // Sync each region
                 for region in dirty_regions {
-                    if let Err(e) = Self::sync_region(
-                        &experiment_id,
-                        &storage,
-                        &cache,
-                        &dirty_tracker,
-                        &region,
-                    )
-                    .await
+                    if let Err(e) =
+                        Self::sync_region(&experiment_id, &storage, &cache, &dirty_tracker, &region)
+                            .await
                     {
                         error!(
                             "Failed to sync region {} @ {}: {}",
@@ -139,10 +134,7 @@ impl SyncWorker {
                 Ok(())
             }
             Err(e) => {
-                warn!(
-                    "Failed to sync {} @ {}: {}",
-                    region.path, region.offset, e
-                );
+                warn!("Failed to sync {} @ {}: {}", region.path, region.offset, e);
                 Err(format!("Storage error: {}", e))
             }
         }
@@ -150,7 +142,10 @@ impl SyncWorker {
 
     /// Force sync all dirty pages (for graceful shutdown)
     pub async fn flush_all(&self) -> Result<(), String> {
-        info!("Flushing all dirty pages for experiment {}", self.experiment_id);
+        info!(
+            "Flushing all dirty pages for experiment {}",
+            self.experiment_id
+        );
 
         let dirty_regions = self.dirty_tracker.get_dirty_regions().await;
 
@@ -313,9 +308,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            dirty_tracker
-                .mark_dirty(&path, 0, data.len())
-                .await;
+            dirty_tracker.mark_dirty(&path, 0, data.len()).await;
         }
 
         // Create worker (don't start)

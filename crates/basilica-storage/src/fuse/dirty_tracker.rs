@@ -113,12 +113,7 @@ impl DirtyPageTracker {
 
         file_regions.push(merged);
 
-        tracing::debug!(
-            "Marked dirty: {} @ {} len {}",
-            path,
-            offset,
-            length
-        );
+        tracing::debug!("Marked dirty: {} @ {} len {}", path, offset, length);
     }
 
     /// Track a memory-mapped region
@@ -137,12 +132,7 @@ impl DirtyPageTracker {
             .or_insert_with(Vec::new)
             .push(region);
 
-        tracing::debug!(
-            "Tracking mmap: {} @ {} len {}",
-            path,
-            offset,
-            length
-        );
+        tracing::debug!("Tracking mmap: {} @ {} len {}", path, offset, length);
     }
 
     /// Get all dirty regions (consumes them)

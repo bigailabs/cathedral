@@ -3,7 +3,7 @@
 //! Provides fast read/write access while data syncs to object storage in background.
 
 use bytes::Bytes;
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -200,11 +200,14 @@ impl PageCache {
 
         let page_offset = (offset / PAGE_SIZE as u64) * PAGE_SIZE as u64;
 
-        file.pages.insert(page_offset, Page {
-            data,
-            dirty: false,
-            last_access: std::time::Instant::now(),
-        });
+        file.pages.insert(
+            page_offset,
+            Page {
+                data,
+                dirty: false,
+                last_access: std::time::Instant::now(),
+            },
+        );
 
         self.current_size += PAGE_SIZE;
     }

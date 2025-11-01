@@ -359,9 +359,8 @@ impl Filesystem for BasilicaFS {
             }
 
             // Update inode size
-            let new_size = (offset as u64 + data.len() as u64).max(
-                cache.get_size(&path).await.unwrap_or(0)
-            );
+            let new_size =
+                (offset as u64 + data.len() as u64).max(cache.get_size(&path).await.unwrap_or(0));
 
             drop(cache);
 
@@ -392,7 +391,10 @@ impl Filesystem for BasilicaFS {
         reply: ReplyCreate,
     ) {
         let name_str = name.to_string_lossy().to_string();
-        debug!("create: parent={}, name={}, mode={:o}", parent, name_str, mode);
+        debug!(
+            "create: parent={}, name={}, mode={:o}",
+            parent, name_str, mode
+        );
 
         self.runtime_handle.block_on(async {
             let ino = self.alloc_ino().await;
@@ -418,7 +420,10 @@ impl Filesystem for BasilicaFS {
             drop(inodes);
 
             // Update path mapping
-            let parent_path = self.get_path(parent).await.unwrap_or_else(|| "/".to_string());
+            let parent_path = self
+                .get_path(parent)
+                .await
+                .unwrap_or_else(|| "/".to_string());
             let full_path = if parent_path == "/" {
                 format!("/{}", name_str)
             } else {
@@ -450,7 +455,10 @@ impl Filesystem for BasilicaFS {
         reply: ReplyEntry,
     ) {
         let name_str = name.to_string_lossy().to_string();
-        debug!("mkdir: parent={}, name={}, mode={:o}", parent, name_str, mode);
+        debug!(
+            "mkdir: parent={}, name={}, mode={:o}",
+            parent, name_str, mode
+        );
 
         self.runtime_handle.block_on(async {
             let ino = self.alloc_ino().await;
@@ -476,7 +484,10 @@ impl Filesystem for BasilicaFS {
             drop(inodes);
 
             // Update path mapping
-            let parent_path = self.get_path(parent).await.unwrap_or_else(|| "/".to_string());
+            let parent_path = self
+                .get_path(parent)
+                .await
+                .unwrap_or_else(|| "/".to_string());
             let full_path = if parent_path == "/" {
                 format!("/{}", name_str)
             } else {
@@ -526,7 +537,14 @@ impl Filesystem for BasilicaFS {
         });
     }
 
-    fn fsync(&mut self, _req: &Request<'_>, _ino: u64, _fh: u64, _datasync: bool, reply: fuser::ReplyEmpty) {
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _datasync: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
         debug!("fsync called, flushing dirty pages");
 
         self.runtime_handle.block_on(async {
@@ -595,12 +613,7 @@ mod tests {
     #[tokio::test]
     async fn test_filesystem_creation() {
         let storage = Arc::new(MockStorage::new());
-        let fs = BasilicaFS::new(
-            "exp-test".to_string(),
-            storage,
-            1000,
-            10,
-        );
+        let fs = BasilicaFS::new("exp-test".to_string(), storage, 1000, 10);
 
         // Root should exist
         let inodes = fs.inodes.read().await;
@@ -611,12 +624,7 @@ mod tests {
     #[tokio::test]
     async fn test_path_resolution() {
         let storage = Arc::new(MockStorage::new());
-        let fs = BasilicaFS::new(
-            "exp-test".to_string(),
-            storage,
-            1000,
-            10,
-        );
+        let fs = BasilicaFS::new("exp-test".to_string(), storage, 1000, 10);
 
         // Root path
         let root_path = fs.get_path(ROOT_INO).await;

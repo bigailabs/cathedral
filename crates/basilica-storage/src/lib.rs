@@ -19,11 +19,13 @@
 pub mod backend;
 pub mod config;
 pub mod error;
+#[cfg(feature = "fuse")]
 pub mod fuse;
 pub mod snapshot;
 
 pub use backend::{S3Backend, StorageBackend};
 pub use config::StorageConfig;
 pub use error::{Result, StorageError};
+#[cfg(feature = "fuse")]
 pub use fuse::{BasilicaFS, DirtyPageTracker, PageCache, SyncWorker};
 pub use snapshot::{SnapshotManager, SnapshotMetadata};

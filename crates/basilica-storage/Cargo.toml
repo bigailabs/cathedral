@@ -6,6 +6,11 @@ edition = "2021"
 [[bin]]
 name = "basilica-storage-daemon"
 path = "src/bin/daemon.rs"
+required-features = ["fuse"]
+
+[features]
+default = ["fuse"]
+fuse = ["dep:fuser"]
 
 [dependencies]
 # Workspace dependencies
@@ -23,8 +28,8 @@ aws-sdk-s3 = "1.15"
 aws-smithy-runtime-api = "1.1"
 bytes = "1.5"
 
-# FUSE filesystem
-fuser = "0.14"
+# FUSE filesystem (optional, requires system libfuse3-dev)
+fuser = { version = "0.14", optional = true }
 libc = { workspace = true }
 
 # Async utilities
