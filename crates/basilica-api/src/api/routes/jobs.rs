@@ -273,6 +273,9 @@ mod tests {
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
                 .expect("lazy PG pool dsn should be valid"),
             k8s: Some(Arc::new(client)),
+            payments_client: None,
+            billing_client: None,
+            metrics: None,
         }
     }
 
@@ -540,8 +543,16 @@ mod tests {
 
         assert_eq!(status.0.status.phase, "Pending");
         assert_eq!(status.0.status.endpoints.len(), 2);
-        assert!(status.0.status.endpoints.contains(&"mock-endpoint.local:8080".to_string()));
-        assert!(status.0.status.endpoints.contains(&"mock-endpoint.local:9090".to_string()));
+        assert!(status
+            .0
+            .status
+            .endpoints
+            .contains(&"mock-endpoint.local:8080".to_string()));
+        assert!(status
+            .0
+            .status
+            .endpoints
+            .contains(&"mock-endpoint.local:9090".to_string()));
     }
 
     #[tokio::test]
@@ -627,8 +638,16 @@ mod tests {
 
         assert_eq!(status.0.status.phase, "Pending");
         assert_eq!(status.0.status.endpoints.len(), 2);
-        assert!(status.0.status.endpoints.contains(&"mock-endpoint.local:8000".to_string()));
-        assert!(status.0.status.endpoints.contains(&"mock-endpoint.local:8001".to_string()));
+        assert!(status
+            .0
+            .status
+            .endpoints
+            .contains(&"mock-endpoint.local:8000".to_string()));
+        assert!(status
+            .0
+            .status
+            .endpoints
+            .contains(&"mock-endpoint.local:8001".to_string()));
     }
 
     #[tokio::test]
