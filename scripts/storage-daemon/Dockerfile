@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 
 # Install build dependencies including FUSE
 RUN apt-get update && apt-get install -y \
