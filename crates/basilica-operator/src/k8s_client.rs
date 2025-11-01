@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -11,6 +12,7 @@ use tokio::sync::RwLock;
 use crate::crd::basilica_job::BasilicaJob;
 use crate::crd::basilica_queue::BasilicaQueue;
 use crate::crd::gpu_rental::GpuRental;
+use crate::crd::user_deployment::UserDeployment;
 
 #[async_trait]
 pub trait K8sClient: Send + Sync {
@@ -33,6 +35,20 @@ pub trait K8sClient: Send + Sync {
         ns: &str,
         name: &str,
         status: crate::crd::gpu_rental::GpuRentalStatus,
+    ) -> Result<()>;
+
+    async fn create_user_deployment(
+        &self,
+        ns: &str,
+        obj: &UserDeployment,
+    ) -> Result<UserDeployment>;
+    async fn get_user_deployment(&self, ns: &str, name: &str) -> Result<UserDeployment>;
+    async fn delete_user_deployment(&self, ns: &str, name: &str) -> Result<()>;
+    async fn update_user_deployment_status(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
     ) -> Result<()>;
 
     // Core
@@ -61,6 +77,9 @@ pub trait K8sClient: Send + Sync {
 
     async fn create_job(&self, ns: &str, job: &Job) -> Result<Job>;
     async fn get_job(&self, ns: &str, name: &str) -> Result<Job>;
+
+    async fn create_deployment(&self, ns: &str, dep: &Deployment) -> Result<Deployment>;
+    async fn get_deployment(&self, ns: &str, name: &str) -> Result<Deployment>;
 
     // Queues
     async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue>;
@@ -95,6 +114,8 @@ pub struct MockK8sClient {
     rent_crds: Arc<RwLock<HashMap<String, HashMap<String, GpuRental>>>>,
     job_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaJob>>>>,
     queue_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaQueue>>>>,
+    user_deployment_crds: Arc<RwLock<HashMap<String, HashMap<String, UserDeployment>>>>,
+    deployments: Arc<RwLock<HashMap<String, HashMap<String, Deployment>>>>,
     nodes: Arc<RwLock<HashMap<String, Node>>>,
     evict_block: Arc<RwLock<std::collections::HashSet<String>>>,
     http_routes: Arc<RwLock<HashMap<String, HashMap<String, kube::core::DynamicObject>>>>,
@@ -189,6 +210,53 @@ impl K8sClient for MockK8sClient {
             .get_mut(name)
             .ok_or_else(|| anyhow!("GpuRental not found: {}/{}", ns, name))?;
         gr.status = Some(status);
+        Ok(())
+    }
+
+    async fn create_user_deployment(
+        &self,
+        ns: &str,
+        obj: &UserDeployment,
+    ) -> Result<UserDeployment> {
+        let name = obj.name_any();
+        if name.is_empty() {
+            return Err(anyhow!("UserDeployment missing metadata.name"));
+        }
+        let mut map = self.user_deployment_crds.write().await;
+        map.entry(key(ns))
+            .or_default()
+            .insert(name.clone(), obj.clone());
+        Ok(obj.clone())
+    }
+
+    async fn get_user_deployment(&self, ns: &str, name: &str) -> Result<UserDeployment> {
+        let map = self.user_deployment_crds.read().await;
+        map.get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("UserDeployment not found: {}/{}", ns, name))
+    }
+
+    async fn delete_user_deployment(&self, ns: &str, name: &str) -> Result<()> {
+        let mut map = self.user_deployment_crds.write().await;
+        map.get_mut(ns).and_then(|m| m.remove(name));
+        Ok(())
+    }
+
+    async fn update_user_deployment_status(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()> {
+        let mut map = self.user_deployment_crds.write().await;
+        let ns_map = map
+            .get_mut(ns)
+            .ok_or_else(|| anyhow!("namespace not found: {}", ns))?;
+        let ud = ns_map
+            .get_mut(name)
+            .ok_or_else(|| anyhow!("UserDeployment not found: {}/{}", ns, name))?;
+        ud.status = Some(status);
         Ok(())
     }
 
@@ -347,6 +415,26 @@ impl K8sClient for MockK8sClient {
             .and_then(|m| m.get(name))
             .cloned()
             .ok_or_else(|| anyhow!("Job not found: {}/{}", ns, name))
+    }
+
+    async fn create_deployment(&self, ns: &str, dep: &Deployment) -> Result<Deployment> {
+        let name = dep.metadata.name.clone().unwrap_or_default();
+        if name.is_empty() {
+            return Err(anyhow!("Deployment missing metadata.name"));
+        }
+        let mut map = self.deployments.write().await;
+        map.entry(key(ns))
+            .or_default()
+            .insert(name.clone(), dep.clone());
+        Ok(dep.clone())
+    }
+
+    async fn get_deployment(&self, ns: &str, name: &str) -> Result<Deployment> {
+        let map = self.deployments.read().await;
+        map.get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("Deployment not found: {}/{}", ns, name))
     }
 
     async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue> {
@@ -592,6 +680,49 @@ impl K8sClient for KubeClient {
             .map_err(|e| anyhow!(e))
     }
 
+    async fn create_user_deployment(
+        &self,
+        ns: &str,
+        obj: &UserDeployment,
+    ) -> Result<UserDeployment> {
+        use kube::api::PostParams;
+        let api: kube::Api<UserDeployment> = self.api(ns);
+        match api.create(&PostParams::default(), obj).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(obj.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_user_deployment(&self, ns: &str, name: &str) -> Result<UserDeployment> {
+        let api: kube::Api<UserDeployment> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_user_deployment(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+        let api: kube::Api<UserDeployment> = self.api(ns);
+        api.delete(name, &DeleteParams::default())
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
+
+    async fn update_user_deployment_status(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<UserDeployment> = self.api(ns);
+        let patch = serde_json::json!({"status": status});
+        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
+
     async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod> {
         use kube::api::PostParams;
         let api: kube::Api<Pod> = self.api(ns);
@@ -707,6 +838,21 @@ impl K8sClient for KubeClient {
 
     async fn get_job(&self, ns: &str, name: &str) -> Result<Job> {
         let api: kube::Api<Job> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn create_deployment(&self, ns: &str, dep: &Deployment) -> Result<Deployment> {
+        use kube::api::PostParams;
+        let api: kube::Api<Deployment> = self.api(ns);
+        match api.create(&PostParams::default(), dep).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(dep.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_deployment(&self, ns: &str, name: &str) -> Result<Deployment> {
+        let api: kube::Api<Deployment> = self.api(ns);
         api.get(name).await.map_err(|e| anyhow!(e))
     }
 

@@ -164,7 +164,7 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
 
     // Main container with optional storage volume mount
     // If storage is enabled, wrap user command to wait for FUSE mount
-    let (container_command, container_args) = if storage_mount_path.is_some() {
+    let (container_command, container_args) = if let Some(ref mount_path) = storage_mount_path {
         let user_cmd = if !spec.command.is_empty() {
             spec.command.join(" ")
         } else {
@@ -176,7 +176,6 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
         } else {
             String::new()
         };
-        let mount_path = storage_mount_path.as_ref().unwrap();
 
         // Inject wait-for-fuse logic before user command
         let wrapped_cmd = format!(
@@ -187,7 +186,10 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
             mount_path, user_cmd, user_args
         );
 
-        (Some(vec!["sh".into(), "-c".into()]), Some(vec![wrapped_cmd]))
+        (
+            Some(vec!["sh".into(), "-c".into()]),
+            Some(vec![wrapped_cmd]),
+        )
     } else {
         // No storage, use original command
         (
@@ -299,14 +301,12 @@ pub fn render_job(name: &str, spec: &BasilicaJobSpec) -> Job {
                     args: None, // No --allow-other args needed
                     env: Some(env),
                     env_from,
-                    volume_mounts: Some(vec![
-                        VolumeMount {
-                            name: "basilica-storage".into(),
-                            mount_path: mount_path.clone(),
-                            mount_propagation: Some("Bidirectional".into()), // Required for FUSE
-                            ..Default::default()
-                        },
-                    ]),
+                    volume_mounts: Some(vec![VolumeMount {
+                        name: "basilica-storage".into(),
+                        mount_path: mount_path.clone(),
+                        mount_propagation: Some("Bidirectional".into()), // Required for FUSE
+                        ..Default::default()
+                    }]),
                     security_context: Some(SecurityContext {
                         privileged: Some(true), // Required for FUSE
                         allow_privilege_escalation: Some(true),
@@ -723,7 +723,9 @@ mod tests {
         // Verify other critical requirements exist
         assert!(match_exprs.iter().any(|r| r.key == "basilica.ai/node-role"));
         assert!(match_exprs.iter().any(|r| r.key == "basilica.ai/validated"));
-        assert!(match_exprs.iter().any(|r| r.key == "basilica.ai/node-group"));
+        assert!(match_exprs
+            .iter()
+            .any(|r| r.key == "basilica.ai/node-group"));
     }
 
     #[test]
@@ -771,7 +773,11 @@ mod tests {
         });
         let job = render_job("storage-job", &spec);
         let pod = job.spec.unwrap().template.spec.unwrap();
-        assert_eq!(pod.containers.len(), 2, "Should have main container + storage sidecar");
+        assert_eq!(
+            pod.containers.len(),
+            2,
+            "Should have main container + storage sidecar"
+        );
 
         // Verify shared volume exists
         assert!(pod.volumes.is_some(), "Should have volumes");
@@ -784,7 +790,9 @@ mod tests {
         let main_container = &pod.containers[0];
         assert!(main_container.volume_mounts.is_some());
         let main_mounts = main_container.volume_mounts.as_ref().unwrap();
-        assert!(main_mounts.iter().any(|m| m.name == "basilica-storage" && m.mount_path == "/data"));
+        assert!(main_mounts
+            .iter()
+            .any(|m| m.name == "basilica-storage" && m.mount_path == "/data"));
 
         // Verify storage sidecar
         let sidecar = pod
@@ -792,7 +800,10 @@ mod tests {
             .iter()
             .find(|c| c.name.starts_with("basilica-storage-"))
             .expect("Storage sidecar should exist");
-        assert_eq!(sidecar.image.as_ref().unwrap(), "ghcr.io/one-covenant/basilica/storage-daemon:k3_sdk_fix");
+        assert_eq!(
+            sidecar.image.as_ref().unwrap(),
+            "ghcr.io/one-covenant/basilica/storage-daemon:k3_sdk_fix"
+        );
 
         // Verify env vars
         let envs = sidecar.env.as_ref().unwrap();
@@ -802,16 +813,28 @@ mod tests {
         // Verify sidecar has volume mount with bidirectional propagation
         assert!(sidecar.volume_mounts.is_some());
         let sidecar_mounts = sidecar.volume_mounts.as_ref().unwrap();
-        let storage_mount = sidecar_mounts.iter().find(|m| m.name == "basilica-storage").expect("Should have storage mount");
+        let storage_mount = sidecar_mounts
+            .iter()
+            .find(|m| m.name == "basilica-storage")
+            .expect("Should have storage mount");
         assert_eq!(storage_mount.mount_path, "/data");
-        assert_eq!(storage_mount.mount_propagation.as_ref().unwrap(), "Bidirectional");
+        assert_eq!(
+            storage_mount.mount_propagation.as_ref().unwrap(),
+            "Bidirectional"
+        );
 
         // Verify envFrom for secret
         assert!(sidecar.env_from.is_some());
         let env_from = sidecar.env_from.as_ref().unwrap();
         assert_eq!(env_from.len(), 1);
         assert_eq!(
-            env_from[0].secret_ref.as_ref().unwrap().name.as_ref().unwrap(),
+            env_from[0]
+                .secret_ref
+                .as_ref()
+                .unwrap()
+                .name
+                .as_ref()
+                .unwrap(),
             "basilica-r2-credentials"
         );
     }
