@@ -525,6 +525,9 @@ mod tests {
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
                 .expect("lazy PG pool dsn should be valid"),
             k8s: Some(Arc::new(client)),
+            payments_client: None,
+            billing_client: None,
+            metrics: None,
         }
     }
 
@@ -548,6 +551,9 @@ mod tests {
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
                 .expect("lazy PG pool dsn should be valid"),
             k8s: Some(std::sync::Arc::new(client.clone())),
+            payments_client: None,
+            billing_client: None,
+            metrics: None,
         };
         let auth = AuthContext {
             user_id: "alice".into(),
@@ -638,6 +644,9 @@ mod tests {
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
                 .expect("lazy PG pool dsn should be valid"),
             k8s: Some(std::sync::Arc::new(client.clone())),
+            payments_client: None,
+            billing_client: None,
+            metrics: None,
         };
         let auth = AuthContext {
             user_id: "bob".into(),
@@ -714,6 +723,9 @@ mod tests {
             db: sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/db")
                 .expect("lazy PG pool dsn should be valid"),
             k8s: Some(std::sync::Arc::new(client.clone())),
+            payments_client: None,
+            billing_client: None,
+            metrics: None,
         };
         let auth = AuthContext {
             user_id: "bob".into(),

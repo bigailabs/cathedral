@@ -112,6 +112,26 @@ pub trait ApiK8sClient {
         additional_hours: u32,
     ) -> Result<RentalStatusDto>;
     async fn list_rentals(&self, ns: &str) -> Result<Vec<RentalListItemDto>>;
+
+    // Namespace management
+    async fn create_namespace(&self, name: &str) -> Result<()>;
+    async fn get_namespace(&self, name: &str) -> Result<()>;
+
+    // ConfigMap management
+    async fn get_configmap(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>>;
+    async fn patch_configmap(
+        &self,
+        ns: &str,
+        name: &str,
+        data: std::collections::BTreeMap<String, String>,
+    ) -> Result<()>;
+
+    // Deployment management
+    async fn restart_deployment(&self, ns: &str, name: &str) -> Result<()>;
 }
 
 #[derive(Default, Clone)]
@@ -210,7 +230,8 @@ impl ApiK8sClient for MockK8sClient {
       "observation_space": {"type": "box", "shape": [84, 84, 3]}
     }
   ]
-}"#.to_string();
+}"#
+                .to_string();
                 return Ok(ExecResultDto {
                     stdout,
                     stderr,
@@ -483,6 +504,35 @@ impl ApiK8sClient for MockK8sClient {
             }
         }
         Ok(out)
+    }
+
+    async fn create_namespace(&self, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_namespace(&self, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_configmap(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        Ok(std::collections::BTreeMap::new())
+    }
+
+    async fn patch_configmap(
+        &self,
+        _ns: &str,
+        _name: &str,
+        _data: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn restart_deployment(&self, _ns: &str, _name: &str) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -762,8 +812,7 @@ impl ApiK8sClient for K8sClient {
             })?;
 
         let pod_name = pod.metadata.name.unwrap_or_default();
-        let pods: Api<k8s_openapi::api::core::v1::Pod> =
-            Api::namespaced(self.client.clone(), ns);
+        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(self.client.clone(), ns);
 
         // Determine container name (first container in spec)
         let container_name = pod
@@ -782,12 +831,12 @@ impl ApiK8sClient for K8sClient {
 
         // Execute command
         let args: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
-        let mut attached = pods
-            .exec(&pod_name, args, &params)
-            .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("exec failed: {e}"),
-            })?;
+        let mut attached =
+            pods.exec(&pod_name, args, &params)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("exec failed: {e}"),
+                })?;
 
         // Send stdin if provided
         if let (Some(input), Some(mut sin)) = (stdin, attached.stdin()) {
@@ -1145,6 +1194,105 @@ impl ApiK8sClient for K8sClient {
             });
         }
         Ok(out)
+    }
+
+    async fn create_namespace(&self, name: &str) -> Result<()> {
+        use k8s_openapi::api::core::v1::Namespace;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use kube::api::{Api, PostParams};
+
+        let api: Api<Namespace> = Api::all(self.client.clone());
+        let ns = Namespace {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        match api.create(&PostParams::default(), &ns).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+            Err(e) => Err(ApiError::Internal {
+                message: format!("create namespace failed: {e}"),
+            }),
+        }
+    }
+
+    async fn get_namespace(&self, name: &str) -> Result<()> {
+        use k8s_openapi::api::core::v1::Namespace;
+        use kube::api::Api;
+
+        let api: Api<Namespace> = Api::all(self.client.clone());
+        api.get(name).await.map_err(|e| ApiError::Internal {
+            message: format!("get namespace failed: {e}"),
+        })?;
+        Ok(())
+    }
+
+    async fn get_configmap(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        use k8s_openapi::api::core::v1::ConfigMap;
+        use kube::api::Api;
+
+        let api: Api<ConfigMap> = Api::namespaced(self.client.clone(), ns);
+        let cm = api.get(name).await.map_err(|e| ApiError::Internal {
+            message: format!("get configmap failed: {e}"),
+        })?;
+        Ok(cm.data.unwrap_or_default())
+    }
+
+    async fn patch_configmap(
+        &self,
+        ns: &str,
+        name: &str,
+        data: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        use k8s_openapi::api::core::v1::ConfigMap;
+        use kube::api::{Api, Patch, PatchParams};
+
+        let api: Api<ConfigMap> = Api::namespaced(self.client.clone(), ns);
+        let patch = serde_json::json!({ "data": data });
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("patch configmap failed: {e}"),
+            })?;
+        Ok(())
+    }
+
+    async fn restart_deployment(&self, ns: &str, name: &str) -> Result<()> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        use kube::api::{Api, Patch, PatchParams};
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), ns);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+
+        let patch = serde_json::json!({
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            "kubectl.kubernetes.io/restartedAt": timestamp
+                        }
+                    }
+                }
+            }
+        });
+
+        api.patch(name, &PatchParams::default(), &Patch::Strategic(&patch))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("restart deployment failed: {e}"),
+            })?;
+        Ok(())
     }
 }
 
