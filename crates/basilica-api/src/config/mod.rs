@@ -1,10 +1,12 @@
 //! Configuration module for the Basilica API gateway
 
 mod cache;
+mod deployment;
 mod rate_limit;
 mod server;
 
 pub use cache::{CacheBackend, CacheConfig};
+pub use deployment::DeploymentConfig;
 pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
@@ -146,6 +148,10 @@ pub struct Config {
 
     /// Billing service configuration
     pub billing: BillingServiceConfig,
+
+    /// Deployment configuration
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
 
     /// Metrics configuration
     #[serde(default)]

@@ -22,7 +22,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/metrics", get(routes::metrics::metrics_handler));
 
     // Routes that require balance validation
-    let rental_creation_route = Router::new()
+    let _rental_creation_route = Router::new()
         .route("/rentals", post(routes::rentals::start_rental))
         // Balance validation (after auth, before handler)
         .layer(axum::middleware::from_fn_with_state(
@@ -72,7 +72,16 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/api-keys",
             post(routes::api_keys::create_key).get(routes::api_keys::list_keys),
         )
-        .route("/api-keys/:name", delete(routes::api_keys::revoke_key));
+        .route("/api-keys/:name", delete(routes::api_keys::revoke_key))
+        // User deployment management endpoints
+        .route(
+            "/deployments",
+            post(routes::deployments::create_deployment).get(routes::deployments::list_deployments),
+        )
+        .route(
+            "/deployments/:instance_name",
+            get(routes::deployments::get_deployment).delete(routes::deployments::delete_deployment),
+        );
 
     // Conditionally map legacy vs k8s backend under /rentals
     let use_k8s_backend = match state.config.rental_backend {
