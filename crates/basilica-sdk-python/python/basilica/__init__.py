@@ -32,6 +32,16 @@ from basilica._basilica import (
     VolumeMountRequest,
     ListAvailableNodesQuery,
     ListRentalsQuery,
+    # Deployment types
+    EnvVar,
+    ResourceRequirements,
+    ReplicaStatus,
+    PodInfo,
+    CreateDeploymentRequest,
+    DeploymentResponse,
+    DeploymentSummary,
+    DeploymentListResponse,
+    DeleteDeploymentResponse,
     # Constants from Rust
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT_SECS,
@@ -71,6 +81,16 @@ __all__ = [
     "PortMappingRequest",
     "ListAvailableNodesQuery",
     "ListRentalsQuery",
+    # Deployment types
+    "EnvVar",
+    "ResourceRequirements",
+    "ReplicaStatus",
+    "PodInfo",
+    "CreateDeploymentRequest",
+    "DeploymentResponse",
+    "DeploymentSummary",
+    "DeploymentListResponse",
+    "DeleteDeploymentResponse",
 ]
 
 
@@ -315,3 +335,83 @@ class BasilicaClient:
             return self._client.list_rentals(query)
         else:
             return self._client.list_rentals(None)
+
+    def create_deployment(
+        self,
+        instance_name: str,
+        image: str,
+        replicas: int = 1,
+        port: int = 80,
+        command: Optional[List[str]] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        cpu: str = "500m",
+        memory: str = "512Mi",
+        ttl_seconds: Optional[int] = None
+    ) -> DeploymentResponse:
+        """
+        Create a new deployment.
+
+        Args:
+            instance_name: Name for the deployment (DNS-safe: lowercase, numbers, hyphens)
+            image: Container image to deploy
+            replicas: Number of replicas (default: 1)
+            port: Container port to expose (default: 80)
+            command: Optional command override
+            args: Optional command arguments
+            env: Environment variables as dict
+            cpu: CPU resource request (default: "500m")
+            memory: Memory resource request (default: "512Mi")
+            ttl_seconds: Optional time-to-live in seconds
+
+        Returns:
+            DeploymentResponse: Typed response with deployment details
+        """
+        resources = ResourceRequirements(cpu=cpu, memory=memory) if cpu or memory else None
+
+        request = CreateDeploymentRequest(
+            instance_name=instance_name,
+            image=image,
+            replicas=replicas,
+            port=port,
+            command=command,
+            args=args,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds
+        )
+
+        return self._client.create_deployment(request)
+
+    def get_deployment(self, instance_name: str) -> DeploymentResponse:
+        """
+        Get deployment status by instance name.
+
+        Args:
+            instance_name: The deployment instance name
+
+        Returns:
+            DeploymentResponse: Typed response with deployment details
+        """
+        return self._client.get_deployment(instance_name)
+
+    def delete_deployment(self, instance_name: str) -> DeleteDeploymentResponse:
+        """
+        Delete a deployment.
+
+        Args:
+            instance_name: The deployment instance name
+
+        Returns:
+            DeleteDeploymentResponse: Typed response with deletion status
+        """
+        return self._client.delete_deployment(instance_name)
+
+    def list_deployments(self) -> DeploymentListResponse:
+        """
+        List all deployments for the authenticated user.
+
+        Returns:
+            DeploymentListResponse: Typed response with list of deployments
+        """
+        return self._client.list_deployments()

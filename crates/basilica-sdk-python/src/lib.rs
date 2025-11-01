@@ -21,8 +21,9 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::types::{
-    AvailableNode, HealthCheckResponse, ListAvailableNodesQuery, ListRentalsQuery, RentalResponse,
-    RentalStatusWithSshResponse, StartRentalApiRequest,
+    AvailableNode, CreateDeploymentRequest, DeleteDeploymentResponse, DeploymentListResponse,
+    DeploymentResponse, HealthCheckResponse, ListAvailableNodesQuery, ListRentalsQuery,
+    RentalResponse, RentalStatusWithSshResponse, StartRentalApiRequest,
 };
 
 /// Python wrapper for BasilicaClient
@@ -200,6 +201,81 @@ impl BasilicaClient {
         // Keep list_rentals as PyObject for now since it returns a complex structure
         to_pyobject(py, &response)
     }
+
+    /// Create a new deployment
+    ///
+    /// Args:
+    ///     request: Deployment request parameters
+    fn create_deployment(
+        &self,
+        py: Python,
+        request: CreateDeploymentRequest,
+    ) -> PyResult<DeploymentResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let request = request.into();
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.create_deployment(request).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Get deployment status by instance name
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn get_deployment(&self, py: Python, instance_name: String) -> PyResult<DeploymentResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.get_deployment(&instance_name).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Delete a deployment
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn delete_deployment(
+        &self,
+        py: Python,
+        instance_name: String,
+    ) -> PyResult<DeleteDeploymentResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.delete_deployment(&instance_name).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// List all deployments for the authenticated user
+    fn list_deployments(&self, py: Python) -> PyResult<DeploymentListResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.list_deployments().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
 }
 
 impl BasilicaClient {
@@ -282,6 +358,17 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::VolumeMountRequest>()?;
     m.add_class::<types::ListAvailableNodesQuery>()?;
     m.add_class::<types::ListRentalsQuery>()?;
+
+    // Deployment types
+    m.add_class::<types::EnvVar>()?;
+    m.add_class::<types::ResourceRequirements>()?;
+    m.add_class::<types::ReplicaStatus>()?;
+    m.add_class::<types::PodInfo>()?;
+    m.add_class::<types::CreateDeploymentRequest>()?;
+    m.add_class::<types::DeploymentResponse>()?;
+    m.add_class::<types::DeploymentSummary>()?;
+    m.add_class::<types::DeploymentListResponse>()?;
+    m.add_class::<types::DeleteDeploymentResponse>()?;
 
     // Helper functions
     m.add_function(wrap_pyfunction!(node_by_id, m)?)?;
