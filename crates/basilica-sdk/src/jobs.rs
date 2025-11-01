@@ -1,6 +1,6 @@
-///! Jobs API client methods
-///!
-///! Provides methods for managing stateful jobs on the Basilica platform.
+//! Jobs API client methods
+//!
+//! Provides methods for managing stateful jobs on the Basilica platform.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -100,7 +100,10 @@ impl JobStorageConfig {
     /// Create GCS storage configuration
     pub fn gcs(service_account_key: &str, bucket: &str) -> Self {
         let mut credentials = HashMap::new();
-        credentials.insert("service_account_key".to_string(), service_account_key.to_string());
+        credentials.insert(
+            "service_account_key".to_string(),
+            service_account_key.to_string(),
+        );
 
         Self {
             backend: "gcs".to_string(),

@@ -381,3 +381,101 @@ pub struct RentalUsageResponse {
     pub summary: Option<UsageSummary>,
     pub total_cost: String,
 }
+
+/// Environment variable for container deployments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
+}
+
+/// Resource requirements for container deployments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceRequirements {
+    pub cpu: String,
+    pub memory: String,
+}
+
+/// Create deployment request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDeploymentRequest {
+    pub instance_name: String,
+    pub image: String,
+    pub replicas: u32,
+    pub port: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<EnvVar>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceRequirements>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttl_seconds: Option<u32>,
+}
+
+/// Replica status for deployments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaStatus {
+    pub desired: u32,
+    pub ready: u32,
+}
+
+/// Pod information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodInfo {
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+}
+
+/// Deployment response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentResponse {
+    pub instance_name: String,
+    pub user_id: String,
+    pub namespace: String,
+    pub state: String,
+    pub url: String,
+    pub replicas: ReplicaStatus,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pods: Option<Vec<PodInfo>>,
+}
+
+/// Deployment summary for list responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentSummary {
+    pub instance_name: String,
+    pub state: String,
+    pub url: String,
+    pub replicas: ReplicaStatus,
+    pub created_at: String,
+}
+
+/// List deployments response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentListResponse {
+    pub deployments: Vec<DeploymentSummary>,
+    pub total: usize,
+}
+
+/// Delete deployment response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteDeploymentResponse {
+    pub instance_name: String,
+    pub state: String,
+    pub message: String,
+}

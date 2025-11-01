@@ -39,13 +39,13 @@ use crate::{
     auth::TokenManager,
     error::{ApiError, ErrorResponse, Result},
     jobs::{
-        CreateJobRequest, CreateJobResponse, DeleteJobResponse, JobLogsResponse,
-        JobStatusResponse, ReadFileRequest, ReadFileResponse, ResumeJobResponse,
-        SuspendJobResponse,
+        CreateJobRequest, CreateJobResponse, DeleteJobResponse, JobLogsResponse, JobStatusResponse,
+        ReadFileRequest, ReadFileResponse, ResumeJobResponse, SuspendJobResponse,
     },
     types::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
-        CreateDepositAccountResponse, DepositAccountResponse, HealthCheckResponse,
+        CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
+        DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
         ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
         PackagesResponse, RentalStatusWithSshResponse, RentalUsageResponse, UsageHistoryResponse,
     },
@@ -360,6 +360,164 @@ impl BasilicaClient {
         self.get(&path).await
     }
 
+    // ===== Deployment Management Methods =====
+
+    /// Create a new deployment
+    ///
+    /// Deploys a container to the K3s cluster with the specified configuration.
+    /// Deployments are idempotent by `instance_name` - calling this multiple times
+    /// with the same instance_name will return the existing deployment if it's active.
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - The deployment configuration
+    ///
+    /// # Returns
+    ///
+    /// Returns the created or existing deployment information including the public URL
+    ///
+    /// # Errors
+    ///
+    /// * `ApiError::InvalidRequest` - Invalid instance name, image, port, or resources
+    /// * `ApiError::Authorization` - Insufficient permissions
+    /// * `ApiError::ServiceUnavailable` - K8s cluster unavailable
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use basilica_sdk::{BasilicaClient, CreateDeploymentRequest};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = BasilicaClient::builder()
+    ///     .with_api_key("your-api-key")
+    ///     .build()?;
+    ///
+    /// let request = CreateDeploymentRequest {
+    ///     instance_name: "my-nginx".to_string(),
+    ///     image: "nginx:latest".to_string(),
+    ///     replicas: 2,
+    ///     port: 80,
+    ///     command: None,
+    ///     args: None,
+    ///     env: None,
+    ///     resources: None,
+    ///     ttl_seconds: None,
+    /// };
+    ///
+    /// let deployment = client.create_deployment(request).await?;
+    /// println!("Deployment URL: {}", deployment.url);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn create_deployment(
+        &self,
+        request: CreateDeploymentRequest,
+    ) -> Result<DeploymentResponse> {
+        self.post("/deployments", &request).await
+    }
+
+    /// Get deployment status by instance name
+    ///
+    /// Retrieves the current status of a deployment including replica counts,
+    /// pod information, and the public URL.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The unique instance name of the deployment
+    ///
+    /// # Returns
+    ///
+    /// Returns the deployment status with current replica counts and pod details
+    ///
+    /// # Errors
+    ///
+    /// * `ApiError::NotFound` - Deployment doesn't exist or doesn't belong to user
+    /// * `ApiError::Authorization` - Insufficient permissions
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use basilica_sdk::BasilicaClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = BasilicaClient::builder().with_api_key("key").build()?;
+    /// let deployment = client.get_deployment("my-nginx").await?;
+    /// println!("State: {}, Ready: {}/{}",
+    ///     deployment.state,
+    ///     deployment.replicas.ready,
+    ///     deployment.replicas.desired
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_deployment(&self, instance_name: &str) -> Result<DeploymentResponse> {
+        let path = format!("/deployments/{}", instance_name);
+        self.get(&path).await
+    }
+
+    /// Delete a deployment
+    ///
+    /// Deletes the deployment and all associated K8s resources (pods, services, etc.).
+    /// This also removes the routing configuration from Envoy.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The unique instance name of the deployment to delete
+    ///
+    /// # Returns
+    ///
+    /// Returns confirmation of deletion initiation
+    ///
+    /// # Errors
+    ///
+    /// * `ApiError::NotFound` - Deployment doesn't exist or doesn't belong to user
+    /// * `ApiError::Authorization` - Insufficient permissions
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use basilica_sdk::BasilicaClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = BasilicaClient::builder().with_api_key("key").build()?;
+    /// let result = client.delete_deployment("my-nginx").await?;
+    /// println!("Deletion initiated: {}", result.message);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_deployment(&self, instance_name: &str) -> Result<DeleteDeploymentResponse> {
+        let path = format!("/deployments/{}", instance_name);
+        self.delete(&path).await
+    }
+
+    /// List all deployments for the authenticated user
+    ///
+    /// Returns a summary of all active deployments including their state and URLs.
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of deployment summaries with total count
+    ///
+    /// # Errors
+    ///
+    /// * `ApiError::Authorization` - Insufficient permissions
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use basilica_sdk::BasilicaClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = BasilicaClient::builder().with_api_key("key").build()?;
+    /// let deployments = client.list_deployments().await?;
+    /// println!("Total deployments: {}", deployments.total);
+    /// for deployment in deployments.deployments {
+    ///     println!("{}: {} ({})", deployment.instance_name, deployment.state, deployment.url);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_deployments(&self) -> Result<DeploymentListResponse> {
+        self.get("/deployments").await
+    }
+
     // ===== Private Helper Methods =====
 
     /// Apply authentication to request
@@ -403,6 +561,16 @@ impl BasilicaClient {
 
         let response = request.send().await.map_err(ApiError::HttpClient)?;
         Ok(response)
+    }
+
+    /// Generic DELETE request with typed response
+    async fn delete<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let request = self.http_client.delete(&url);
+        let request = self.apply_auth(request).await?;
+
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
     }
 
     /// Handle successful response
@@ -599,7 +767,7 @@ impl ClientBuilder {
 mod tests {
     use super::*;
     use serde_json::json;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -850,5 +1018,380 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.content, "File contents here");
+    }
+
+    #[tokio::test]
+    async fn test_create_deployment() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "instanceName": "my-nginx",
+                "userId": "user123",
+                "namespace": "u-user123",
+                "state": "Pending",
+                "url": "http://3.21.154.119:8080/deployments/my-nginx/",
+                "replicas": {
+                    "desired": 2,
+                    "ready": 0
+                },
+                "createdAt": "2025-10-31T10:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let request = CreateDeploymentRequest {
+            instance_name: "my-nginx".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 2,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+        };
+
+        let response = client.create_deployment(request).await.unwrap();
+
+        assert_eq!(response.instance_name, "my-nginx");
+        assert_eq!(response.user_id, "user123");
+        assert_eq!(response.namespace, "u-user123");
+        assert_eq!(response.state, "Pending");
+        assert_eq!(
+            response.url,
+            "http://3.21.154.119:8080/deployments/my-nginx/"
+        );
+        assert_eq!(response.replicas.desired, 2);
+        assert_eq!(response.replicas.ready, 0);
+        assert_eq!(response.created_at, "2025-10-31T10:00:00Z");
+    }
+
+    #[tokio::test]
+    async fn test_create_deployment_with_resources() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments"))
+            .and(body_json(json!({
+                "instanceName": "my-app",
+                "image": "myapp:v1",
+                "replicas": 1,
+                "port": 8080,
+                "env": [
+                    {"name": "ENV_VAR", "value": "value"}
+                ],
+                "resources": {
+                    "cpu": "1000m",
+                    "memory": "1Gi"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "instanceName": "my-app",
+                "userId": "user123",
+                "namespace": "u-user123",
+                "state": "Pending",
+                "url": "http://3.21.154.119:8080/deployments/my-app/",
+                "replicas": {"desired": 1, "ready": 0},
+                "createdAt": "2025-10-31T10:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let request = CreateDeploymentRequest {
+            instance_name: "my-app".to_string(),
+            image: "myapp:v1".to_string(),
+            replicas: 1,
+            port: 8080,
+            command: None,
+            args: None,
+            env: Some(vec![crate::types::EnvVar {
+                name: "ENV_VAR".to_string(),
+                value: "value".to_string(),
+            }]),
+            resources: Some(crate::types::ResourceRequirements {
+                cpu: "1000m".to_string(),
+                memory: "1Gi".to_string(),
+            }),
+            ttl_seconds: None,
+        };
+
+        let response = client.create_deployment(request).await.unwrap();
+        assert_eq!(response.instance_name, "my-app");
+    }
+
+    #[tokio::test]
+    async fn test_create_deployment_idempotent() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "instanceName": "existing-app",
+                "userId": "user123",
+                "namespace": "u-user123",
+                "state": "Active",
+                "url": "http://3.21.154.119:8080/deployments/existing-app/",
+                "replicas": {"desired": 2, "ready": 2},
+                "createdAt": "2025-10-31T09:00:00Z",
+                "updatedAt": "2025-10-31T10:00:00Z"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let request = CreateDeploymentRequest {
+            instance_name: "existing-app".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 2,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+        };
+
+        let response = client.create_deployment(request).await.unwrap();
+        assert_eq!(response.state, "Active");
+        assert_eq!(response.replicas.ready, 2);
+        assert!(response.updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_get_deployment() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/deployments/my-nginx"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "instanceName": "my-nginx",
+                "userId": "user123",
+                "namespace": "u-user123",
+                "state": "Active",
+                "url": "http://3.21.154.119:8080/deployments/my-nginx/",
+                "replicas": {"desired": 2, "ready": 2},
+                "createdAt": "2025-10-31T09:00:00Z",
+                "updatedAt": "2025-10-31T10:00:00Z",
+                "pods": [
+                    {
+                        "name": "my-nginx-5d8f7b9c-abc12",
+                        "status": "Running",
+                        "node": "ip-172-31-18-204"
+                    },
+                    {
+                        "name": "my-nginx-5d8f7b9c-def34",
+                        "status": "Running",
+                        "node": "ip-172-31-18-204"
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.get_deployment("my-nginx").await.unwrap();
+
+        assert_eq!(response.instance_name, "my-nginx");
+        assert_eq!(response.state, "Active");
+        assert_eq!(response.replicas.desired, 2);
+        assert_eq!(response.replicas.ready, 2);
+        assert!(response.pods.is_some());
+        let pods = response.pods.unwrap();
+        assert_eq!(pods.len(), 2);
+        assert_eq!(pods[0].name, "my-nginx-5d8f7b9c-abc12");
+        assert_eq!(pods[0].status, "Running");
+        assert_eq!(pods[0].node, Some("ip-172-31-18-204".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_deployment_not_found() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/deployments/nonexistent"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "error": "NOT_FOUND",
+                "message": "Deployment not found"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let result = client.get_deployment("nonexistent").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ApiError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_delete_deployment() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("DELETE"))
+            .and(path("/deployments/my-nginx"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "instanceName": "my-nginx",
+                "state": "Terminating",
+                "message": "Deployment deletion initiated"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.delete_deployment("my-nginx").await.unwrap();
+
+        assert_eq!(response.instance_name, "my-nginx");
+        assert_eq!(response.state, "Terminating");
+        assert_eq!(response.message, "Deployment deletion initiated");
+    }
+
+    #[tokio::test]
+    async fn test_list_deployments() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/deployments"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "deployments": [
+                    {
+                        "instanceName": "my-nginx",
+                        "state": "Active",
+                        "url": "http://3.21.154.119:8080/deployments/my-nginx/",
+                        "replicas": {"desired": 2, "ready": 2},
+                        "createdAt": "2025-10-31T09:00:00Z"
+                    },
+                    {
+                        "instanceName": "my-postgres",
+                        "state": "Pending",
+                        "url": "http://3.21.154.119:8080/deployments/my-postgres/",
+                        "replicas": {"desired": 1, "ready": 0},
+                        "createdAt": "2025-10-31T10:00:00Z"
+                    }
+                ],
+                "total": 2
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.list_deployments().await.unwrap();
+
+        assert_eq!(response.total, 2);
+        assert_eq!(response.deployments.len(), 2);
+        assert_eq!(response.deployments[0].instance_name, "my-nginx");
+        assert_eq!(response.deployments[0].state, "Active");
+        assert_eq!(response.deployments[1].instance_name, "my-postgres");
+        assert_eq!(response.deployments[1].state, "Pending");
+    }
+
+    #[tokio::test]
+    async fn test_list_deployments_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/deployments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "deployments": [],
+                "total": 0
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.list_deployments().await.unwrap();
+
+        assert_eq!(response.total, 0);
+        assert_eq!(response.deployments.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_deployment_validation_error() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "INVALID_REQUEST",
+                "message": "instance_name must be DNS-safe"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let request = CreateDeploymentRequest {
+            instance_name: "Invalid_Name!".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 2,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+        };
+
+        let result = client.create_deployment(request).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ApiError::InvalidRequest { message } => {
+                assert!(message.contains("DNS-safe"));
+            }
+            ApiError::BadRequest { message } => {
+                assert!(message.contains("DNS-safe"));
+            }
+            e => panic!("Expected InvalidRequest or BadRequest error, got: {:?}", e),
+        }
     }
 }
