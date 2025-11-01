@@ -30,15 +30,19 @@ Tie-in with docs/e2e-readiness-checklist.md
 - After the run completes, verify:
   - Operator: `kubectl -n basilica-system logs deploy/basilica-operator | head`
   - API health (ephemeral probe runs during the play): `curl http://127.0.0.1:8000/health` (use the long-lived port-forward options if desired).
+  - Interactive cluster management: Use k9s (see K9S-GUIDE.md or run `./scripts/k9s-basilica.sh`).
 
 Contents
 
 - `playbooks/k3s-setup.yml` — installs a central K3s server and joins agents.
 - `playbooks/e2e-apply.yml` — runs the steps from `docs/e2e-readiness-checklist.md` on the server.
+- `playbooks/get-kubeconfig.yml` — fetches kubeconfig from K3s server to control machine.
 - `roles/k3s_server` — K3s server install role (idempotent, disables Traefik when requested).
 - `roles/k3s_agent` — K3s agent join role.
 - `group_vars/all.yml` — defaults for images, namespace, and toggles.
 - `inventories/example.ini` — sample inventory for local VM or single remote host.
+- `K9S-GUIDE.md` — guide for using k9s to manage the cluster.
+- `KUBECONFIG-SETUP.md` — guide for fetching and using kubeconfig.
 
 Notes
 

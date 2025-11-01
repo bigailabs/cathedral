@@ -22,6 +22,10 @@ tenant_namespace: u-test
 operator_image: ghcr.io/one-covenant/basilica-operator:latest
 api_image: ghcr.io/one-covenant/basilica-api:latest
 
+# Image pull policy (Always, IfNotPresent, Never)
+# Use IfNotPresent for dev with local images, Always for production
+operator_image_pull_policy: IfNotPresent
+
 # API config overrides
 api_hotkey: ""                    # set to your validator hotkey if required
 api_database_url: postgres://basilica:devpassword@basilica-postgres.basilica-system.svc.cluster.local:5432/basilica
