@@ -132,6 +132,20 @@ pub trait ApiK8sClient {
 
     // Deployment management
     async fn restart_deployment(&self, ns: &str, name: &str) -> Result<()>;
+
+    // User Deployment management
+    async fn create_user_deployment(
+        &self,
+        ns: &str,
+        name: &str,
+        user_id: &str,
+        req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
+        path_prefix: &str,
+    ) -> Result<()>;
+
+    async fn user_deployment_exists(&self, ns: &str, name: &str) -> Result<bool>;
+
+    async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)>;
 }
 
 #[derive(Default, Clone)]
@@ -534,6 +548,25 @@ impl ApiK8sClient for MockK8sClient {
     async fn restart_deployment(&self, _ns: &str, _name: &str) -> Result<()> {
         Ok(())
     }
+
+    async fn create_user_deployment(
+        &self,
+        _ns: &str,
+        _name: &str,
+        _user_id: &str,
+        _req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
+        _path_prefix: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn user_deployment_exists(&self, _ns: &str, _name: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn get_user_deployment_status(&self, _ns: &str, _name: &str) -> Result<(u32, u32)> {
+        Ok((2, 2))
+    }
 }
 
 impl MockK8sClient {
@@ -623,12 +656,55 @@ pub struct K8sClient {
 
 impl K8sClient {
     pub async fn try_default() -> Result<Self> {
-        let client = kube::Client::try_default()
+        let client = Self::create_client()
             .await
             .map_err(|e| ApiError::Internal {
                 message: format!("k8s client init failed: {e}"),
             })?;
         Ok(Self { client })
+    }
+
+    async fn create_client() -> anyhow::Result<kube::Client> {
+        // Priority 1: KUBECONFIG_CONTENT environment variable (for AWS Secrets Manager)
+        if let Ok(kubeconfig_content) = std::env::var("KUBECONFIG_CONTENT") {
+            tracing::info!("Loading K8s config from KUBECONFIG_CONTENT environment variable");
+            return Self::client_from_kubeconfig_content(&kubeconfig_content).await;
+        }
+
+        // Priority 2: KUBECONFIG environment variable (file path)
+        if let Ok(kubeconfig_path) = std::env::var("KUBECONFIG") {
+            tracing::info!("Loading K8s config from KUBECONFIG: {}", kubeconfig_path);
+            let config = kube::Config::from_kubeconfig(&kube::config::KubeConfigOptions {
+                context: None,
+                cluster: None,
+                user: None,
+            })
+            .await?;
+            return Ok(kube::Client::try_from(config)?);
+        }
+
+        // Priority 3: Default (in-cluster or ~/.kube/config)
+        tracing::info!("Attempting default K8s client initialization");
+        kube::Client::try_default().await.map_err(Into::into)
+    }
+
+    async fn client_from_kubeconfig_content(content: &str) -> anyhow::Result<kube::Client> {
+        use kube::config::Kubeconfig;
+
+        let kubeconfig: Kubeconfig = serde_yaml::from_str(content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse kubeconfig YAML: {}", e))?;
+
+        let config = kube::Config::from_custom_kubeconfig(
+            kubeconfig,
+            &kube::config::KubeConfigOptions {
+                context: None,
+                cluster: None,
+                user: None,
+            },
+        )
+        .await?;
+
+        kube::Client::try_from(config).map_err(Into::into)
     }
 
     fn cr_api(
@@ -1293,6 +1369,150 @@ impl ApiK8sClient for K8sClient {
                 message: format!("restart deployment failed: {e}"),
             })?;
         Ok(())
+    }
+
+    async fn create_user_deployment(
+        &self,
+        ns: &str,
+        name: &str,
+        user_id: &str,
+        req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
+        path_prefix: &str,
+    ) -> Result<()> {
+        use kube::api::PostParams;
+        use serde_json::json;
+
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        if self.user_deployment_exists(ns, name).await? {
+            tracing::debug!(
+                namespace = ns,
+                name = name,
+                "UserDeployment already exists, skipping creation"
+            );
+            return Ok(());
+        }
+
+        let env_objs: Vec<serde_json::Value> = req
+            .env
+            .iter()
+            .map(|(k, v)| json!({"name": k, "value": v}))
+            .collect();
+
+        let obj = json!({
+            "apiVersion": "basilica.ai/v1",
+            "kind": "UserDeployment",
+            "metadata": {
+                "name": name,
+                "namespace": ns,
+            },
+            "spec": {
+                "userId": user_id,
+                "instanceName": req.instance_name,
+                "image": req.image,
+                "replicas": req.replicas,
+                "port": req.port,
+                "command": req.command,
+                "args": req.args,
+                "env": env_objs,
+                "resources": {
+                    "cpu": req.resources.as_ref().map(|r| r.cpu.clone()).unwrap_or_else(|| "500m".to_string()),
+                    "memory": req.resources.as_ref().map(|r| r.memory.clone()).unwrap_or_else(|| "512Mi".to_string()),
+                },
+                "pathPrefix": path_prefix,
+                "ttlSeconds": req.ttl_seconds,
+            }
+        });
+
+        let dynobj: kube::core::DynamicObject =
+            serde_json::from_value(obj).map_err(|e| ApiError::Internal {
+                message: format!("serde dynobj: {e}"),
+            })?;
+
+        api.create(&PostParams::default(), &dynobj)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("create UserDeployment failed: {e}"),
+            })?;
+
+        Ok(())
+    }
+
+    async fn user_deployment_exists(&self, ns: &str, name: &str) -> Result<bool> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        match api.get(name).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(err_resp)) if err_resp.code == 404 => Ok(false),
+            Err(e) => Err(ApiError::Internal {
+                message: format!("check UserDeployment existence failed: {e}"),
+            }),
+        }
+    }
+
+    async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        match api.get(name).await {
+            Ok(obj) => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "Retrieved UserDeployment CR, checking status"
+                );
+
+                let status = obj.data.get("status");
+                if status.is_none() {
+                    tracing::warn!(
+                        namespace = ns,
+                        name = name,
+                        "UserDeployment CR has no status field"
+                    );
+                    return Ok((0, 0));
+                }
+
+                let status = status.unwrap();
+
+                let desired = status
+                    .get("replicasDesired")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                let ready = status
+                    .get("replicasReady")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    desired = desired,
+                    ready = ready,
+                    "Extracted replica counts from UserDeployment status"
+                );
+
+                Ok((desired, ready))
+            }
+            Err(kube::Error::Api(err_resp)) if err_resp.code == 404 => {
+                tracing::warn!(
+                    namespace = ns,
+                    name = name,
+                    "UserDeployment CR not found (404)"
+                );
+                Ok((0, 0))
+            }
+            Err(e) => {
+                tracing::error!(
+                    namespace = ns,
+                    name = name,
+                    error = %e,
+                    "Failed to get UserDeployment status"
+                );
+                Err(ApiError::Internal {
+                    message: format!("get UserDeployment status failed: {e}"),
+                })
+            }
+        }
     }
 }
 
