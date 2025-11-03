@@ -224,6 +224,7 @@ impl SimplePersistence {
                     builder.push_bind(match state {
                         RentalState::Provisioning => "provisioning",
                         RentalState::Active => "active",
+                        RentalState::Restarting => "restarting",
                         RentalState::Stopping => "stopping",
                         RentalState::Stopped => "stopped",
                         RentalState::Failed => "failed",
@@ -417,6 +418,7 @@ impl ValidatorPersistence for SimplePersistence {
         .bind(match &rental.state {
             RentalState::Provisioning => "provisioning",
             RentalState::Active => "active",
+            RentalState::Restarting => "restarting",
             RentalState::Stopping => "stopping",
             RentalState::Stopped => "stopped",
             RentalState::Failed => "failed",

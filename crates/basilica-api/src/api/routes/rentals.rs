@@ -390,6 +390,33 @@ pub async fn stop_rental(
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
+/// Restart a rental's container (with ownership validation)
+pub async fn restart_rental(
+    State(state): State<AppState>,
+    owned_rental: OwnedRental,
+) -> Result<Json<basilica_validator::rental::RentalRestartResponse>> {
+    info!(
+        "User {} restarting rental {}",
+        owned_rental.user_id, owned_rental.rental_id
+    );
+
+    let response = state
+        .validator_client
+        .restart_rental(&owned_rental.rental_id)
+        .await?;
+
+    // Log audit event to billing (no status change, just for tracking)
+    // Note: Billing continues uninterrupted during restart
+    if state.billing_client.is_some() {
+        debug!(
+            "Rental {} restarted by user {} (duration: {}ms)",
+            owned_rental.rental_id, owned_rental.user_id, response.operation_duration_ms
+        );
+    }
+
+    Ok(Json(response))
+}
+
 /// Stream rental logs (with ownership validation)
 pub async fn stream_rental_logs(
     State(state): State<AppState>,

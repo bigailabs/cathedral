@@ -60,6 +60,12 @@ pub enum Commands {
         all: bool,
     },
 
+    /// Restart instance container
+    Restart {
+        /// Rental UUID to restart (optional)
+        target: Option<String>,
+    },
+
     /// Execute commands on instances
     Exec {
         /// Command to execute
@@ -217,6 +223,7 @@ impl Commands {
             | Commands::Status { .. }
             | Commands::Logs { .. }
             | Commands::Down { .. }
+            | Commands::Restart { .. }
             | Commands::Exec { .. }
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
