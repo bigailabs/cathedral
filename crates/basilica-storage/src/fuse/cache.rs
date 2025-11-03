@@ -98,7 +98,7 @@ impl PageCache {
 
         // Calculate which pages we need
         let start_page = offset / PAGE_SIZE as u64;
-        let end_page = (offset + size as u64 + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64;
+        let end_page = (offset + size as u64).div_ceil(PAGE_SIZE as u64);
 
         let mut result = Vec::new();
         let mut current_offset = offset;
@@ -148,7 +148,7 @@ impl PageCache {
 
         // Calculate which pages we need to write
         let start_page = offset / PAGE_SIZE as u64;
-        let end_page = (offset + data.len() as u64 + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64;
+        let end_page = (offset + data.len() as u64).div_ceil(PAGE_SIZE as u64);
 
         let mut data_offset = 0;
 

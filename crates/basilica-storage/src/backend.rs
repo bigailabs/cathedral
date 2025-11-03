@@ -150,7 +150,7 @@ impl StorageBackend for S3Backend {
             StorageError::BackendError(format!("Failed to read object body: {}", e))
         })?;
 
-        Ok(Bytes::from(data.into_bytes()))
+        Ok(data.into_bytes())
     }
 
     async fn exists(&self, key: &str) -> Result<bool> {

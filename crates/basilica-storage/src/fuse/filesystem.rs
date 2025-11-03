@@ -38,7 +38,7 @@ impl Inode {
         FileAttr {
             ino: self.ino,
             size: self.size,
-            blocks: (self.size + 511) / 512,
+            blocks: self.size.div_ceil(512),
             atime: self.metadata.mtime,
             mtime: self.metadata.mtime,
             ctime: self.metadata.ctime,
