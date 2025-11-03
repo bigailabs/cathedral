@@ -36,9 +36,18 @@ impl EnvoyConfigManager {
             .await?;
 
         let route_key = format!("route_{}", sanitize_key(&route.prefix));
-        let route_yaml = self.render_route_snippet(&route);
-
         let cluster_key = format!("cluster_{}", sanitize_key(&route.cluster_name));
+
+        if cm_data.contains_key(&route_key) && cm_data.contains_key(&cluster_key) {
+            tracing::debug!(
+                prefix = %route.prefix,
+                cluster = %route.cluster_name,
+                "Envoy route and cluster already exist, skipping"
+            );
+            return Ok(());
+        }
+
+        let route_yaml = self.render_route_snippet(&route);
         let cluster_yaml = self.render_cluster_snippet(&route);
 
         cm_data.insert(route_key, route_yaml);
