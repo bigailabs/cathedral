@@ -146,6 +146,82 @@ pub async fn create_deployment(
                 .await
                 .unwrap_or((existing.replicas as u32, 0));
 
+            if desired == 0 {
+                tracing::warn!(
+                    user_id = %auth.user_id,
+                    instance_name = %req.instance_name,
+                    "Active deployment has 0 desired replicas, checking if K8s resources exist"
+                );
+
+                let exists = k8s_client
+                    .user_deployment_exists(&existing.namespace, &existing.cr_name)
+                    .await
+                    .unwrap_or(true);
+
+                if !exists {
+                    tracing::warn!(
+                        user_id = %auth.user_id,
+                        instance_name = %req.instance_name,
+                        deployment_id = existing.id,
+                        "UserDeployment CR missing for Active deployment, attempting self-healing"
+                    );
+
+                    match create_k8s_resources(
+                        k8s_client.clone(),
+                        &state.config,
+                        &namespace,
+                        &cr_name,
+                        &auth.user_id,
+                        &req,
+                        &path_prefix,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            tracing::info!(
+                                user_id = %auth.user_id,
+                                instance_name = %req.instance_name,
+                                deployment_id = existing.id,
+                                "Successfully recreated missing K8s resources"
+                            );
+
+                            let (desired_new, ready_new) = k8s_client
+                                .get_user_deployment_status(&existing.namespace, &existing.cr_name)
+                                .await
+                                .unwrap_or((existing.replicas as u32, 0));
+
+                            apimetrics::record_request("POST /deployments", "200", start, true);
+                            return Ok((
+                                StatusCode::OK,
+                                Json(DeploymentResponse::from_record_with_status(
+                                    &existing,
+                                    desired_new,
+                                    ready_new,
+                                )),
+                            ));
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                user_id = %auth.user_id,
+                                instance_name = %req.instance_name,
+                                deployment_id = existing.id,
+                                error = %e,
+                                "Failed to recreate missing K8s resources"
+                            );
+                            let error_msg = format!("K8s resource recreation failed: {}", e);
+                            db::update_deployment_state(
+                                &state.db,
+                                existing.id,
+                                "Failed",
+                                Some(&error_msg),
+                            )
+                            .await?;
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+
             tracing::info!(
                 user_id = %auth.user_id,
                 instance_name = %req.instance_name,

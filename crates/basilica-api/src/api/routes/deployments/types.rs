@@ -436,6 +436,27 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_user_id_auth0_formats() {
+        assert_eq!(sanitize_user_id("github|434149"), "github-434149");
+        assert_eq!(
+            sanitize_user_id("google-oauth2|123456789"),
+            "google-oauth2-123456789"
+        );
+        assert_eq!(sanitize_user_id("auth0|user123"), "auth0-user123");
+        assert_eq!(
+            sanitize_user_id("email|user@example.com"),
+            "email-user-example-com"
+        );
+
+        let result = sanitize_user_id("github|434149");
+        assert!(result
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+        assert!(!result.starts_with('-'));
+        assert!(!result.ends_with('-'));
+    }
+
+    #[test]
     fn test_generate_cr_name() {
         assert_eq!(generate_cr_name("my-app"), "ud-my-app");
         assert_eq!(generate_cr_name("test"), "ud-test");
