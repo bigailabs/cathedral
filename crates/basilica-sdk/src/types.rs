@@ -410,7 +410,7 @@ pub struct CreateDeploymentRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub env: Option<Vec<EnvVar>>,
+    pub env: Option<std::collections::HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
     #[serde(skip_serializing_if = "Option::is_none")]

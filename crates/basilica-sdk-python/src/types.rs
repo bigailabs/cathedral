@@ -835,12 +835,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             port: req.port,
             command: req.command,
             args: req.args,
-            env: req.env.map(|env_map| {
-                env_map
-                    .into_iter()
-                    .map(|(name, value)| SdkEnvVar { name, value })
-                    .collect()
-            }),
+            env: req.env,
             resources: req.resources.map(Into::into),
             ttl_seconds: req.ttl_seconds,
         }
