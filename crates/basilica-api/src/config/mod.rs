@@ -229,6 +229,7 @@ impl Config {
             wallet_name: "default".to_string(),
             hotkey_name: "default".to_string(),
             weight_interval_secs: 300, // 5 minutes default
+            read_only: true,           // API only needs read-only access for metagraph queries
             ..Default::default()
         }
     }

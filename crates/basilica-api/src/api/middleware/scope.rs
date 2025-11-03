@@ -147,6 +147,13 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/billing/usage") => Some(String::new()),
         (&Method::GET, p) if p.starts_with("/billing/usage/") => Some(String::new()),
 
+        // Deployment endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own deployments
+        (&Method::POST, "/deployments") => Some(String::new()),
+        (&Method::GET, "/deployments") => Some(String::new()),
+        (&Method::GET, p) if p.starts_with("/deployments/") => Some(String::new()),
+        (&Method::DELETE, p) if p.starts_with("/deployments/") => Some(String::new()),
+
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"
         (&Method::GET, "/health") => Some(String::new()),

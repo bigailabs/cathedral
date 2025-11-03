@@ -282,6 +282,7 @@ mod tests {
     #[tokio::test]
     async fn create_get_delete_job_flow() {
         let state = build_state().await;
+        std::env::set_var("TENANT_NAMESPACE", "default");
 
         let req_body = serde_json::json!({
             "image": "img",
