@@ -20,6 +20,26 @@ fn to_quantity(s: &str) -> Quantity {
     Quantity(s.to_string())
 }
 
+fn sanitize_user_id(user_id: &str) -> String {
+    let mut out = String::new();
+    for ch in user_id.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' {
+            out.push(ch);
+        } else if ch.is_ascii_uppercase() {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('-');
+        }
+        if out.len() >= 60 {
+            break;
+        }
+    }
+    if out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 fn build_resources(cpu: &str, memory: &str) -> ResourceRequirements {
     let mut limits = BTreeMap::new();
     let mut requests = BTreeMap::new();
@@ -53,11 +73,64 @@ fn build_tolerations() -> Vec<Toleration> {
     }]
 }
 
+fn build_writable_volumes() -> (
+    Vec<k8s_openapi::api::core::v1::Volume>,
+    Vec<k8s_openapi::api::core::v1::VolumeMount>,
+) {
+    let volumes = vec![
+        k8s_openapi::api::core::v1::Volume {
+            name: "tmp".to_string(),
+            empty_dir: Some(k8s_openapi::api::core::v1::EmptyDirVolumeSource {
+                medium: Some("Memory".to_string()),
+                size_limit: Some(to_quantity("100Mi")),
+            }),
+            ..Default::default()
+        },
+        k8s_openapi::api::core::v1::Volume {
+            name: "var-run".to_string(),
+            empty_dir: Some(k8s_openapi::api::core::v1::EmptyDirVolumeSource {
+                medium: Some("Memory".to_string()),
+                size_limit: Some(to_quantity("10Mi")),
+            }),
+            ..Default::default()
+        },
+        k8s_openapi::api::core::v1::Volume {
+            name: "cache-data".to_string(),
+            empty_dir: Some(k8s_openapi::api::core::v1::EmptyDirVolumeSource {
+                medium: None,
+                size_limit: Some(to_quantity("1Gi")),
+            }),
+            ..Default::default()
+        },
+    ];
+
+    let mounts = vec![
+        k8s_openapi::api::core::v1::VolumeMount {
+            name: "tmp".to_string(),
+            mount_path: "/tmp".to_string(),
+            read_only: Some(false),
+            ..Default::default()
+        },
+        k8s_openapi::api::core::v1::VolumeMount {
+            name: "var-run".to_string(),
+            mount_path: "/var/run".to_string(),
+            read_only: Some(false),
+            ..Default::default()
+        },
+        k8s_openapi::api::core::v1::VolumeMount {
+            name: "cache-data".to_string(),
+            mount_path: "/var/cache".to_string(),
+            read_only: Some(false),
+            ..Default::default()
+        },
+    ];
+
+    (volumes, mounts)
+}
+
 fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityContext>) {
     let pod_sc = Some(PodSecurityContext {
-        run_as_non_root: Some(true),
-        run_as_user: Some(1000),
-        fs_group: Some(1000),
+        fs_group: Some(101),
         seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
             type_: "RuntimeDefault".into(),
             localhost_profile: None,
@@ -69,7 +142,7 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
         read_only_root_filesystem: Some(true),
         capabilities: Some(Capabilities {
             drop: Some(vec!["ALL".into()]),
-            ..Default::default()
+            add: Some(vec!["SETUID".into(), "SETGID".into()]),
         }),
         seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
             type_: "RuntimeDefault".into(),
@@ -86,6 +159,7 @@ pub fn render_deployment(
     spec: &crate::crd::user_deployment::UserDeploymentSpec,
 ) -> Deployment {
     let (pod_sc, container_sc) = build_security_contexts();
+    let (volumes, volume_mounts) = build_writable_volumes();
 
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), instance_name.to_string());
@@ -97,12 +171,39 @@ pub fn render_deployment(
         "basilica.ai/instance".to_string(),
         instance_name.to_string(),
     );
-    labels.insert("basilica.ai/user-id".to_string(), spec.user_id.clone());
+    labels.insert(
+        "basilica.ai/user-id".to_string(),
+        sanitize_user_id(&spec.user_id),
+    );
 
     let resources = if let Some(ref res) = spec.resources {
         build_resources(&res.cpu, &res.memory)
     } else {
         build_resources("100m", "128Mi")
+    };
+
+    let init_security_context = Some(SecurityContext {
+        allow_privilege_escalation: Some(false),
+        read_only_root_filesystem: Some(true),
+        run_as_user: Some(0),
+        capabilities: Some(Capabilities {
+            drop: Some(vec!["ALL".into()]),
+            add: Some(vec!["CHOWN".into(), "FOWNER".into()]),
+        }),
+        ..Default::default()
+    });
+
+    let init_container = Container {
+        name: "init-permissions".to_string(),
+        image: Some("busybox:latest".to_string()),
+        command: Some(vec!["sh".to_string(), "-c".to_string()]),
+        args: Some(vec![
+            "mkdir -p /var/cache/nginx/client_temp /var/cache/nginx/proxy_temp /var/cache/nginx/fastcgi_temp /var/cache/nginx/uwsgi_temp /var/cache/nginx/scgi_temp /var/run/nginx && chown -R 101:101 /var/cache /var/run && chmod -R 777 /var/cache /var/run"
+                .to_string(),
+        ]),
+        volume_mounts: Some(volume_mounts.clone()),
+        security_context: init_security_context,
+        ..Default::default()
     };
 
     let container = Container {
@@ -126,6 +227,7 @@ pub fn render_deployment(
         }]),
         resources: Some(resources),
         security_context: container_sc,
+        volume_mounts: Some(volume_mounts),
         ..Default::default()
     };
 
@@ -135,11 +237,13 @@ pub fn render_deployment(
             ..Default::default()
         }),
         spec: Some(PodSpec {
+            init_containers: Some(vec![init_container]),
             containers: vec![container],
             security_context: pod_sc,
             tolerations: Some(build_tolerations()),
             restart_policy: Some("Always".into()),
             automount_service_account_token: Some(false),
+            volumes: Some(volumes),
             ..Default::default()
         }),
     };
@@ -238,6 +342,7 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
     }
 }
 
+#[derive(Clone)]
 pub struct UserDeploymentController {
     client: Arc<dyn K8sClient>,
     public_ip: String,
@@ -307,23 +412,13 @@ impl UserDeploymentController {
 
         if state == "Active" {
             if cr.status.as_ref().map(|s| s.state.as_str()).unwrap_or("") != "Active" {
-                status.start_time = Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        .to_string(),
-                );
+                status.start_time = Some(k8s_openapi::chrono::Utc::now().to_rfc3339());
             } else if let Some(existing_status) = &cr.status {
                 status.start_time = existing_status.start_time.clone();
             }
         }
 
-        status.last_updated = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .to_string();
+        status.last_updated = k8s_openapi::chrono::Utc::now().to_rfc3339();
 
         self.client
             .update_user_deployment_status(ns, name, status)

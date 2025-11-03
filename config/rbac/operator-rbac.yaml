@@ -46,11 +46,21 @@ rules:
 
   # Basilica CRDs
   - apiGroups: ["basilica.ai"]
-    resources: ["basilicajobs", "gpurentals", "basilicanodeprofiles"]
-    verbs: ["get", "list", "watch", "patch"]
+    resources: ["basilicajobs", "gpurentals", "basilicanodeprofiles", "userdeployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
   - apiGroups: ["basilica.ai"]
-    resources: ["basilicajobs/status", "gpurentals/status", "basilicanodeprofiles/status"]
+    resources: ["basilicajobs/status", "gpurentals/status", "basilicanodeprofiles/status", "userdeployments/status"]
     verbs: ["patch", "update"]
+
+  # Apps resources for UserDeployment controller
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
+
+  # ConfigMaps for Envoy routing
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

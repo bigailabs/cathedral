@@ -9,6 +9,11 @@ kind: ClusterRole
 metadata:
   name: basilica-api
 rules:
+  # Namespace management for user deployments
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list"]
+
   # Read/exec into pods for logs/exec endpoints
   - apiGroups: [""]
     resources: ["pods"]
@@ -33,6 +38,25 @@ rules:
   - apiGroups: ["basilica.ai"]
     resources: ["basilicajobs/status"]
     verbs: ["get"]
+
+  # UserDeployment CRD for K8s-based deployments
+  - apiGroups: ["basilica.ai"]
+    resources: ["userdeployments"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
+  - apiGroups: ["basilica.ai"]
+    resources: ["userdeployments/status"]
+    verbs: ["get", "watch"]
+
+  # Core K8s resources for deployment management
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

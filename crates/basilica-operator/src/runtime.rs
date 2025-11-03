@@ -11,9 +11,11 @@ use crate::billing::{BillingClient, HttpBillingClient, MockBillingClient};
 use crate::controllers::job_controller::JobController;
 use crate::controllers::node_removal_controller::NodeRemovalController;
 use crate::controllers::rental_controller::RentalController;
+use crate::controllers::user_deployment_controller::UserDeploymentController;
 use crate::crd::basilica_job::BasilicaJob;
 use crate::crd::basilica_node_profile::BasilicaNodeProfile;
 use crate::crd::gpu_rental::GpuRental;
+use crate::crd::user_deployment::UserDeployment;
 use crate::k8s_client::{K8sClient, KubeClient};
 use crate::metrics_provider::K8sMetricsProvider;
 
@@ -25,6 +27,11 @@ struct JobCtx<C: K8sClient + Clone + 'static> {
 #[derive(Clone)]
 struct RentalCtx<C: K8sClient + Clone + 'static> {
     ctrl: RentalController<C>,
+}
+
+#[derive(Clone)]
+struct UserDeploymentCtx {
+    ctrl: UserDeploymentController,
 }
 
 #[derive(Debug)]
@@ -78,6 +85,26 @@ fn error_policy_rental<C: K8sClient + Clone + 'static>(
     Action::requeue(Duration::from_secs(10))
 }
 
+async fn reconcile_user_deployment(
+    obj: Arc<UserDeployment>,
+    ctx: Arc<UserDeploymentCtx>,
+) -> std::result::Result<Action, ReconcileError> {
+    let ns = obj.namespace().unwrap_or_else(|| "default".into());
+    if let Err(e) = ctx.ctrl.reconcile(&ns, &obj).await {
+        return Err(ReconcileError(e));
+    }
+    Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+fn error_policy_user_deployment(
+    _obj: Arc<UserDeployment>,
+    err: &ReconcileError,
+    _ctx: Arc<UserDeploymentCtx>,
+) -> Action {
+    warn!("user deployment reconcile error: {}", err);
+    Action::requeue(Duration::from_secs(10))
+}
+
 pub async fn run() -> AnyResult<()> {
     let client = Client::try_default().await?;
     let kube_client = KubeClient {
@@ -95,6 +122,18 @@ pub async fn run() -> AnyResult<()> {
     let mut rent_ctrl = RentalController::new_with_arc(kube_client.clone(), billing_arc);
     let node_ctrl = NodeRemovalController::new(kube_client.clone());
 
+    let public_ip =
+        std::env::var("DEPLOYMENT_PUBLIC_IP").unwrap_or_else(|_| "localhost".to_string());
+    let public_port = std::env::var("DEPLOYMENT_PUBLIC_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(8080);
+    let user_deploy_ctrl = UserDeploymentController::new(
+        std::sync::Arc::new(kube_client.clone()),
+        public_ip,
+        public_port,
+    );
+
     // Optionally enable K8s metrics provider when BASILICA_ENABLE_K8S_METRICS=true
     if std::env::var("BASILICA_ENABLE_K8S_METRICS").ok().as_deref() == Some("true") {
         let provider = std::sync::Arc::new(K8sMetricsProvider::new(client.clone()));
@@ -106,6 +145,7 @@ pub async fn run() -> AnyResult<()> {
     let bj_api: Api<BasilicaJob> = Api::all(client.clone());
     let gr_api: Api<GpuRental> = Api::all(client.clone());
     let np_api: Api<BasilicaNodeProfile> = Api::all(client.clone());
+    let ud_api: Api<UserDeployment> = Api::all(client.clone());
 
     // Run controllers as streams
     let jobs = Controller::new(bj_api, Default::default())
@@ -158,7 +198,22 @@ pub async fn run() -> AnyResult<()> {
             }
         });
 
+    let user_deployments = Controller::new(ud_api, Default::default())
+        .run(
+            reconcile_user_deployment,
+            error_policy_user_deployment,
+            Arc::new(UserDeploymentCtx {
+                ctrl: user_deploy_ctrl,
+            }),
+        )
+        .for_each(|res| async move {
+            match res {
+                Ok(_o) => {}
+                Err(e) => error!("user deployment controller stream error: {}", e),
+            }
+        });
+
     info!("operator controllers started");
-    futures::future::join3(jobs, rentals, node_removal).await;
+    futures::future::join4(jobs, rentals, node_removal, user_deployments).await;
     Ok(())
 }
