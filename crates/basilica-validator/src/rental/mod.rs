@@ -615,7 +615,20 @@ impl RentalManager {
         self.persistence.save_rental(&updated_rental).await?;
 
         // Create container client and perform restart
-        let container_client = self.create_container_client(&rental_info.ssh_credentials)?;
+        let container_client = match self.create_container_client(&rental_info.ssh_credentials) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(
+                    rental_id = %rental_id,
+                    error = %e,
+                    "Failed to create container client for restart"
+                );
+                updated_rental.state = RentalState::Failed;
+                updated_rental.updated_at = chrono::Utc::now();
+                self.persistence.save_rental(&updated_rental).await?;
+                return Err(e);
+            }
+        };
         let restart_result = container_client
             .restart_container(&rental_info.container_id, 10)
             .await;
