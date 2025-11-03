@@ -60,7 +60,7 @@ RUN if [ "$BUILD_MODE" = "release" ]; then \
 # Runtime stage
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies including Python for btcli
 RUN apt-get update && apt-get install -y \
     libssl3 \
     ca-certificates \
@@ -68,6 +68,9 @@ RUN apt-get update && apt-get install -y \
     wget \
     libfuse3-3 \
     fuse3 \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary
@@ -83,10 +86,24 @@ RUN useradd -m -u 1000 -s /bin/bash basilica
 RUN mkdir -p /etc/basilica && chown basilica:basilica /etc/basilica
 RUN mkdir -p /home/basilica/.bittensor/wallets && chown -R basilica:basilica /home/basilica/.bittensor
 
-# Wallets are provided via bind mount in compose; no bundled wallet
+# Install bittensor for programmatic wallet creation
+RUN pip3 install --no-cache-dir bittensor --break-system-packages
 
-# Switch to non-root user
+# Switch to basilica user to generate wallet
 USER basilica
+
+# Generate read-only Bittensor wallet with no password for metagraph queries
+# This wallet is only used for read-only operations (querying metagraph)
+# It does NOT hold funds and does NOT sign transactions
+RUN python3 -c "\
+import bittensor as bt; \
+wallet = bt.wallet(name='default', hotkey='default'); \
+wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False); \
+print('Wallet created successfully')"
+
+# Verify wallet was created
+RUN test -f /home/basilica/.bittensor/wallets/default/hotkeys/default || \
+    (echo "ERROR: Wallet generation failed" && exit 1)
 
 # Expose port
 EXPOSE 8000

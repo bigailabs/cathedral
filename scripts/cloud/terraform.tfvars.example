@@ -78,3 +78,18 @@ payments_reconciliation_dry_run = true
 #
 # Formula: sweep_amount = current_balance - (TARGET_BALANCE + ESTIMATED_FEE)
 # Example: If balance is 2.0 TAO, sweep: 2.0 - (0.55 + 0.05) = 1.4 TAO
+
+# =============================================================================
+# K8S KUBECONFIG (Optional - for K8s deployments feature)
+# =============================================================================
+# Path to kubeconfig file for API to connect to K3s cluster
+# Terraform will automatically upload this to AWS Secrets Manager
+# The path supports ~ expansion (e.g., ~/.kube/k3s-basilica-config)
+# Leave empty "" to manually upload kubeconfig via AWS CLI
+kubeconfig_path = "~/.kube/k3s-basilica-config"
+
+# Alternative: manually upload after terraform apply:
+# kubeconfig_path = ""
+# aws secretsmanager put-secret-value \
+#   --secret-id basilica-dev-v3-kubeconfig \
+#   --secret-string "$(cat ~/.kube/k3s-basilica-config)"

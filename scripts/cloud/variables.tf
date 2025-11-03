@@ -100,3 +100,9 @@ variable "payments_blockchain_websocket_url" {
   description = "WebSocket URL for blockchain connectivity (payments service)"
   default     = "wss://entrypoint-finney.opentensor.ai:443"
 }
+
+variable "kubeconfig_path" {
+  type        = string
+  description = "Path to kubeconfig file for K3s cluster connection (e.g., ~/.kube/k3s-basilica-config). Leave empty to manually upload kubeconfig to AWS Secrets Manager."
+  default     = ""
+}

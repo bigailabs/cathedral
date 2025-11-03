@@ -33,6 +33,10 @@ api_bittensor_network: test
 api_chain_endpoint: wss://test.finney.opentensor.ai:443
 api_bittensor_netuid: "387"
 
+# User Deployment config
+deployment_public_ip: "localhost"
+deployment_public_port: "8080"
+
 # Toggles
 install_envoy_forward_proxy: true   # apply forward proxy (config/deploy/ingress/*)
 install_gateway_api: true           # apply Gateway API bits (config/deploy/gateway/*)
