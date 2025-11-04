@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        target: [x86_64]
     steps:
       - uses: actions/checkout@v4
 
@@ -259,7 +259,7 @@ jobs:
 
             ## Supported Platforms
 
-            - Linux: x86_64, aarch64 (ARM64)
+            - Linux: x86_64
             - macOS: x86_64 (Intel), aarch64 (Apple Silicon)
             - Windows: x86_64
             - Python: 3.10, 3.11, 3.12, 3.13
