@@ -130,7 +130,9 @@ fn build_writable_volumes() -> (
 
 fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityContext>) {
     let pod_sc = Some(PodSecurityContext {
-        fs_group: Some(101),
+        run_as_non_root: Some(true),
+        run_as_user: Some(1000),
+        fs_group: Some(1000),
         seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
             type_: "RuntimeDefault".into(),
             localhost_profile: None,

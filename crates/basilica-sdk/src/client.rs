@@ -1086,9 +1086,9 @@ mod tests {
                 "image": "myapp:v1",
                 "replicas": 1,
                 "port": 8080,
-                "env": [
-                    {"name": "ENV_VAR", "value": "value"}
-                ],
+                "env": {
+                    "ENV_VAR": "value"
+                },
                 "resources": {
                     "cpu": "1000m",
                     "memory": "1Gi"
@@ -1119,10 +1119,10 @@ mod tests {
             port: 8080,
             command: None,
             args: None,
-            env: Some(vec![crate::types::EnvVar {
-                name: "ENV_VAR".to_string(),
-                value: "value".to_string(),
-            }]),
+            env: Some(std::collections::HashMap::from([(
+                "ENV_VAR".to_string(),
+                "value".to_string(),
+            )])),
             resources: Some(crate::types::ResourceRequirements {
                 cpu: "1000m".to_string(),
                 memory: "1Gi".to_string(),
