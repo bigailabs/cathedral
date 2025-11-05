@@ -1,0 +1,54 @@
+[package]
+name = "basilica-aggregator"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "basilica-aggregator"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# OAuth2
+oauth2 = "4"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate", "chrono", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Decimal precision for prices
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+
+# Configuration
+config = "0.14"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Async trait support
+async-trait = "0.1"
+
+[dev-dependencies]
+axum-test = "15"
+mockito = "1"

@@ -1,0 +1,40 @@
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[cache]
+ttl_seconds = 45
+
+[providers.datacrunch]
+enabled = true
+# You can either:
+# 1. Put your credentials directly here:
+#    client_id = "your-client-id"
+#    client_secret = "your-client-secret"
+# 2. Or override with environment variables:
+#    export AGGREGATOR__PROVIDERS__DATACRUNCH__CLIENT_ID="your-client-id"
+#    export AGGREGATOR__PROVIDERS__DATACRUNCH__CLIENT_SECRET="your-client-secret"
+client_id = "your-datacrunch-client-id"
+client_secret = "your-datacrunch-client-secret"
+cooldown_seconds = 30
+timeout_seconds = 10
+api_base_url = "https://api.datacrunch.io/v1"
+
+[providers.hyperstack]
+enabled = false
+client_id = "your-hyperstack-client-id"
+client_secret = "your-hyperstack-client-secret"
+cooldown_seconds = 30
+timeout_seconds = 10
+api_base_url = "https://infrahub-api.nexgencloud.com/v1"
+
+[providers.lambda]
+enabled = false
+client_id = "your-lambda-client-id"
+client_secret = "your-lambda-client-secret"
+cooldown_seconds = 30
+timeout_seconds = 10
+api_base_url = "https://cloud.lambda.ai/api/v1"
+
+[database]
+path = "aggregator.db"
