@@ -29,7 +29,8 @@ RUN sed -i '/crates\/basilica-executor/d' Cargo.toml && \
     sed -i '/crates\/basilica-sdk/d' Cargo.toml && \
     sed -i '/crates\/basilica-sdk-python/d' Cargo.toml && \
     sed -i '/crates\/collateral/d' Cargo.toml && \
-    sed -i '/crates\/integration-tests/d' Cargo.toml
+    sed -i '/crates\/integration-tests/d' Cargo.toml && \
+    sed -i '/crates\/basilica-aggregator/d' Cargo.toml
 
 # Build the billing service
 RUN cargo build --release -p basilica-billing
