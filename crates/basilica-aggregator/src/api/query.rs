@@ -1,4 +1,5 @@
-use crate::models::{GpuType, Provider};
+use crate::models::Provider;
+use basilica_common::types::GpuCategory;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::str::FromStr;
@@ -15,10 +16,10 @@ pub struct GpuPriceQuery {
 }
 
 impl GpuPriceQuery {
-    pub fn gpu_type(&self) -> Option<GpuType> {
+    pub fn gpu_type(&self) -> Option<GpuCategory> {
         self.gpu_type
             .as_ref()
-            .and_then(|s| GpuType::from_str(s).ok())
+            .and_then(|s| GpuCategory::from_str(s).ok())
     }
 
     pub fn provider(&self) -> Option<Provider> {

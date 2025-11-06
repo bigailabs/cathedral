@@ -4,6 +4,7 @@ use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
 use crate::providers::datacrunch::DataCrunchProvider;
 use crate::providers::Provider;
+use basilica_common::types::GpuCategory;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
 
@@ -65,11 +66,12 @@ impl AggregatorService {
 
     /// Get GPU offerings from database cache
     /// Note: Background task keeps cache fresh, so this just reads from DB
+    /// Cache only contains supported GPU types (A100, H100, B200)
     pub async fn get_offerings(&self) -> Result<Vec<GpuOffering>> {
-        // Simply return all cached offerings from database
-        let all_offerings = self.db.get_offerings(None).await?;
-        tracing::debug!("Retrieved {} offerings from cache", all_offerings.len());
-        Ok(all_offerings)
+        let offerings = self.db.get_offerings(None).await?;
+
+        tracing::debug!("Retrieved {} offerings from cache", offerings.len());
+        Ok(offerings)
     }
 
     /// Refresh offerings from all providers (called by background task)
@@ -101,10 +103,7 @@ impl AggregatorService {
                     }
                 }
             } else {
-                tracing::debug!(
-                    "Skipping {} - cooldown period not elapsed",
-                    provider_id
-                );
+                tracing::debug!("Skipping {} - cooldown period not elapsed", provider_id);
             }
         }
 
@@ -133,20 +132,35 @@ impl AggregatorService {
     }
 
     /// Fetch from provider and cache results
+    /// Only caches supported GPU types (A100, H100, B200) - filters out Other
     async fn fetch_and_cache(&self, provider: &dyn Provider) -> Result<Vec<GpuOffering>> {
         let provider_id = provider.provider_id();
 
-        let offerings = provider.fetch_offerings().await?;
+        let all_offerings = provider.fetch_offerings().await?;
+        let total_count = all_offerings.len();
 
-        // Store in database
-        self.db.upsert_offerings(&offerings).await?;
+        // Filter to only supported GPU types before caching
+        let supported_offerings: Vec<GpuOffering> = all_offerings
+            .into_iter()
+            .filter(|o| !matches!(o.gpu_type, GpuCategory::Other(_)))
+            .collect();
+
+        tracing::debug!(
+            "Filtered {} to {} supported offerings for {}",
+            total_count,
+            supported_offerings.len(),
+            provider_id
+        );
+
+        // Store only supported offerings in database
+        self.db.upsert_offerings(&supported_offerings).await?;
 
         // Update provider status
         self.db
             .update_provider_status(provider_id, true, None)
             .await?;
 
-        Ok(offerings)
+        Ok(supported_offerings)
     }
 
     /// Get health status for all providers
@@ -154,10 +168,7 @@ impl AggregatorService {
         let mut health_statuses = Vec::new();
 
         for provider in &self.providers {
-            let health = self
-                .db
-                .get_provider_health(provider.provider_id())
-                .await?;
+            let health = self.db.get_provider_health(provider.provider_id()).await?;
             health_statuses.push(health);
         }
 

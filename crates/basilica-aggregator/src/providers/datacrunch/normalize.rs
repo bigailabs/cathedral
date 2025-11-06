@@ -1,40 +1,12 @@
-use crate::models::GpuType;
+use basilica_common::types::GpuCategory;
 
-/// Map DataCrunch GPU model to canonical GpuType
-pub fn normalize_gpu_type(gpu_model: &str, gpu_memory_gb: u32) -> Option<GpuType> {
-    let model_lower = gpu_model.to_lowercase();
-
-    if model_lower.contains("h100") {
-        if gpu_memory_gb >= 90 {
-            Some(GpuType::H100_94GB)
-        } else {
-            Some(GpuType::H100_80GB)
-        }
-    } else if model_lower.contains("a100") {
-        if gpu_memory_gb >= 70 {
-            Some(GpuType::A100_80GB)
-        } else {
-            Some(GpuType::A100_40GB)
-        }
-    } else if model_lower.contains("v100") {
-        if gpu_memory_gb >= 30 {
-            Some(GpuType::V100_32GB)
-        } else {
-            Some(GpuType::V100_16GB)
-        }
-    } else if model_lower.contains("a10") && !model_lower.contains("a100") {
-        Some(GpuType::A10_24GB)
-    } else if model_lower.contains("a6000") {
-        Some(GpuType::A6000_48GB)
-    } else if model_lower.contains("l40") {
-        Some(GpuType::L40_48GB)
-    } else if model_lower.contains("b200") {
-        Some(GpuType::B200)
-    } else if model_lower.contains("gh200") {
-        Some(GpuType::GH200)
-    } else {
-        None
-    }
+/// Map DataCrunch GPU model to canonical GpuCategory
+/// Returns the GPU category based on the model string
+pub fn normalize_gpu_type(gpu_model: &str) -> GpuCategory {
+    // Use GpuCategory's FromStr implementation which handles parsing
+    gpu_model
+        .parse()
+        .unwrap_or_else(|_| GpuCategory::Other(gpu_model.to_string()))
 }
 
 /// Normalize region code
@@ -50,52 +22,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_h100_80gb() {
+    fn test_normalize_h100() {
+        assert_eq!(normalize_gpu_type("NVIDIA H100"), GpuCategory::H100);
+        assert_eq!(normalize_gpu_type("NVIDIA H100 NVL"), GpuCategory::H100);
+    }
+
+    #[test]
+    fn test_normalize_a100() {
         assert_eq!(
-            normalize_gpu_type("NVIDIA H100", 80),
-            Some(GpuType::H100_80GB)
+            normalize_gpu_type("NVIDIA A100-PCIE-40GB"),
+            GpuCategory::A100
+        );
+        assert_eq!(
+            normalize_gpu_type("NVIDIA A100-SXM4-80GB"),
+            GpuCategory::A100
         );
     }
 
     #[test]
-    fn test_normalize_h100_94gb() {
-        assert_eq!(
-            normalize_gpu_type("NVIDIA H100 NVL", 94),
-            Some(GpuType::H100_94GB)
-        );
-    }
-
-    #[test]
-    fn test_normalize_a100_40gb() {
-        assert_eq!(
-            normalize_gpu_type("NVIDIA A100-PCIE-40GB", 40),
-            Some(GpuType::A100_40GB)
-        );
-    }
-
-    #[test]
-    fn test_normalize_a100_80gb() {
-        assert_eq!(
-            normalize_gpu_type("NVIDIA A100-SXM4-80GB", 80),
-            Some(GpuType::A100_80GB)
-        );
-    }
-
-    #[test]
-    fn test_normalize_v100() {
-        assert_eq!(
-            normalize_gpu_type("Tesla V100-SXM2-16GB", 16),
-            Some(GpuType::V100_16GB)
-        );
-        assert_eq!(
-            normalize_gpu_type("Tesla V100-SXM2-32GB", 32),
-            Some(GpuType::V100_32GB)
-        );
+    fn test_normalize_b200() {
+        assert_eq!(normalize_gpu_type("NVIDIA B200"), GpuCategory::B200);
     }
 
     #[test]
     fn test_normalize_unknown() {
-        assert_eq!(normalize_gpu_type("NVIDIA RTX 3090", 24), None);
+        match normalize_gpu_type("NVIDIA RTX 3090") {
+            GpuCategory::Other(model) => assert!(model.contains("3090")),
+            _ => panic!("Expected Other variant"),
+        }
     }
 
     #[test]

@@ -2,9 +2,10 @@
 CREATE TABLE gpu_offerings (
     id TEXT PRIMARY KEY,
     provider TEXT NOT NULL,
-    gpu_type TEXT NOT NULL,
+    gpu_type TEXT NOT NULL, -- GPU category (A100, H100, B200, OTHER)
+    gpu_memory_gb INTEGER NOT NULL, -- GPU memory per card
     gpu_count INTEGER NOT NULL,
-    memory_gb INTEGER NOT NULL,
+    system_memory_gb INTEGER NOT NULL, -- System RAM
     vcpu_count INTEGER NOT NULL,
     region TEXT NOT NULL,
     hourly_rate TEXT NOT NULL,

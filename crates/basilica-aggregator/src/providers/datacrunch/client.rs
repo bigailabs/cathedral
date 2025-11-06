@@ -178,13 +178,14 @@ impl DataCrunchProvider {
             });
         }
 
-        let instance_types: Vec<InstanceType> = response
-            .json()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("Failed to parse instance types: {}", e),
-            })?;
+        let instance_types: Vec<InstanceType> =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "datacrunch".to_string(),
+                    message: format!("Failed to parse instance types: {}", e),
+                })?;
 
         Ok(instance_types)
     }
@@ -212,13 +213,14 @@ impl DataCrunchProvider {
             });
         }
 
-        let locations: Vec<Location> = response
-            .json()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("Failed to parse locations: {}", e),
-            })?;
+        let locations: Vec<Location> =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "datacrunch".to_string(),
+                    message: format!("Failed to parse locations: {}", e),
+                })?;
 
         Ok(locations)
     }
@@ -246,13 +248,14 @@ impl DataCrunchProvider {
             });
         }
 
-        let availability: Vec<InstanceAvailability> = response
-            .json()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("Failed to parse availability: {}", e),
-            })?;
+        let availability: Vec<InstanceAvailability> =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "datacrunch".to_string(),
+                    message: format!("Failed to parse availability: {}", e),
+                })?;
 
         Ok(availability)
     }
@@ -271,27 +274,13 @@ impl Provider for DataCrunchProvider {
         let mut offerings = Vec::new();
 
         for instance_type in instance_types {
-            // Try to normalize GPU type - use the model field or parse from description
+            // Normalize GPU type - use the model field or parse from description
             let gpu_model = instance_type
                 .model
                 .as_ref()
                 .unwrap_or(&instance_type.gpu.description);
 
-            let gpu_type = match normalize_gpu_type(
-                gpu_model,
-                instance_type.gpu_memory.size_in_gigabytes,
-            ) {
-                Some(gt) => gt,
-                None => {
-                    tracing::warn!(
-                        "Skipping instance {} - unknown GPU type: {} ({} GB)",
-                        instance_type.id,
-                        gpu_model,
-                        instance_type.gpu_memory.size_in_gigabytes
-                    );
-                    continue;
-                }
-            };
+            let gpu_type = normalize_gpu_type(gpu_model);
 
             // Parse price strings to Decimal
             let hourly_rate = instance_type
@@ -310,8 +299,9 @@ impl Provider for DataCrunchProvider {
                 id: instance_type.id.clone(),
                 provider: ProviderEnum::DataCrunch,
                 gpu_type,
+                gpu_memory_gb: instance_type.gpu_memory.size_in_gigabytes,
                 gpu_count: instance_type.gpu.number_of_gpus,
-                memory_gb: instance_type.memory.size_in_gigabytes,
+                system_memory_gb: instance_type.memory.size_in_gigabytes,
                 vcpu_count: instance_type.cpu.number_of_cores,
                 region: "global".to_string(), // Simplified: use global since we can't fetch locations
                 hourly_rate,

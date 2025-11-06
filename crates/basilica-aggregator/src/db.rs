@@ -38,9 +38,9 @@ impl Database {
             sqlx::query(
                 r#"
                 INSERT INTO gpu_offerings
-                (id, provider, gpu_type, gpu_count, memory_gb, vcpu_count, region,
+                (id, provider, gpu_type, gpu_memory_gb, gpu_count, system_memory_gb, vcpu_count, region,
                  hourly_rate, spot_rate, availability, raw_metadata, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     hourly_rate = excluded.hourly_rate,
                     spot_rate = excluded.spot_rate,
@@ -52,8 +52,9 @@ impl Database {
             .bind(&offering.id)
             .bind(offering.provider.as_str())
             .bind(offering.gpu_type.as_str())
+            .bind(offering.gpu_memory_gb as i64)
             .bind(offering.gpu_count as i64)
-            .bind(offering.memory_gb as i64)
+            .bind(offering.system_memory_gb as i64)
             .bind(offering.vcpu_count as i64)
             .bind(&offering.region)
             .bind(offering.hourly_rate.to_string())
@@ -70,20 +71,17 @@ impl Database {
     }
 
     /// Get all offerings for a provider
-    pub async fn get_offerings(
-        &self,
-        provider: Option<Provider>,
-    ) -> Result<Vec<GpuOffering>> {
+    pub async fn get_offerings(&self, provider: Option<Provider>) -> Result<Vec<GpuOffering>> {
         let query = if let Some(p) = provider {
             sqlx::query(
-                "SELECT id, provider, gpu_type, gpu_count, memory_gb, vcpu_count, region,
+                "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, system_memory_gb, vcpu_count, region,
                         hourly_rate, spot_rate, availability, raw_metadata, fetched_at
                  FROM gpu_offerings WHERE provider = ? ORDER BY fetched_at DESC",
             )
             .bind(p.as_str())
         } else {
             sqlx::query(
-                "SELECT id, provider, gpu_type, gpu_count, memory_gb, vcpu_count, region,
+                "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, system_memory_gb, vcpu_count, region,
                         hourly_rate, spot_rate, availability, raw_metadata, fetched_at
                  FROM gpu_offerings ORDER BY fetched_at DESC",
             )
@@ -104,8 +102,9 @@ impl Database {
                     id: row.get("id"),
                     provider: provider_str.parse().ok()?,
                     gpu_type: gpu_type_str.parse().ok()?,
+                    gpu_memory_gb: row.get::<i64, _>("gpu_memory_gb") as u32,
                     gpu_count: row.get::<i64, _>("gpu_count") as u32,
-                    memory_gb: row.get::<i64, _>("memory_gb") as u32,
+                    system_memory_gb: row.get::<i64, _>("system_memory_gb") as u32,
                     vcpu_count: row.get::<i64, _>("vcpu_count") as u32,
                     region: row.get("region"),
                     hourly_rate: hourly_rate_str.parse().ok()?,

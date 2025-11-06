@@ -1,6 +1,4 @@
-use basilica_aggregator::{
-    config::*, db::Database, models::*, service::AggregatorService,
-};
+use basilica_aggregator::{config::*, db::Database, models::*, service::AggregatorService};
 use std::sync::Arc;
 
 #[tokio::test]
