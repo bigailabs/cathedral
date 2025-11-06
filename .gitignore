@@ -130,3 +130,4 @@ crates/basilica-sdk-python/python/basilica/*.so
 **/*.pyo
 **/*.pyd
 crates/basilica-sdk-python/.venv/
+.worktrees/
