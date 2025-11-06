@@ -1,4 +1,7 @@
-use basilica_aggregator::{api, config::Config, db::Database, service::AggregatorService};
+use basilica_aggregator::{
+    api, background::BackgroundRefreshTask, config::Config, db::Database,
+    service::AggregatorService,
+};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -39,8 +42,22 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize service
     let service = Arc::new(AggregatorService::new(db, config.clone())?);
-    tracing::info!("Service initialized with {} provider(s)",
-        if service.get_provider_health().await?.is_empty() { 0 } else { 1 });
+    tracing::info!(
+        "Service initialized with {} provider(s)",
+        if service.get_provider_health().await?.is_empty() {
+            0
+        } else {
+            1
+        }
+    );
+
+    // Start background refresh task
+    let refresh_task =
+        BackgroundRefreshTask::new(service.clone(), config.cache.ttl_seconds).start();
+    tracing::info!(
+        "Background refresh task started (interval: {}s)",
+        config.cache.ttl_seconds
+    );
 
     // Create API router
     let app = api::create_router(service);
@@ -51,7 +68,24 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Server listening on {}", addr);
 
-    axum::serve(listener, app).await?;
+    // Handle graceful shutdown
+    let server = axum::serve(listener, app);
+
+    // Setup graceful shutdown signal handling
+    tokio::select! {
+        result = server => {
+            if let Err(e) = result {
+                tracing::error!("Server error: {}", e);
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Received shutdown signal, stopping...");
+        }
+    }
+
+    // Abort background task on shutdown
+    refresh_task.abort();
+    tracing::info!("Background refresh task stopped");
 
     Ok(())
 }

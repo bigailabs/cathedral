@@ -63,45 +63,52 @@ impl AggregatorService {
         })
     }
 
-    /// Get GPU offerings, fetching from providers if cache is stale
+    /// Get GPU offerings from database cache
+    /// Note: Background task keeps cache fresh, so this just reads from DB
     pub async fn get_offerings(&self) -> Result<Vec<GpuOffering>> {
-        let mut all_offerings = Vec::new();
+        // Simply return all cached offerings from database
+        let all_offerings = self.db.get_offerings(None).await?;
+        tracing::debug!("Retrieved {} offerings from cache", all_offerings.len());
+        Ok(all_offerings)
+    }
+
+    /// Refresh offerings from all providers (called by background task)
+    /// Returns total number of offerings fetched
+    pub async fn refresh_all_providers(&self) -> Result<usize> {
+        let mut total_count = 0;
 
         for provider in &self.providers {
             let provider_id = provider.provider_id();
 
-            // Check if we need to fetch fresh data
+            // Check if we should fetch (respects cooldown)
             if self.should_fetch(provider_id).await? {
                 match self.fetch_and_cache(provider.as_ref()).await {
                     Ok(offerings) => {
                         tracing::info!(
-                            "Successfully fetched {} offerings from {}",
+                            "Refreshed {} offerings from {}",
                             offerings.len(),
                             provider_id
                         );
-                        all_offerings.extend(offerings);
+                        total_count += offerings.len();
                     }
                     Err(e) => {
-                        tracing::error!("Failed to fetch from {}: {}", provider_id, e);
-                        // Fall back to cached data
-                        let cached = self.db.get_offerings(Some(provider_id)).await?;
-                        tracing::info!(
-                            "Using {} cached offerings from {}",
-                            cached.len(),
-                            provider_id
-                        );
-                        all_offerings.extend(cached);
+                        tracing::error!("Failed to refresh from {}: {}", provider_id, e);
+                        // Update provider status with error
+                        let _ = self
+                            .db
+                            .update_provider_status(provider_id, false, Some(e.to_string()))
+                            .await;
                     }
                 }
             } else {
-                // Use cached data
-                let cached = self.db.get_offerings(Some(provider_id)).await?;
-                tracing::debug!("Using {} cached offerings from {}", cached.len(), provider_id);
-                all_offerings.extend(cached);
+                tracing::debug!(
+                    "Skipping {} - cooldown period not elapsed",
+                    provider_id
+                );
             }
         }
 
-        Ok(all_offerings)
+        Ok(total_count)
     }
 
     /// Check if we should fetch fresh data

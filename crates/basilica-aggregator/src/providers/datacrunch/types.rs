@@ -49,6 +49,7 @@ pub struct StorageSpec {
 
 /// Location response from DataCrunch API
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
 pub struct Location {
     pub code: String,
     pub name: String,
@@ -57,6 +58,7 @@ pub struct Location {
 
 /// Instance availability response
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
 pub struct InstanceAvailability {
     pub instance_type: String,
     pub location_code: String,

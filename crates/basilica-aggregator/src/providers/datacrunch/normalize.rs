@@ -38,6 +38,7 @@ pub fn normalize_gpu_type(gpu_model: &str, gpu_memory_gb: u32) -> Option<GpuType
 }
 
 /// Normalize region code
+#[allow(dead_code)]
 pub fn normalize_region(location_code: &str) -> String {
     // DataCrunch uses codes like "FIN-01", "ICE-01"
     // For now, keep as-is but lowercase

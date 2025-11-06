@@ -1,4 +1,4 @@
-use super::normalize::{normalize_gpu_type, normalize_region};
+use super::normalize::normalize_gpu_type;
 use super::types::{InstanceAvailability, InstanceType, Location};
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
@@ -8,7 +8,6 @@ use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -190,6 +189,7 @@ impl DataCrunchProvider {
         Ok(instance_types)
     }
 
+    #[allow(dead_code)]
     async fn fetch_locations(&self) -> Result<Vec<Location>> {
         let url = format!("{}/locations", self.base_url);
         let access_token = self.get_access_token().await?;
@@ -223,6 +223,7 @@ impl DataCrunchProvider {
         Ok(locations)
     }
 
+    #[allow(dead_code)]
     async fn fetch_availability(&self) -> Result<Vec<InstanceAvailability>> {
         let url = format!("{}/instance-availability", self.base_url);
         let access_token = self.get_access_token().await?;
@@ -265,17 +266,6 @@ impl Provider for DataCrunchProvider {
 
     async fn fetch_offerings(&self) -> Result<Vec<GpuOffering>> {
         let instance_types = self.fetch_instance_types().await?;
-        let locations = self.fetch_locations().await?;
-        let availability = self.fetch_availability().await?;
-
-        // Build availability map: (instance_type, location) -> available
-        let mut availability_map: HashMap<(String, String), bool> = HashMap::new();
-        for avail in availability {
-            availability_map.insert(
-                (avail.instance_type.clone(), avail.location_code.clone()),
-                avail.available,
-            );
-        }
 
         let fetched_at = Utc::now();
         let mut offerings = Vec::new();
@@ -314,30 +304,24 @@ impl Provider for DataCrunchProvider {
                 .as_ref()
                 .and_then(|s| s.parse::<Decimal>().ok());
 
-            // Create offering for each location
-            for location in &locations {
-                let is_available = availability_map
-                    .get(&(instance_type.instance_type.clone(), location.code.clone()))
-                    .copied()
-                    .unwrap_or(false);
+            // Create single offering per instance type (simplified - no location/availability data)
+            // DataCrunch's locations/availability endpoints require different permissions
+            let offering = GpuOffering {
+                id: instance_type.id.clone(),
+                provider: ProviderEnum::DataCrunch,
+                gpu_type,
+                gpu_count: instance_type.gpu.number_of_gpus,
+                memory_gb: instance_type.memory.size_in_gigabytes,
+                vcpu_count: instance_type.cpu.number_of_cores,
+                region: "global".to_string(), // Simplified: use global since we can't fetch locations
+                hourly_rate,
+                spot_rate,
+                availability: true, // Assume available if listed in API
+                fetched_at,
+                raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
+            };
 
-                let offering = GpuOffering {
-                    id: format!("{}-{}", instance_type.id, location.code),
-                    provider: ProviderEnum::DataCrunch,
-                    gpu_type,
-                    gpu_count: instance_type.gpu.number_of_gpus,
-                    memory_gb: instance_type.memory.size_in_gigabytes,
-                    vcpu_count: instance_type.cpu.number_of_cores,
-                    region: normalize_region(&location.code),
-                    hourly_rate,
-                    spot_rate,
-                    availability: is_available,
-                    fetched_at,
-                    raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
-                };
-
-                offerings.push(offering);
-            }
+            offerings.push(offering);
         }
 
         tracing::info!("Fetched {} offerings from DataCrunch", offerings.len());
