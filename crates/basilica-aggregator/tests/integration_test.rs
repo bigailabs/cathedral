@@ -17,6 +17,7 @@ async fn test_service_initialization() {
             datacrunch: ProviderConfig::default(), // No auth = disabled
             hyperstack: ProviderConfig::default(),
             lambda: ProviderConfig::default(),
+            hydrahost: ProviderConfig::default(),
         },
         database: DatabaseConfig {
             path: ":memory:".to_string(),

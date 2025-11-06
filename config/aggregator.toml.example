@@ -44,5 +44,17 @@ cooldown_seconds = 30
 timeout_seconds = 10
 api_base_url = "https://cloud.lambdalabs.com/api/v1"
 
+[providers.hydrahost]
+enabled = false
+# You can either:
+# 1. Put your API key directly here:
+#    api_key = "your-api-key"
+# 2. Or override with environment variable:
+#    export AGGREGATOR__PROVIDERS__HYDRAHOST__API_KEY="your-api-key"
+api_key = "your-hydrahost-api-key"
+cooldown_seconds = 30
+timeout_seconds = 10
+api_base_url = "https://api.brokkr.prod.hydra.host"
+
 [database]
 path = "aggregator.db"

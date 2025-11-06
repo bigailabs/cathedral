@@ -4,6 +4,7 @@ use async_trait::async_trait;
 
 pub mod datacrunch;
 pub mod hyperstack;
+pub mod hydrahost;
 pub mod lambda;
 
 #[async_trait]

@@ -3,6 +3,7 @@ use crate::db::Database;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
 use crate::providers::datacrunch::DataCrunchProvider;
+use crate::providers::hydrahost::HydraHostProvider;
 use crate::providers::hyperstack::HyperstackProvider;
 use crate::providers::lambda::LambdaProvider;
 use crate::providers::Provider;
@@ -123,6 +124,39 @@ impl AggregatorService {
             providers.push(Box::new(provider));
         }
 
+        // Initialize HydraHost provider if configured
+        if config.providers.hydrahost.is_enabled() {
+            let auth = config
+                .providers
+                .hydrahost
+                .get_auth()
+                .ok_or_else(|| AggregatorError::Config("HydraHost auth missing".into()))?;
+
+            let api_key = match auth {
+                AuthConfig::ApiKey { api_key } => api_key,
+                AuthConfig::OAuth { .. } => {
+                    return Err(AggregatorError::Config(
+                        "HydraHost requires ApiKey authentication".into(),
+                    ))
+                }
+            };
+
+            let base_url = config
+                .providers
+                .hydrahost
+                .api_base_url
+                .clone()
+                .ok_or_else(|| AggregatorError::Config("HydraHost base URL missing".into()))?;
+
+            let provider = HydraHostProvider::new(
+                api_key,
+                base_url,
+                config.providers.hydrahost.timeout_seconds,
+            )?;
+
+            providers.push(Box::new(provider));
+        }
+
         if providers.is_empty() {
             return Err(AggregatorError::NoProvidersAvailable);
         }
@@ -189,6 +223,7 @@ impl AggregatorService {
                 ProviderEnum::DataCrunch => self.config.providers.datacrunch.cooldown_seconds,
                 ProviderEnum::Hyperstack => self.config.providers.hyperstack.cooldown_seconds,
                 ProviderEnum::Lambda => self.config.providers.lambda.cooldown_seconds,
+                ProviderEnum::HydraHost => self.config.providers.hydrahost.cooldown_seconds,
             };
 
             let cooldown_duration = Duration::seconds(cooldown as i64);

@@ -11,6 +11,7 @@ pub enum Provider {
     DataCrunch,
     Hyperstack,
     Lambda,
+    HydraHost,
 }
 
 impl Provider {
@@ -19,6 +20,7 @@ impl Provider {
             Provider::DataCrunch => "datacrunch",
             Provider::Hyperstack => "hyperstack",
             Provider::Lambda => "lambda",
+            Provider::HydraHost => "hydrahost",
         }
     }
 }
@@ -37,6 +39,7 @@ impl std::str::FromStr for Provider {
             "datacrunch" => Ok(Provider::DataCrunch),
             "hyperstack" => Ok(Provider::Hyperstack),
             "lambda" => Ok(Provider::Lambda),
+            "hydrahost" => Ok(Provider::HydraHost),
             _ => Err(format!("Unknown provider: {}", s)),
         }
     }

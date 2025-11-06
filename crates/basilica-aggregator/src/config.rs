@@ -44,6 +44,8 @@ pub struct ProvidersConfig {
     pub hyperstack: ProviderConfig,
     #[serde(default)]
     pub lambda: ProviderConfig,
+    #[serde(default)]
+    pub hydrahost: ProviderConfig,
 }
 
 /// Authentication configuration enum for different provider types
@@ -158,7 +160,8 @@ impl Config {
         // Check at least one provider is enabled (has auth configured)
         let any_enabled = self.providers.datacrunch.is_enabled()
             || self.providers.hyperstack.is_enabled()
-            || self.providers.lambda.is_enabled();
+            || self.providers.lambda.is_enabled()
+            || self.providers.hydrahost.is_enabled();
 
         if !any_enabled {
             return Err(AggregatorError::Config(
@@ -186,6 +189,7 @@ mod tests {
                 datacrunch: ProviderConfig::default(),
                 hyperstack: ProviderConfig::default(),
                 lambda: ProviderConfig::default(),
+                hydrahost: ProviderConfig::default(),
             },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
@@ -207,6 +211,7 @@ mod tests {
                 datacrunch: ProviderConfig::default(),
                 hyperstack: ProviderConfig::default(),
                 lambda: ProviderConfig::default(),
+                hydrahost: ProviderConfig::default(),
             },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
@@ -233,6 +238,7 @@ mod tests {
                 },
                 hyperstack: ProviderConfig::default(),
                 lambda: ProviderConfig::default(),
+                hydrahost: ProviderConfig::default(),
             },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
@@ -258,6 +264,7 @@ mod tests {
                     api_base_url: Some("https://cloud.lambdalabs.com/api/v1".to_string()),
                     ..Default::default()
                 },
+                hydrahost: ProviderConfig::default(),
             },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
