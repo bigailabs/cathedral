@@ -92,12 +92,7 @@ impl Provider for HydraHostProvider {
             }
 
             // Get GPU model - either from specs or infer from other fields
-            let gpu_model = listing
-                .specs
-                .gpu
-                .model
-                .as_deref()
-                .unwrap_or("unknown");
+            let gpu_model = listing.specs.gpu.model.as_deref().unwrap_or("unknown");
 
             // Normalize GPU type
             let gpu_type = normalize_gpu_type(gpu_model);
@@ -109,8 +104,8 @@ impl Provider for HydraHostProvider {
             let region = normalize_region(&listing.location);
 
             // Convert pricing to Decimal
-            let hourly_rate = Decimal::from_str(&listing.price.hourly.total.to_string())
-                .unwrap_or(Decimal::ZERO);
+            let hourly_rate =
+                Decimal::from_str(&listing.price.hourly.total.to_string()).unwrap_or(Decimal::ZERO);
 
             // HydraHost doesn't explicitly provide spot pricing in this endpoint
             let spot_rate = None;

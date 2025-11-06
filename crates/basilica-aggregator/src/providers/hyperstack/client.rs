@@ -95,10 +95,7 @@ impl Provider for HyperstackProvider {
 
             // Parse GPU memory from group's GPU string (e.g., "A100-80G-PCIe" -> 80)
             let gpu_memory_gb = parse_gpu_memory(&group.gpu).unwrap_or_else(|| {
-                tracing::warn!(
-                    "Failed to parse GPU memory from group GPU: {}",
-                    group.gpu
-                );
+                tracing::warn!("Failed to parse GPU memory from group GPU: {}", group.gpu);
                 0
             });
 

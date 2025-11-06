@@ -82,11 +82,8 @@ impl AggregatorService {
                 .clone()
                 .ok_or_else(|| AggregatorError::Config("Lambda base URL missing".into()))?;
 
-            let provider = LambdaProvider::new(
-                api_key,
-                base_url,
-                config.providers.lambda.timeout_seconds,
-            )?;
+            let provider =
+                LambdaProvider::new(api_key, base_url, config.providers.lambda.timeout_seconds)?;
 
             providers.push(Box::new(provider));
         }

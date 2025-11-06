@@ -3,8 +3,8 @@ use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
 use async_trait::async_trait;
 
 pub mod datacrunch;
-pub mod hyperstack;
 pub mod hydrahost;
+pub mod hyperstack;
 pub mod lambda;
 
 #[async_trait]

@@ -28,10 +28,7 @@ pub fn parse_gpu_description(description: &str) -> Option<GpuInfo> {
     }
 
     // Extract count from "1x"
-    let count = gpu_tokens[0]
-        .trim_end_matches('x')
-        .parse::<u32>()
-        .ok()?;
+    let count = gpu_tokens[0].trim_end_matches('x').parse::<u32>().ok()?;
 
     // Extract model (everything after count until parenthesis)
     let model = gpu_tokens[1..].join(" ");

@@ -18,7 +18,7 @@ pub struct InstanceTypeWrapper {
 pub struct InstanceType {
     pub name: String,
     pub price_cents_per_hour: u64, // Lambda returns prices in cents
-    pub description: String,         // e.g., "1x A10 (24 GB PCIe)"
+    pub description: String,       // e.g., "1x A10 (24 GB PCIe)"
     pub specs: Specs,
 }
 

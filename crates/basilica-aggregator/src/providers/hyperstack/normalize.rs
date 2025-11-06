@@ -15,17 +15,16 @@ pub fn parse_gpu_string(gpu_str: &str) -> (String, Option<u32>) {
     let model = parts[0].to_string();
 
     // Look for memory specification (e.g., "80G", "40G")
-    let memory = parts.iter()
-        .find_map(|part| {
-            if part.ends_with('G') || part.ends_with("GB") {
-                part.trim_end_matches("GB")
-                    .trim_end_matches('G')
-                    .parse::<u32>()
-                    .ok()
-            } else {
-                None
-            }
-        });
+    let memory = parts.iter().find_map(|part| {
+        if part.ends_with('G') || part.ends_with("GB") {
+            part.trim_end_matches("GB")
+                .trim_end_matches('G')
+                .parse::<u32>()
+                .ok()
+        } else {
+            None
+        }
+    });
 
     (model, memory)
 }

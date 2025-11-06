@@ -296,7 +296,10 @@ client_secret = "test-secret"
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.providers.datacrunch.is_enabled());
         match config.providers.datacrunch.get_auth() {
-            Some(AuthConfig::OAuth { client_id, client_secret }) => {
+            Some(AuthConfig::OAuth {
+                client_id,
+                client_secret,
+            }) => {
                 assert_eq!(client_id, "test-id");
                 assert_eq!(client_secret, "test-secret");
             }

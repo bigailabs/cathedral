@@ -61,7 +61,7 @@ pub async fn get_gpu_prices(
                 let provider_name = offering.provider.as_str().to_string();
                 provider_groups
                     .entry(provider_name)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(offering);
             }
 
@@ -77,7 +77,10 @@ pub async fn get_gpu_prices(
                 })
                 .collect();
 
-            let total_count: usize = providers.iter().map(|p| p["count"].as_u64().unwrap_or(0) as usize).sum();
+            let total_count: usize = providers
+                .iter()
+                .map(|p| p["count"].as_u64().unwrap_or(0) as usize)
+                .sum();
 
             (
                 StatusCode::OK,

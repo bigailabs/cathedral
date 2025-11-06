@@ -103,7 +103,8 @@ impl Provider for LambdaProvider {
             let gpu_type = normalize_gpu_type(&gpu_info.model);
 
             // Convert price from cents to dollars
-            let hourly_rate = Decimal::from(instance_type.price_cents_per_hour) / Decimal::from(100);
+            let hourly_rate =
+                Decimal::from(instance_type.price_cents_per_hour) / Decimal::from(100);
 
             // Determine region - use first available or "global"
             let region = wrapper

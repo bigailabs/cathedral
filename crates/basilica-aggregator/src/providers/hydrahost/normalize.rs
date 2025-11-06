@@ -19,12 +19,12 @@ pub fn get_gpu_memory(gpu_model: &str) -> u32 {
         // NVIDIA GPUs
         ("4090", 24),
         ("3090", 24),
-        ("a100", 80),  // A100 comes in 40GB and 80GB, default to 80GB
+        ("a100", 80), // A100 comes in 40GB and 80GB, default to 80GB
         ("a40", 48),
         ("a5000", 24),
         ("a6000", 48),
         ("h100", 80),
-        ("gh200", 96),  // Grace Hopper superchip
+        ("gh200", 96), // Grace Hopper superchip
         // AMD GPUs
         ("mi250", 128),  // MI250X has 128GB
         ("mi300x", 192), // MI300X has 192GB
