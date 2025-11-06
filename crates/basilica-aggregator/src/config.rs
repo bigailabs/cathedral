@@ -38,6 +38,7 @@ fn default_ttl() -> u64 {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProvidersConfig {
+    #[serde(default)]
     pub datacrunch: ProviderConfig,
     #[serde(default)]
     pub hyperstack: ProviderConfig,
@@ -45,12 +46,28 @@ pub struct ProvidersConfig {
     pub lambda: ProviderConfig,
 }
 
+/// Authentication configuration enum for different provider types
+/// The type is automatically determined based on which fields are present in ProviderConfig
+#[derive(Debug, Clone)]
+pub enum AuthConfig {
+    OAuth {
+        client_id: String,
+        client_secret: String,
+    },
+    ApiKey {
+        api_key: String,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProviderConfig {
-    #[serde(default)]
-    pub enabled: bool,
+    /// OAuth client ID (for OAuth providers like DataCrunch)
     pub client_id: Option<String>,
+    /// OAuth client secret (for OAuth providers like DataCrunch)
     pub client_secret: Option<String>,
+    /// API key (for API key providers like Lambda)
+    pub api_key: Option<String>,
+
     #[serde(default = "default_cooldown")]
     pub cooldown_seconds: u64,
     #[serde(default = "default_timeout")]
@@ -58,12 +75,33 @@ pub struct ProviderConfig {
     pub api_base_url: Option<String>,
 }
 
+impl ProviderConfig {
+    /// Check if this provider is enabled (has auth configured)
+    pub fn is_enabled(&self) -> bool {
+        self.get_auth().is_some()
+    }
+
+    /// Get authentication config if provider is configured
+    pub fn get_auth(&self) -> Option<AuthConfig> {
+        match (&self.client_id, &self.client_secret, &self.api_key) {
+            (Some(client_id), Some(client_secret), None) => Some(AuthConfig::OAuth {
+                client_id: client_id.clone(),
+                client_secret: client_secret.clone(),
+            }),
+            (None, None, Some(api_key)) => Some(AuthConfig::ApiKey {
+                api_key: api_key.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             client_id: None,
             client_secret: None,
+            api_key: None,
             cooldown_seconds: default_cooldown(),
             timeout_seconds: default_timeout(),
             api_base_url: None,
@@ -117,55 +155,15 @@ impl Config {
 
     /// Validate configuration
     pub fn validate(&self) -> Result<()> {
-        // Check at least one provider is enabled
-        let any_enabled = self.providers.datacrunch.enabled
-            || self.providers.hyperstack.enabled
-            || self.providers.lambda.enabled;
+        // Check at least one provider is enabled (has auth configured)
+        let any_enabled = self.providers.datacrunch.is_enabled()
+            || self.providers.hyperstack.is_enabled()
+            || self.providers.lambda.is_enabled();
 
         if !any_enabled {
             return Err(AggregatorError::Config(
-                "At least one provider must be enabled".to_string(),
+                "At least one provider must be configured (has auth)".to_string(),
             ));
-        }
-
-        // Check enabled providers have credentials
-        if self.providers.datacrunch.enabled {
-            if self.providers.datacrunch.client_id.is_none() {
-                return Err(AggregatorError::Config(
-                    "DataCrunch provider enabled but client_id not set".to_string(),
-                ));
-            }
-            if self.providers.datacrunch.client_secret.is_none() {
-                return Err(AggregatorError::Config(
-                    "DataCrunch provider enabled but client_secret not set".to_string(),
-                ));
-            }
-        }
-
-        if self.providers.hyperstack.enabled {
-            if self.providers.hyperstack.client_id.is_none() {
-                return Err(AggregatorError::Config(
-                    "Hyperstack provider enabled but client_id not set".to_string(),
-                ));
-            }
-            if self.providers.hyperstack.client_secret.is_none() {
-                return Err(AggregatorError::Config(
-                    "Hyperstack provider enabled but client_secret not set".to_string(),
-                ));
-            }
-        }
-
-        if self.providers.lambda.enabled {
-            if self.providers.lambda.client_id.is_none() {
-                return Err(AggregatorError::Config(
-                    "Lambda provider enabled but client_id not set".to_string(),
-                ));
-            }
-            if self.providers.lambda.client_secret.is_none() {
-                return Err(AggregatorError::Config(
-                    "Lambda provider enabled but client_secret not set".to_string(),
-                ));
-            }
         }
 
         Ok(())
@@ -206,12 +204,7 @@ mod tests {
             },
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
-                datacrunch: ProviderConfig {
-                    enabled: true,
-                    client_id: None,
-                    client_secret: None,
-                    ..Default::default()
-                },
+                datacrunch: ProviderConfig::default(),
                 hyperstack: ProviderConfig::default(),
                 lambda: ProviderConfig::default(),
             },
@@ -224,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_validation_valid() {
+    fn test_config_validation_valid_oauth() {
         let config = Config {
             server: ServerConfig {
                 host: "0.0.0.0".to_string(),
@@ -233,7 +226,6 @@ mod tests {
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
                 datacrunch: ProviderConfig {
-                    enabled: true,
                     client_id: Some("test-client-id".to_string()),
                     client_secret: Some("test-client-secret".to_string()),
                     api_base_url: Some("https://api.datacrunch.io/v1".to_string()),
@@ -248,5 +240,88 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validation_valid_api_key() {
+        let config = Config {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+            },
+            cache: CacheConfig { ttl_seconds: 45 },
+            providers: ProvidersConfig {
+                datacrunch: ProviderConfig::default(),
+                hyperstack: ProviderConfig::default(),
+                lambda: ProviderConfig {
+                    api_key: Some("test-api-key".to_string()),
+                    api_base_url: Some("https://cloud.lambdalabs.com/api/v1".to_string()),
+                    ..Default::default()
+                },
+            },
+            database: DatabaseConfig {
+                path: "test.db".to_string(),
+            },
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_deserialization_oauth() {
+        let toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[cache]
+ttl_seconds = 45
+
+[database]
+path = "test.db"
+
+[providers.datacrunch]
+api_base_url = "https://api.datacrunch.io/v1"
+client_id = "test-id"
+client_secret = "test-secret"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.providers.datacrunch.is_enabled());
+        match config.providers.datacrunch.get_auth() {
+            Some(AuthConfig::OAuth { client_id, client_secret }) => {
+                assert_eq!(client_id, "test-id");
+                assert_eq!(client_secret, "test-secret");
+            }
+            _ => panic!("Expected OAuth auth"),
+        }
+    }
+
+    #[test]
+    fn test_config_deserialization_api_key() {
+        let toml = r#"
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[cache]
+ttl_seconds = 45
+
+[database]
+path = "test.db"
+
+[providers.lambda]
+api_base_url = "https://cloud.lambdalabs.com/api/v1"
+api_key = "test-key"
+        "#;
+
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.providers.lambda.is_enabled());
+        match config.providers.lambda.get_auth() {
+            Some(AuthConfig::ApiKey { api_key }) => {
+                assert_eq!(api_key, "test-key");
+            }
+            _ => panic!("Expected ApiKey auth"),
+        }
     }
 }

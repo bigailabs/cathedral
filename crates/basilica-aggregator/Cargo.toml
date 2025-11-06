@@ -52,3 +52,4 @@ async-trait = "0.1"
 [dev-dependencies]
 axum-test = "15"
 mockito = "1"
+toml = "0.8"

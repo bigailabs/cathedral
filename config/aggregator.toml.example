@@ -22,19 +22,27 @@ api_base_url = "https://api.datacrunch.io/v1"
 
 [providers.hyperstack]
 enabled = false
-client_id = "your-hyperstack-client-id"
-client_secret = "your-hyperstack-client-secret"
+# You can either:
+# 1. Put your API key directly here:
+#    api_key = "your-api-key"
+# 2. Or override with environment variable:
+#    export AGGREGATOR__PROVIDERS__HYPERSTACK__API_KEY="your-api-key"
+api_key = "your-hyperstack-api-key"
 cooldown_seconds = 30
 timeout_seconds = 10
 api_base_url = "https://infrahub-api.nexgencloud.com/v1"
 
 [providers.lambda]
 enabled = false
-client_id = "your-lambda-client-id"
-client_secret = "your-lambda-client-secret"
+# You can either:
+# 1. Put your API key directly here:
+#    api_key = "your-api-key"
+# 2. Or override with environment variable:
+#    export AGGREGATOR__PROVIDERS__LAMBDA__API_KEY="your-api-key"
+api_key = "your-lambda-api-key"
 cooldown_seconds = 30
 timeout_seconds = 10
-api_base_url = "https://cloud.lambda.ai/api/v1"
+api_base_url = "https://cloud.lambdalabs.com/api/v1"
 
 [database]
 path = "aggregator.db"

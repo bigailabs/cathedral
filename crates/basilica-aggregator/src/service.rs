@@ -1,8 +1,10 @@
-use crate::config::Config;
+use crate::config::{AuthConfig, Config};
 use crate::db::Database;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
 use crate::providers::datacrunch::DataCrunchProvider;
+use crate::providers::hyperstack::HyperstackProvider;
+use crate::providers::lambda::LambdaProvider;
 use crate::providers::Provider;
 use basilica_common::types::GpuCategory;
 use chrono::{Duration, Utc};
@@ -18,23 +20,25 @@ impl AggregatorService {
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
         let mut providers: Vec<Box<dyn Provider>> = Vec::new();
 
-        // Initialize enabled providers
-        if config.providers.datacrunch.enabled {
-            let client_id = config
+        // Initialize configured providers
+        if config.providers.datacrunch.is_enabled() {
+            let auth = config
                 .providers
                 .datacrunch
-                .client_id
-                .clone()
-                .ok_or_else(|| AggregatorError::Config("DataCrunch client_id missing".into()))?;
+                .get_auth()
+                .ok_or_else(|| AggregatorError::Config("DataCrunch auth missing".into()))?;
 
-            let client_secret = config
-                .providers
-                .datacrunch
-                .client_secret
-                .clone()
-                .ok_or_else(|| {
-                    AggregatorError::Config("DataCrunch client_secret missing".into())
-                })?;
+            let (client_id, client_secret) = match auth {
+                AuthConfig::OAuth {
+                    client_id,
+                    client_secret,
+                } => (client_id, client_secret),
+                AuthConfig::ApiKey { .. } => {
+                    return Err(AggregatorError::Config(
+                        "DataCrunch requires OAuth authentication".into(),
+                    ))
+                }
+            };
 
             let base_url = config
                 .providers
@@ -48,6 +52,72 @@ impl AggregatorService {
                 client_secret,
                 base_url,
                 config.providers.datacrunch.timeout_seconds,
+            )?;
+
+            providers.push(Box::new(provider));
+        }
+
+        // Initialize Lambda provider if configured
+        if config.providers.lambda.is_enabled() {
+            let auth = config
+                .providers
+                .lambda
+                .get_auth()
+                .ok_or_else(|| AggregatorError::Config("Lambda auth missing".into()))?;
+
+            let api_key = match auth {
+                AuthConfig::ApiKey { api_key } => api_key,
+                AuthConfig::OAuth { .. } => {
+                    return Err(AggregatorError::Config(
+                        "Lambda requires ApiKey authentication".into(),
+                    ))
+                }
+            };
+
+            let base_url = config
+                .providers
+                .lambda
+                .api_base_url
+                .clone()
+                .ok_or_else(|| AggregatorError::Config("Lambda base URL missing".into()))?;
+
+            let provider = LambdaProvider::new(
+                api_key,
+                base_url,
+                config.providers.lambda.timeout_seconds,
+            )?;
+
+            providers.push(Box::new(provider));
+        }
+
+        // Initialize Hyperstack provider if configured
+        if config.providers.hyperstack.is_enabled() {
+            let auth = config
+                .providers
+                .hyperstack
+                .get_auth()
+                .ok_or_else(|| AggregatorError::Config("Hyperstack auth missing".into()))?;
+
+            let api_key = match auth {
+                AuthConfig::ApiKey { api_key } => api_key,
+                AuthConfig::OAuth { .. } => {
+                    return Err(AggregatorError::Config(
+                        "Hyperstack requires ApiKey authentication".into(),
+                    ))
+                }
+            };
+
+            let base_url = config
+                .providers
+                .hyperstack
+                .api_base_url
+                .clone()
+                .ok_or_else(|| AggregatorError::Config("Hyperstack base URL missing".into()))?;
+
+            let provider = HyperstackProvider::new(
+                api_key,
+                base_url,
+                config.providers.hyperstack.timeout_seconds,
             )?;
 
             providers.push(Box::new(provider));

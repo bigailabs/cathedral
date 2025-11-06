@@ -1,7 +1,9 @@
 use crate::api::query::GpuPriceQuery;
+use crate::models::GpuOffering;
 use crate::service::AggregatorService;
 use axum::{extract::Query, extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub async fn get_gpu_prices(
@@ -45,7 +47,7 @@ pub async fn get_gpu_prices(
             }
 
             // Remove raw_metadata before returning
-            let response: Vec<_> = offerings
+            let cleaned_offerings: Vec<_> = offerings
                 .into_iter()
                 .map(|mut o| {
                     o.raw_metadata = json!(null);
@@ -53,12 +55,34 @@ pub async fn get_gpu_prices(
                 })
                 .collect();
 
-            let total_count = response.len();
+            // Group by provider
+            let mut provider_groups: HashMap<String, Vec<GpuOffering>> = HashMap::new();
+            for offering in cleaned_offerings {
+                let provider_name = offering.provider.as_str().to_string();
+                provider_groups
+                    .entry(provider_name)
+                    .or_insert_with(Vec::new)
+                    .push(offering);
+            }
+
+            // Build response with provider grouping
+            let providers: Vec<_> = provider_groups
+                .into_iter()
+                .map(|(provider, nodes)| {
+                    json!({
+                        "provider": provider,
+                        "count": nodes.len(),
+                        "nodes": nodes,
+                    })
+                })
+                .collect();
+
+            let total_count: usize = providers.iter().map(|p| p["count"].as_u64().unwrap_or(0) as usize).sum();
 
             (
                 StatusCode::OK,
                 Json(json!({
-                    "offerings": response,
+                    "providers": providers,
                     "total_count": total_count,
                 })),
             )

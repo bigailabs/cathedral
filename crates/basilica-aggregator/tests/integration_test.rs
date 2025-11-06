@@ -6,7 +6,7 @@ async fn test_service_initialization() {
     // Create in-memory database
     let db = Arc::new(Database::new(":memory:").await.unwrap());
 
-    // Create test config
+    // Create test config with no providers configured (auth = None)
     let config = Config {
         server: ServerConfig {
             host: "127.0.0.1".to_string(),
@@ -14,10 +14,7 @@ async fn test_service_initialization() {
         },
         cache: CacheConfig { ttl_seconds: 45 },
         providers: ProvidersConfig {
-            datacrunch: ProviderConfig {
-                enabled: false, // Disabled for test
-                ..Default::default()
-            },
+            datacrunch: ProviderConfig::default(), // No auth = disabled
             hyperstack: ProviderConfig::default(),
             lambda: ProviderConfig::default(),
         },
@@ -26,7 +23,7 @@ async fn test_service_initialization() {
         },
     };
 
-    // Should fail - no providers enabled
+    // Should fail - no providers configured
     let result = AggregatorService::new(db, config);
     assert!(result.is_err());
 }
