@@ -19,10 +19,11 @@ metrics = { workspace = true }
 serde_yaml = "0.9"
 kube-runtime = "0.88"
 metrics-exporter-prometheus = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 futures = "0.3"
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

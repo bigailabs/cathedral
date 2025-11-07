@@ -1,8 +1,0 @@
-{
-  "image": "busybox:latest",
-  "command": ["echo", "job-completed"],
-  "resources": {
-    "cpu": "0.25",
-    "memory": "128Mi"
-  }
-}

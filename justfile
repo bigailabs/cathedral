@@ -307,7 +307,7 @@ ci-build-images TAG="k3_test":
     fi
     echo
     echo "When the workflow finishes, deploy with Ansible:"
-    echo "  cd scripts/ansible && ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \"-e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}}\" \"-e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}\""
+    echo "  cd orchestrator/ansible && ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \"-e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}}\" \"-e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}\""
 
 # Manually run CI on the current branch (or a given ref)
 ci-run REF="":
@@ -375,11 +375,11 @@ r2-setup:
     echo "  1. Prompt for vault password (min 12 chars)"
     echo "  2. Collect R2 credentials interactively"
     echo "  3. Encrypt credentials with AES-256"
-    echo "  4. Save to scripts/ansible/group_vars/all/vault.yml"
+    echo "  4. Save to orchestrator/ansible/group_vars/all/vault.yml"
     echo ""
-    cd scripts/ansible
-    chmod +x secure-r2-setup.sh
-    ./secure-r2-setup.sh
+    cd orchestrator/ansible
+    chmod +x scripts/05-secure-r2-setup.sh
+    ./scripts/05-secure-r2-setup.sh
     cd ../..
     echo ""
     echo "✅ R2 credentials configured!"
@@ -398,9 +398,9 @@ r2-upload:
     echo "This will upload your R2 credentials directly to the cluster."
     echo "Provide credentials via environment variables or interactively."
     echo ""
-    cd scripts/ansible
-    chmod +x upload-r2-credentials.sh
-    ./upload-r2-credentials.sh
+    cd orchestrator/ansible
+    chmod +x scripts/06-upload-r2-credentials.sh
+    ./scripts/06-upload-r2-credentials.sh
     cd ../..
     echo ""
     echo "✅ Credentials uploaded!"
@@ -420,9 +420,9 @@ e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basili
         echo ""
         echo "Running secure R2 setup before deployment..."
         echo ""
-        cd scripts/ansible
-        chmod +x secure-r2-setup.sh
-        ./secure-r2-setup.sh
+        cd orchestrator/ansible
+        chmod +x scripts/05-secure-r2-setup.sh
+        ./scripts/05-secure-r2-setup.sh
         cd ../..
         echo ""
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -432,7 +432,7 @@ e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basili
     DB_HOST="basilica-postgres.basilica-system.svc.cluster.local"
     DB_URL="postgres://{{DB_USER}}:{{DB_PASS}}@${DB_HOST}:5432/{{DB_NAME}}"
     echo "Using DB_URL=${DB_URL}"
-    cd scripts/ansible
+    cd orchestrator/ansible
 
     # Check if vault file exists and use it
     VAULT_ARGS=""
@@ -448,7 +448,7 @@ e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basili
     else
         echo "ℹ️  No R2 credentials found (group_vars/all/vault.yml)"
         echo "   To set up R2 storage, run: just e2e-apply SETUP_R2=true"
-        echo "   Or run manually: cd scripts/ansible && ./secure-r2-setup.sh"
+        echo "   Or run manually: cd orchestrator/ansible && ./scripts/05-secure-r2-setup.sh"
     fi
 
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
@@ -465,7 +465,7 @@ e2e-reinstall TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="ba
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Teardown remote cluster resources via Ansible..."
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml -e tenant_namespace={{TENANT_NS}} || true
     cd - >/dev/null
     just e2e-apply TAG={{TAG}} DB_USER={{DB_USER}} DB_PASS={{DB_PASS}} DB_NAME={{DB_NAME}}
@@ -478,21 +478,21 @@ e2e-reinstall TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="ba
 subtensor-up:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/subtensor-up.yml
 
 # Tear down Subtensor local devnet (delete Alice/Bob/ConfigMap/Job)
 subtensor-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/subtensor-down.yml || true
 
 # Show Subtensor resources and recent events
 subtensor-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/subtensor-status.yml
 
 # Tail Subtensor init job logs
@@ -512,7 +512,7 @@ subtensor-logs:
 api-status:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/api-status.yml
 
 # API logs locally using KUBECONFIG=build/k3s.yaml
@@ -539,7 +539,7 @@ k3s-provision TAG="k3_test":
     #!/usr/bin/env bash
     set -euo pipefail
     echo "🚀 Provisioning remote K3s cluster via Ansible..."
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/k3s-setup.yml
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
       -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
@@ -869,7 +869,7 @@ operator-redeploy TAG="k3_test":
 deploy-operator-api TAG="k3_test":
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
       -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
       -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
@@ -879,28 +879,28 @@ deploy-operator-api TAG="k3_test":
 wss-enable:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags subtensor_wss
 
 # Resume only the public WSS (Ingress + cert-manager) setup
 wss-public-enable:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags subtensor_public_wss
 
 # Bootstrap only the cluster networking (ingress-nginx + cert-manager + ClusterIssuer)
 networking-bootstrap:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags networking
 
 # Run only WSS setup via subtensor-up playbook
 subtensor-wss:
     #!/usr/bin/env bash
     set -euo pipefail
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/subtensor-up.yml --tags subtensor_wss
 
 # Regenerate local kubeconfig (and install kubectl if missing)
@@ -908,7 +908,7 @@ k3s-kubeconfig:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f build/k3s.yaml || true
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags kubeconfig
 
 # Regenerate local kubeconfig for SSH tunnel (server=127.0.0.1)
@@ -916,7 +916,7 @@ k3s-kubeconfig-local:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f build/k3s.yaml || true
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags kubeconfig -e kubeconfig_server=127.0.0.1
 
 # # Open an SSH tunnel to the K3s API (local 6443 -> remote 127.0.0.1:6443)
@@ -1416,7 +1416,7 @@ localnet-restart:
 
 # Setup complete E2E environment (local subtensor + remote K3s + operator + local validator + local API)
 # Prerequisites: Run 'just ci-build-images' first to build and push images with k3_test tag
-# R2 storage: Automatically deployed if vault credentials exist at scripts/ansible/group_vars/all/vault.yml
+# R2 storage: Automatically deployed if vault credentials exist at orchestrator/ansible/group_vars/all/vault.yml
 e2e-up TAG="k3_test":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1478,7 +1478,7 @@ e2e-down:
 
     # 1. Teardown remote K3s deployments via Ansible
     echo "🧹 Cleaning up remote K3s deployments..."
-    cd scripts/ansible
+    cd orchestrator/ansible
     ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml || true
     cd ../..
 
@@ -1614,8 +1614,8 @@ e2e-status:
 e2e-validate:
     #!/usr/bin/env bash
     set -euo pipefail
-    chmod +x scripts/e2e/run-validation.sh
-    ./scripts/e2e/run-validation.sh
+    chmod +x orchestrator/scripts/e2e/run-validation.sh
+    ./orchestrator/scripts/e2e/run-validation.sh
 
 # =============================================================================
 # SHOW HELP

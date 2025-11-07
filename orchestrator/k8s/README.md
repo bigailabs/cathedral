@@ -1,0 +1,62 @@
+# Kubernetes Manifests
+
+This directory contains all Kubernetes manifests for the Basilica platform, organized by component type.
+
+## Directory Structure
+
+```
+k8s/
+├── core/                    # Required cluster resources
+│   ├── namespaces.yaml     # Three namespaces: basilica-system, basilica-validators, basilica-system
+│   └── rbac/               # RBAC policies
+│       ├── operator-rbac.yaml
+│       └── operator-tenant-role.yaml (templated)
+│
+├── services/                # Service deployments
+│   └── operator/           # Basilica K8s operator (deployment + servicemonitor)
+│
+├── observability/           # Telemetry and monitoring
+│   ├── alloy/              # Grafana Alloy telemetry agent (DaemonSet)
+│   └── disk-cleanup-cronjob.yaml
+│
+└── networking/              # Ingress and routing
+    ├── envoy/              # Envoy forward proxy
+    └── gateway-api/        # Kubernetes Gateway API resources
+        └── examples/       # Example Gateway/HTTPRoute manifests
+```
+
+## Deployment
+
+All manifests are deployed via Ansible playbooks in `orchestrator/ansible/playbooks/`.
+
+**Primary Deployment**:
+```bash
+cd orchestrator/ansible
+ansible-playbook -i inventories/production.ini playbooks/02-deploy/basilica.yml
+```
+
+**Teardown**:
+```bash
+ansible-playbook -i inventories/production.ini playbooks/05-teardown/basilica.yml
+```
+
+## Important Notes
+
+### Deployment Architecture
+- **Operator**: Deployed in K3s cluster (manages GPU workloads, user deployments)
+- **API**: Deployed via Terraform/ECS (see `scripts/cloud/compute.tf`)
+- **Validator**: Deployed via Docker Compose (see `scripts/validator/compose.prod.yml`)
+- **Telemetry**: Deployed via Ansible (see `telemetry/ansible/`)
+
+### Optional Components
+Controlled by variables in `orchestrator/ansible/group_vars/all/application.yml`:
+- `install_envoy_forward_proxy` (default: true) - Forward proxy for user workloads
+- `install_gateway_api` (default: true) - Kubernetes Gateway API resources
+
+### Dynamic Routing
+The Envoy ConfigMap in `networking/envoy/` contains the base configuration. For production user deployments, the operator dynamically generates routing rules based on `UserDeployment` custom resources.
+
+## See Also
+- [Ansible Playbooks](../ansible/playbooks/README.md)
+- [Operator Documentation](../../crates/basilica-operator/README.md)
+- [CLAUDE.md](../../CLAUDE.md) - Comprehensive development guide

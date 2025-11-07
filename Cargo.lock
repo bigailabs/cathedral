@@ -2526,6 +2526,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum 0.7.9",
+ "chrono",
  "futures",
  "k8s-openapi",
  "kube",

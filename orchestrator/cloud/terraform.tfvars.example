@@ -1,0 +1,41 @@
+# AWS Configuration
+aws_region   = "us-east-2"
+project_name = "basilica-k3s"
+
+# SSH Key Configuration
+# Option 1: Use existing AWS key pair
+# ssh_key_name = "my-existing-key"
+
+# Option 2: Generate new SSH key (leave ssh_key_name empty)
+ssh_key_name         = ""
+ssh_public_key_path  = "~/.ssh/id_rsa.pub"
+
+# SSH Access Control
+# CIDR blocks allowed to SSH into K3s nodes
+# Default allows all IPs - restrict this in production
+allowed_ssh_cidr_blocks = ["0.0.0.0/0"]
+
+# Example: Restrict to specific IPs
+# allowed_ssh_cidr_blocks = [
+#   "203.0.113.10/32",  # Your office IP
+#   "198.51.100.0/24",  # Your VPN subnet
+# ]
+
+# K3s Server Configuration (Control Plane)
+# Number of server nodes - must be odd for etcd quorum (1, 3, 5, etc.)
+# Recommended: 3 for HA production, 1 for dev/test
+k3s_server_count            = 3
+k3s_server_instance_type    = "t3.xlarge"
+k3s_server_root_volume_size = 100
+
+# K3s Agent Configuration (Worker Nodes)
+k3s_agent_instance_type    = "t3.medium"
+k3s_agent_count            = 2
+k3s_agent_root_volume_size = 100
+
+# Network Configuration
+enable_public_ips = true
+
+# Ubuntu AMI Configuration
+ubuntu_ami_owner = "099720109477"
+ubuntu_version   = "24.04"
