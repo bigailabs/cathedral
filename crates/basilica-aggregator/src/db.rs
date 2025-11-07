@@ -38,10 +38,13 @@ impl Database {
             sqlx::query(
                 r#"
                 INSERT INTO gpu_offerings
-                (id, provider, gpu_type, gpu_memory_gb, gpu_count, system_memory_gb, vcpu_count, region,
-                 hourly_rate, spot_rate, availability, raw_metadata, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, provider, gpu_type, gpu_memory_gb, gpu_count, interconnect, storage, deployment_type,
+                 system_memory_gb, vcpu_count, region, hourly_rate, spot_rate, availability, raw_metadata, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    interconnect = excluded.interconnect,
+                    storage = excluded.storage,
+                    deployment_type = excluded.deployment_type,
                     hourly_rate = excluded.hourly_rate,
                     spot_rate = excluded.spot_rate,
                     availability = excluded.availability,
@@ -54,6 +57,9 @@ impl Database {
             .bind(offering.gpu_type.as_str())
             .bind(offering.gpu_memory_gb as i64)
             .bind(offering.gpu_count as i64)
+            .bind(offering.interconnect.as_ref())
+            .bind(offering.storage.as_ref())
+            .bind(offering.deployment_type.as_ref())
             .bind(offering.system_memory_gb as i64)
             .bind(offering.vcpu_count as i64)
             .bind(&offering.region)
@@ -74,15 +80,15 @@ impl Database {
     pub async fn get_offerings(&self, provider: Option<Provider>) -> Result<Vec<GpuOffering>> {
         let query = if let Some(p) = provider {
             sqlx::query(
-                "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, system_memory_gb, vcpu_count, region,
-                        hourly_rate, spot_rate, availability, raw_metadata, fetched_at
+                "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, interconnect, storage, deployment_type,
+                        system_memory_gb, vcpu_count, region, hourly_rate, spot_rate, availability, raw_metadata, fetched_at
                  FROM gpu_offerings WHERE provider = ? ORDER BY fetched_at DESC",
             )
             .bind(p.as_str())
         } else {
             sqlx::query(
-                "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, system_memory_gb, vcpu_count, region,
-                        hourly_rate, spot_rate, availability, raw_metadata, fetched_at
+                "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, interconnect, storage, deployment_type,
+                        system_memory_gb, vcpu_count, region, hourly_rate, spot_rate, availability, raw_metadata, fetched_at
                  FROM gpu_offerings ORDER BY fetched_at DESC",
             )
         };
@@ -104,6 +110,9 @@ impl Database {
                     gpu_type: gpu_type_str.parse().ok()?,
                     gpu_memory_gb: row.get::<i64, _>("gpu_memory_gb") as u32,
                     gpu_count: row.get::<i64, _>("gpu_count") as u32,
+                    interconnect: row.get("interconnect"),
+                    storage: row.get("storage"),
+                    deployment_type: row.get("deployment_type"),
                     system_memory_gb: row.get::<i64, _>("system_memory_gb") as u32,
                     vcpu_count: row.get::<i64, _>("vcpu_count") as u32,
                     region: row.get("region"),

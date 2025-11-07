@@ -1,4 +1,6 @@
-use super::normalize::{normalize_gpu_type, normalize_region, parse_gpu_memory};
+use super::normalize::{
+    normalize_gpu_type, normalize_region, parse_gpu_memory, parse_interconnect,
+};
 use super::types::FlavorsResponse;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
@@ -128,6 +130,13 @@ impl Provider for HyperstackProvider {
                 // Use stock_available from flavor
                 let availability = flavor.stock_available;
 
+                // Parse interconnect from GPU string (e.g., "H100-80G-PCIe", "A100-80G-SXM4")
+                let interconnect = parse_interconnect(&group.gpu);
+
+                // Extract storage information (disk + ephemeral)
+                let total_storage = flavor.disk + flavor.ephemeral.unwrap_or(0);
+                let storage = Some(total_storage.to_string());
+
                 // Create offering with unique ID using flavor ID
                 let offering = GpuOffering {
                     id: format!("hyperstack-{}", flavor.id),
@@ -135,6 +144,9 @@ impl Provider for HyperstackProvider {
                     gpu_type: gpu_type.clone(),
                     gpu_memory_gb,
                     gpu_count: flavor.gpu_count,
+                    interconnect,
+                    storage,
+                    deployment_type: None, // Set as NULL for now
                     system_memory_gb,
                     vcpu_count: flavor.cpu,
                     region: region.clone(),

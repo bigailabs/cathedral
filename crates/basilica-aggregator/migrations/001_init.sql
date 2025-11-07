@@ -5,6 +5,9 @@ CREATE TABLE gpu_offerings (
     gpu_type TEXT NOT NULL, -- GPU category (A100, H100, B200, OTHER)
     gpu_memory_gb INTEGER NOT NULL, -- GPU memory per card
     gpu_count INTEGER NOT NULL,
+    interconnect TEXT, -- GPU interconnect type (SXM4, SXM5, SXM6, PCIe, PCIe-NVLink, etc.)
+    storage TEXT, -- Storage capacity (raw provider data, no unit conversion)
+    deployment_type TEXT, -- Deployment type (vm, bare-metal, container, etc.)
     system_memory_gb INTEGER NOT NULL, -- System RAM
     vcpu_count INTEGER NOT NULL,
     region TEXT NOT NULL,

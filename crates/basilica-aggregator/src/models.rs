@@ -53,6 +53,12 @@ pub struct GpuOffering {
     pub gpu_type: GpuCategory,
     pub gpu_memory_gb: u32, // GPU memory per card
     pub gpu_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interconnect: Option<String>, // GPU interconnect type (SXM4, SXM5, PCIe, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>, // Storage capacity (raw provider data, no unit conversion)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_type: Option<String>, // Deployment type (vm, bare-metal, container, etc.)
     pub system_memory_gb: u32, // System RAM
     pub vcpu_count: u32,
     pub region: String,

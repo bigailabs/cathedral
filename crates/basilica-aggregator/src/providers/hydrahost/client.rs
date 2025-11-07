@@ -1,4 +1,4 @@
-use super::normalize::{get_gpu_memory, normalize_gpu_type, normalize_region};
+use super::normalize::{format_storage, get_gpu_memory, normalize_gpu_type, normalize_region};
 use super::types::ListingsResponse;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
@@ -151,6 +151,9 @@ impl Provider for HydraHostProvider {
                 .or(listing.specs.cpu.thread_count)
                 .unwrap_or(listing.specs.cpu.cores * 2);
 
+            // Extract storage information with type details
+            let storage = listing.specs.storage.as_ref().and_then(format_storage);
+
             // Create offering with unique ID using listing ID
             let offering = GpuOffering {
                 id: format!("hydrahost-{}", listing.id),
@@ -158,6 +161,9 @@ impl Provider for HydraHostProvider {
                 gpu_type,
                 gpu_memory_gb,
                 gpu_count,
+                interconnect: None, // HydraHost API doesn't provide interconnect info
+                storage,
+                deployment_type: None, // Set as NULL for now
                 system_memory_gb: listing.specs.memory,
                 vcpu_count,
                 region,

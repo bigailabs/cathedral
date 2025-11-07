@@ -49,20 +49,15 @@ pub struct StorageSpec {
 
 /// Location response from DataCrunch API
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[allow(dead_code)]
 pub struct Location {
     pub code: String,
     pub name: String,
     pub country_code: String,
 }
 
-/// Instance availability response
+/// Instance availability response - per location
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[allow(dead_code)]
-pub struct InstanceAvailability {
-    pub instance_type: String,
+pub struct LocationAvailability {
     pub location_code: String,
-    pub available: bool,
-    #[serde(default)]
-    pub is_spot: bool,
+    pub availabilities: Vec<String>, // List of available instance type IDs
 }

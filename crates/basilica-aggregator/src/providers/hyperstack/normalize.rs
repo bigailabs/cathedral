@@ -78,11 +78,73 @@ pub fn parse_gpu_memory(gpu_str: &str) -> Option<u32> {
     get_fallback_gpu_memory(gpu_str)
 }
 
-/// Normalize region to "global" (as per DataCrunch pattern)
-/// Hyperstack regions would be like "CANADA-1", "US-WEST-2", etc.
-/// We simplify to "global" to match DataCrunch behavior
-pub fn normalize_region(_region: &str) -> String {
-    "global".to_string()
+/// Parse interconnect type from Hyperstack GPU string
+/// Format: "H100-80G-PCIe" -> Some("PCIe")
+/// Format: "H100-80G-SXM5" -> Some("SXM5")
+/// Format: "A100-80G-PCIe-NVLink" -> Some("PCIe-NVLink")
+/// Format: "A100-80G-PCIe-spot" -> Some("PCIe")
+/// Returns None if interconnect type not found
+pub fn parse_interconnect(gpu_str: &str) -> Option<String> {
+    // Split by '-' to separate components
+    let parts: Vec<&str> = gpu_str.split('-').collect();
+
+    // Known interconnect types (order matters for multi-part matches like PCIe-NVLink)
+    let multi_part_interconnects = [("PCIe", "NVLink")];
+    let single_interconnects = ["SXM4", "SXM5", "SXM6", "PCIe", "PCIE"];
+
+    // Check for multi-part interconnects first (e.g., PCIe-NVLink)
+    for i in 0..parts.len().saturating_sub(1) {
+        let part1 = parts[i].to_uppercase();
+        let part2 = parts[i + 1].to_uppercase();
+
+        for (first, second) in &multi_part_interconnects {
+            if (part1 == first.to_uppercase() || part1 == "PCIE") && part2 == second.to_uppercase()
+            {
+                return Some(format!("{}-{}", first, second));
+            }
+        }
+    }
+
+    // Check for single-part interconnects, excluding known non-interconnect suffixes
+    let ignore_parts = ["SPOT", "GB"];
+    for part in &parts {
+        let part_upper = part.to_uppercase();
+
+        // Skip ignored parts
+        if ignore_parts.contains(&part_upper.as_str()) {
+            continue;
+        }
+
+        // Skip memory specifications (e.g., "80G")
+        if part_upper.ends_with('G') && part_upper[..part_upper.len() - 1].parse::<u32>().is_ok() {
+            continue;
+        }
+
+        // Check if it matches a known interconnect
+        for interconnect in &single_interconnects {
+            if part_upper == *interconnect {
+                // Normalize PCIE to PCIe
+                return Some(if part_upper == "PCIE" {
+                    "PCIe".to_string()
+                } else {
+                    part_upper
+                });
+            }
+        }
+    }
+
+    None
+}
+
+/// Pass through Hyperstack region name as-is
+/// Hyperstack regions are like "CANADA-1", "US-WEST-1", "NORWAY-1" etc.
+/// We store exactly what the API provides without transformation
+pub fn normalize_region(region: &str) -> String {
+    if region.trim().is_empty() {
+        "unknown".to_string()
+    } else {
+        region.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -173,7 +235,70 @@ mod tests {
 
     #[test]
     fn test_normalize_region() {
-        assert_eq!(normalize_region("CANADA-1"), "global");
-        assert_eq!(normalize_region("US-WEST-2"), "global");
+        // Store exactly what Hyperstack API provides
+        assert_eq!(normalize_region("CANADA-1"), "CANADA-1");
+        assert_eq!(normalize_region("US-WEST-2"), "US-WEST-2");
+        assert_eq!(normalize_region("NORWAY-1"), "NORWAY-1");
+        assert_eq!(normalize_region(""), "unknown");
+    }
+
+    #[test]
+    fn test_parse_interconnect_pcie() {
+        assert_eq!(
+            parse_interconnect("H100-80G-PCIe"),
+            Some("PCIe".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("A100-80G-PCIe"),
+            Some("PCIe".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("H100-80G-PCIE"),
+            Some("PCIe".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_sxm() {
+        assert_eq!(
+            parse_interconnect("H100-80G-SXM5"),
+            Some("SXM5".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("A100-80G-SXM4"),
+            Some("SXM4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_pcie_nvlink() {
+        assert_eq!(
+            parse_interconnect("A100-80G-PCIe-NVLink"),
+            Some("PCIe-NVLink".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("H100-80G-PCIe-NVLink"),
+            Some("PCIe-NVLink".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_with_spot() {
+        // spot suffix should be ignored, return the interconnect
+        assert_eq!(
+            parse_interconnect("H100-80G-PCIe-spot"),
+            Some("PCIe".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("A100-80G-SXM4-spot"),
+            Some("SXM4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_none() {
+        // Just GPU model without interconnect
+        assert_eq!(parse_interconnect("H100"), None);
+        assert_eq!(parse_interconnect("H100-80GB"), None);
     }
 }

@@ -58,9 +58,11 @@ pub fn normalize_gpu_type(gpu_model: &str) -> GpuCategory {
         .unwrap_or_else(|_| GpuCategory::Other(gpu_model.to_string()))
 }
 
-/// Normalize region code to lowercase
+/// Pass through Lambda region name as-is
+/// Lambda regions are like "us-west-1", "us-east-1", etc.
+/// We store exactly what the API provides without transformation
 pub fn normalize_region(region_name: &str) -> String {
-    region_name.to_lowercase()
+    region_name.to_string()
 }
 
 #[cfg(test)]
@@ -113,7 +115,8 @@ mod tests {
 
     #[test]
     fn test_normalize_region() {
-        assert_eq!(normalize_region("US-WEST-1"), "us-west-1");
+        // Store exactly what Lambda API provides
+        assert_eq!(normalize_region("US-WEST-1"), "US-WEST-1");
         assert_eq!(normalize_region("us-east-1"), "us-east-1");
     }
 }

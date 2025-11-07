@@ -9,6 +9,31 @@ pub fn normalize_gpu_type(gpu_model: &str) -> GpuCategory {
         .unwrap_or_else(|_| GpuCategory::Other(gpu_model.to_string()))
 }
 
+/// Parse interconnect type from GPU description
+/// Format: "8x H100 SXM5 80GB" -> Some("SXM5")
+/// Returns None if interconnect type not found in description
+pub fn parse_interconnect(description: &str) -> Option<String> {
+    // Known interconnect types
+    let interconnect_types = ["SXM4", "SXM5", "SXM6", "PCIe", "PCIE"];
+
+    // Split by whitespace and look for interconnect type
+    for part in description.split_whitespace() {
+        let part_upper = part.to_uppercase();
+        for interconnect in &interconnect_types {
+            if part_upper == *interconnect {
+                // Normalize PCIe variations to "PCIe"
+                return Some(if part_upper == "PCIE" {
+                    "PCIe".to_string()
+                } else {
+                    part_upper
+                });
+            }
+        }
+    }
+
+    None
+}
+
 /// Normalize region code
 #[allow(dead_code)]
 pub fn normalize_region(location_code: &str) -> String {
@@ -56,5 +81,59 @@ mod tests {
     fn test_normalize_region() {
         assert_eq!(normalize_region("FIN-01"), "fin-01");
         assert_eq!(normalize_region("ICE-01"), "ice-01");
+    }
+
+    #[test]
+    fn test_parse_interconnect_sxm4() {
+        assert_eq!(
+            parse_interconnect("1x A100 SXM4 80GB"),
+            Some("SXM4".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("8x A100 SXM4 40GB"),
+            Some("SXM4".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_sxm5() {
+        assert_eq!(
+            parse_interconnect("1x H100 SXM5 80GB"),
+            Some("SXM5".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("8x H100 SXM5 80GB"),
+            Some("SXM5".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_sxm6() {
+        assert_eq!(
+            parse_interconnect("1x B200 SXM6 180GB"),
+            Some("SXM6".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("8x B200 SXM6 180GB"),
+            Some("SXM6".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_pcie() {
+        assert_eq!(
+            parse_interconnect("1x A100 PCIe 80GB"),
+            Some("PCIe".to_string())
+        );
+        assert_eq!(
+            parse_interconnect("1x A100 PCIE 80GB"),
+            Some("PCIe".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_interconnect_none() {
+        assert_eq!(parse_interconnect("1x RTX 4090 24GB"), None);
+        assert_eq!(parse_interconnect("NVIDIA H100"), None);
     }
 }

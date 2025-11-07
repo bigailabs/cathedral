@@ -106,34 +106,58 @@ impl Provider for LambdaProvider {
             let hourly_rate =
                 Decimal::from(instance_type.price_cents_per_hour) / Decimal::from(100);
 
-            // Determine region - use first available or "global"
-            let region = wrapper
-                .regions_with_capacity_available
-                .first()
-                .map(|r| normalize_region(&r.name))
-                .unwrap_or_else(|| "global".to_string());
+            // Extract storage information (in GiB)
+            let storage = Some(instance_type.specs.storage_gib.to_string());
 
-            // Check availability - true if any regions have capacity
-            let availability = !wrapper.regions_with_capacity_available.is_empty();
+            // Create one offering per region with capacity
+            if wrapper.regions_with_capacity_available.is_empty() {
+                // If no regions available, create single "global" offering as unavailable
+                let offering = GpuOffering {
+                    id: instance_type.name.clone(),
+                    provider: ProviderEnum::Lambda,
+                    gpu_type: gpu_type.clone(),
+                    gpu_memory_gb: gpu_info.memory_gb,
+                    gpu_count: gpu_info.count,
+                    interconnect: None,
+                    storage: storage.clone(),
+                    deployment_type: None,
+                    system_memory_gb: instance_type.specs.memory_gib,
+                    vcpu_count: instance_type.specs.vcpus,
+                    region: "global".to_string(),
+                    hourly_rate,
+                    spot_rate: None,
+                    availability: false,
+                    fetched_at,
+                    raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
+                };
+                offerings.push(offering);
+            } else {
+                // Create one offering per available region
+                for region_info in &wrapper.regions_with_capacity_available {
+                    let region = normalize_region(&region_info.name);
+                    let offering_id = format!("{}-{}", instance_type.name, region);
 
-            // Create offering
-            let offering = GpuOffering {
-                id: instance_type.name.clone(),
-                provider: ProviderEnum::Lambda,
-                gpu_type,
-                gpu_memory_gb: gpu_info.memory_gb,
-                gpu_count: gpu_info.count,
-                system_memory_gb: instance_type.specs.memory_gib,
-                vcpu_count: instance_type.specs.vcpus,
-                region,
-                hourly_rate,
-                spot_rate: None, // Lambda doesn't provide spot pricing in this endpoint
-                availability,
-                fetched_at,
-                raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
-            };
-
-            offerings.push(offering);
+                    let offering = GpuOffering {
+                        id: offering_id,
+                        provider: ProviderEnum::Lambda,
+                        gpu_type: gpu_type.clone(),
+                        gpu_memory_gb: gpu_info.memory_gb,
+                        gpu_count: gpu_info.count,
+                        interconnect: None, // Lambda API doesn't provide interconnect info
+                        storage: storage.clone(),
+                        deployment_type: None, // Set as NULL for now
+                        system_memory_gb: instance_type.specs.memory_gib,
+                        vcpu_count: instance_type.specs.vcpus,
+                        region,
+                        hourly_rate,
+                        spot_rate: None, // Lambda doesn't provide spot pricing in this endpoint
+                        availability: true, // True since this region has capacity
+                        fetched_at,
+                        raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
+                    };
+                    offerings.push(offering);
+                }
+            }
         }
 
         tracing::info!("Fetched {} offerings from Lambda", offerings.len());
