@@ -41,11 +41,41 @@ pub fn normalize_gpu_type(gpu_str: &str) -> GpuCategory {
         .unwrap_or_else(|_| GpuCategory::Other(gpu_str.to_string()))
 }
 
+/// Fallback lookup table for GPU models without memory in their name
+/// Maps GPU model prefix to standard memory size in GB
+fn get_fallback_gpu_memory(gpu_model: &str) -> Option<u32> {
+    // Extract base model name (before any suffixes like -spot, -NVLink, etc.)
+    let base_model = gpu_model.split('-').next()?;
+
+    match base_model {
+        "L40" => Some(48), // NVIDIA L40: 48GB GDDR6
+        "RTX" => {
+            // Handle RTX variants
+            if gpu_model.contains("A4000") {
+                Some(16) // RTX A4000: 16GB GDDR6
+            } else if gpu_model.contains("A6000") || gpu_model.contains("PRO6000") {
+                Some(48) // RTX A6000 and RTX PRO6000-SE: 48GB GDDR6
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Extract GPU memory in GB from Hyperstack GPU string
-/// Returns None if memory info not found in string
+/// First tries to parse from string (e.g., "A100-80G-PCIe" -> 80)
+/// Falls back to lookup table for known models without memory in name
 pub fn parse_gpu_memory(gpu_str: &str) -> Option<u32> {
     let (_, memory) = parse_gpu_string(gpu_str);
-    memory
+
+    // If memory was found in string, return it
+    if memory.is_some() {
+        return memory;
+    }
+
+    // Otherwise, try fallback lookup for known GPU models
+    get_fallback_gpu_memory(gpu_str)
 }
 
 /// Normalize region to "global" (as per DataCrunch pattern)
@@ -118,6 +148,27 @@ mod tests {
         assert_eq!(parse_gpu_memory("A100-80G-PCIe"), Some(80));
         assert_eq!(parse_gpu_memory("H100-80GB"), Some(80));
         assert_eq!(parse_gpu_memory("H100"), None);
+    }
+
+    #[test]
+    fn test_fallback_gpu_memory_l40() {
+        assert_eq!(parse_gpu_memory("L40"), Some(48));
+        assert_eq!(parse_gpu_memory("L40-spot"), Some(48));
+    }
+
+    #[test]
+    fn test_fallback_gpu_memory_rtx() {
+        assert_eq!(parse_gpu_memory("RTX-A4000"), Some(16));
+        assert_eq!(parse_gpu_memory("RTX-A6000"), Some(48));
+        assert_eq!(parse_gpu_memory("RTX-A6000-spot"), Some(48));
+        assert_eq!(parse_gpu_memory("RTX-PRO6000-SE"), Some(48));
+        assert_eq!(parse_gpu_memory("RTX-PRO6000-SE-spot"), Some(48));
+    }
+
+    #[test]
+    fn test_fallback_unknown_gpu() {
+        assert_eq!(parse_gpu_memory("RTX-4090"), None);
+        assert_eq!(parse_gpu_memory("UNKNOWN-GPU"), None);
     }
 
     #[test]

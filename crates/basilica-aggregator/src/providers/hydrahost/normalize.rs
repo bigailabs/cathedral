@@ -16,15 +16,23 @@ pub fn normalize_gpu_type(gpu_str: &str) -> GpuCategory {
 pub fn get_gpu_memory(gpu_model: &str) -> u32 {
     // Create lookup table for standard GPU memory configurations
     let memory_map: HashMap<&str, u32> = [
-        // NVIDIA GPUs
+        // NVIDIA GPUs - Consumer/Gaming
         ("4090", 24),
+        ("5090", 32), // RTX 5090
         ("3090", 24),
+        // NVIDIA GPUs - Data Center
         ("a100", 80), // A100 comes in 40GB and 80GB, default to 80GB
         ("a40", 48),
         ("a5000", 24),
         ("a6000", 48),
-        ("h100", 80),
+        ("h100", 80),  // H100 comes in 80GB (SXM/PCIe) and 94GB (NVL)
+        ("h200", 141), // H200 has 141GB HBM3e
+        ("b200", 192), // B200 Blackwell
+        ("l40s", 48),  // L40S
         ("gh200", 96), // Grace Hopper superchip
+        ("v100", 32),  // Tesla V100 comes in 16GB and 32GB variants
+        // NVIDIA Workstation GPUs
+        ("rtx", 48), // RTX PRO series (catch-all, may need refinement)
         // AMD GPUs
         ("mi250", 128),  // MI250X has 128GB
         ("mi300x", 192), // MI300X has 192GB
@@ -92,9 +100,14 @@ mod tests {
     fn test_get_memory_known_models() {
         assert_eq!(get_gpu_memory("a100"), 80);
         assert_eq!(get_gpu_memory("h100"), 80);
+        assert_eq!(get_gpu_memory("h200"), 141);
+        assert_eq!(get_gpu_memory("b200"), 192);
         assert_eq!(get_gpu_memory("4090"), 24);
+        assert_eq!(get_gpu_memory("5090"), 32);
         assert_eq!(get_gpu_memory("a40"), 48);
+        assert_eq!(get_gpu_memory("l40s"), 48);
         assert_eq!(get_gpu_memory("gh200"), 96);
+        assert_eq!(get_gpu_memory("v100"), 32);
         assert_eq!(get_gpu_memory("mi300x"), 192);
     }
 
@@ -102,6 +115,9 @@ mod tests {
     fn test_get_memory_case_insensitive() {
         assert_eq!(get_gpu_memory("A100"), 80);
         assert_eq!(get_gpu_memory("H100"), 80);
+        assert_eq!(get_gpu_memory("H200"), 141);
+        assert_eq!(get_gpu_memory("B200"), 192);
+        assert_eq!(get_gpu_memory("L40S"), 48);
         assert_eq!(get_gpu_memory("MI300X"), 192);
     }
 
@@ -109,6 +125,11 @@ mod tests {
     fn test_get_memory_with_suffix() {
         assert_eq!(get_gpu_memory("A100-80G"), 80);
         assert_eq!(get_gpu_memory("a100-pcie"), 80);
+        assert_eq!(get_gpu_memory("NVIDIA B200"), 192);
+        assert_eq!(get_gpu_memory("NVIDIA H200"), 141);
+        assert_eq!(get_gpu_memory("NVIDIA L40S"), 48);
+        assert_eq!(get_gpu_memory("NVIDIA GeForce RTX 5090"), 32);
+        assert_eq!(get_gpu_memory("Tesla V100-SXM3-32GB"), 32);
     }
 
     #[test]

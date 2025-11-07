@@ -94,10 +94,18 @@ impl Provider for HyperstackProvider {
             let gpu_type = normalize_gpu_type(&group.gpu);
 
             // Parse GPU memory from group's GPU string (e.g., "A100-80G-PCIe" -> 80)
-            let gpu_memory_gb = parse_gpu_memory(&group.gpu).unwrap_or_else(|| {
-                tracing::warn!("Failed to parse GPU memory from group GPU: {}", group.gpu);
-                0
-            });
+            // Includes fallback lookup for known GPU models without memory in name
+            let gpu_memory_gb = match parse_gpu_memory(&group.gpu) {
+                Some(memory) => memory,
+                None => {
+                    // Only warn if we truly can't determine memory for this GPU
+                    tracing::warn!(
+                        "Unable to determine GPU memory for unknown model: {}. Skipping offerings.",
+                        group.gpu
+                    );
+                    0
+                }
+            };
 
             // Normalize region to "global" (consistent with DataCrunch)
             let region = normalize_region(&group.region_name);
