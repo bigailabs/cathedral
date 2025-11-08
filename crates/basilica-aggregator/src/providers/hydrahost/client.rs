@@ -198,3 +198,144 @@ impl Provider for HydraHostProvider {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::providers::hydrahost::types::MarketplaceListing;
+
+    #[test]
+    fn test_parse_hydrahost_h100_listing() {
+        // Sample H100 listing from HydraHost Brokkr API (8x H100 80GB)
+        let json_data = r#"{
+            "id": 1200,
+            "name": "Supermicro SYS-821GE-TNHR-LC0-HP001-1200",
+            "location": "Canada",
+            "role": {
+                "slug": "Baremetal"
+            },
+            "status": "on demand",
+            "isInterruptibleOnly": false,
+            "cluster": {
+                "id": null,
+                "name": null
+            },
+            "specs": {
+                "cpu": {
+                    "model": "Intel(R) Xeon(R) Platinum 8462Y+",
+                    "cores": 64,
+                    "threadCount": 128,
+                    "count": 2
+                },
+                "gpu": {
+                    "model": "NVIDIA H100 80GB HBM3",
+                    "count": 8
+                },
+                "memory": 2048,
+                "storage": {
+                    "hdd_count": null,
+                    "hdd_size": null,
+                    "nvme_count": 4,
+                    "nvme_size": 30726,
+                    "ssd_count": 2,
+                    "ssd_size": 480,
+                    "total": 31206
+                }
+            },
+            "primary_ip4": "192.251.140.92",
+            "primary_ip6": "",
+            "networkType": "NAT",
+            "vpcCapable": false,
+            "price": {
+                "stripeId": "price_1RbPXSHxc9tHGXhdhSA9qYKM",
+                "monthly": 1488000,
+                "weekly": 336000,
+                "hourly": {
+                    "per_gpu": 250,
+                    "per_cpu": 1000,
+                    "total": 2000
+                }
+            },
+            "interruptiblePrice": {
+                "monthly": 714240,
+                "weekly": 161280,
+                "hourly": {
+                    "per_gpu": 120,
+                    "per_cpu": 480,
+                    "total": 960
+                }
+            },
+            "activeReservationInvite": null,
+            "availableOperatingSystems": [],
+            "storageLayouts": null,
+            "defaultDiskLayouts": [],
+            "supplierPolicyUrl": null
+        }"#;
+
+        // Parse the JSON
+        let listing: MarketplaceListing =
+            serde_json::from_str(json_data).expect("Failed to parse JSON");
+
+        // Verify the parsed data
+        assert_eq!(listing.id, 1200);
+        assert_eq!(listing.name, "Supermicro SYS-821GE-TNHR-LC0-HP001-1200");
+        assert_eq!(listing.location, Some("Canada".to_string()));
+        assert_eq!(listing.status, "on demand");
+
+        // Verify GPU specs
+        assert_eq!(listing.specs.gpu.count, Some(8));
+        assert_eq!(
+            listing.specs.gpu.model,
+            Some("NVIDIA H100 80GB HBM3".to_string())
+        );
+
+        // Verify CPU specs
+        assert_eq!(listing.specs.cpu.cores, 64);
+        assert_eq!(listing.specs.cpu.thread_count, Some(128));
+        assert_eq!(listing.specs.cpu.count, Some(2));
+
+        // Verify memory
+        assert_eq!(listing.specs.memory, 2048);
+
+        // Verify storage
+        let storage = listing.specs.storage.as_ref().unwrap();
+        assert_eq!(storage.nvme_count, Some(4));
+        assert_eq!(storage.nvme_size, Some(30726));
+        assert_eq!(storage.ssd_count, Some(2));
+        assert_eq!(storage.ssd_size, Some(480));
+        assert_eq!(storage.total, Some(31206));
+
+        // Verify pricing (in cents)
+        assert_eq!(listing.price.hourly.total, Some(2000.0));
+        assert_eq!(listing.price.hourly.per_gpu, Some(250.0));
+
+        // Verify interruptible pricing
+        let interruptible = listing.interruptible_price.as_ref().unwrap();
+        assert_eq!(interruptible.hourly.total, Some(960.0));
+        assert_eq!(interruptible.hourly.per_gpu, Some(120.0));
+
+        // Print the parsed data
+        println!("Successfully parsed HydraHost H100 listing:");
+        println!("  ID: {}", listing.id);
+        println!("  Name: {}", listing.name);
+        println!(
+            "  Location: {}",
+            listing.location.as_ref().unwrap_or(&"Unknown".to_string())
+        );
+        println!("  Status: {}", listing.status);
+        println!("  GPU Model: {}", listing.specs.gpu.model.as_ref().unwrap());
+        println!("  GPU Count: {}", listing.specs.gpu.count.unwrap());
+        println!("  CPU Cores: {}", listing.specs.cpu.cores);
+        println!("  CPU Threads: {}", listing.specs.cpu.thread_count.unwrap());
+        println!("  System Memory: {}GB", listing.specs.memory);
+        println!("  Storage Total: {}GB", storage.total.unwrap_or(0));
+        println!(
+            "  Hourly Price: ${:.2}",
+            listing.price.hourly.total.unwrap() / 100.0
+        );
+        println!(
+            "  Interruptible Price: ${:.2}",
+            interruptible.hourly.total.unwrap() / 100.0
+        );
+    }
+}

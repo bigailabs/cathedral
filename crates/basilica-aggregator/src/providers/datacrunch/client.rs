@@ -432,3 +432,88 @@ impl Provider for DataCrunchProvider {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_datacrunch_h100_instance() {
+        // Sample H100 instance from DataCrunch API (1x H100 SXM5 80GB)
+        let json_data = r#"{
+            "best_for": ["Gargantuan ML models", "Multi-GPU training", "FP64 HPC", "NVLINK"],
+            "cpu": {
+                "description": "30 CPU",
+                "number_of_cores": 30
+            },
+            "deploy_warning": "H100: Use Nvidia driver 535 or higher for best performance",
+            "description": "Dedicated Hardware Instance",
+            "gpu": {
+                "description": "1x H100 SXM5 80GB",
+                "number_of_gpus": 1
+            },
+            "gpu_memory": {
+                "description": "80GB GPU RAM",
+                "size_in_gigabytes": 80
+            },
+            "id": "c01dd00d-0000-480b-ae4e-d429115d055b",
+            "instance_type": "1H100.80S.30V",
+            "memory": {
+                "description": "120GB RAM",
+                "size_in_gigabytes": 120
+            },
+            "model": "H100",
+            "name": "H100 SXM5 80GB",
+            "p2p": null,
+            "price_per_hour": "1.99",
+            "spot_price": "0.99",
+            "dynamic_price": "1.98",
+            "max_dynamic_price": "2.99",
+            "serverless_price": "2.19",
+            "serverless_spot_price": "1.09",
+            "storage": {
+                "description": "dynamic"
+            },
+            "currency": "usd",
+            "manufacturer": "NVIDIA",
+            "display_name": null
+        }"#;
+
+        // Parse the JSON
+        let instance: InstanceType = serde_json::from_str(json_data).expect("Failed to parse JSON");
+
+        // Verify the parsed data
+        assert_eq!(instance.id, "c01dd00d-0000-480b-ae4e-d429115d055b");
+        assert_eq!(instance.instance_type, "1H100.80S.30V");
+        assert_eq!(instance.model, Some("H100".to_string()));
+        assert_eq!(instance.price_per_hour, "1.99");
+        assert_eq!(instance.spot_price, Some("0.99".to_string()));
+
+        // Verify CPU specs
+        assert_eq!(instance.cpu.number_of_cores, 30);
+        assert_eq!(instance.cpu.description, "30 CPU");
+
+        // Verify GPU specs
+        assert_eq!(instance.gpu.number_of_gpus, 1);
+        assert_eq!(instance.gpu.description, "1x H100 SXM5 80GB");
+
+        // Verify memory specs
+        assert_eq!(instance.memory.size_in_gigabytes, 120);
+        assert_eq!(instance.gpu_memory.size_in_gigabytes, 80);
+
+        // Verify storage
+        assert_eq!(instance.storage.description, "dynamic");
+
+        // Print the parsed data
+        println!("Successfully parsed DataCrunch H100 instance:");
+        println!("  ID: {}", instance.id);
+        println!("  Instance Type: {}", instance.instance_type);
+        println!("  GPU Model: {}", instance.model.as_ref().unwrap());
+        println!("  GPU Count: {}", instance.gpu.number_of_gpus);
+        println!("  GPU Memory: {}GB", instance.gpu_memory.size_in_gigabytes);
+        println!("  vCPUs: {}", instance.cpu.number_of_cores);
+        println!("  System Memory: {}GB", instance.memory.size_in_gigabytes);
+        println!("  Price/hour: ${}", instance.price_per_hour);
+        println!("  Spot Price: ${}", instance.spot_price.as_ref().unwrap());
+    }
+}

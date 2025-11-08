@@ -182,3 +182,88 @@ impl Provider for HyperstackProvider {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::providers::hyperstack::types::Flavor;
+
+    #[test]
+    fn test_parse_hyperstack_h100_flavor() {
+        // Sample H100 flavor from Hyperstack API (1x H100 80GB PCIe)
+        let json_data = r#"{
+            "id": 95,
+            "name": "n3-H100x1",
+            "display_name": null,
+            "region_name": "CANADA-1",
+            "cpu": 28,
+            "ram": 180.0,
+            "disk": 100,
+            "ephemeral": 750,
+            "gpu": "H100-80G-PCIe",
+            "gpu_count": 1,
+            "stock_available": true,
+            "created_at": "2024-04-18T15:19:56",
+            "labels": [
+                {
+                    "id": 16717,
+                    "label": "network-optimised"
+                }
+            ],
+            "features": {
+                "network_optimised": true,
+                "no_hibernation": false,
+                "no_snapshot": false,
+                "local_storage_only": false
+            }
+        }"#;
+
+        // Parse the JSON
+        let flavor: Flavor = serde_json::from_str(json_data).expect("Failed to parse JSON");
+
+        // Verify the parsed data
+        assert_eq!(flavor.id, 95);
+        assert_eq!(flavor.name, "n3-H100x1");
+        assert_eq!(flavor.display_name, None);
+        assert_eq!(flavor.region_name, "CANADA-1");
+
+        // Verify compute specs
+        assert_eq!(flavor.cpu, 28);
+        assert_eq!(flavor.ram, 180.0);
+
+        // Verify GPU specs
+        assert_eq!(flavor.gpu, "H100-80G-PCIe");
+        assert_eq!(flavor.gpu_count, 1);
+
+        // Verify storage
+        assert_eq!(flavor.disk, 100);
+        assert_eq!(flavor.ephemeral, Some(750));
+
+        // Verify availability
+        assert!(flavor.stock_available);
+
+        // Verify features
+        assert!(flavor.features.network_optimised);
+        assert!(!flavor.features.no_hibernation);
+        assert!(!flavor.features.no_snapshot);
+        assert!(!flavor.features.local_storage_only);
+
+        // Verify labels
+        assert_eq!(flavor.labels.len(), 1);
+        assert_eq!(flavor.labels[0].label, "network-optimised");
+
+        // Print the parsed data
+        println!("Successfully parsed Hyperstack H100 flavor:");
+        println!("  ID: {}", flavor.id);
+        println!("  Name: {}", flavor.name);
+        println!("  Region: {}", flavor.region_name);
+        println!("  GPU Model: {}", flavor.gpu);
+        println!("  GPU Count: {}", flavor.gpu_count);
+        println!("  vCPUs: {}", flavor.cpu);
+        println!("  RAM: {}GB", flavor.ram);
+        println!("  Disk: {}GB", flavor.disk);
+        println!("  Ephemeral Storage: {}GB", flavor.ephemeral.unwrap_or(0));
+        println!("  Stock Available: {}", flavor.stock_available);
+        println!("  Network Optimised: {}", flavor.features.network_optimised);
+    }
+}

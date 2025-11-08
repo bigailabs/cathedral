@@ -181,3 +181,85 @@ impl Provider for LambdaProvider {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    use crate::providers::lambda::types::InstanceTypeWrapper;
+
+    #[test]
+    fn test_parse_lambda_a100_instance() {
+        // Sample A100 instance wrapper from Lambda instance-types API
+        let json_data = r#"{
+            "instance_type": {
+                "name": "gpu_1x_a100",
+                "price_cents_per_hour": 110,
+                "description": "1x NVIDIA A100 (40 GB SXM4)",
+                "specs": {
+                    "vcpus": 30,
+                    "memory_gib": 200,
+                    "storage_gib": 1400
+                }
+            },
+            "regions_with_capacity_available": [
+                {
+                    "name": "us-west-2",
+                    "description": "California, USA"
+                },
+                {
+                    "name": "us-east-1",
+                    "description": "Virginia, USA"
+                }
+            ]
+        }"#;
+
+        // Parse the JSON
+        let wrapper: InstanceTypeWrapper =
+            serde_json::from_str(json_data).expect("Failed to parse JSON");
+
+        // Verify instance type data
+        assert_eq!(wrapper.instance_type.name, "gpu_1x_a100");
+        assert_eq!(wrapper.instance_type.price_cents_per_hour, 110);
+        assert_eq!(
+            wrapper.instance_type.description,
+            "1x NVIDIA A100 (40 GB SXM4)"
+        );
+
+        // Verify specs
+        assert_eq!(wrapper.instance_type.specs.vcpus, 30);
+        assert_eq!(wrapper.instance_type.specs.memory_gib, 200);
+        assert_eq!(wrapper.instance_type.specs.storage_gib, 1400);
+
+        // Verify regions
+        assert_eq!(wrapper.regions_with_capacity_available.len(), 2);
+        assert_eq!(wrapper.regions_with_capacity_available[0].name, "us-west-2");
+        assert_eq!(
+            wrapper.regions_with_capacity_available[0].description,
+            "California, USA"
+        );
+        assert_eq!(wrapper.regions_with_capacity_available[1].name, "us-east-1");
+        assert_eq!(
+            wrapper.regions_with_capacity_available[1].description,
+            "Virginia, USA"
+        );
+
+        // Print the parsed data
+        println!("Successfully parsed Lambda A100 instance:");
+        println!("  Name: {}", wrapper.instance_type.name);
+        println!("  Description: {}", wrapper.instance_type.description);
+        println!(
+            "  Price: ${:.2}/hour",
+            wrapper.instance_type.price_cents_per_hour as f64 / 100.0
+        );
+        println!("  vCPUs: {}", wrapper.instance_type.specs.vcpus);
+        println!("  Memory: {}GB", wrapper.instance_type.specs.memory_gib);
+        println!("  Storage: {}GB", wrapper.instance_type.specs.storage_gib);
+        println!(
+            "  Available Regions: {}",
+            wrapper.regions_with_capacity_available.len()
+        );
+        for region in &wrapper.regions_with_capacity_available {
+            println!("    - {} ({})", region.name, region.description);
+        }
+    }
+}
