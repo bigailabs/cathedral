@@ -39,14 +39,13 @@ impl Database {
                 r#"
                 INSERT INTO gpu_offerings
                 (id, provider, gpu_type, gpu_memory_gb, gpu_count, interconnect, storage, deployment_type,
-                 system_memory_gb, vcpu_count, region, hourly_rate, spot_rate, availability, raw_metadata, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 system_memory_gb, vcpu_count, region, hourly_rate, availability, raw_metadata, fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     interconnect = excluded.interconnect,
                     storage = excluded.storage,
                     deployment_type = excluded.deployment_type,
                     hourly_rate = excluded.hourly_rate,
-                    spot_rate = excluded.spot_rate,
                     availability = excluded.availability,
                     raw_metadata = excluded.raw_metadata,
                     fetched_at = excluded.fetched_at
@@ -55,7 +54,7 @@ impl Database {
             .bind(&offering.id)
             .bind(offering.provider.as_str())
             .bind(offering.gpu_type.as_str())
-            .bind(offering.gpu_memory_gb as i64)
+            .bind(offering.gpu_memory_gb.map(|m| m as i64))
             .bind(offering.gpu_count as i64)
             .bind(offering.interconnect.as_ref())
             .bind(offering.storage.as_ref())
@@ -64,7 +63,6 @@ impl Database {
             .bind(offering.vcpu_count as i64)
             .bind(&offering.region)
             .bind(offering.hourly_rate.to_string())
-            .bind(offering.spot_rate.map(|r| r.to_string()))
             .bind(offering.availability)
             .bind(offering.raw_metadata.to_string())
             .bind(offering.fetched_at)
@@ -81,14 +79,14 @@ impl Database {
         let query = if let Some(p) = provider {
             sqlx::query(
                 "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, interconnect, storage, deployment_type,
-                        system_memory_gb, vcpu_count, region, hourly_rate, spot_rate, availability, raw_metadata, fetched_at
+                        system_memory_gb, vcpu_count, region, hourly_rate, availability, raw_metadata, fetched_at
                  FROM gpu_offerings WHERE provider = ? ORDER BY fetched_at DESC",
             )
             .bind(p.as_str())
         } else {
             sqlx::query(
                 "SELECT id, provider, gpu_type, gpu_memory_gb, gpu_count, interconnect, storage, deployment_type,
-                        system_memory_gb, vcpu_count, region, hourly_rate, spot_rate, availability, raw_metadata, fetched_at
+                        system_memory_gb, vcpu_count, region, hourly_rate, availability, raw_metadata, fetched_at
                  FROM gpu_offerings ORDER BY fetched_at DESC",
             )
         };
@@ -101,14 +99,13 @@ impl Database {
                 let provider_str: String = row.get("provider");
                 let gpu_type_str: String = row.get("gpu_type");
                 let hourly_rate_str: String = row.get("hourly_rate");
-                let spot_rate_str: Option<String> = row.get("spot_rate");
                 let raw_metadata_str: String = row.get("raw_metadata");
 
                 Some(GpuOffering {
                     id: row.get("id"),
                     provider: provider_str.parse().ok()?,
                     gpu_type: gpu_type_str.parse().ok()?,
-                    gpu_memory_gb: row.get::<i64, _>("gpu_memory_gb") as u32,
+                    gpu_memory_gb: row.get::<Option<i64>, _>("gpu_memory_gb").map(|m| m as u32),
                     gpu_count: row.get::<i64, _>("gpu_count") as u32,
                     interconnect: row.get("interconnect"),
                     storage: row.get("storage"),
@@ -117,7 +114,6 @@ impl Database {
                     vcpu_count: row.get::<i64, _>("vcpu_count") as u32,
                     region: row.get("region"),
                     hourly_rate: hourly_rate_str.parse().ok()?,
-                    spot_rate: spot_rate_str.and_then(|s| s.parse().ok()),
                     availability: row.get("availability"),
                     raw_metadata: serde_json::from_str(&raw_metadata_str).ok()?,
                     fetched_at: row.get("fetched_at"),

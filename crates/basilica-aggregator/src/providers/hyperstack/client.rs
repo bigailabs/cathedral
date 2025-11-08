@@ -4,12 +4,12 @@ use super::normalize::{
 use super::types::FlavorsResponse;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
+use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
 use crate::providers::Provider;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use std::time::Duration;
 
 pub struct HyperstackProvider {
     client: Client,
@@ -19,13 +19,7 @@ pub struct HyperstackProvider {
 
 impl HyperstackProvider {
     pub fn new(api_key: String, base_url: String, timeout_seconds: u64) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .build()
-            .map_err(|e| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to create HTTP client: {}", e),
-            })?;
+        let client = HttpClientBuilder::new(timeout_seconds).build("hyperstack")?;
 
         Ok(Self {
             client,
@@ -50,15 +44,7 @@ impl HyperstackProvider {
                 message: format!("Failed to fetch flavors: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            tracing::error!("Hyperstack API returned error: {} - {}", status, error_text);
-            return Err(AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("API returned status: {} - {}", status, error_text),
-            });
-        }
+        let response = handle_error_response(response, "hyperstack").await?;
 
         let flavors_response: FlavorsResponse =
             response
@@ -95,19 +81,15 @@ impl Provider for HyperstackProvider {
             // Normalize GPU type from group's GPU string
             let gpu_type = normalize_gpu_type(&group.gpu);
 
+            // Filter: Only process supported GPU types (A100, H100, B200)
+            // Skip unsupported GPUs immediately
+            if matches!(gpu_type, basilica_common::types::GpuCategory::Other(_)) {
+                continue;
+            }
+
             // Parse GPU memory from group's GPU string (e.g., "A100-80G-PCIe" -> 80)
-            // Includes fallback lookup for known GPU models without memory in name
-            let gpu_memory_gb = match parse_gpu_memory(&group.gpu) {
-                Some(memory) => memory,
-                None => {
-                    // Only warn if we truly can't determine memory for this GPU
-                    tracing::warn!(
-                        "Unable to determine GPU memory for unknown model: {}. Skipping offerings.",
-                        group.gpu
-                    );
-                    0
-                }
-            };
+            // If not found, we'll try parsing from individual flavor names as fallback
+            let group_gpu_memory = parse_gpu_memory(&group.gpu);
 
             // Normalize region to "global" (consistent with DataCrunch)
             let region = normalize_region(&group.region_name);
@@ -119,13 +101,29 @@ impl Provider for HyperstackProvider {
                     continue;
                 }
 
+                // Parse GPU memory from group GPU string, falling back to flavor name
+                // For supported GPUs, store as NULL if we can't parse memory
+                let gpu_memory_gb = group_gpu_memory
+                    .or_else(|| parse_gpu_memory(&flavor.name))
+                    .or_else(|| parse_gpu_memory(&flavor.gpu));
+
+                // Log when we can't determine memory for supported GPUs
+                if gpu_memory_gb.is_none() {
+                    tracing::debug!(
+                        "Unable to parse GPU memory from group GPU: '{}', flavor name: '{}', or flavor GPU: '{}' for supported GPU type {:?}. Storing with NULL memory.",
+                        group.gpu,
+                        flavor.name,
+                        flavor.gpu,
+                        gpu_type
+                    );
+                }
+
                 // Convert RAM from float GB to u32
                 let system_memory_gb = flavor.ram.round() as u32;
 
                 // Hyperstack API doesn't include pricing in flavors endpoint
                 // Set to 0 - would need separate pricing API call
                 let hourly_rate = Decimal::ZERO;
-                let spot_rate = None;
 
                 // Use stock_available from flavor
                 let availability = flavor.stock_available;
@@ -151,7 +149,6 @@ impl Provider for HyperstackProvider {
                     vcpu_count: flavor.cpu,
                     region: region.clone(),
                     hourly_rate,
-                    spot_rate,
                     availability,
                     fetched_at,
                     raw_metadata: serde_json::to_value(&flavor).unwrap_or_default(),

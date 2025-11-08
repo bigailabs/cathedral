@@ -51,7 +51,8 @@ pub struct GpuOffering {
     pub id: String,
     pub provider: Provider,
     pub gpu_type: GpuCategory,
-    pub gpu_memory_gb: u32, // GPU memory per card
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_memory_gb: Option<u32>, // GPU memory per card (NULL if provider doesn't specify)
     pub gpu_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interconnect: Option<String>, // GPU interconnect type (SXM4, SXM5, PCIe, etc.)
@@ -64,11 +65,6 @@ pub struct GpuOffering {
     pub region: String,
     #[serde(with = "rust_decimal::serde::str")]
     pub hourly_rate: Decimal,
-    #[serde(
-        with = "rust_decimal::serde::str_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub spot_rate: Option<Decimal>,
     pub availability: bool,
     pub fetched_at: DateTime<Utc>,
     #[serde(skip_serializing)] // Never expose in API

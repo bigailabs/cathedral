@@ -2,6 +2,7 @@ use super::normalize::{normalize_gpu_type, parse_interconnect};
 use super::types::{InstanceType, Location, LocationAvailability};
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
+use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
 use crate::providers::Provider;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -9,7 +10,6 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,13 +68,7 @@ impl DataCrunchProvider {
         base_url: String,
         timeout_seconds: u64,
     ) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .build()
-            .map_err(|e| AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("Failed to create HTTP client: {}", e),
-            })?;
+        let client = HttpClientBuilder::new(timeout_seconds).build("datacrunch")?;
 
         Ok(Self {
             client,
@@ -127,15 +121,7 @@ impl DataCrunchProvider {
                 message: format!("Failed to send OAuth2 token request: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            tracing::error!("OAuth2 token request failed: {} - {}", status, error_text);
-            return Err(AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("OAuth2 token request failed: {} - {}", status, error_text),
-            });
-        }
+        let response = handle_error_response(response, "datacrunch").await?;
 
         let token_response: TokenResponse = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse OAuth2 token response: {}", e);
@@ -171,12 +157,7 @@ impl DataCrunchProvider {
                 message: format!("Failed to fetch instance types: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            return Err(AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("API returned status: {}", response.status()),
-            });
-        }
+        let response = handle_error_response(response, "datacrunch").await?;
 
         let instance_types: Vec<InstanceType> =
             response
@@ -205,12 +186,7 @@ impl DataCrunchProvider {
                 message: format!("Failed to fetch locations: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            return Err(AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("API returned status: {}", response.status()),
-            });
-        }
+        let response = handle_error_response(response, "datacrunch").await?;
 
         let locations: Vec<Location> =
             response
@@ -239,12 +215,7 @@ impl DataCrunchProvider {
                 message: format!("Failed to fetch availability: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            return Err(AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: format!("API returned status: {}", response.status()),
-            });
-        }
+        let response = handle_error_response(response, "datacrunch").await?;
 
         let availability: Vec<LocationAvailability> =
             response
@@ -309,10 +280,6 @@ impl Provider for DataCrunchProvider {
                         .price_per_hour
                         .parse::<Decimal>()
                         .unwrap_or_default();
-                    let spot_rate = instance_type
-                        .spot_price
-                        .as_ref()
-                        .and_then(|s| s.parse::<Decimal>().ok());
                     let interconnect = parse_interconnect(&instance_type.gpu.description);
                     let storage = Some(instance_type.storage.description.clone());
 
@@ -331,7 +298,7 @@ impl Provider for DataCrunchProvider {
                             id: offering_id,
                             provider: ProviderEnum::DataCrunch,
                             gpu_type: gpu_type.clone(),
-                            gpu_memory_gb: instance_type.gpu_memory.size_in_gigabytes,
+                            gpu_memory_gb: Some(instance_type.gpu_memory.size_in_gigabytes),
                             gpu_count: instance_type.gpu.number_of_gpus,
                             interconnect: interconnect.clone(),
                             storage: storage.clone(),
@@ -340,7 +307,6 @@ impl Provider for DataCrunchProvider {
                             vcpu_count: instance_type.cpu.number_of_cores,
                             region: location.code.clone(),
                             hourly_rate,
-                            spot_rate,
                             availability: is_available,
                             fetched_at,
                             raw_metadata: serde_json::to_value(instance_type).unwrap_or_default(),
@@ -376,10 +342,6 @@ impl Provider for DataCrunchProvider {
                         .price_per_hour
                         .parse::<Decimal>()
                         .unwrap_or_default();
-                    let spot_rate = instance_type
-                        .spot_price
-                        .as_ref()
-                        .and_then(|s| s.parse::<Decimal>().ok());
                     let interconnect = parse_interconnect(&instance_type.gpu.description);
                     let storage = Some(instance_type.storage.description.clone());
 
@@ -387,7 +349,7 @@ impl Provider for DataCrunchProvider {
                         id: instance_type.id.clone(),
                         provider: ProviderEnum::DataCrunch,
                         gpu_type,
-                        gpu_memory_gb: instance_type.gpu_memory.size_in_gigabytes,
+                        gpu_memory_gb: Some(instance_type.gpu_memory.size_in_gigabytes),
                         gpu_count: instance_type.gpu.number_of_gpus,
                         interconnect,
                         storage,
@@ -396,7 +358,6 @@ impl Provider for DataCrunchProvider {
                         vcpu_count: instance_type.cpu.number_of_cores,
                         region: "global".to_string(),
                         hourly_rate,
-                        spot_rate,
                         availability: true,
                         fetched_at,
                         raw_metadata: serde_json::to_value(instance_type).unwrap_or_default(),
@@ -466,11 +427,9 @@ mod tests {
             "name": "H100 SXM5 80GB",
             "p2p": null,
             "price_per_hour": "1.99",
-            "spot_price": "0.99",
             "dynamic_price": "1.98",
             "max_dynamic_price": "2.99",
             "serverless_price": "2.19",
-            "serverless_spot_price": "1.09",
             "storage": {
                 "description": "dynamic"
             },
@@ -487,7 +446,6 @@ mod tests {
         assert_eq!(instance.instance_type, "1H100.80S.30V");
         assert_eq!(instance.model, Some("H100".to_string()));
         assert_eq!(instance.price_per_hour, "1.99");
-        assert_eq!(instance.spot_price, Some("0.99".to_string()));
 
         // Verify CPU specs
         assert_eq!(instance.cpu.number_of_cores, 30);
@@ -514,6 +472,5 @@ mod tests {
         println!("  vCPUs: {}", instance.cpu.number_of_cores);
         println!("  System Memory: {}GB", instance.memory.size_in_gigabytes);
         println!("  Price/hour: ${}", instance.price_per_hour);
-        println!("  Spot Price: ${}", instance.spot_price.as_ref().unwrap());
     }
 }

@@ -23,10 +23,6 @@ pub struct MarketplaceListing {
     /// Listing status (e.g., "on demand", "reserve", "preorder")
     pub status: String,
 
-    /// Whether interruptible pricing only
-    #[serde(rename = "isInterruptibleOnly", default)]
-    pub is_interruptible_only: bool,
-
     /// Primary IPv4 address
     #[serde(default)]
     pub primary_ip4: Option<String>,
@@ -44,10 +40,6 @@ pub struct MarketplaceListing {
 
     /// Standard pricing information
     pub price: Pricing,
-
-    /// Interruptible instance pricing
-    #[serde(rename = "interruptiblePrice", default)]
-    pub interruptible_price: Option<Pricing>,
 
     /// Available operating systems
     #[serde(rename = "availableOperatingSystems", default)]

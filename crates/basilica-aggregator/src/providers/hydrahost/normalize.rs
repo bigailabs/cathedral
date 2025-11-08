@@ -1,5 +1,4 @@
 use basilica_common::types::GpuCategory;
-use std::collections::HashMap;
 
 /// Map HydraHost GPU model string to canonical GpuCategory
 /// HydraHost models from API categories: "4090", "3090", "a100", "a40", "a5000", "a6000", "gh200", "h100", "mi250", "mi300x"
@@ -10,62 +9,44 @@ pub fn normalize_gpu_type(gpu_str: &str) -> GpuCategory {
         .unwrap_or_else(|_| GpuCategory::Other(gpu_str.to_string()))
 }
 
-/// Get GPU memory in GB based on model
-/// Returns default memory size for known GPU models
-/// HydraHost API may not always include memory info, so we use standard configurations
-pub fn get_gpu_memory(gpu_model: &str) -> u32 {
-    // Create lookup table for standard GPU memory configurations
-    let memory_map: HashMap<&str, u32> = [
-        // NVIDIA GPUs - Consumer/Gaming
-        ("4090", 24),
-        ("5090", 32), // RTX 5090
-        ("3090", 24),
-        // NVIDIA GPUs - Data Center
-        ("a100", 80), // A100 comes in 40GB and 80GB, default to 80GB
-        ("a40", 48),
-        ("a5000", 24),
-        ("a6000", 48),
-        ("h100", 80),  // H100 comes in 80GB (SXM/PCIe) and 94GB (NVL)
-        ("h200", 141), // H200 has 141GB HBM3e
-        ("b200", 192), // B200 Blackwell
-        ("l40s", 48),  // L40S
-        ("gh200", 96), // Grace Hopper superchip
-        ("v100", 32),  // Tesla V100 comes in 16GB and 32GB variants
-        // NVIDIA Workstation GPUs
-        ("rtx", 48), // RTX PRO series (catch-all, may need refinement)
-        // AMD GPUs
-        ("mi250", 128),  // MI250X has 128GB
-        ("mi300x", 192), // MI300X has 192GB
-    ]
-    .iter()
-    .cloned()
-    .collect();
+/// Parse GPU memory from HydraHost GPU model string
+/// HydraHost provides strings like "NVIDIA H100 80GB HBM3" or "RTX 4090 24GB"
+/// Returns None if memory cannot be parsed from the string
+pub fn parse_gpu_memory(gpu_model: &str) -> Option<u32> {
+    // Common patterns: "80GB", "80 GB", "24GB", "V100-SXM3-32GB" etc.
+    // Strategy: Look for patterns like "XGB" or "X GB" where X is a number
 
-    // Normalize to lowercase for lookup
-    let normalized = gpu_model.to_lowercase();
-
-    // Try direct lookup first
-    if let Some(&memory) = memory_map.get(normalized.as_str()) {
-        return memory;
+    // First, try to find "GB" or "gb" in the string
+    let upper = gpu_model.to_uppercase();
+    if !upper.contains("GB") {
+        return None;
     }
 
-    // Try partial match for variants (e.g., "A100-80G" contains "a100")
-    // Sort keys by length descending to match more specific patterns first
-    let mut keys: Vec<_> = memory_map.keys().collect();
-    keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+    // Split by common delimiters (space, dash, underscore)
+    let parts: Vec<&str> = gpu_model.split(&[' ', '-', '_'][..]).collect();
 
-    for key in keys {
-        if normalized.contains(*key) {
-            return memory_map[key];
+    // Look for a part that contains "GB"
+    for (i, part) in parts.iter().enumerate() {
+        let part_upper = part.to_uppercase();
+        if part_upper.contains("GB") {
+            // Try to parse the number from this part (e.g., "80GB" -> 80)
+            let num_str = part.trim_end_matches(|c: char| !c.is_numeric());
+            if !num_str.is_empty() {
+                if let Ok(memory) = num_str.parse::<u32>() {
+                    return Some(memory);
+                }
+            }
+
+            // If the current part is just "GB", try the previous part for the number
+            if i > 0 && (part_upper == "GB" || part_upper == "gb") {
+                if let Ok(memory) = parts[i - 1].parse::<u32>() {
+                    return Some(memory);
+                }
+            }
         }
     }
 
-    // If no match found, log warning and return 0
-    tracing::warn!(
-        "Unknown GPU model for memory lookup: {}, defaulting to 0",
-        gpu_model
-    );
-    0
+    None
 }
 
 /// Pass through HydraHost location as-is
@@ -160,44 +141,44 @@ mod tests {
     }
 
     #[test]
-    fn test_get_memory_known_models() {
-        assert_eq!(get_gpu_memory("a100"), 80);
-        assert_eq!(get_gpu_memory("h100"), 80);
-        assert_eq!(get_gpu_memory("h200"), 141);
-        assert_eq!(get_gpu_memory("b200"), 192);
-        assert_eq!(get_gpu_memory("4090"), 24);
-        assert_eq!(get_gpu_memory("5090"), 32);
-        assert_eq!(get_gpu_memory("a40"), 48);
-        assert_eq!(get_gpu_memory("l40s"), 48);
-        assert_eq!(get_gpu_memory("gh200"), 96);
-        assert_eq!(get_gpu_memory("v100"), 32);
-        assert_eq!(get_gpu_memory("mi300x"), 192);
+    fn test_parse_gpu_memory_with_gb() {
+        // Test various formats with GB in the string
+        assert_eq!(parse_gpu_memory("NVIDIA H100 80GB HBM3"), Some(80));
+        assert_eq!(parse_gpu_memory("RTX 4090 24GB"), Some(24));
+        assert_eq!(parse_gpu_memory("A100 80GB"), Some(80));
+        assert_eq!(parse_gpu_memory("Tesla V100-SXM3-32GB"), Some(32));
     }
 
     #[test]
-    fn test_get_memory_case_insensitive() {
-        assert_eq!(get_gpu_memory("A100"), 80);
-        assert_eq!(get_gpu_memory("H100"), 80);
-        assert_eq!(get_gpu_memory("H200"), 141);
-        assert_eq!(get_gpu_memory("B200"), 192);
-        assert_eq!(get_gpu_memory("L40S"), 48);
-        assert_eq!(get_gpu_memory("MI300X"), 192);
+    fn test_parse_gpu_memory_with_space() {
+        // Test format with space between number and GB
+        assert_eq!(parse_gpu_memory("H100 80 GB"), Some(80));
+        assert_eq!(parse_gpu_memory("A100 40 GB"), Some(40));
     }
 
     #[test]
-    fn test_get_memory_with_suffix() {
-        assert_eq!(get_gpu_memory("A100-80G"), 80);
-        assert_eq!(get_gpu_memory("a100-pcie"), 80);
-        assert_eq!(get_gpu_memory("NVIDIA B200"), 192);
-        assert_eq!(get_gpu_memory("NVIDIA H200"), 141);
-        assert_eq!(get_gpu_memory("NVIDIA L40S"), 48);
-        assert_eq!(get_gpu_memory("NVIDIA GeForce RTX 5090"), 32);
-        assert_eq!(get_gpu_memory("Tesla V100-SXM3-32GB"), 32);
+    fn test_parse_gpu_memory_no_memory() {
+        // Test cases where memory is not in the string
+        assert_eq!(parse_gpu_memory("H100"), None);
+        assert_eq!(parse_gpu_memory("A100"), None);
+        assert_eq!(parse_gpu_memory("RTX 4090"), None);
+        assert_eq!(parse_gpu_memory("UnknownGPU"), None);
     }
 
     #[test]
-    fn test_get_memory_unknown() {
-        assert_eq!(get_gpu_memory("UnknownGPU"), 0);
+    fn test_parse_gpu_memory_from_name_field() {
+        // Test parsing from HydraHost name field patterns
+        assert_eq!(
+            parse_gpu_memory("Lenovo NVIDIA H100 80GB HBM3-1063"),
+            Some(80)
+        );
+        assert_eq!(
+            parse_gpu_memory("Quanta Cloud Technology Inc. NVIDIA GH200 480GB-237"),
+            Some(480)
+        );
+        // Cases without memory in name
+        assert_eq!(parse_gpu_memory("Tencent NVIDIA L40S-291"), None);
+        assert_eq!(parse_gpu_memory("OOB IPMI-1754"), None);
     }
 
     #[test]

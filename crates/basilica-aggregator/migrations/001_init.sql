@@ -3,7 +3,7 @@ CREATE TABLE gpu_offerings (
     id TEXT PRIMARY KEY,
     provider TEXT NOT NULL,
     gpu_type TEXT NOT NULL, -- GPU category (A100, H100, B200, OTHER)
-    gpu_memory_gb INTEGER NOT NULL, -- GPU memory per card
+    gpu_memory_gb INTEGER, -- GPU memory per card (NULL if provider doesn't specify)
     gpu_count INTEGER NOT NULL,
     interconnect TEXT, -- GPU interconnect type (SXM4, SXM5, SXM6, PCIe, PCIe-NVLink, etc.)
     storage TEXT, -- Storage capacity (raw provider data, no unit conversion)
@@ -12,7 +12,6 @@ CREATE TABLE gpu_offerings (
     vcpu_count INTEGER NOT NULL,
     region TEXT NOT NULL,
     hourly_rate TEXT NOT NULL,
-    spot_rate TEXT,
     availability BOOLEAN NOT NULL,
     raw_metadata TEXT NOT NULL,
     fetched_at TIMESTAMP NOT NULL,

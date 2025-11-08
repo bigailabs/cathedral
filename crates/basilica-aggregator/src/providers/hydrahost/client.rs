@@ -1,14 +1,15 @@
-use super::normalize::{format_storage, get_gpu_memory, normalize_gpu_type, normalize_region};
+use super::normalize::{format_storage, normalize_gpu_type, normalize_region, parse_gpu_memory};
 use super::types::ListingsResponse;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
+use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
 use crate::providers::Provider;
 use async_trait::async_trait;
+use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use std::str::FromStr;
-use std::time::Duration;
 
 pub struct HydraHostProvider {
     client: Client,
@@ -18,13 +19,7 @@ pub struct HydraHostProvider {
 
 impl HydraHostProvider {
     pub fn new(api_key: String, base_url: String, timeout_seconds: u64) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .build()
-            .map_err(|e| AggregatorError::Provider {
-                provider: "hydrahost".to_string(),
-                message: format!("Failed to create HTTP client: {}", e),
-            })?;
+        let client = HttpClientBuilder::new(timeout_seconds).build("hydrahost")?;
 
         Ok(Self {
             client,
@@ -49,15 +44,7 @@ impl HydraHostProvider {
                 message: format!("Failed to fetch listings: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            tracing::error!("HydraHost API returned error: {} - {}", status, error_text);
-            return Err(AggregatorError::Provider {
-                provider: "hydrahost".to_string(),
-                message: format!("API returned status: {} - {}", status, error_text),
-            });
-        }
+        let response = handle_error_response(response, "hydrahost").await?;
 
         // Get response text for better error logging
         let response_text = response
@@ -117,8 +104,26 @@ impl Provider for HydraHostProvider {
             // Normalize GPU type
             let gpu_type = normalize_gpu_type(gpu_model);
 
-            // Get GPU memory
-            let gpu_memory_gb = get_gpu_memory(gpu_model);
+            // Filter: Only process supported GPU types (A100, H100, B200)
+            // Skip unsupported GPUs immediately without trying to parse memory
+            if matches!(gpu_type, GpuCategory::Other(_)) {
+                continue;
+            }
+
+            // Parse GPU memory from model string, falling back to name field
+            // For supported GPUs, if we can't parse memory, store as NULL instead of skipping
+            let gpu_memory_gb =
+                parse_gpu_memory(gpu_model).or_else(|| parse_gpu_memory(&listing.name));
+
+            // Log when we can't determine memory for supported GPUs
+            if gpu_memory_gb.is_none() {
+                tracing::debug!(
+                    "Unable to parse GPU memory from model: '{}' or name: '{}' for supported GPU type {:?}. Storing with NULL memory.",
+                    gpu_model,
+                    listing.name,
+                    gpu_type
+                );
+            }
 
             // Normalize region to "global"
             let region = normalize_region(listing.location.as_deref().unwrap_or("unknown"));
@@ -130,14 +135,6 @@ impl Provider for HydraHostProvider {
             }
             let hourly_rate = Decimal::from_str(&hourly_total.to_string()).unwrap_or(Decimal::ZERO)
                 / Decimal::from(100); // Convert cents to dollars
-
-            // HydraHost supports interruptible pricing (spot-like)
-            let spot_rate = listing.interruptible_price.as_ref().and_then(|price| {
-                price.hourly.total.map(|total| {
-                    Decimal::from_str(&total.to_string()).unwrap_or(Decimal::ZERO)
-                        / Decimal::from(100) // Convert cents to dollars
-                })
-            });
 
             // Check availability based on status
             // "on demand" means available, other statuses might indicate unavailable
@@ -168,7 +165,6 @@ impl Provider for HydraHostProvider {
                 vcpu_count,
                 region,
                 hourly_rate,
-                spot_rate,
                 availability,
                 fetched_at,
                 raw_metadata: serde_json::to_value(&listing).unwrap_or_default(),
@@ -215,7 +211,6 @@ mod tests {
                 "slug": "Baremetal"
             },
             "status": "on demand",
-            "isInterruptibleOnly": false,
             "cluster": {
                 "id": null,
                 "name": null
@@ -254,15 +249,6 @@ mod tests {
                     "per_gpu": 250,
                     "per_cpu": 1000,
                     "total": 2000
-                }
-            },
-            "interruptiblePrice": {
-                "monthly": 714240,
-                "weekly": 161280,
-                "hourly": {
-                    "per_gpu": 120,
-                    "per_cpu": 480,
-                    "total": 960
                 }
             },
             "activeReservationInvite": null,
@@ -309,11 +295,6 @@ mod tests {
         assert_eq!(listing.price.hourly.total, Some(2000.0));
         assert_eq!(listing.price.hourly.per_gpu, Some(250.0));
 
-        // Verify interruptible pricing
-        let interruptible = listing.interruptible_price.as_ref().unwrap();
-        assert_eq!(interruptible.hourly.total, Some(960.0));
-        assert_eq!(interruptible.hourly.per_gpu, Some(120.0));
-
         // Print the parsed data
         println!("Successfully parsed HydraHost H100 listing:");
         println!("  ID: {}", listing.id);
@@ -332,10 +313,6 @@ mod tests {
         println!(
             "  Hourly Price: ${:.2}",
             listing.price.hourly.total.unwrap() / 100.0
-        );
-        println!(
-            "  Interruptible Price: ${:.2}",
-            interruptible.hourly.total.unwrap() / 100.0
         );
     }
 }

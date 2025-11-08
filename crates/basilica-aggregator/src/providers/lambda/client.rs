@@ -2,12 +2,12 @@ use super::normalize::{normalize_gpu_type, normalize_region, parse_gpu_descripti
 use super::types::InstanceTypesResponse;
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
+use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
 use crate::providers::Provider;
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use std::time::Duration;
 
 pub struct LambdaProvider {
     client: Client,
@@ -17,13 +17,7 @@ pub struct LambdaProvider {
 
 impl LambdaProvider {
     pub fn new(api_key: String, base_url: String, timeout_seconds: u64) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(timeout_seconds))
-            .build()
-            .map_err(|e| AggregatorError::Provider {
-                provider: "lambda".to_string(),
-                message: format!("Failed to create HTTP client: {}", e),
-            })?;
+        let client = HttpClientBuilder::new(timeout_seconds).build("lambda")?;
 
         Ok(Self {
             client,
@@ -48,15 +42,7 @@ impl LambdaProvider {
                 message: format!("Failed to fetch instance types: {}", e),
             })?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            tracing::error!("Lambda API returned error: {} - {}", status, error_text);
-            return Err(AggregatorError::Provider {
-                provider: "lambda".to_string(),
-                message: format!("API returned status: {} - {}", status, error_text),
-            });
-        }
+        let response = handle_error_response(response, "lambda").await?;
 
         let instance_types: InstanceTypesResponse =
             response
@@ -116,7 +102,7 @@ impl Provider for LambdaProvider {
                     id: instance_type.name.clone(),
                     provider: ProviderEnum::Lambda,
                     gpu_type: gpu_type.clone(),
-                    gpu_memory_gb: gpu_info.memory_gb,
+                    gpu_memory_gb: Some(gpu_info.memory_gb),
                     gpu_count: gpu_info.count,
                     interconnect: None,
                     storage: storage.clone(),
@@ -125,7 +111,6 @@ impl Provider for LambdaProvider {
                     vcpu_count: instance_type.specs.vcpus,
                     region: "global".to_string(),
                     hourly_rate,
-                    spot_rate: None,
                     availability: false,
                     fetched_at,
                     raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
@@ -141,7 +126,7 @@ impl Provider for LambdaProvider {
                         id: offering_id,
                         provider: ProviderEnum::Lambda,
                         gpu_type: gpu_type.clone(),
-                        gpu_memory_gb: gpu_info.memory_gb,
+                        gpu_memory_gb: Some(gpu_info.memory_gb),
                         gpu_count: gpu_info.count,
                         interconnect: None, // Lambda API doesn't provide interconnect info
                         storage: storage.clone(),
@@ -150,7 +135,6 @@ impl Provider for LambdaProvider {
                         vcpu_count: instance_type.specs.vcpus,
                         region,
                         hourly_rate,
-                        spot_rate: None, // Lambda doesn't provide spot pricing in this endpoint
                         availability: true, // True since this region has capacity
                         fetched_at,
                         raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),

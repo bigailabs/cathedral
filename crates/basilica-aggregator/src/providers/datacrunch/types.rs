@@ -6,8 +6,6 @@ pub struct InstanceType {
     pub id: String,
     pub instance_type: String,
     pub price_per_hour: String, // DataCrunch returns prices as strings
-    #[serde(default)]
-    pub spot_price: Option<String>, // Field name is spot_price, not spot_price_per_hour
     pub description: String,
     pub cpu: CpuSpec,
     pub gpu: GpuSpec,
