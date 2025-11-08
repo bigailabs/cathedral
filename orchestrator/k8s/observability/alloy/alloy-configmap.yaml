@@ -22,6 +22,12 @@ data:
       endpoint {
         url = "https://basilica-telemetry.tplr.ai/api/v1/write"
       }
+      external_labels = {
+        cluster = "basilica-k3s-prod",
+        environment = "production",
+        alloy_instance = env("POD_NAME"),
+        node = env("NODE_NAME"),
+      }
     }
 
     // Kubernetes pod logs
