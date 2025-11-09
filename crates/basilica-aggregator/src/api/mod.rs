@@ -3,7 +3,7 @@ pub mod query;
 
 use crate::service::AggregatorService;
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
     Router,
 };
 use std::sync::Arc;
@@ -27,11 +27,7 @@ pub fn create_router(service: Arc<AggregatorService>) -> Router {
         // SSH key endpoints (user-centric)
         .route("/users/:user_id/ssh-key", post(handlers::register_ssh_key))
         .route("/users/:user_id/ssh-key", get(handlers::get_ssh_key))
-        .route("/users/:user_id/ssh-key", put(handlers::update_ssh_key))
         .route("/users/:user_id/ssh-key", delete(handlers::delete_ssh_key))
-        // Legacy SSH key endpoints (DataCrunch-only, kept for compatibility)
-        .route("/ssh-keys", get(handlers::list_ssh_keys))
-        .route("/ssh-keys", post(handlers::create_ssh_key))
         // OS images endpoint
         .route("/images", get(handlers::list_images))
         .layer(TraceLayer::new_for_http())

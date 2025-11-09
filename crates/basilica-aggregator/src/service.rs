@@ -4,7 +4,7 @@ use crate::error::{AggregatorError, Result};
 use crate::models::{
     Deployment, DeploymentStatus, GpuOffering, Provider as ProviderEnum, ProviderHealth,
 };
-use crate::providers::datacrunch::{DataCrunchProvider, Instance, OsImage, SshKey};
+use crate::providers::datacrunch::{DataCrunchProvider, Instance, OsImage};
 use crate::providers::hyperstack::HyperstackProvider;
 use crate::providers::{DeployRequest, Provider, ProviderClient};
 use basilica_common::types::GpuCategory;
@@ -250,18 +250,6 @@ impl AggregatorService {
                 provider: "DataCrunch".to_string(),
                 message: "DataCrunch provider not enabled".to_string(),
             })
-    }
-
-    /// List SSH keys from DataCrunch (legacy)
-    pub async fn list_ssh_keys(&self) -> Result<Vec<SshKey>> {
-        let provider = self.get_datacrunch_provider()?;
-        provider.list_ssh_keys_impl().await
-    }
-
-    /// Create SSH key in DataCrunch (legacy)
-    pub async fn create_ssh_key(&self, name: String, public_key: String) -> Result<SshKey> {
-        let provider = self.get_datacrunch_provider()?;
-        provider.create_ssh_key_impl(name, public_key).await
     }
 
     /// List available OS images from DataCrunch
@@ -545,37 +533,6 @@ impl AggregatorService {
     /// Get user's SSH key
     pub async fn get_ssh_key(&self, user_id: &str) -> Result<Option<crate::models::SshKey>> {
         self.db.get_ssh_key_by_user(user_id).await
-    }
-
-    /// Update user's SSH key (replaces existing)
-    pub async fn update_ssh_key(
-        &self,
-        user_id: String,
-        name: String,
-        public_key: String,
-    ) -> Result<crate::models::SshKey> {
-        let existing = self
-            .db
-            .get_ssh_key_by_user(&user_id)
-            .await?
-            .ok_or_else(|| AggregatorError::SshKeyNotFound)?;
-
-        // Delete from all providers first
-        self.delete_ssh_key_from_providers(&existing.id).await?;
-
-        // Update the key
-        let updated = crate::models::SshKey {
-            id: existing.id,
-            user_id: existing.user_id,
-            name,
-            public_key,
-            created_at: existing.created_at,
-            updated_at: Utc::now(),
-        };
-
-        self.db.update_ssh_key(&updated).await?;
-
-        Ok(updated)
     }
 
     /// Delete user's SSH key and cleanup from all providers

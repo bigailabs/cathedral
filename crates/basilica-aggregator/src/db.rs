@@ -484,25 +484,6 @@ impl Database {
         }))
     }
 
-    /// Update SSH key
-    pub async fn update_ssh_key(&self, ssh_key: &SshKey) -> Result<()> {
-        sqlx::query(
-            r#"
-            UPDATE ssh_keys
-            SET name = ?, public_key = ?, updated_at = ?
-            WHERE id = ?
-            "#,
-        )
-        .bind(&ssh_key.name)
-        .bind(&ssh_key.public_key)
-        .bind(ssh_key.updated_at)
-        .bind(&ssh_key.id)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
     /// Delete SSH key (cascades to provider_ssh_keys)
     pub async fn delete_ssh_key(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM ssh_keys WHERE id = ?")

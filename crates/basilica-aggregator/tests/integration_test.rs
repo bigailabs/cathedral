@@ -24,9 +24,9 @@ async fn test_service_initialization() {
         },
     };
 
-    // Should fail - no providers configured
+    // Should succeed - providers are optional
     let result = AggregatorService::new(db, config);
-    assert!(result.is_err());
+    assert!(result.is_ok());
 }
 
 #[tokio::test]

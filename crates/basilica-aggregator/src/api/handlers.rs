@@ -253,46 +253,6 @@ pub async fn delete_deployment(
 }
 
 // ============================================================================
-// SSH Key Handlers
-// ============================================================================
-
-pub async fn list_ssh_keys(State(service): State<Arc<AggregatorService>>) -> impl IntoResponse {
-    match service.list_ssh_keys().await {
-        Ok(keys) => (StatusCode::OK, Json(json!({ "ssh_keys": keys }))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Failed to list SSH keys",
-                "message": e.to_string()
-            })),
-        ),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateSshKeyRequest {
-    pub name: String,
-    pub public_key: String,
-}
-
-pub async fn create_ssh_key(
-    State(service): State<Arc<AggregatorService>>,
-    Json(req): Json<CreateSshKeyRequest>,
-) -> impl IntoResponse {
-    match service.create_ssh_key(req.name, req.public_key).await {
-        Ok(key) => (StatusCode::CREATED, Json(key)).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "error": "Failed to create SSH key",
-                "message": e.to_string()
-            })),
-        )
-            .into_response(),
-    }
-}
-
-// ============================================================================
 // OS Images Handler
 // ============================================================================
 
@@ -315,12 +275,6 @@ pub async fn list_images(State(service): State<Arc<AggregatorService>>) -> impl 
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterSshKeyRequest {
-    pub name: String,
-    pub public_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateSshKeyRequest {
     pub name: String,
     pub public_key: String,
 }
@@ -379,37 +333,6 @@ pub async fn get_ssh_key(
                 "message": e.to_string()
             })),
         ),
-    }
-}
-
-/// PUT /users/:user_id/ssh-key
-pub async fn update_ssh_key(
-    Path(user_id): Path<String>,
-    State(service): State<Arc<AggregatorService>>,
-    Json(req): Json<UpdateSshKeyRequest>,
-) -> impl IntoResponse {
-    match service
-        .update_ssh_key(user_id, req.name, req.public_key)
-        .await
-    {
-        Ok(ssh_key) => {
-            let response = crate::models::SshKeyResponse::from(ssh_key);
-            (StatusCode::OK, Json(json!(response)))
-        }
-        Err(e) => {
-            let status = if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (
-                status,
-                Json(json!({
-                    "error": "Failed to update SSH key",
-                    "message": e.to_string()
-                })),
-            )
-        }
     }
 }
 
