@@ -391,17 +391,26 @@ impl Provider for HyperstackProvider {
         }
     }
 
-    async fn create_ssh_key(&self, name: String, public_key: String) -> Result<String> {
+    async fn create_ssh_key(
+        &self,
+        name: String,
+        public_key: String,
+    ) -> Result<crate::providers::ProviderSshKey> {
         // Hyperstack requires an environment_name for SSH keys
-        // We use "default" as the environment name (can be made configurable later)
+        // Use from request if provided, otherwise default to "default"
         let environment_name = "default".to_string();
 
         let keypair = self
             .create_keypair_impl(name, environment_name, public_key)
             .await?;
 
-        // Return the keypair ID as a string
-        Ok(keypair.id.to_string())
+        Ok(keypair.into())
+    }
+
+    async fn list_ssh_keys(&self) -> Result<Vec<crate::providers::ProviderSshKey>> {
+        // Hyperstack doesn't have a list keypairs endpoint in the current implementation
+        // Return empty list for now (can be implemented if API supports it)
+        Ok(vec![])
     }
 
     async fn delete_ssh_key(&self, provider_key_id: &str) -> Result<()> {
@@ -413,6 +422,72 @@ impl Provider for HyperstackProvider {
             })?;
 
         self.delete_keypair(keypair_id).await
+    }
+
+    async fn deploy(
+        &self,
+        request: crate::providers::DeployRequest,
+    ) -> Result<crate::providers::ProviderDeployment> {
+        // Get environment name from request or default
+        let environment_name = request
+            .environment_name
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        // Create SSH keypair
+        let _keypair = self
+            .create_keypair_impl(
+                request.ssh_key_name.clone(),
+                environment_name.clone(),
+                request.ssh_public_key.clone(),
+            )
+            .await?;
+
+        // Get default image if not specified
+        let image_name = request
+            .image_name
+            .clone()
+            .unwrap_or_else(|| "Ubuntu Server 22.04 LTS R535 CUDA 12.2".to_string());
+
+        // Create deployment request
+        let deploy_request = DeployVmRequest {
+            name: request.hostname.clone(),
+            environment_name,
+            image_name,
+            flavor_name: request.instance_type.clone(),
+            key_name: request.ssh_key_name.clone(),
+            user_data: None,
+            assign_floating_ip: Some(true),
+            count: Some(1),
+            create_bootable_volume: None,
+        };
+
+        // Deploy VM
+        let vm = self.deploy_vm(deploy_request).await?;
+
+        Ok(vm.into())
+    }
+
+    async fn get_deployment(
+        &self,
+        instance_id: &str,
+    ) -> Result<crate::providers::ProviderDeployment> {
+        let vm_id: u32 = instance_id.parse().map_err(|_| AggregatorError::Provider {
+            provider: "hyperstack".to_string(),
+            message: format!("Invalid VM ID: {}", instance_id),
+        })?;
+
+        let vm = self.get_vm(vm_id).await?;
+        Ok(vm.into())
+    }
+
+    async fn delete_deployment(&self, instance_id: &str) -> Result<()> {
+        let vm_id: u32 = instance_id.parse().map_err(|_| AggregatorError::Provider {
+            provider: "hyperstack".to_string(),
+            message: format!("Invalid VM ID: {}", instance_id),
+        })?;
+
+        self.delete_vm(vm_id).await
     }
 }
 

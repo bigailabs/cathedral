@@ -194,7 +194,18 @@ impl Provider for HydraHostProvider {
         }
     }
 
-    async fn create_ssh_key(&self, _name: String, _public_key: String) -> Result<String> {
+    async fn create_ssh_key(
+        &self,
+        _name: String,
+        _public_key: String,
+    ) -> Result<crate::providers::ProviderSshKey> {
+        Err(AggregatorError::Provider {
+            provider: "hydrahost".to_string(),
+            message: "SSH key management not yet implemented for HydraHost".to_string(),
+        })
+    }
+
+    async fn list_ssh_keys(&self) -> Result<Vec<crate::providers::ProviderSshKey>> {
         Err(AggregatorError::Provider {
             provider: "hydrahost".to_string(),
             message: "SSH key management not yet implemented for HydraHost".to_string(),
@@ -205,6 +216,33 @@ impl Provider for HydraHostProvider {
         Err(AggregatorError::Provider {
             provider: "hydrahost".to_string(),
             message: "SSH key management not yet implemented for HydraHost".to_string(),
+        })
+    }
+
+    async fn deploy(
+        &self,
+        _request: crate::providers::DeployRequest,
+    ) -> Result<crate::providers::ProviderDeployment> {
+        Err(AggregatorError::Provider {
+            provider: "hydrahost".to_string(),
+            message: "Deployment not yet implemented for HydraHost".to_string(),
+        })
+    }
+
+    async fn get_deployment(
+        &self,
+        _instance_id: &str,
+    ) -> Result<crate::providers::ProviderDeployment> {
+        Err(AggregatorError::Provider {
+            provider: "hydrahost".to_string(),
+            message: "Get deployment not yet implemented for HydraHost".to_string(),
+        })
+    }
+
+    async fn delete_deployment(&self, _instance_id: &str) -> Result<()> {
+        Err(AggregatorError::Provider {
+            provider: "hydrahost".to_string(),
+            message: "Delete deployment not yet implemented for HydraHost".to_string(),
         })
     }
 }

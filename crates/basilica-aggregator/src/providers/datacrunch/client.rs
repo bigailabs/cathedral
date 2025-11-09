@@ -636,18 +636,76 @@ impl Provider for DataCrunchProvider {
         }
     }
 
-    async fn create_ssh_key(&self, name: String, public_key: String) -> Result<String> {
+    async fn create_ssh_key(
+        &self,
+        name: String,
+        public_key: String,
+    ) -> Result<crate::providers::ProviderSshKey> {
         let key = self.create_ssh_key_impl(name, public_key).await?;
-        Ok(key.id)
+        Ok(key.into())
+    }
+
+    async fn list_ssh_keys(&self) -> Result<Vec<crate::providers::ProviderSshKey>> {
+        let keys = self.list_ssh_keys_impl().await?;
+        Ok(keys.into_iter().map(|k| k.into()).collect())
     }
 
     async fn delete_ssh_key(&self, provider_key_id: &str) -> Result<()> {
         self.delete_ssh_key_impl(provider_key_id).await
     }
 
-    async fn list_ssh_keys(&self) -> Result<Vec<String>> {
-        let keys = self.list_ssh_keys_impl().await?;
-        Ok(keys.into_iter().map(|k| k.id).collect())
+    async fn deploy(
+        &self,
+        request: crate::providers::DeployRequest,
+    ) -> Result<crate::providers::ProviderDeployment> {
+        // Create SSH key first
+        let ssh_key = self
+            .create_ssh_key_impl(request.ssh_key_name.clone(), request.ssh_public_key.clone())
+            .await?;
+
+        // Get default image if not specified
+        let image = if let Some(img) = request.image_name {
+            img
+        } else {
+            let images = self.list_images().await?;
+            images
+                .iter()
+                .find(|img| img.image_type.contains("ubuntu-22") && img.image_type.contains("cuda"))
+                .map(|img| img.image_type.clone())
+                .unwrap_or_else(|| "ubuntu-22.04-cuda-12.4-docker".to_string())
+        };
+
+        // Create deployment request
+        let deploy_request = DeployInstanceRequest {
+            instance_type: request.instance_type.clone(),
+            image,
+            hostname: request.hostname.clone(),
+            description: format!("Basilica deployment {}", request.hostname),
+            ssh_key_ids: vec![ssh_key.id.clone()],
+            location_code: request.location_code.clone().or(Some("FIN-01".to_string())),
+            contract: Some("PAY_AS_YOU_GO".to_string()),
+            pricing: Some("FIXED_PRICE".to_string()),
+        };
+
+        // Deploy instance
+        let instance_id = self.deploy_instance(deploy_request).await?;
+
+        // Get instance details
+        let instance = self.get_instance(&instance_id).await?;
+
+        Ok(instance.into())
+    }
+
+    async fn get_deployment(
+        &self,
+        instance_id: &str,
+    ) -> Result<crate::providers::ProviderDeployment> {
+        let instance = self.get_instance(instance_id).await?;
+        Ok(instance.into())
+    }
+
+    async fn delete_deployment(&self, instance_id: &str) -> Result<()> {
+        self.delete_instance(instance_id).await
     }
 }
 

@@ -4,13 +4,9 @@ use crate::error::{AggregatorError, Result};
 use crate::models::{
     Deployment, DeploymentStatus, GpuOffering, Provider as ProviderEnum, ProviderHealth,
 };
-use crate::providers::datacrunch::{
-    DataCrunchProvider, DeployInstanceRequest, Instance, OsImage, SshKey,
-};
-use crate::providers::hyperstack::{
-    DeployVmRequest as HyperstackDeployVmRequest, HyperstackProvider,
-};
-use crate::providers::Provider;
+use crate::providers::datacrunch::{DataCrunchProvider, Instance, OsImage, SshKey};
+use crate::providers::hyperstack::HyperstackProvider;
+use crate::providers::{DeployRequest, Provider, ProviderClient};
 use basilica_common::types::GpuCategory;
 use chrono::{Duration, Utc};
 use std::sync::Arc;
@@ -18,15 +14,16 @@ use uuid::Uuid;
 
 pub struct AggregatorService {
     db: Arc<Database>,
-    datacrunch: Option<DataCrunchProvider>,
-    hyperstack: Option<HyperstackProvider>,
+    providers: Vec<ProviderClient>,
     config: Config,
 }
 
 impl AggregatorService {
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
+        let mut providers = Vec::new();
+
         // Initialize DataCrunch provider (optional)
-        let datacrunch = if config.providers.datacrunch.is_enabled() {
+        if config.providers.datacrunch.is_enabled() {
             if let Some(auth) = config.providers.datacrunch.get_auth() {
                 let (client_id, client_secret) = match auth {
                     AuthConfig::OAuth {
@@ -47,21 +44,20 @@ impl AggregatorService {
                     .clone()
                     .ok_or_else(|| AggregatorError::Config("DataCrunch base URL missing".into()))?;
 
-                Some(DataCrunchProvider::new(
+                let provider = DataCrunchProvider::new(
                     client_id,
                     client_secret,
                     base_url,
                     config.providers.datacrunch.timeout_seconds,
-                )?)
-            } else {
-                None
+                )?;
+
+                providers.push(ProviderClient::DataCrunch(provider));
+                tracing::info!("DataCrunch provider initialized");
             }
-        } else {
-            None
-        };
+        }
 
         // Initialize Hyperstack provider (optional)
-        let hyperstack = if config.providers.hyperstack.is_enabled() {
+        if config.providers.hyperstack.is_enabled() {
             if let Some(auth) = config.providers.hyperstack.get_auth() {
                 let api_key = match auth {
                     AuthConfig::ApiKey { api_key } => api_key,
@@ -79,22 +75,20 @@ impl AggregatorService {
                     .clone()
                     .ok_or_else(|| AggregatorError::Config("Hyperstack base URL missing".into()))?;
 
-                Some(HyperstackProvider::new(
+                let provider = HyperstackProvider::new(
                     api_key,
                     base_url,
                     config.providers.hyperstack.timeout_seconds,
-                )?)
-            } else {
-                None
+                )?;
+
+                providers.push(ProviderClient::Hyperstack(provider));
+                tracing::info!("Hyperstack provider initialized");
             }
-        } else {
-            None
-        };
+        }
 
         Ok(Self {
             db,
-            datacrunch,
-            hyperstack,
+            providers,
             config,
         })
     }
@@ -114,37 +108,12 @@ impl AggregatorService {
     pub async fn refresh_all_providers(&self) -> Result<usize> {
         let mut total_count = 0;
 
-        // Refresh DataCrunch (if enabled)
-        if let Some(ref datacrunch) = self.datacrunch {
-            let provider_id = ProviderEnum::DataCrunch;
-            if self.should_fetch(provider_id).await? {
-                match self.fetch_and_cache(datacrunch).await {
-                    Ok(offerings) => {
-                        tracing::info!(
-                            "Refreshed {} offerings from {}",
-                            offerings.len(),
-                            provider_id
-                        );
-                        total_count += offerings.len();
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to refresh from {}: {}", provider_id, e);
-                        let _ = self
-                            .db
-                            .update_provider_status(provider_id, false, Some(e.to_string()))
-                            .await;
-                    }
-                }
-            } else {
-                tracing::debug!("Skipping {} - cooldown period not elapsed", provider_id);
-            }
-        }
+        // Iterate over all enabled providers
+        for provider in &self.providers {
+            let provider_id = provider.provider_id();
 
-        // Refresh Hyperstack (if enabled)
-        if let Some(ref hyperstack) = self.hyperstack {
-            let provider_id = ProviderEnum::Hyperstack;
             if self.should_fetch(provider_id).await? {
-                match self.fetch_and_cache(hyperstack).await {
+                match self.fetch_and_cache(provider).await {
                     Ok(offerings) => {
                         tracing::info!(
                             "Refreshed {} offerings from {}",
@@ -227,21 +196,10 @@ impl AggregatorService {
     pub async fn get_provider_health(&self) -> Result<Vec<ProviderHealth>> {
         let mut health_statuses = Vec::new();
 
-        // Get health for DataCrunch (if enabled)
-        if self.datacrunch.is_some() {
-            let health = self
-                .db
-                .get_provider_health(ProviderEnum::DataCrunch)
-                .await?;
-            health_statuses.push(health);
-        }
-
-        // Get health for Hyperstack (if enabled)
-        if self.hyperstack.is_some() {
-            let health = self
-                .db
-                .get_provider_health(ProviderEnum::Hyperstack)
-                .await?;
+        // Get health for all enabled providers
+        for provider in &self.providers {
+            let provider_id = provider.provider_id();
+            let health = self.db.get_provider_health(provider_id).await?;
             health_statuses.push(health);
         }
 
@@ -266,53 +224,32 @@ impl AggregatorService {
     }
 
     // ========================================================================
-    // DataCrunch Deployment Management
+    // Provider Access
     // ========================================================================
 
-    /// Get DataCrunch provider instance
+    /// Get provider by enum
+    fn get_provider(&self, provider_enum: ProviderEnum) -> Result<&ProviderClient> {
+        self.providers
+            .iter()
+            .find(|p| p.provider_id() == provider_enum)
+            .ok_or_else(|| AggregatorError::Provider {
+                provider: provider_enum.as_str().to_string(),
+                message: "Provider not enabled".to_string(),
+            })
+    }
+
+    /// Get DataCrunch provider (for legacy APIs that need provider-specific methods)
     fn get_datacrunch_provider(&self) -> Result<&DataCrunchProvider> {
-        self.datacrunch
-            .as_ref()
+        self.providers
+            .iter()
+            .find_map(|p| match p {
+                ProviderClient::DataCrunch(dc) => Some(dc),
+                _ => None,
+            })
             .ok_or_else(|| AggregatorError::Provider {
                 provider: "DataCrunch".to_string(),
-                message: "Provider not enabled".to_string(),
+                message: "DataCrunch provider not enabled".to_string(),
             })
-    }
-
-    /// Get Hyperstack provider instance
-    fn get_hyperstack_provider(&self) -> Result<&HyperstackProvider> {
-        self.hyperstack
-            .as_ref()
-            .ok_or_else(|| AggregatorError::Provider {
-                provider: "Hyperstack".to_string(),
-                message: "Provider not enabled".to_string(),
-            })
-    }
-
-    /// Get provider as trait object by enum
-    fn get_provider_dyn(&self, provider: &ProviderEnum) -> Result<&dyn Provider> {
-        match provider {
-            ProviderEnum::DataCrunch => self
-                .datacrunch
-                .as_ref()
-                .map(|p| p as &dyn Provider)
-                .ok_or_else(|| AggregatorError::Provider {
-                    provider: provider.as_str().to_string(),
-                    message: "Provider not enabled".to_string(),
-                }),
-            ProviderEnum::Hyperstack => self
-                .hyperstack
-                .as_ref()
-                .map(|p| p as &dyn Provider)
-                .ok_or_else(|| AggregatorError::Provider {
-                    provider: provider.as_str().to_string(),
-                    message: "Provider not enabled".to_string(),
-                }),
-            _ => Err(AggregatorError::Provider {
-                provider: provider.as_str().to_string(),
-                message: "Provider not supported".to_string(),
-            }),
-        }
     }
 
     /// List SSH keys from DataCrunch (legacy)
@@ -352,183 +289,55 @@ impl AggregatorService {
 
         let provider_enum = offering.provider;
 
-        // Dispatch to provider-specific deployment logic
-        match provider_enum {
-            ProviderEnum::DataCrunch => {
-                self.deploy_instance_datacrunch(
-                    offering,
-                    ssh_public_key,
-                    ssh_key_name,
-                    location_code,
-                )
-                .await
-            }
-            ProviderEnum::Hyperstack => {
-                self.deploy_instance_hyperstack(
-                    offering,
-                    ssh_public_key,
-                    ssh_key_name,
-                    location_code,
-                )
-                .await
-            }
-            _ => Err(AggregatorError::Provider {
-                provider: provider_enum.as_str().to_string(),
-                message: "Deployment not supported for this provider".to_string(),
-            }),
-        }
-    }
-
-    /// Deploy instance on DataCrunch
-    async fn deploy_instance_datacrunch(
-        &self,
-        offering: &GpuOffering,
-        ssh_public_key: String,
-        ssh_key_name: Option<String>,
-        location_code: Option<String>,
-    ) -> Result<Deployment> {
-        let provider = self.get_datacrunch_provider()?;
-
         // Extract instance type from raw metadata
         let instance_type = offering
             .raw_metadata
             .get("instance_type")
             .and_then(|v| v.as_str())
+            .or_else(|| offering.raw_metadata.get("name").and_then(|v| v.as_str()))
             .ok_or_else(|| AggregatorError::Provider {
-                provider: "datacrunch".to_string(),
-                message: "Missing instance_type in offering metadata".to_string(),
-            })?
-            .to_string();
-
-        // Create or reuse SSH key
-        let key_name = ssh_key_name.unwrap_or_else(|| format!("basilica-{}", Uuid::new_v4()));
-        let ssh_key = provider
-            .create_ssh_key_impl(key_name, ssh_public_key)
-            .await?;
-
-        // Generate deployment ID and hostname
-        let deployment_id = Uuid::new_v4().to_string();
-        let hostname = format!("basilica-{}", deployment_id);
-
-        // Get default image (Ubuntu 22.04 with CUDA)
-        let images = provider.list_images().await?;
-        let default_image = images
-            .iter()
-            .find(|img| img.image_type.contains("ubuntu-22") && img.image_type.contains("cuda"))
-            .map(|img| img.image_type.clone())
-            .unwrap_or_else(|| "ubuntu-22.04-cuda-12.4-docker".to_string());
-
-        // Create deployment request
-        let deploy_request = DeployInstanceRequest {
-            instance_type: instance_type.clone(),
-            image: default_image,
-            hostname: hostname.clone(),
-            description: format!("Basilica deployment {}", deployment_id),
-            ssh_key_ids: vec![ssh_key.id.clone()],
-            location_code: location_code.clone().or_else(|| Some("FIN-01".to_string())),
-            contract: Some("PAY_AS_YOU_GO".to_string()),
-            pricing: Some("FIXED_PRICE".to_string()),
-        };
-
-        // Deploy instance
-        let provider_instance_id = provider.deploy_instance(deploy_request).await?;
-
-        // Create deployment record
-        let now = Utc::now();
-        let deployment = Deployment {
-            id: deployment_id,
-            user_id: "legacy".to_string(),
-            provider: ProviderEnum::DataCrunch,
-            provider_instance_id: Some(provider_instance_id),
-            offering_id: offering.id.clone(),
-            instance_type,
-            location_code,
-            status: DeploymentStatus::Pending,
-            hostname,
-            ssh_key_id: Some(ssh_key.id),
-            ip_address: None,
-            connection_info: None,
-            raw_response: None,
-            error_message: None,
-            created_at: now,
-            updated_at: now,
-        };
-
-        self.db.create_deployment(&deployment).await?;
-        Ok(deployment)
-    }
-
-    /// Deploy instance on Hyperstack
-    async fn deploy_instance_hyperstack(
-        &self,
-        offering: &GpuOffering,
-        ssh_public_key: String,
-        ssh_key_name: Option<String>,
-        _location_code: Option<String>,
-    ) -> Result<Deployment> {
-        let provider = self.get_hyperstack_provider()?;
-
-        // Extract flavor name from raw metadata
-        let flavor_name = offering
-            .raw_metadata
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: "Missing flavor name in offering metadata".to_string(),
+                provider: provider_enum.as_str().to_string(),
+                message: "Missing instance_type/name in offering metadata".to_string(),
             })?
             .to_string();
 
         // Generate deployment ID and hostname
         let deployment_id = Uuid::new_v4().to_string();
         let hostname = format!("basilica-{}", &deployment_id[..8]);
-
-        // Create SSH keypair
         let key_name = ssh_key_name.unwrap_or_else(|| format!("basilica-{}", &deployment_id[..8]));
-        let environment_name = "default".to_string();
-        let keypair = provider
-            .create_keypair_impl(key_name.clone(), environment_name.clone(), ssh_public_key)
-            .await?;
 
-        // Default image (Ubuntu 22.04 with CUDA)
-        let default_image = "Ubuntu Server 22.04 LTS R535 CUDA 12.2".to_string();
+        // Get provider and deploy using unified interface
+        let provider = self.get_provider(provider_enum)?;
 
-        // Create deployment request
-        let deploy_request = HyperstackDeployVmRequest {
-            name: hostname.clone(),
-            environment_name,
-            image_name: default_image,
-            flavor_name: flavor_name.clone(),
-            key_name,
-            user_data: None,
-            assign_floating_ip: Some(true),
-            count: Some(1),
-            create_bootable_volume: None,
+        let deploy_request = DeployRequest {
+            instance_type: instance_type.clone(),
+            hostname: hostname.clone(),
+            ssh_key_name: key_name.clone(),
+            ssh_public_key,
+            location_code: location_code.clone(),
+            image_name: None,       // Use provider defaults
+            environment_name: None, // Use provider defaults
         };
 
-        // Deploy VM
-        let vm = provider.deploy_vm(deploy_request).await?;
+        let provider_deployment = provider.deploy(deploy_request).await?;
 
-        // Create deployment record
+        // Create deployment record in database
         let now = Utc::now();
         let deployment = Deployment {
             id: deployment_id,
             user_id: "legacy".to_string(),
-            provider: ProviderEnum::Hyperstack,
-            provider_instance_id: Some(vm.id.to_string()),
+            provider: provider_enum,
+            provider_instance_id: Some(provider_deployment.id.clone()),
             offering_id: offering.id.clone(),
-            instance_type: flavor_name,
-            location_code: None,
-            status: DeploymentStatus::Provisioning,
+            instance_type,
+            location_code,
+            status: self
+                .map_provider_status_to_deployment(&provider_deployment.status, provider_enum),
             hostname,
-            ssh_key_id: Some(keypair.id.to_string()),
-            ip_address: vm.floating_ip.clone(),
-            connection_info: Some(serde_json::json!({
-                "fixed_ip": vm.fixed_ip,
-                "floating_ip": vm.floating_ip,
-                "status": vm.status,
-            })),
-            raw_response: Some(serde_json::to_value(&vm).unwrap_or_default()),
+            ssh_key_id: Some(provider_deployment.ssh_key_id),
+            ip_address: provider_deployment.ip_address,
+            connection_info: provider_deployment.raw_data.clone(),
+            raw_response: provider_deployment.raw_data,
             error_message: None,
             created_at: now,
             updated_at: now,
@@ -536,6 +345,51 @@ impl AggregatorService {
 
         self.db.create_deployment(&deployment).await?;
         Ok(deployment)
+    }
+
+    /// Map provider-specific status strings to deployment status
+    fn map_provider_status_to_deployment(
+        &self,
+        status: &str,
+        provider: ProviderEnum,
+    ) -> DeploymentStatus {
+        match provider {
+            ProviderEnum::DataCrunch => {
+                // Status from DataCrunch Instance will be in Debug format (e.g., "Running", "Provisioning")
+                match status {
+                    s if s.contains("Running") => DeploymentStatus::Running,
+                    s if s.contains("Provisioning")
+                        || s.contains("Ordered")
+                        || s.contains("New")
+                        || s.contains("Validating") =>
+                    {
+                        DeploymentStatus::Provisioning
+                    }
+                    s if s.contains("Error")
+                        || s.contains("NoCapacity")
+                        || s.contains("NotFound") =>
+                    {
+                        DeploymentStatus::Error
+                    }
+                    s if s.contains("Deleting") || s.contains("Discontinued") => {
+                        DeploymentStatus::Deleted
+                    }
+                    _ => DeploymentStatus::Pending,
+                }
+            }
+            ProviderEnum::Hyperstack => {
+                // Hyperstack status strings are UPPERCASE (e.g., "ACTIVE", "BUILDING")
+                match status.to_uppercase().as_str() {
+                    "ACTIVE" => DeploymentStatus::Running,
+                    "BUILDING" | "MIGRATING" | "REBUILD" | "RESIZE" | "VERIFY_RESIZE"
+                    | "REVERT_RESIZE" => DeploymentStatus::Provisioning,
+                    "ERROR" => DeploymentStatus::Error,
+                    "SHUTOFF" | "SOFT_DELETED" | "SHELVED_OFFLOADED" => DeploymentStatus::Deleted,
+                    _ => DeploymentStatus::Pending,
+                }
+            }
+            _ => DeploymentStatus::Pending,
+        }
     }
 
     /// Get deployment status and update database
@@ -551,83 +405,38 @@ impl AggregatorService {
 
         // If we have a provider instance ID, fetch latest status
         if let Some(provider_instance_id) = &deployment.provider_instance_id {
-            match deployment.provider {
-                ProviderEnum::DataCrunch => {
-                    let provider = self.get_datacrunch_provider()?;
-                    match provider.get_instance(provider_instance_id).await {
-                        Ok(instance) => {
-                            let status = map_datacrunch_status_to_deployment(&instance.status);
-                            let raw_response = serde_json::to_value(&instance).ok();
+            let provider = self.get_provider(deployment.provider)?;
 
-                            self.db
-                                .update_deployment(
-                                    deployment_id,
-                                    Some(provider_instance_id.clone()),
-                                    status.clone(),
-                                    instance.ip.clone(),
-                                    None,
-                                    raw_response.clone(),
-                                    None,
-                                )
-                                .await?;
+            match provider.get_deployment(provider_instance_id).await {
+                Ok(provider_deployment) => {
+                    let status = self.map_provider_status_to_deployment(
+                        &provider_deployment.status,
+                        deployment.provider,
+                    );
 
-                            deployment.status = status;
-                            deployment.ip_address = instance.ip;
-                            deployment.raw_response = raw_response;
-                            deployment.updated_at = Utc::now();
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to fetch DataCrunch instance status: {}", e);
-                        }
-                    }
+                    self.db
+                        .update_deployment(
+                            deployment_id,
+                            Some(provider_instance_id.clone()),
+                            status.clone(),
+                            provider_deployment.ip_address.clone(),
+                            provider_deployment.raw_data.clone(),
+                            provider_deployment.raw_data.clone(),
+                            None,
+                        )
+                        .await?;
+
+                    deployment.status = status;
+                    deployment.ip_address = provider_deployment.ip_address;
+                    deployment.connection_info = provider_deployment.raw_data.clone();
+                    deployment.raw_response = provider_deployment.raw_data;
+                    deployment.updated_at = Utc::now();
                 }
-                ProviderEnum::Hyperstack => {
-                    let provider = self.get_hyperstack_provider()?;
-                    let vm_id: u32 =
-                        provider_instance_id
-                            .parse()
-                            .map_err(|_| AggregatorError::Provider {
-                                provider: "hyperstack".to_string(),
-                                message: format!("Invalid VM ID: {}", provider_instance_id),
-                            })?;
-
-                    match provider.get_vm(vm_id).await {
-                        Ok(vm) => {
-                            let status = map_hyperstack_status_to_deployment(&vm.status);
-                            let raw_response = serde_json::to_value(&vm).ok();
-                            let connection_info = Some(serde_json::json!({
-                                "fixed_ip": vm.fixed_ip,
-                                "floating_ip": vm.floating_ip,
-                                "status": vm.status,
-                            }));
-
-                            self.db
-                                .update_deployment(
-                                    deployment_id,
-                                    Some(provider_instance_id.clone()),
-                                    status.clone(),
-                                    vm.floating_ip.clone(),
-                                    connection_info.clone(),
-                                    raw_response.clone(),
-                                    None,
-                                )
-                                .await?;
-
-                            deployment.status = status;
-                            deployment.ip_address = vm.floating_ip;
-                            deployment.connection_info = connection_info;
-                            deployment.raw_response = raw_response;
-                            deployment.updated_at = Utc::now();
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to fetch Hyperstack VM status: {}", e);
-                        }
-                    }
-                }
-                _ => {
-                    tracing::warn!(
-                        "Unsupported provider for deployment status update: {:?}",
-                        deployment.provider
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to fetch {} instance status: {}",
+                        deployment.provider,
+                        e
                     );
                 }
             }
@@ -673,29 +482,8 @@ impl AggregatorService {
 
         // Delete instance if it exists
         if let Some(provider_instance_id) = &deployment.provider_instance_id {
-            match deployment.provider {
-                ProviderEnum::DataCrunch => {
-                    let provider = self.get_datacrunch_provider()?;
-                    provider.delete_instance(provider_instance_id).await?;
-                }
-                ProviderEnum::Hyperstack => {
-                    let provider = self.get_hyperstack_provider()?;
-                    let vm_id: u32 =
-                        provider_instance_id
-                            .parse()
-                            .map_err(|_| AggregatorError::Provider {
-                                provider: "hyperstack".to_string(),
-                                message: format!("Invalid VM ID: {}", provider_instance_id),
-                            })?;
-                    provider.delete_vm(vm_id).await?;
-                }
-                _ => {
-                    return Err(AggregatorError::Provider {
-                        provider: deployment.provider.as_str().to_string(),
-                        message: "Deletion not supported for this provider".to_string(),
-                    });
-                }
-            }
+            let provider = self.get_provider(deployment.provider)?;
+            provider.delete_deployment(provider_instance_id).await?;
         }
 
         // Update deployment status to deleted
@@ -809,7 +597,7 @@ impl AggregatorService {
         let mappings = self.db.list_provider_ssh_keys_for_key(ssh_key_id).await?;
 
         for mapping in mappings {
-            let provider = self.get_provider_dyn(&mapping.provider)?;
+            let provider = self.get_provider(mapping.provider)?;
 
             // Try to delete, but don't fail if provider returns error
             // (key might already be deleted, provider might be down, etc.)
@@ -824,42 +612,5 @@ impl AggregatorService {
         }
 
         Ok(())
-    }
-}
-
-/// Map DataCrunch instance status to deployment status
-fn map_datacrunch_status_to_deployment(
-    status: &crate::providers::datacrunch::InstanceStatus,
-) -> DeploymentStatus {
-    use crate::providers::datacrunch::InstanceStatus;
-
-    match status {
-        InstanceStatus::Running => DeploymentStatus::Running,
-        InstanceStatus::Provisioning
-        | InstanceStatus::Ordered
-        | InstanceStatus::New
-        | InstanceStatus::Validating => DeploymentStatus::Provisioning,
-        InstanceStatus::Error | InstanceStatus::NoCapacity | InstanceStatus::NotFound => {
-            DeploymentStatus::Error
-        }
-        InstanceStatus::Deleting | InstanceStatus::Discontinued => DeploymentStatus::Deleted,
-        InstanceStatus::Offline | InstanceStatus::Unknown => DeploymentStatus::Pending,
-    }
-}
-
-/// Map Hyperstack VM status to deployment status
-fn map_hyperstack_status_to_deployment(status: &str) -> DeploymentStatus {
-    // Hyperstack status strings are UPPERCASE (e.g., "ACTIVE", "BUILDING")
-    match status.to_uppercase().as_str() {
-        "ACTIVE" => DeploymentStatus::Running,
-        "BUILDING" | "MIGRATING" | "REBUILD" | "RESIZE" | "VERIFY_RESIZE" | "REVERT_RESIZE" => {
-            DeploymentStatus::Provisioning
-        }
-        "ERROR" => DeploymentStatus::Error,
-        "SHUTOFF" | "SOFT_DELETED" | "SHELVED_OFFLOADED" => DeploymentStatus::Deleted,
-        "PAUSED" | "SUSPENDED" | "RESCUED" | "PASSWORD" | "REBOOT" | "HARD_REBOOT" | "UNKNOWN" => {
-            DeploymentStatus::Pending
-        }
-        _ => DeploymentStatus::Pending,
     }
 }
