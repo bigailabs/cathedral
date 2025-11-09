@@ -139,6 +139,7 @@ pub trait ApiK8sClient {
         ns: &str,
         name: &str,
         user_id: &str,
+        instance_name: &str,
         req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
         path_prefix: &str,
     ) -> Result<()>;
@@ -554,6 +555,7 @@ impl ApiK8sClient for MockK8sClient {
         _ns: &str,
         _name: &str,
         _user_id: &str,
+        _instance_name: &str,
         _req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
         _path_prefix: &str,
     ) -> Result<()> {
@@ -1376,6 +1378,7 @@ impl ApiK8sClient for K8sClient {
         ns: &str,
         name: &str,
         user_id: &str,
+        instance_name: &str,
         req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
         path_prefix: &str,
     ) -> Result<()> {
@@ -1408,7 +1411,7 @@ impl ApiK8sClient for K8sClient {
             },
             "spec": {
                 "userId": user_id,
-                "instanceName": req.instance_name,
+                "instanceName": instance_name,
                 "image": req.image,
                 "replicas": req.replicas,
                 "port": req.port,

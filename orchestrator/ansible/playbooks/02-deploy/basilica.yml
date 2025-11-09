@@ -175,6 +175,12 @@
       run_once: true
       tags: ["deploy_operator"]
 
+    - name: Deploy Operator PodDisruptionBudget
+      ansible.builtin.command: kubectl apply -f /opt/basilica/k8s/services/operator/operator-pdb.yaml
+      changed_when: true
+      run_once: true
+      tags: ["deploy_operator"]
+
     - name: Wait for operator rollout
       ansible.builtin.command: kubectl -n basilica-system rollout status deploy/basilica-operator --timeout=720s
       changed_when: false
@@ -248,6 +254,7 @@
         kubectl apply -f /opt/basilica/k8s/networking/envoy/envoy-configmap.yaml || true
         kubectl apply -f /opt/basilica/k8s/networking/envoy/envoy-deployment.yaml || true
         kubectl apply -f /opt/basilica/k8s/networking/envoy/envoy-service.yaml || true
+        kubectl apply -f /opt/basilica/k8s/networking/envoy/envoy-pdb.yaml || true
       args:
         executable: /bin/bash
       changed_when: true

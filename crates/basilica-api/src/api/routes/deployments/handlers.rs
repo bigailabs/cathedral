@@ -13,7 +13,7 @@ use axum::{
 use serde::Serialize;
 
 use super::types::{
-    sanitize_user_id, validate_image, validate_instance_name, validate_port, validate_replicas,
+    resolve_instance_name, sanitize_user_id, validate_image, validate_port, validate_replicas,
     CreateDeploymentRequest, DeploymentResponse,
 };
 
@@ -31,6 +31,7 @@ async fn create_k8s_resources(
     namespace: &str,
     cr_name: &str,
     user_id: &str,
+    instance_name: &str,
     req: &super::types::CreateDeploymentRequest,
     path_prefix: &str,
 ) -> Result<()> {
@@ -47,7 +48,7 @@ async fn create_k8s_resources(
         "Creating UserDeployment CR"
     );
     k8s_client
-        .create_user_deployment(namespace, cr_name, user_id, req, path_prefix)
+        .create_user_deployment(namespace, cr_name, user_id, instance_name, req, path_prefix)
         .await?;
 
     tracing::debug!(
@@ -61,13 +62,13 @@ async fn create_k8s_resources(
         config.deployment.envoy_configmap_name.clone(),
     );
 
-    let service_name = format!("{}-service", req.instance_name);
+    let service_name = format!("{}-service", instance_name);
     let target_service = format!("{}.{}:{}", service_name, namespace, req.port);
 
     envoy_manager
         .add_route(EnvoyRoute {
             prefix: path_prefix.to_string(),
-            cluster_name: format!("user_deployment_{}", req.instance_name),
+            cluster_name: format!("user_deployment_{}", instance_name),
             target_service,
             rewrite: "/".to_string(),
         })
@@ -95,15 +96,16 @@ pub async fn create_deployment(
 ) -> Result<impl IntoResponse> {
     let start = std::time::Instant::now();
 
+    let instance_name = resolve_instance_name(req.instance_name.clone());
+
     tracing::info!(
         user_id = %auth.user_id,
-        instance_name = %req.instance_name,
+        instance_name = %instance_name,
         image = %req.image,
         replicas = req.replicas,
         "Received deployment creation request"
     );
 
-    validate_instance_name(&req.instance_name)?;
     validate_image(&req.image)?;
     validate_port(req.port)?;
     validate_replicas(req.replicas, state.config.deployment.max_replicas)?;
@@ -114,21 +116,21 @@ pub async fn create_deployment(
 
     tracing::debug!(
         user_id = %auth.user_id,
-        instance_name = %req.instance_name,
+        instance_name = %instance_name,
         "Checking K8s client availability"
     );
     let k8s_client = state.k8s.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
     let namespace = user_namespace(&auth.user_id);
-    let cr_name = generate_cr_name(&req.instance_name);
-    let path_prefix = format!("/deployments/{}", req.instance_name);
+    let cr_name = generate_cr_name(&instance_name);
+    let path_prefix = format!("/deployments/{}", instance_name);
     let public_url = state.config.deployment.generate_public_url(&path_prefix);
 
-    let existing = db::get_deployment(&state.db, &auth.user_id, &req.instance_name).await?;
+    let existing = db::get_deployment(&state.db, &auth.user_id, &instance_name).await?;
     if let Some(existing) = existing {
         tracing::info!(
             user_id = %auth.user_id,
-            instance_name = %req.instance_name,
+            instance_name = %instance_name,
             state = %existing.state,
             deployment_id = existing.id,
             "Found existing deployment, attempting to complete K8s resource creation"
@@ -137,7 +139,7 @@ pub async fn create_deployment(
         if existing.state == "Active" {
             tracing::info!(
                 user_id = %auth.user_id,
-                instance_name = %req.instance_name,
+                instance_name = %instance_name,
                 "Deployment already active, querying K8s for current status"
             );
 
@@ -149,7 +151,7 @@ pub async fn create_deployment(
             if desired == 0 {
                 tracing::warn!(
                     user_id = %auth.user_id,
-                    instance_name = %req.instance_name,
+                    instance_name = %instance_name,
                     "Active deployment has 0 desired replicas, checking if K8s resources exist"
                 );
 
@@ -161,7 +163,7 @@ pub async fn create_deployment(
                 if !exists {
                     tracing::warn!(
                         user_id = %auth.user_id,
-                        instance_name = %req.instance_name,
+                        instance_name = %instance_name,
                         deployment_id = existing.id,
                         "UserDeployment CR missing for Active deployment, attempting self-healing"
                     );
@@ -172,6 +174,7 @@ pub async fn create_deployment(
                         &namespace,
                         &cr_name,
                         &auth.user_id,
+                        &instance_name,
                         &req,
                         &path_prefix,
                     )
@@ -180,7 +183,7 @@ pub async fn create_deployment(
                         Ok(_) => {
                             tracing::info!(
                                 user_id = %auth.user_id,
-                                instance_name = %req.instance_name,
+                                instance_name = %instance_name,
                                 deployment_id = existing.id,
                                 "Successfully recreated missing K8s resources"
                             );
@@ -203,7 +206,7 @@ pub async fn create_deployment(
                         Err(e) => {
                             tracing::error!(
                                 user_id = %auth.user_id,
-                                instance_name = %req.instance_name,
+                                instance_name = %instance_name,
                                 deployment_id = existing.id,
                                 error = %e,
                                 "Failed to recreate missing K8s resources"
@@ -224,7 +227,7 @@ pub async fn create_deployment(
 
             tracing::info!(
                 user_id = %auth.user_id,
-                instance_name = %req.instance_name,
+                instance_name = %instance_name,
                 desired = desired,
                 ready = ready,
                 "Returning active deployment with status"
@@ -245,6 +248,7 @@ pub async fn create_deployment(
             &namespace,
             &cr_name,
             &auth.user_id,
+            &instance_name,
             &req,
             &path_prefix,
         )
@@ -253,7 +257,7 @@ pub async fn create_deployment(
             Ok(_) => {
                 tracing::info!(
                     user_id = %auth.user_id,
-                    instance_name = %req.instance_name,
+                    instance_name = %instance_name,
                     deployment_id = existing.id,
                     "K8s resources created, updating deployment to Active"
                 );
@@ -275,7 +279,7 @@ pub async fn create_deployment(
             Err(e) => {
                 tracing::error!(
                     user_id = %auth.user_id,
-                    instance_name = %req.instance_name,
+                    instance_name = %instance_name,
                     deployment_id = existing.id,
                     error = %e,
                     "Failed to create K8s resources, updating deployment to Failed"
@@ -290,7 +294,7 @@ pub async fn create_deployment(
 
     tracing::info!(
         user_id = %auth.user_id,
-        instance_name = %req.instance_name,
+        instance_name = %instance_name,
         namespace = %namespace,
         "Creating database record for new deployment"
     );
@@ -298,7 +302,7 @@ pub async fn create_deployment(
         &state.db,
         db::CreateDeploymentParams {
             user_id: &auth.user_id,
-            instance_name: &req.instance_name,
+            instance_name: &instance_name,
             namespace: &namespace,
             cr_name: &cr_name,
             image: &req.image,
@@ -316,6 +320,7 @@ pub async fn create_deployment(
         &namespace,
         &cr_name,
         &auth.user_id,
+        &instance_name,
         &req,
         &path_prefix,
     )
@@ -324,7 +329,7 @@ pub async fn create_deployment(
         Ok(_) => {
             tracing::info!(
                 user_id = %auth.user_id,
-                instance_name = %req.instance_name,
+                instance_name = %instance_name,
                 deployment_id = record.id,
                 "K8s resources created, updating deployment to Active"
             );
@@ -352,7 +357,7 @@ pub async fn create_deployment(
         Err(e) => {
             tracing::error!(
                 user_id = %auth.user_id,
-                instance_name = %req.instance_name,
+                instance_name = %instance_name,
                 deployment_id = record.id,
                 error = %e,
                 "Failed to create K8s resources, updating deployment to Failed"

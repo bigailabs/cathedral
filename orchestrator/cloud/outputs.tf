@@ -28,6 +28,11 @@ output "vpc_peering_connection_id" {
   value       = module.vpc_peering.peering_connection_id
 }
 
+output "private_route_table_id" {
+  description = "Private route table ID (internal reference)"
+  value       = module.networking.private_route_table_id
+}
+
 output "k3s_server_ids" {
   description = "Instance IDs of K3s server nodes"
   value       = module.k3s_servers.instance_ids

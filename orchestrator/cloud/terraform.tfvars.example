@@ -39,3 +39,39 @@ enable_public_ips = true
 # Ubuntu AMI Configuration
 ubuntu_ami_owner = "099720109477"
 ubuntu_version   = "24.04"
+
+# =============================================================================
+# VPC PEERING CONFIGURATION (for ECS API connectivity to K3s cluster)
+# =============================================================================
+# Enable VPC peering between K3s cluster and ECS services VPC
+# This allows the basilica-api service running in ECS to connect to K3s API
+#
+# Steps to configure VPC peering:
+# 1. Deploy scripts/cloud/ ECS infrastructure first
+# 2. Get outputs: terraform output -state=../../scripts/cloud/terraform.tfstate
+# 3. Copy vpc_id, vpc_cidr, private_route_table_id values below
+# 4. Deploy this K3s infrastructure
+# 5. VPC peering will be established automatically
+#
+# Leave empty to disable VPC peering (API will use kubeconfig with public endpoint)
+
+# ECS VPC ID (from scripts/cloud/ terraform output vpc_id)
+peer_vpc_id = ""
+# Example: peer_vpc_id = "vpc-0123456789abcdef0"
+
+# ECS VPC CIDR block (from scripts/cloud/ terraform output vpc_cidr)
+peer_vpc_cidr = ""
+# Example dev:  peer_vpc_cidr = "10.0.0.0/16"
+# Example prod: peer_vpc_cidr = "10.1.0.0/16"
+
+# ECS private route table ID (from scripts/cloud/ terraform output private_route_table_id)
+peer_route_table_id = ""
+# Example: peer_route_table_id = "rtb-0123456789abcdef0"
+
+# =============================================================================
+# DEPLOYMENT PUBLIC IP (advanced)
+# =============================================================================
+# Public IP/DNS for user deployments
+# Defaults to primary K3s server IP, update after Envoy LB is provisioned
+deployment_public_ip = ""
+# Example: deployment_public_ip = "basilica-envoy-lb-123456.us-east-2.elb.amazonaws.com"

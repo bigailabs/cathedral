@@ -6,7 +6,7 @@ metadata:
   labels:
     app: basilica-envoy
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: basilica-envoy
@@ -15,8 +15,19 @@ spec:
       labels:
         app: basilica-envoy
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - basilica-envoy
+                topologyKey: kubernetes.io/hostname
       tolerations:
-        # Allow scheduling on control-plane nodes (for single-node clusters)
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
@@ -44,4 +55,3 @@ spec:
         - name: config
           configMap:
             name: basilica-envoy-config
-

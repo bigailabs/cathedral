@@ -1,13 +1,15 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::error::{ApiError, Result};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateDeploymentRequest {
-    pub instance_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_name: Option<String>,
     pub image: String,
     pub replicas: u32,
     pub port: u32,
@@ -222,7 +224,12 @@ pub fn validate_create_deployment_request(
     req: &CreateDeploymentRequest,
     max_replicas: u32,
 ) -> Result<()> {
-    validate_instance_name(&req.instance_name)?;
+    if let Some(ref instance_name) = req.instance_name {
+        if !instance_name.is_empty() {
+            validate_instance_name(instance_name)?;
+        }
+    }
+
     validate_image(&req.image)?;
     validate_port(req.port)?;
     validate_replicas(req.replicas, max_replicas)?;
@@ -267,12 +274,29 @@ pub fn sanitize_user_id(user_id: &str) -> String {
     out
 }
 
+pub fn generate_instance_name() -> String {
+    Uuid::new_v4().to_string()
+}
+
 pub fn generate_cr_name(instance_name: &str) -> String {
     format!("ud-{}", instance_name)
 }
 
 pub fn generate_path_prefix(instance_name: &str) -> String {
     format!("/deployments/{}", instance_name)
+}
+
+pub fn resolve_instance_name(provided: Option<String>) -> String {
+    match provided {
+        Some(name) if !name.is_empty() => {
+            tracing::warn!(
+                provided_name = %name,
+                "User-provided instance_name is deprecated and will be ignored. Server will auto-generate UUID."
+            );
+            generate_instance_name()
+        }
+        _ => generate_instance_name(),
+    }
 }
 
 #[cfg(test)]
@@ -471,7 +495,26 @@ mod tests {
     #[test]
     fn test_validate_create_deployment_request_valid() {
         let req = CreateDeploymentRequest {
-            instance_name: "my-app".to_string(),
+            instance_name: Some("my-app".to_string()),
+            image: "nginx:latest".to_string(),
+            replicas: 2,
+            port: 80,
+            command: vec![],
+            args: vec![],
+            env: HashMap::new(),
+            resources: Some(ResourceRequirements {
+                cpu: "500m".to_string(),
+                memory: "512Mi".to_string(),
+            }),
+            ttl_seconds: None,
+        };
+        assert!(validate_create_deployment_request(&req, 10).is_ok());
+    }
+
+    #[test]
+    fn test_validate_create_deployment_request_no_instance_name() {
+        let req = CreateDeploymentRequest {
+            instance_name: None,
             image: "nginx:latest".to_string(),
             replicas: 2,
             port: 80,
@@ -490,7 +533,7 @@ mod tests {
     #[test]
     fn test_validate_create_deployment_request_invalid_instance_name() {
         let req = CreateDeploymentRequest {
-            instance_name: "My-App".to_string(),
+            instance_name: Some("My-App".to_string()),
             image: "nginx:latest".to_string(),
             replicas: 2,
             port: 80,
@@ -509,7 +552,7 @@ mod tests {
         env.insert("".to_string(), "value".to_string());
 
         let req = CreateDeploymentRequest {
-            instance_name: "my-app".to_string(),
+            instance_name: Some("my-app".to_string()),
             image: "nginx:latest".to_string(),
             replicas: 1,
             port: 80,
@@ -520,5 +563,31 @@ mod tests {
             ttl_seconds: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
+    }
+
+    #[test]
+    fn test_generate_instance_name() {
+        let name = generate_instance_name();
+        assert_eq!(name.len(), 36);
+        assert!(name.contains('-'));
+    }
+
+    #[test]
+    fn test_resolve_instance_name_none() {
+        let name = resolve_instance_name(None);
+        assert_eq!(name.len(), 36);
+    }
+
+    #[test]
+    fn test_resolve_instance_name_empty() {
+        let name = resolve_instance_name(Some("".to_string()));
+        assert_eq!(name.len(), 36);
+    }
+
+    #[test]
+    fn test_resolve_instance_name_provided() {
+        let name = resolve_instance_name(Some("user-provided".to_string()));
+        assert_eq!(name.len(), 36);
+        assert_ne!(name, "user-provided");
     }
 }
