@@ -23,6 +23,16 @@ output "nlb_dns_name" {
   value       = module.k3s_nlb.nlb_dns_name
 }
 
+output "alb_dns_name" {
+  description = "DNS name of the Application Load Balancer for public deployments"
+  value       = module.deployments_alb.alb_dns_name
+}
+
+output "deployments_endpoint" {
+  description = "Public endpoint for user deployments (will be used for Cloudflare CNAME)"
+  value       = "https://${module.deployments_alb.alb_dns_name}"
+}
+
 output "vpc_peering_connection_id" {
   description = "VPC peering connection ID (if created)"
   value       = module.vpc_peering.peering_connection_id

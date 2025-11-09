@@ -23,6 +23,8 @@ pub struct CreateDeploymentRequest {
     pub resources: Option<ResourceRequirements>,
     #[serde(default)]
     pub ttl_seconds: Option<u32>,
+    #[serde(default)]
+    pub public: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,6 +509,7 @@ mod tests {
                 memory: "512Mi".to_string(),
             }),
             ttl_seconds: None,
+            public: false,
         };
         assert!(validate_create_deployment_request(&req, 10).is_ok());
     }
@@ -526,6 +529,7 @@ mod tests {
                 memory: "512Mi".to_string(),
             }),
             ttl_seconds: None,
+            public: false,
         };
         assert!(validate_create_deployment_request(&req, 10).is_ok());
     }
@@ -542,6 +546,7 @@ mod tests {
             env: HashMap::new(),
             resources: None,
             ttl_seconds: None,
+            public: false,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
     }
@@ -561,6 +566,7 @@ mod tests {
             env,
             resources: None,
             ttl_seconds: None,
+            public: false,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
     }

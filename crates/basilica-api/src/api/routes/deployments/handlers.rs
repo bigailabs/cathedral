@@ -25,6 +25,7 @@ fn generate_cr_name(instance_name: &str) -> String {
     format!("{}-deployment", instance_name)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_k8s_resources(
     k8s_client: std::sync::Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>,
     config: &crate::config::Config,
@@ -65,12 +66,19 @@ async fn create_k8s_resources(
     let service_name = format!("{}-service", instance_name);
     let target_service = format!("{}.{}:{}", service_name, namespace, req.port);
 
+    let envoy_host = if req.public {
+        config.dns.build_fqdn(instance_name)
+    } else {
+        None
+    };
+
     envoy_manager
         .add_route(EnvoyRoute {
             prefix: path_prefix.to_string(),
             cluster_name: format!("user_deployment_{}", instance_name),
             target_service,
             rewrite: "/".to_string(),
+            host: envoy_host,
         })
         .await?;
 
@@ -124,7 +132,19 @@ pub async fn create_deployment(
     let namespace = user_namespace(&auth.user_id);
     let cr_name = generate_cr_name(&instance_name);
     let path_prefix = format!("/deployments/{}", instance_name);
-    let public_url = state.config.deployment.generate_public_url(&path_prefix);
+
+    let public_url = if req.public {
+        state.config.dns.build_public_url(&instance_name).unwrap_or_else(|| {
+            tracing::warn!(
+                user_id = %auth.user_id,
+                instance_name = %instance_name,
+                "Public deployment requested but DNS not configured, falling back to path-based URL"
+            );
+            state.config.deployment.generate_public_url(&path_prefix)
+        })
+    } else {
+        state.config.deployment.generate_public_url(&path_prefix)
+    };
 
     let existing = db::get_deployment(&state.db, &auth.user_id, &instance_name).await?;
     if let Some(existing) = existing {
@@ -310,6 +330,7 @@ pub async fn create_deployment(
             port: req.port as i32,
             path_prefix: &path_prefix,
             public_url: &public_url,
+            public: req.public,
         },
     )
     .await?;
@@ -334,6 +355,45 @@ pub async fn create_deployment(
                 "K8s resources created, updating deployment to Active"
             );
             db::update_deployment_state(&state.db, record.id, "Active", None).await?;
+
+            if req.public {
+                if let Some(dns_provider) = &state.dns_provider {
+                    let alb_dns_name = state.config.dns.alb_dns_name.as_ref().ok_or_else(|| {
+                        ApiError::Internal {
+                            message: "ALB DNS name not configured for public deployments"
+                                .to_string(),
+                        }
+                    })?;
+
+                    match dns_provider
+                        .create_record(&instance_name, alb_dns_name)
+                        .await
+                    {
+                        Ok(fqdn) => {
+                            tracing::info!(
+                                user_id = %auth.user_id,
+                                instance_name = %instance_name,
+                                fqdn = %fqdn,
+                                "Successfully created DNS record for public deployment"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                user_id = %auth.user_id,
+                                instance_name = %instance_name,
+                                error = %e,
+                                "Failed to create DNS record, deployment will remain private"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        user_id = %auth.user_id,
+                        instance_name = %instance_name,
+                        "Public deployment requested but DNS provider not available"
+                    );
+                }
+            }
 
             apimetrics::record_request("POST /deployments", "201", start, true);
             Ok((
@@ -488,6 +548,28 @@ pub async fn delete_deployment(
             &state.config.deployment.envoy_deployment_name,
         )
         .await?;
+
+    if deployment.public {
+        if let Some(dns_provider) = &state.dns_provider {
+            match dns_provider.delete_record(&instance_name).await {
+                Ok(_) => {
+                    tracing::info!(
+                        user_id = %auth.user_id,
+                        instance_name = %instance_name,
+                        "Successfully deleted DNS record for public deployment"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        user_id = %auth.user_id,
+                        instance_name = %instance_name,
+                        error = %e,
+                        "Failed to delete DNS record"
+                    );
+                }
+            }
+        }
+    }
 
     db::mark_deployment_deleted(&state.db, deployment.id).await?;
 

@@ -63,6 +63,12 @@ variable "vpc_cidr" {
   description = "VPC CIDR block for internal communication"
 }
 
+variable "alb_security_group_id" {
+  type        = string
+  description = "Security group ID of the deployments ALB for Envoy access"
+  default     = ""
+}
+
 variable "tags" {
   type        = map(string)
   description = "Tags to apply to resources"

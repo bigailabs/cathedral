@@ -275,6 +275,7 @@ mod tests {
             k8s: Some(Arc::new(client)),
             payments_client: None,
             billing_client: None,
+            dns_provider: None,
             metrics: None,
         }
     }

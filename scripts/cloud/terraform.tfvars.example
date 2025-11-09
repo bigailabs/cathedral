@@ -93,3 +93,8 @@ kubeconfig_path = "~/.kube/k3s-basilica-config"
 # aws secretsmanager put-secret-value \
 #   --secret-id basilica-dev-v3-kubeconfig \
 #   --secret-string "$(cat ~/.kube/k3s-basilica-config)"
+
+cloudflare_api_token     = "your-cloudflare-api-token"
+cloudflare_zone_id       = "your-cloudflare-zone-id"
+cloudflare_domain        = "deployments.basilica.ai"
+deployments_alb_dns_name = "your-deployments-alb-dns-name"

@@ -61,6 +61,9 @@ pub struct AppState {
     /// Billing service client
     pub billing_client: Option<Arc<BillingClient>>,
 
+    /// DNS provider for public deployments
+    pub dns_provider: Option<Arc<dyn crate::dns::DnsProvider>>,
+
     /// Metrics system
     pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
 }
@@ -290,6 +293,41 @@ impl Server {
             None
         };
 
+        let dns_provider: Option<Arc<dyn crate::dns::DnsProvider>> = if config.dns.enabled {
+            let dns_config = config.dns.from_env();
+            if let Err(e) = dns_config.validate() {
+                warn!(
+                    "DNS configuration invalid: {}. Public deployments will be disabled.",
+                    e
+                );
+                None
+            } else {
+                match crate::dns::cloudflare::CloudflareDnsManager::new(
+                    crate::dns::cloudflare::CloudflareConfig {
+                        api_token: dns_config.api_token.unwrap(),
+                        zone_id: dns_config.zone_id.unwrap(),
+                        domain: dns_config.domain.clone(),
+                        proxy: dns_config.proxy,
+                    },
+                ) {
+                    Ok(manager) => {
+                        info!(
+                            "DNS provider initialized successfully for domain: {}",
+                            dns_config.domain
+                        );
+                        Some(Arc::new(manager) as Arc<dyn crate::dns::DnsProvider>)
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize DNS provider: {}. Public deployments will be disabled.", e);
+                        None
+                    }
+                }
+            }
+        } else {
+            info!("DNS management is disabled");
+            None
+        };
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -302,6 +340,7 @@ impl Server {
             k8s,
             payments_client,
             billing_client,
+            dns_provider,
             metrics,
         };
 

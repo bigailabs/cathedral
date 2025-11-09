@@ -8,6 +8,7 @@ pub struct EnvoyRoute {
     pub cluster_name: String,
     pub target_service: String,
     pub rewrite: String,
+    pub host: Option<String>,
 }
 
 pub struct EnvoyConfigManager {
@@ -35,13 +36,18 @@ impl EnvoyConfigManager {
             .get_configmap(&self.namespace, &self.configmap_name)
             .await?;
 
-        let route_key = format!("route_{}", sanitize_key(&route.prefix));
+        let route_key = if let Some(ref host) = route.host {
+            format!("route__host__{}", sanitize_key(host))
+        } else {
+            format!("route_{}", sanitize_key(&route.prefix))
+        };
         let cluster_key = format!("cluster_{}", sanitize_key(&route.cluster_name));
 
         if cm_data.contains_key(&route_key) && cm_data.contains_key(&cluster_key) {
             tracing::debug!(
                 prefix = %route.prefix,
                 cluster = %route.cluster_name,
+                host = ?route.host,
                 "Envoy route and cluster already exist, skipping"
             );
             return Ok(());
@@ -63,6 +69,7 @@ impl EnvoyConfigManager {
         tracing::info!(
             prefix = %route.prefix,
             cluster = %route.cluster_name,
+            host = ?route.host,
             "Added Envoy route and rebuilt envoy.yaml"
         );
 
@@ -97,28 +104,77 @@ impl EnvoyConfigManager {
         Ok(())
     }
 
-    fn build_full_envoy_config(&self, cm_data: &std::collections::BTreeMap<String, String>) -> String {
-        let mut routes = Vec::new();
+    fn build_full_envoy_config(
+        &self,
+        cm_data: &std::collections::BTreeMap<String, String>,
+    ) -> String {
+        let mut path_routes = Vec::new();
+        let mut host_routes = std::collections::BTreeMap::new();
         let mut clusters = Vec::new();
 
         for (key, value) in cm_data.iter() {
             if key.starts_with("route_") {
-                let indented = indent_lines(value, 18);
-                routes.push(indented);
+                if key.contains("__host__") {
+                    if let Some(host) = extract_host_from_key(key) {
+                        let indented = indent_lines(value, 18);
+                        host_routes.entry(host).or_insert_with(Vec::new).push(indented);
+                    }
+                } else {
+                    let indented = indent_lines(value, 18);
+                    path_routes.push(indented);
+                }
             } else if key.starts_with("cluster_") {
                 let indented = indent_lines(value, 6);
                 clusters.push(indented);
             }
         }
 
-        routes.sort();
+        path_routes.sort();
         clusters.sort();
 
-        let routes_section = if routes.is_empty() {
+        let path_routes_section = if path_routes.is_empty() {
             String::new()
         } else {
-            format!("\n{}\n                  ", routes.join("\n"))
+            format!("\n{}\n                  ", path_routes.join("\n"))
         };
+
+        let mut virtual_hosts_sections = Vec::new();
+
+        for (host, routes) in host_routes.iter() {
+            let routes_str = routes.join("\n");
+            let vhost = format!(
+                r#"            - name: {}
+              domains: ["{}"]
+              routes:
+{}"#,
+                sanitize_key(host),
+                host,
+                routes_str
+            );
+            virtual_hosts_sections.push(vhost);
+        }
+
+        let path_based_vhost = format!(
+            r#"            - name: user_deployments
+              domains: ["*"]
+              routes:
+                  - match:
+                      prefix: "/health"
+                    direct_response:
+                      status: 200
+                      body:
+                        inline_string: "healthy"
+{}
+                  - match:
+                      prefix: "/"
+                    route:
+                      cluster: dynamic_forward_proxy_cluster
+                      timeout: 0s"#,
+            path_routes_section
+        );
+        virtual_hosts_sections.push(path_based_vhost);
+
+        let all_virtual_hosts = virtual_hosts_sections.join("\n");
 
         let clusters_section = if clusters.is_empty() {
             String::new()
@@ -144,21 +200,7 @@ impl EnvoyConfigManager {
           route_config:
             name: local_route
             virtual_hosts:
-            - name: user_deployments
-              domains: ["*"]
-              routes:
-                  - match:
-                      prefix: "/health"
-                    direct_response:
-                      status: 200
-                      body:
-                        inline_string: "healthy"
 {}
-                  - match:
-                      prefix: "/"
-                    route:
-                      cluster: dynamic_forward_proxy_cluster
-                      timeout: 0s
           http_filters:
           - name: envoy.filters.http.dynamic_forward_proxy
             typed_config:
@@ -189,13 +231,26 @@ admin:
       address: 0.0.0.0
       port_value: 9901
 "#,
-            routes_section, clusters_section
+            all_virtual_hosts, clusters_section
         )
     }
 
     fn render_route_snippet(&self, route: &EnvoyRoute) -> String {
-        format!(
-            r#"- match:
+        if route.host.is_some() {
+            format!(
+                r#"- match:
+    prefix: "/"
+  route:
+    cluster: {}
+    timeout: 300s
+    retry_policy:
+      retry_on: 5xx,connect-failure
+      num_retries: 2"#,
+                route.cluster_name
+            )
+        } else {
+            format!(
+                r#"- match:
     prefix: "{}"
   route:
     cluster: {}
@@ -204,8 +259,9 @@ admin:
     retry_policy:
       retry_on: 5xx,connect-failure
       num_retries: 2"#,
-            route.prefix, route.cluster_name, route.rewrite
-        )
+                route.prefix, route.cluster_name, route.rewrite
+            )
+        }
     }
 
     fn render_cluster_snippet(&self, route: &EnvoyRoute) -> String {
@@ -258,6 +314,14 @@ fn sanitize_key(s: &str) -> String {
     s.replace(['/', '.', ':'], "_")
 }
 
+fn extract_host_from_key(key: &str) -> Option<String> {
+    if let Some(stripped) = key.strip_prefix("route__host__") {
+        Some(stripped.replace('_', "."))
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,6 +348,7 @@ mod tests {
             cluster_name: "user_deployment_my-app".to_string(),
             target_service: "my-app-service.u-user123:8080".to_string(),
             rewrite: "/".to_string(),
+            host: None,
         };
 
         let snippet = manager.render_route_snippet(&route);
@@ -305,6 +370,7 @@ mod tests {
             cluster_name: "user_deployment_my-app".to_string(),
             target_service: "my-app-service.u-user123:8080".to_string(),
             rewrite: "/".to_string(),
+            host: None,
         };
 
         let snippet = manager.render_cluster_snippet(&route);
@@ -329,6 +395,7 @@ mod tests {
             cluster_name: "user_deployment_app1".to_string(),
             target_service: "app1-service.u-user1:8080".to_string(),
             rewrite: "/".to_string(),
+            host: None,
         };
 
         let route2 = EnvoyRoute {
@@ -336,12 +403,25 @@ mod tests {
             cluster_name: "user_deployment_app2".to_string(),
             target_service: "app2-service.u-user2:9000".to_string(),
             rewrite: "/".to_string(),
+            host: None,
         };
 
-        cm_data.insert("route_deployments_app1".to_string(), manager.render_route_snippet(&route1));
-        cm_data.insert("cluster_user_deployment_app1".to_string(), manager.render_cluster_snippet(&route1));
-        cm_data.insert("route_deployments_app2".to_string(), manager.render_route_snippet(&route2));
-        cm_data.insert("cluster_user_deployment_app2".to_string(), manager.render_cluster_snippet(&route2));
+        cm_data.insert(
+            "route_deployments_app1".to_string(),
+            manager.render_route_snippet(&route1),
+        );
+        cm_data.insert(
+            "cluster_user_deployment_app1".to_string(),
+            manager.render_cluster_snippet(&route1),
+        );
+        cm_data.insert(
+            "route_deployments_app2".to_string(),
+            manager.render_route_snippet(&route2),
+        );
+        cm_data.insert(
+            "cluster_user_deployment_app2".to_string(),
+            manager.render_cluster_snippet(&route2),
+        );
 
         let config = manager.build_full_envoy_config(&cm_data);
 

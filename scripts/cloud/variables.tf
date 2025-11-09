@@ -106,3 +106,24 @@ variable "kubeconfig_path" {
   description = "Path to kubeconfig file for K3s cluster connection (e.g., ~/.kube/k3s-basilica-config). Leave empty to manually upload kubeconfig to AWS Secrets Manager."
   default     = ""
 }
+
+variable "cloudflare_api_token" {
+  type        = string
+  description = "API token for Cloudflare"
+  sensitive   = true
+}
+
+variable "cloudflare_zone_id" {
+  type        = string
+  description = "Cloudflare zone ID for deployments.basilica.ai"
+}
+
+variable "cloudflare_domain" {
+  type        = string
+  description = "Cloudflare domain for deployments.basilica.ai"
+}
+
+variable "deployments_alb_dns_name" {
+  type        = string
+  description = "DNS name of the ALB for deployments.basilica.ai"
+}

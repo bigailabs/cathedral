@@ -2,11 +2,13 @@
 
 mod cache;
 mod deployment;
+mod dns;
 mod rate_limit;
 mod server;
 
 pub use cache::{CacheBackend, CacheConfig};
 pub use deployment::DeploymentConfig;
+pub use dns::DnsConfig;
 pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
@@ -152,6 +154,10 @@ pub struct Config {
     /// Deployment configuration
     #[serde(default)]
     pub deployment: DeploymentConfig,
+
+    /// DNS configuration for public deployments
+    #[serde(default)]
+    pub dns: DnsConfig,
 
     /// Metrics configuration
     #[serde(default)]

@@ -527,6 +527,7 @@ mod tests {
             k8s: Some(Arc::new(client)),
             payments_client: None,
             billing_client: None,
+            dns_provider: None,
             metrics: None,
         }
     }
@@ -553,6 +554,7 @@ mod tests {
             k8s: Some(std::sync::Arc::new(client.clone())),
             payments_client: None,
             billing_client: None,
+            dns_provider: None,
             metrics: None,
         };
         let auth = AuthContext {
@@ -646,6 +648,7 @@ mod tests {
             k8s: Some(std::sync::Arc::new(client.clone())),
             payments_client: None,
             billing_client: None,
+            dns_provider: None,
             metrics: None,
         };
         let auth = AuthContext {
@@ -725,6 +728,7 @@ mod tests {
             k8s: Some(std::sync::Arc::new(client.clone())),
             payments_client: None,
             billing_client: None,
+            dns_provider: None,
             metrics: None,
         };
         let auth = AuthContext {

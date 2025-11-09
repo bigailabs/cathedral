@@ -71,6 +71,18 @@ module "k3s_nlb" {
   depends_on = [module.networking]
 }
 
+module "deployments_alb" {
+  source = "./modules/deployments-alb"
+
+  name_prefix = local.name_prefix
+  vpc_id      = module.networking.vpc_id
+  subnet_ids  = module.networking.public_subnet_ids
+
+  tags = local.common_tags
+
+  depends_on = [module.networking]
+}
+
 module "k3s_servers" {
   source = "./modules/k3s-servers"
 
@@ -86,10 +98,11 @@ module "k3s_servers" {
   allowed_ssh_cidr_blocks = var.allowed_ssh_cidr_blocks
   nlb_dns_name            = module.k3s_nlb.nlb_dns_name
   peer_vpc_cidr           = var.peer_vpc_cidr
+  alb_security_group_id   = module.deployments_alb.alb_security_group_id
 
   tags = local.common_tags
 
-  depends_on = [module.networking, module.k3s_nlb]
+  depends_on = [module.networking, module.k3s_nlb, module.deployments_alb]
 }
 
 resource "aws_lb_target_group_attachment" "k3s_servers" {
@@ -100,6 +113,16 @@ resource "aws_lb_target_group_attachment" "k3s_servers" {
   port             = 6443
 
   depends_on = [module.k3s_servers, module.k3s_nlb]
+}
+
+resource "aws_lb_target_group_attachment" "envoy_on_k3s_servers" {
+  count = local.workspace_config.k3s_server_count
+
+  target_group_arn = module.deployments_alb.target_group_arn
+  target_id        = module.k3s_servers.instance_ids[count.index]
+  port             = 32162
+
+  depends_on = [module.k3s_servers, module.deployments_alb]
 }
 
 module "k3s_agents" {

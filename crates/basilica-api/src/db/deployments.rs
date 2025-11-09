@@ -12,6 +12,7 @@ pub struct CreateDeploymentParams<'a> {
     pub port: i32,
     pub path_prefix: &'a str,
     pub public_url: &'a str,
+    pub public: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -26,6 +27,7 @@ pub struct DeploymentRecord {
     pub port: i32,
     pub path_prefix: String,
     pub public_url: String,
+    pub public: bool,
     pub state: String,
     pub message: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -41,7 +43,7 @@ pub async fn get_deployment(
     let record = sqlx::query_as::<_, DeploymentRecord>(
         r#"
         SELECT id, user_id, instance_name, namespace, cr_name, image, replicas, port,
-               path_prefix, public_url, state, message, created_at, updated_at, deleted_at
+               path_prefix, public_url, public, state, message, created_at, updated_at, deleted_at
         FROM user_deployments
         WHERE user_id = $1 AND instance_name = $2 AND deleted_at IS NULL
         "#,
@@ -64,10 +66,10 @@ pub async fn create_deployment(
     let record = sqlx::query_as::<_, DeploymentRecord>(
         r#"
         INSERT INTO user_deployments
-        (user_id, instance_name, namespace, cr_name, image, replicas, port, path_prefix, public_url, state)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'Pending')
+        (user_id, instance_name, namespace, cr_name, image, replicas, port, path_prefix, public_url, public, state)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'Pending')
         RETURNING id, user_id, instance_name, namespace, cr_name, image, replicas, port,
-                  path_prefix, public_url, state, message, created_at, updated_at, deleted_at
+                  path_prefix, public_url, public, state, message, created_at, updated_at, deleted_at
         "#,
     )
     .bind(params.user_id)
@@ -79,6 +81,7 @@ pub async fn create_deployment(
     .bind(params.port)
     .bind(params.path_prefix)
     .bind(params.public_url)
+    .bind(params.public)
     .fetch_one(pool)
     .await
     .map_err(|e| {
@@ -147,7 +150,7 @@ pub async fn list_user_deployments(pool: &PgPool, user_id: &str) -> Result<Vec<D
     let records = sqlx::query_as::<_, DeploymentRecord>(
         r#"
         SELECT id, user_id, instance_name, namespace, cr_name, image, replicas, port,
-               path_prefix, public_url, state, message, created_at, updated_at, deleted_at
+               path_prefix, public_url, public, state, message, created_at, updated_at, deleted_at
         FROM user_deployments
         WHERE user_id = $1 AND deleted_at IS NULL
         ORDER BY created_at DESC
@@ -179,6 +182,7 @@ mod tests {
             port: 80,
             path_prefix: "/deployments/test-app".to_string(),
             public_url: "http://3.21.154.119:8080/deployments/test-app/".to_string(),
+            public: false,
             state: "Active".to_string(),
             message: None,
             created_at: chrono::Utc::now(),
