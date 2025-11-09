@@ -169,16 +169,14 @@ impl Provider for LambdaProvider {
         Err(AggregatorError::Provider {
             provider: "lambda".to_string(),
             message: "SSH key management not yet implemented for Lambda".to_string(),
-        }
-        .into())
+        })
     }
 
     async fn delete_ssh_key(&self, _provider_key_id: &str) -> Result<()> {
         Err(AggregatorError::Provider {
             provider: "lambda".to_string(),
             message: "SSH key management not yet implemented for Lambda".to_string(),
-        }
-        .into())
+        })
     }
 }
 

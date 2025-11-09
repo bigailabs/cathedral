@@ -34,14 +34,6 @@ pub fn parse_interconnect(description: &str) -> Option<String> {
     None
 }
 
-/// Normalize region code
-#[allow(dead_code)]
-pub fn normalize_region(location_code: &str) -> String {
-    // DataCrunch uses codes like "FIN-01", "ICE-01"
-    // For now, keep as-is but lowercase
-    location_code.to_lowercase()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,12 +67,6 @@ mod tests {
             GpuCategory::Other(model) => assert!(model.contains("3090")),
             _ => panic!("Expected Other variant"),
         }
-    }
-
-    #[test]
-    fn test_normalize_region() {
-        assert_eq!(normalize_region("FIN-01"), "fin-01");
-        assert_eq!(normalize_region("ICE-01"), "ice-01");
     }
 
     #[test]

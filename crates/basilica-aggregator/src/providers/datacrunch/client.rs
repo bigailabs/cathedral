@@ -25,14 +25,7 @@ struct TokenRequest {
 #[derive(Debug, Clone, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    #[allow(dead_code)]
-    refresh_token: String,
     expires_in: u64,
-    #[allow(dead_code)]
-    token_type: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    scope: String,
 }
 
 #[derive(Debug, Clone)]

@@ -256,6 +256,7 @@ impl Database {
     }
 
     /// Update deployment status and details
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_deployment(
         &self,
         id: &str,

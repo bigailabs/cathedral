@@ -271,24 +271,22 @@ impl AggregatorService {
 
     /// Get DataCrunch provider instance
     fn get_datacrunch_provider(&self) -> Result<&DataCrunchProvider> {
-        self.datacrunch.as_ref().ok_or_else(|| {
-            AggregatorError::Provider {
+        self.datacrunch
+            .as_ref()
+            .ok_or_else(|| AggregatorError::Provider {
                 provider: "DataCrunch".to_string(),
                 message: "Provider not enabled".to_string(),
-            }
-            .into()
-        })
+            })
     }
 
     /// Get Hyperstack provider instance
     fn get_hyperstack_provider(&self) -> Result<&HyperstackProvider> {
-        self.hyperstack.as_ref().ok_or_else(|| {
-            AggregatorError::Provider {
+        self.hyperstack
+            .as_ref()
+            .ok_or_else(|| AggregatorError::Provider {
                 provider: "Hyperstack".to_string(),
                 message: "Provider not enabled".to_string(),
-            }
-            .into()
-        })
+            })
     }
 
     /// Get provider as trait object by enum
@@ -298,29 +296,22 @@ impl AggregatorService {
                 .datacrunch
                 .as_ref()
                 .map(|p| p as &dyn Provider)
-                .ok_or_else(|| {
-                    AggregatorError::Provider {
-                        provider: provider.as_str().to_string(),
-                        message: "Provider not enabled".to_string(),
-                    }
-                    .into()
+                .ok_or_else(|| AggregatorError::Provider {
+                    provider: provider.as_str().to_string(),
+                    message: "Provider not enabled".to_string(),
                 }),
             ProviderEnum::Hyperstack => self
                 .hyperstack
                 .as_ref()
                 .map(|p| p as &dyn Provider)
-                .ok_or_else(|| {
-                    AggregatorError::Provider {
-                        provider: provider.as_str().to_string(),
-                        message: "Provider not enabled".to_string(),
-                    }
-                    .into()
+                .ok_or_else(|| AggregatorError::Provider {
+                    provider: provider.as_str().to_string(),
+                    message: "Provider not enabled".to_string(),
                 }),
             _ => Err(AggregatorError::Provider {
                 provider: provider.as_str().to_string(),
                 message: "Provider not supported".to_string(),
-            }
-            .into()),
+            }),
         }
     }
 
@@ -359,7 +350,7 @@ impl AggregatorService {
                 AggregatorError::NotFound(format!("Offering not found: {}", offering_id))
             })?;
 
-        let provider_enum = offering.provider.clone();
+        let provider_enum = offering.provider;
 
         // Dispatch to provider-specific deployment logic
         match provider_enum {
@@ -384,8 +375,7 @@ impl AggregatorService {
             _ => Err(AggregatorError::Provider {
                 provider: provider_enum.as_str().to_string(),
                 message: "Deployment not supported for this provider".to_string(),
-            }
-            .into()),
+            }),
         }
     }
 
@@ -703,8 +693,7 @@ impl AggregatorService {
                     return Err(AggregatorError::Provider {
                         provider: deployment.provider.as_str().to_string(),
                         message: "Deletion not supported for this provider".to_string(),
-                    }
-                    .into());
+                    });
                 }
             }
         }
@@ -747,7 +736,7 @@ impl AggregatorService {
     ) -> Result<crate::models::SshKey> {
         // Check if user already has an SSH key
         if let Some(_existing) = self.db.get_ssh_key_by_user(&user_id).await? {
-            return Err(AggregatorError::SshKeyAlreadyExists.into());
+            return Err(AggregatorError::SshKeyAlreadyExists);
         }
 
         // Create SSH key record
@@ -868,7 +857,9 @@ fn map_hyperstack_status_to_deployment(status: &str) -> DeploymentStatus {
         }
         "ERROR" => DeploymentStatus::Error,
         "SHUTOFF" | "SOFT_DELETED" | "SHELVED_OFFLOADED" => DeploymentStatus::Deleted,
-        "PAUSED" | "SUSPENDED" | "RESCUED" | "PASSWORD" | "REBOOT" | "HARD_REBOOT" | "UNKNOWN"
-        | _ => DeploymentStatus::Pending,
+        "PAUSED" | "SUSPENDED" | "RESCUED" | "PASSWORD" | "REBOOT" | "HARD_REBOOT" | "UNKNOWN" => {
+            DeploymentStatus::Pending
+        }
+        _ => DeploymentStatus::Pending,
     }
 }

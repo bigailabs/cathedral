@@ -110,8 +110,7 @@ impl HyperstackProvider {
             return Err(AggregatorError::Provider {
                 provider: "hyperstack".to_string(),
                 message: format!("Failed to create keypair: {}", create_response.message),
-            }
-            .into());
+            });
         }
 
         tracing::info!(
@@ -188,8 +187,7 @@ impl HyperstackProvider {
             return Err(AggregatorError::Provider {
                 provider: "hyperstack".to_string(),
                 message: format!("Failed to deploy VM: {}", deploy_response.message),
-            }
-            .into());
+            });
         }
 
         let vm = deploy_response
@@ -236,8 +234,7 @@ impl HyperstackProvider {
             return Err(AggregatorError::Provider {
                 provider: "hyperstack".to_string(),
                 message: format!("Failed to get VM: {}", vm_response.message),
-            }
-            .into());
+            });
         }
 
         Ok(vm_response.virtual_machine)

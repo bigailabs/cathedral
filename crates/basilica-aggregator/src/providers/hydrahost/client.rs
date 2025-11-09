@@ -198,16 +198,14 @@ impl Provider for HydraHostProvider {
         Err(AggregatorError::Provider {
             provider: "hydrahost".to_string(),
             message: "SSH key management not yet implemented for HydraHost".to_string(),
-        }
-        .into())
+        })
     }
 
     async fn delete_ssh_key(&self, _provider_key_id: &str) -> Result<()> {
         Err(AggregatorError::Provider {
             provider: "hydrahost".to_string(),
             message: "SSH key management not yet implemented for HydraHost".to_string(),
-        }
-        .into())
+        })
     }
 }
 
