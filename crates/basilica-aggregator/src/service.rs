@@ -18,74 +18,78 @@ use uuid::Uuid;
 
 pub struct AggregatorService {
     db: Arc<Database>,
-    datacrunch: DataCrunchProvider,
-    hyperstack: HyperstackProvider,
+    datacrunch: Option<DataCrunchProvider>,
+    hyperstack: Option<HyperstackProvider>,
     config: Config,
 }
 
 impl AggregatorService {
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
-        // Initialize DataCrunch provider (required)
-        let auth = config
-            .providers
-            .datacrunch
-            .get_auth()
-            .ok_or_else(|| AggregatorError::Config("DataCrunch auth missing".into()))?;
+        // Initialize DataCrunch provider (optional)
+        let datacrunch = if config.providers.datacrunch.is_enabled() {
+            if let Some(auth) = config.providers.datacrunch.get_auth() {
+                let (client_id, client_secret) = match auth {
+                    AuthConfig::OAuth {
+                        client_id,
+                        client_secret,
+                    } => (client_id, client_secret),
+                    AuthConfig::ApiKey { .. } => {
+                        return Err(AggregatorError::Config(
+                            "DataCrunch requires OAuth authentication".into(),
+                        ))
+                    }
+                };
 
-        let (client_id, client_secret) = match auth {
-            AuthConfig::OAuth {
-                client_id,
-                client_secret,
-            } => (client_id, client_secret),
-            AuthConfig::ApiKey { .. } => {
-                return Err(AggregatorError::Config(
-                    "DataCrunch requires OAuth authentication".into(),
-                ))
+                let base_url = config
+                    .providers
+                    .datacrunch
+                    .api_base_url
+                    .clone()
+                    .ok_or_else(|| AggregatorError::Config("DataCrunch base URL missing".into()))?;
+
+                Some(DataCrunchProvider::new(
+                    client_id,
+                    client_secret,
+                    base_url,
+                    config.providers.datacrunch.timeout_seconds,
+                )?)
+            } else {
+                None
             }
+        } else {
+            None
         };
 
-        let base_url = config
-            .providers
-            .datacrunch
-            .api_base_url
-            .clone()
-            .ok_or_else(|| AggregatorError::Config("DataCrunch base URL missing".into()))?;
+        // Initialize Hyperstack provider (optional)
+        let hyperstack = if config.providers.hyperstack.is_enabled() {
+            if let Some(auth) = config.providers.hyperstack.get_auth() {
+                let api_key = match auth {
+                    AuthConfig::ApiKey { api_key } => api_key,
+                    AuthConfig::OAuth { .. } => {
+                        return Err(AggregatorError::Config(
+                            "Hyperstack requires ApiKey authentication".into(),
+                        ))
+                    }
+                };
 
-        let datacrunch = DataCrunchProvider::new(
-            client_id,
-            client_secret,
-            base_url,
-            config.providers.datacrunch.timeout_seconds,
-        )?;
+                let base_url = config
+                    .providers
+                    .hyperstack
+                    .api_base_url
+                    .clone()
+                    .ok_or_else(|| AggregatorError::Config("Hyperstack base URL missing".into()))?;
 
-        // Initialize Hyperstack provider (required)
-        let auth = config
-            .providers
-            .hyperstack
-            .get_auth()
-            .ok_or_else(|| AggregatorError::Config("Hyperstack auth missing".into()))?;
-
-        let api_key = match auth {
-            AuthConfig::ApiKey { api_key } => api_key,
-            AuthConfig::OAuth { .. } => {
-                return Err(AggregatorError::Config(
-                    "Hyperstack requires ApiKey authentication".into(),
-                ))
+                Some(HyperstackProvider::new(
+                    api_key,
+                    base_url,
+                    config.providers.hyperstack.timeout_seconds,
+                )?)
+            } else {
+                None
             }
+        } else {
+            None
         };
-
-        let base_url = config
-            .providers
-            .hyperstack
-            .api_base_url
-            .clone()
-            .ok_or_else(|| AggregatorError::Config("Hyperstack base URL missing".into()))?;
-
-        let hyperstack = HyperstackProvider::new(
-            api_key,
-            base_url,
-            config.providers.hyperstack.timeout_seconds,
-        )?;
 
         Ok(Self {
             db,
@@ -110,52 +114,56 @@ impl AggregatorService {
     pub async fn refresh_all_providers(&self) -> Result<usize> {
         let mut total_count = 0;
 
-        // Refresh DataCrunch
-        let provider_id = ProviderEnum::DataCrunch;
-        if self.should_fetch(provider_id).await? {
-            match self.fetch_and_cache(&self.datacrunch).await {
-                Ok(offerings) => {
-                    tracing::info!(
-                        "Refreshed {} offerings from {}",
-                        offerings.len(),
-                        provider_id
-                    );
-                    total_count += offerings.len();
+        // Refresh DataCrunch (if enabled)
+        if let Some(ref datacrunch) = self.datacrunch {
+            let provider_id = ProviderEnum::DataCrunch;
+            if self.should_fetch(provider_id).await? {
+                match self.fetch_and_cache(datacrunch).await {
+                    Ok(offerings) => {
+                        tracing::info!(
+                            "Refreshed {} offerings from {}",
+                            offerings.len(),
+                            provider_id
+                        );
+                        total_count += offerings.len();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to refresh from {}: {}", provider_id, e);
+                        let _ = self
+                            .db
+                            .update_provider_status(provider_id, false, Some(e.to_string()))
+                            .await;
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to refresh from {}: {}", provider_id, e);
-                    let _ = self
-                        .db
-                        .update_provider_status(provider_id, false, Some(e.to_string()))
-                        .await;
-                }
+            } else {
+                tracing::debug!("Skipping {} - cooldown period not elapsed", provider_id);
             }
-        } else {
-            tracing::debug!("Skipping {} - cooldown period not elapsed", provider_id);
         }
 
-        // Refresh Hyperstack
-        let provider_id = ProviderEnum::Hyperstack;
-        if self.should_fetch(provider_id).await? {
-            match self.fetch_and_cache(&self.hyperstack).await {
-                Ok(offerings) => {
-                    tracing::info!(
-                        "Refreshed {} offerings from {}",
-                        offerings.len(),
-                        provider_id
-                    );
-                    total_count += offerings.len();
+        // Refresh Hyperstack (if enabled)
+        if let Some(ref hyperstack) = self.hyperstack {
+            let provider_id = ProviderEnum::Hyperstack;
+            if self.should_fetch(provider_id).await? {
+                match self.fetch_and_cache(hyperstack).await {
+                    Ok(offerings) => {
+                        tracing::info!(
+                            "Refreshed {} offerings from {}",
+                            offerings.len(),
+                            provider_id
+                        );
+                        total_count += offerings.len();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to refresh from {}: {}", provider_id, e);
+                        let _ = self
+                            .db
+                            .update_provider_status(provider_id, false, Some(e.to_string()))
+                            .await;
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Failed to refresh from {}: {}", provider_id, e);
-                    let _ = self
-                        .db
-                        .update_provider_status(provider_id, false, Some(e.to_string()))
-                        .await;
-                }
+            } else {
+                tracing::debug!("Skipping {} - cooldown period not elapsed", provider_id);
             }
-        } else {
-            tracing::debug!("Skipping {} - cooldown period not elapsed", provider_id);
         }
 
         Ok(total_count)
@@ -219,19 +227,23 @@ impl AggregatorService {
     pub async fn get_provider_health(&self) -> Result<Vec<ProviderHealth>> {
         let mut health_statuses = Vec::new();
 
-        // Get health for DataCrunch
-        let health = self
-            .db
-            .get_provider_health(ProviderEnum::DataCrunch)
-            .await?;
-        health_statuses.push(health);
+        // Get health for DataCrunch (if enabled)
+        if self.datacrunch.is_some() {
+            let health = self
+                .db
+                .get_provider_health(ProviderEnum::DataCrunch)
+                .await?;
+            health_statuses.push(health);
+        }
 
-        // Get health for Hyperstack
-        let health = self
-            .db
-            .get_provider_health(ProviderEnum::Hyperstack)
-            .await?;
-        health_statuses.push(health);
+        // Get health for Hyperstack (if enabled)
+        if self.hyperstack.is_some() {
+            let health = self
+                .db
+                .get_provider_health(ProviderEnum::Hyperstack)
+                .await?;
+            health_statuses.push(health);
+        }
 
         Ok(health_statuses)
     }
@@ -258,20 +270,52 @@ impl AggregatorService {
     // ========================================================================
 
     /// Get DataCrunch provider instance
-    fn get_datacrunch_provider(&self) -> &DataCrunchProvider {
-        &self.datacrunch
+    fn get_datacrunch_provider(&self) -> Result<&DataCrunchProvider> {
+        self.datacrunch.as_ref().ok_or_else(|| {
+            AggregatorError::Provider {
+                provider: "DataCrunch".to_string(),
+                message: "Provider not enabled".to_string(),
+            }
+            .into()
+        })
     }
 
     /// Get Hyperstack provider instance
-    fn get_hyperstack_provider(&self) -> &HyperstackProvider {
-        &self.hyperstack
+    fn get_hyperstack_provider(&self) -> Result<&HyperstackProvider> {
+        self.hyperstack.as_ref().ok_or_else(|| {
+            AggregatorError::Provider {
+                provider: "Hyperstack".to_string(),
+                message: "Provider not enabled".to_string(),
+            }
+            .into()
+        })
     }
 
     /// Get provider as trait object by enum
     fn get_provider_dyn(&self, provider: &ProviderEnum) -> Result<&dyn Provider> {
         match provider {
-            ProviderEnum::DataCrunch => Ok(&self.datacrunch as &dyn Provider),
-            ProviderEnum::Hyperstack => Ok(&self.hyperstack as &dyn Provider),
+            ProviderEnum::DataCrunch => self
+                .datacrunch
+                .as_ref()
+                .map(|p| p as &dyn Provider)
+                .ok_or_else(|| {
+                    AggregatorError::Provider {
+                        provider: provider.as_str().to_string(),
+                        message: "Provider not enabled".to_string(),
+                    }
+                    .into()
+                }),
+            ProviderEnum::Hyperstack => self
+                .hyperstack
+                .as_ref()
+                .map(|p| p as &dyn Provider)
+                .ok_or_else(|| {
+                    AggregatorError::Provider {
+                        provider: provider.as_str().to_string(),
+                        message: "Provider not enabled".to_string(),
+                    }
+                    .into()
+                }),
             _ => Err(AggregatorError::Provider {
                 provider: provider.as_str().to_string(),
                 message: "Provider not supported".to_string(),
@@ -282,19 +326,19 @@ impl AggregatorService {
 
     /// List SSH keys from DataCrunch (legacy)
     pub async fn list_ssh_keys(&self) -> Result<Vec<SshKey>> {
-        let provider = self.get_datacrunch_provider();
+        let provider = self.get_datacrunch_provider()?;
         provider.list_ssh_keys_impl().await
     }
 
     /// Create SSH key in DataCrunch (legacy)
     pub async fn create_ssh_key(&self, name: String, public_key: String) -> Result<SshKey> {
-        let provider = self.get_datacrunch_provider();
+        let provider = self.get_datacrunch_provider()?;
         provider.create_ssh_key_impl(name, public_key).await
     }
 
     /// List available OS images from DataCrunch
     pub async fn list_images(&self) -> Result<Vec<OsImage>> {
-        let provider = self.get_datacrunch_provider();
+        let provider = self.get_datacrunch_provider()?;
         provider.list_images().await
     }
 
@@ -353,7 +397,7 @@ impl AggregatorService {
         ssh_key_name: Option<String>,
         location_code: Option<String>,
     ) -> Result<Deployment> {
-        let provider = self.get_datacrunch_provider();
+        let provider = self.get_datacrunch_provider()?;
 
         // Extract instance type from raw metadata
         let instance_type = offering
@@ -432,7 +476,7 @@ impl AggregatorService {
         ssh_key_name: Option<String>,
         _location_code: Option<String>,
     ) -> Result<Deployment> {
-        let provider = self.get_hyperstack_provider();
+        let provider = self.get_hyperstack_provider()?;
 
         // Extract flavor name from raw metadata
         let flavor_name = offering
@@ -519,7 +563,7 @@ impl AggregatorService {
         if let Some(provider_instance_id) = &deployment.provider_instance_id {
             match deployment.provider {
                 ProviderEnum::DataCrunch => {
-                    let provider = self.get_datacrunch_provider();
+                    let provider = self.get_datacrunch_provider()?;
                     match provider.get_instance(provider_instance_id).await {
                         Ok(instance) => {
                             let status = map_datacrunch_status_to_deployment(&instance.status);
@@ -548,7 +592,7 @@ impl AggregatorService {
                     }
                 }
                 ProviderEnum::Hyperstack => {
-                    let provider = self.get_hyperstack_provider();
+                    let provider = self.get_hyperstack_provider()?;
                     let vm_id: u32 =
                         provider_instance_id
                             .parse()
@@ -604,7 +648,7 @@ impl AggregatorService {
 
     /// Get raw instance details from DataCrunch
     pub async fn get_instance_details(&self, deployment_id: &str) -> Result<Instance> {
-        let provider = self.get_datacrunch_provider();
+        let provider = self.get_datacrunch_provider()?;
 
         // Get deployment from database
         let deployment = self
@@ -641,11 +685,11 @@ impl AggregatorService {
         if let Some(provider_instance_id) = &deployment.provider_instance_id {
             match deployment.provider {
                 ProviderEnum::DataCrunch => {
-                    let provider = self.get_datacrunch_provider();
+                    let provider = self.get_datacrunch_provider()?;
                     provider.delete_instance(provider_instance_id).await?;
                 }
                 ProviderEnum::Hyperstack => {
-                    let provider = self.get_hyperstack_provider();
+                    let provider = self.get_hyperstack_provider()?;
                     let vm_id: u32 =
                         provider_instance_id
                             .parse()
@@ -791,49 +835,6 @@ impl AggregatorService {
         }
 
         Ok(())
-    }
-
-    /// Ensure SSH key is registered with provider (lazy registration)
-    async fn ensure_ssh_key_registered(
-        &self,
-        ssh_key: &crate::models::SshKey,
-        provider: &ProviderEnum,
-    ) -> Result<String> {
-        // Check if already registered
-        if let Some(mapping) = self.db.get_provider_ssh_key(&ssh_key.id, *provider).await? {
-            tracing::debug!(
-                "SSH key {} already registered with provider {} as {}",
-                ssh_key.id,
-                provider,
-                mapping.provider_key_id
-            );
-            return Ok(mapping.provider_key_id);
-        }
-
-        // Not registered - register now
-        tracing::info!(
-            "Registering SSH key {} with provider {} for first time",
-            ssh_key.id,
-            provider
-        );
-
-        let provider_client = self.get_provider_dyn(provider)?;
-        let provider_key_id = provider_client
-            .create_ssh_key(ssh_key.name.clone(), ssh_key.public_key.clone())
-            .await?;
-
-        // Store the mapping
-        let mapping = crate::models::ProviderSshKey {
-            id: Uuid::new_v4().to_string(),
-            ssh_key_id: ssh_key.id.clone(),
-            provider: *provider,
-            provider_key_id: provider_key_id.clone(),
-            created_at: Utc::now(),
-        };
-
-        self.db.create_provider_ssh_key(&mapping).await?;
-
-        Ok(provider_key_id)
     }
 }
 

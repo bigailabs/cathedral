@@ -533,158 +533,95 @@ impl Provider for DataCrunchProvider {
 
     async fn fetch_offerings(&self) -> Result<Vec<GpuOffering>> {
         let instance_types = self.fetch_instance_types().await?;
+        dbg!(&instance_types);
 
-        // Try to fetch locations and availability data
-        // If either fails, fall back to single global offering per instance type
-        let locations_result = self.fetch_locations().await;
-        let availability_result = self.fetch_availability().await;
+        let locations = self.fetch_locations().await?;
+        let availability_data = self.fetch_availability().await?;
 
         let fetched_at = Utc::now();
         let mut offerings = Vec::new();
 
-        match (&locations_result, &availability_result) {
-            (Ok(locations), Ok(availability_data)) if !locations.is_empty() => {
-                // We have location and availability data - create per-region offerings
-                tracing::info!(
-                    "Using per-region data for DataCrunch ({} locations)",
-                    locations.len()
-                );
+        tracing::info!(
+            "Using per-region data for DataCrunch ({} locations)",
+            locations.len()
+        );
 
-                // Build a map of (location_code, instance_type) -> bool (available)
-                // The API returns: location_code -> [available_instance_types]
-                let mut availability_map = std::collections::HashMap::new();
-                for location_avail in availability_data.iter() {
-                    for instance_type_id in &location_avail.availabilities {
-                        availability_map.insert(
-                            (
-                                location_avail.location_code.clone(),
-                                instance_type_id.clone(),
-                            ),
-                            true,
-                        );
-                    }
-                }
-
-                for instance_type in &instance_types {
-                    // Skip instances with no GPUs (CPU-only instances)
-                    if instance_type.gpu.number_of_gpus == 0 {
-                        continue;
-                    }
-
-                    let gpu_model = instance_type
-                        .model
-                        .as_ref()
-                        .unwrap_or(&instance_type.gpu.description);
-                    let gpu_type = normalize_gpu_type(gpu_model);
-                    let hourly_rate = instance_type
-                        .price_per_hour
-                        .parse::<Decimal>()
-                        .unwrap_or_default();
-                    let interconnect = parse_interconnect(&instance_type.gpu.description);
-                    let storage = Some(instance_type.storage.description.clone());
-
-                    // Create one offering per location
-                    for location in locations.iter() {
-                        // Check if this instance type is available at this location
-                        // The key is (location_code, instance_type_id)
-                        let is_available = availability_map
-                            .get(&(location.code.clone(), instance_type.instance_type.clone()))
-                            .copied()
-                            .unwrap_or(false);
-
-                        let offering_id = format!("{}-{}", instance_type.id, location.code);
-
-                        let offering = GpuOffering {
-                            id: offering_id,
-                            provider: ProviderEnum::DataCrunch,
-                            gpu_type: gpu_type.clone(),
-                            // Datacrunch API returns aggregate memory across all GPUs, divide by count to get per-GPU memory
-                            gpu_memory_gb_per_gpu: Some(
-                                instance_type.gpu_memory.size_in_gigabytes
-                                    / instance_type.gpu.number_of_gpus,
-                            ),
-                            gpu_count: instance_type.gpu.number_of_gpus,
-                            interconnect: interconnect.clone(),
-                            storage: storage.clone(),
-                            deployment_type: Some("vm".to_string()),
-                            system_memory_gb: instance_type.memory.size_in_gigabytes,
-                            vcpu_count: instance_type.cpu.number_of_cores,
-                            region: location.code.clone(),
-                            hourly_rate,
-                            availability: is_available,
-                            fetched_at,
-                            raw_metadata: serde_json::to_value(instance_type).unwrap_or_default(),
-                        };
-
-                        offerings.push(offering);
-                    }
-                }
-
-                tracing::info!(
-                    "Fetched {} offerings from DataCrunch ({} instance types × {} locations)",
-                    offerings.len(),
-                    instance_types.len(),
-                    locations.len()
-                );
-            }
-            _ => {
-                // Fall back to global offerings (no per-region data available)
-                tracing::warn!(
-                    "Unable to fetch location/availability data from DataCrunch, using global region. \
-                     Locations error: {:?}, Availability error: {:?}",
-                    locations_result.err(),
-                    availability_result.err()
-                );
-
-                for instance_type in &instance_types {
-                    // Skip instances with no GPUs (CPU-only instances)
-                    if instance_type.gpu.number_of_gpus == 0 {
-                        continue;
-                    }
-
-                    let gpu_model = instance_type
-                        .model
-                        .as_ref()
-                        .unwrap_or(&instance_type.gpu.description);
-                    let gpu_type = normalize_gpu_type(gpu_model);
-                    let hourly_rate = instance_type
-                        .price_per_hour
-                        .parse::<Decimal>()
-                        .unwrap_or_default();
-                    let interconnect = parse_interconnect(&instance_type.gpu.description);
-                    let storage = Some(instance_type.storage.description.clone());
-
-                    let offering = GpuOffering {
-                        id: instance_type.id.clone(),
-                        provider: ProviderEnum::DataCrunch,
-                        gpu_type,
-                        // Datacrunch API returns aggregate memory across all GPUs, divide by count to get per-GPU memory
-                        gpu_memory_gb_per_gpu: Some(
-                            instance_type.gpu_memory.size_in_gigabytes
-                                / instance_type.gpu.number_of_gpus,
-                        ),
-                        gpu_count: instance_type.gpu.number_of_gpus,
-                        interconnect,
-                        storage,
-                        deployment_type: Some("vm".to_string()),
-                        system_memory_gb: instance_type.memory.size_in_gigabytes,
-                        vcpu_count: instance_type.cpu.number_of_cores,
-                        region: "global".to_string(),
-                        hourly_rate,
-                        availability: true,
-                        fetched_at,
-                        raw_metadata: serde_json::to_value(instance_type).unwrap_or_default(),
-                    };
-
-                    offerings.push(offering);
-                }
-
-                tracing::info!(
-                    "Fetched {} offerings from DataCrunch (global region fallback)",
-                    offerings.len()
+        // Build a map of (location_code, instance_type) -> bool (available)
+        // The API returns: location_code -> [available_instance_types]
+        let mut availability_map = std::collections::HashMap::new();
+        for location_avail in availability_data.iter() {
+            for instance_type_id in &location_avail.availabilities {
+                availability_map.insert(
+                    (
+                        location_avail.location_code.clone(),
+                        instance_type_id.clone(),
+                    ),
+                    true,
                 );
             }
         }
+
+        for instance_type in &instance_types {
+            // Skip instances with no GPUs (CPU-only instances)
+            if instance_type.gpu.number_of_gpus == 0 {
+                continue;
+            }
+
+            let gpu_model = instance_type
+                .model
+                .as_ref()
+                .unwrap_or(&instance_type.gpu.description);
+            let gpu_type = normalize_gpu_type(gpu_model);
+            let hourly_rate = instance_type
+                .price_per_hour
+                .parse::<Decimal>()
+                .unwrap_or_default();
+            let interconnect = parse_interconnect(&instance_type.gpu.description);
+            let storage = Some(instance_type.storage.description.clone());
+
+            // Create one offering per location
+            for location in locations.iter() {
+                // Check if this instance type is available at this location
+                // The key is (location_code, instance_type_id)
+                let is_available = availability_map
+                    .get(&(location.code.clone(), instance_type.instance_type.clone()))
+                    .copied()
+                    .unwrap_or(false);
+
+                let offering_id = format!("{}-{}", instance_type.id, location.code);
+
+                let offering = GpuOffering {
+                    id: offering_id,
+                    provider: ProviderEnum::DataCrunch,
+                    gpu_type: gpu_type.clone(),
+                    // Datacrunch API returns aggregate memory across all GPUs, divide by count to get per-GPU memory
+                    gpu_memory_gb_per_gpu: Some(
+                        instance_type.gpu_memory.size_in_gigabytes
+                            / instance_type.gpu.number_of_gpus,
+                    ),
+                    gpu_count: instance_type.gpu.number_of_gpus,
+                    interconnect: interconnect.clone(),
+                    storage: storage.clone(),
+                    deployment_type: Some("vm".to_string()),
+                    system_memory_gb: instance_type.memory.size_in_gigabytes,
+                    vcpu_count: instance_type.cpu.number_of_cores,
+                    region: location.code.clone(),
+                    hourly_rate,
+                    availability: is_available,
+                    fetched_at,
+                    raw_metadata: serde_json::to_value(instance_type).unwrap_or_default(),
+                };
+
+                offerings.push(offering);
+            }
+        }
+
+        tracing::info!(
+            "Fetched {} offerings from DataCrunch ({} instance types × {} locations)",
+            offerings.len(),
+            instance_types.len(),
+            locations.len()
+        );
 
         Ok(offerings)
     }

@@ -6,55 +6,46 @@ port = 8080
 ttl_seconds = 45
 
 [providers.datacrunch]
-enabled = true
-# You can either:
-# 1. Put your credentials directly here:
-#    client_id = "your-client-id"
-#    client_secret = "your-client-secret"
-# 2. Or override with environment variables:
-#    export AGGREGATOR__PROVIDERS__DATACRUNCH__CLIENT_ID="your-client-id"
-#    export AGGREGATOR__PROVIDERS__DATACRUNCH__CLIENT_SECRET="your-client-secret"
-client_id = "your-datacrunch-client-id"
-client_secret = "your-datacrunch-client-secret"
+# Optional: To enable DataCrunch provider, uncomment and configure:
+# client_id = "your-datacrunch-client-id"
+# client_secret = "your-datacrunch-client-secret"
+# api_base_url = "https://api.datacrunch.io/v1"
+# Or override with environment variables:
+#   export AGGREGATOR__PROVIDERS__DATACRUNCH__CLIENT_ID="your-client-id"
+#   export AGGREGATOR__PROVIDERS__DATACRUNCH__CLIENT_SECRET="your-client-secret"
+#   export AGGREGATOR__PROVIDERS__DATACRUNCH__API_BASE_URL="https://api.datacrunch.io/v1"
 cooldown_seconds = 30
 timeout_seconds = 10
-api_base_url = "https://api.datacrunch.io/v1"
 
 [providers.hyperstack]
-enabled = false
-# You can either:
-# 1. Put your API key directly here:
-#    api_key = "your-api-key"
-# 2. Or override with environment variable:
-#    export AGGREGATOR__PROVIDERS__HYPERSTACK__API_KEY="your-api-key"
-api_key = "your-hyperstack-api-key"
+# Optional: To enable Hyperstack provider, uncomment and configure:
+# api_key = "your-hyperstack-api-key"
+# api_base_url = "https://infrahub-api.nexgencloud.com/v1"
+# Or override with environment variable:
+#   export AGGREGATOR__PROVIDERS__HYPERSTACK__API_KEY="your-api-key"
+#   export AGGREGATOR__PROVIDERS__HYPERSTACK__API_BASE_URL="https://infrahub-api.nexgencloud.com/v1"
 cooldown_seconds = 30
 timeout_seconds = 10
-api_base_url = "https://infrahub-api.nexgencloud.com/v1"
 
 [providers.lambda]
-enabled = false
-# You can either:
-# 1. Put your API key directly here:
-#    api_key = "your-api-key"
-# 2. Or override with environment variable:
-#    export AGGREGATOR__PROVIDERS__LAMBDA__API_KEY="your-api-key"
-api_key = "your-lambda-api-key"
+# Optional: To enable Lambda provider, uncomment and configure:
+# api_key = "your-lambda-api-key"
+# api_base_url = "https://cloud.lambdalabs.com/api/v1"
+# Or override with environment variable:
+#   export AGGREGATOR__PROVIDERS__LAMBDA__API_KEY="your-api-key"
+#   export AGGREGATOR__PROVIDERS__LAMBDA__API_BASE_URL="https://cloud.lambdalabs.com/api/v1"
 cooldown_seconds = 30
 timeout_seconds = 10
-api_base_url = "https://cloud.lambdalabs.com/api/v1"
 
 [providers.hydrahost]
-enabled = false
-# You can either:
-# 1. Put your API key directly here:
-#    api_key = "your-api-key"
-# 2. Or override with environment variable:
-#    export AGGREGATOR__PROVIDERS__HYDRAHOST__API_KEY="your-api-key"
-api_key = "your-hydrahost-api-key"
+# Optional: To enable HydraHost provider, uncomment and configure:
+# api_key = "your-hydrahost-api-key"
+# api_base_url = "https://api.brokkr.prod.hydra.host"
+# Or override with environment variable:
+#   export AGGREGATOR__PROVIDERS__HYDRAHOST__API_KEY="your-api-key"
+#   export AGGREGATOR__PROVIDERS__HYDRAHOST__API_BASE_URL="https://api.brokkr.prod.hydra.host"
 cooldown_seconds = 30
 timeout_seconds = 10
-api_base_url = "https://api.brokkr.prod.hydra.host"
 
 [database]
 path = "aggregator.db"
