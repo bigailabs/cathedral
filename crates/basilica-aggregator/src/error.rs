@@ -19,6 +19,18 @@ pub enum AggregatorError {
 
     #[error("No providers available")]
     NoProvidersAvailable,
+
+    #[error("Resource not found: {0}")]
+    NotFound(String),
+
+    #[error("User already has an SSH key registered")]
+    SshKeyAlreadyExists,
+
+    #[error("No SSH key found for user")]
+    SshKeyNotFound,
+
+    #[error("Invalid SSH public key format")]
+    InvalidSshKey,
 }
 
 pub type Result<T> = std::result::Result<T, AggregatorError>;

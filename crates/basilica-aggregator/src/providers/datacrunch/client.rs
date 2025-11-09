@@ -1,5 +1,8 @@
 use super::normalize::{normalize_gpu_type, parse_interconnect};
-use super::types::{InstanceType, Location, LocationAvailability};
+use super::types::{
+    CreateSshKeyRequest, DeployInstanceRequest, Instance, InstanceActionRequest, InstanceType,
+    Location, LocationAvailability, OsImage, SshKey,
+};
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
 use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
@@ -228,6 +231,298 @@ impl DataCrunchProvider {
 
         Ok(availability)
     }
+
+    // ========================================================================
+    // SSH Key Management
+    // ========================================================================
+
+    /// List all SSH keys in the DataCrunch account
+    pub async fn list_ssh_keys_impl(&self) -> Result<Vec<SshKey>> {
+        let url = format!("{}/sshkeys", self.base_url);
+        let access_token = self.get_access_token().await?;
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to list SSH keys: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        let keys: Vec<SshKey> = response
+            .json()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to parse SSH keys: {}", e),
+            })?;
+
+        Ok(keys)
+    }
+
+    /// Create a new SSH key
+    pub async fn create_ssh_key_impl(&self, name: String, public_key: String) -> Result<SshKey> {
+        let url = format!("{}/sshkeys", self.base_url);
+        let access_token = self.get_access_token().await?;
+
+        let request_body = CreateSshKeyRequest {
+            name,
+            key: public_key,
+        };
+
+        tracing::debug!("Creating SSH key in DataCrunch");
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&access_token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to create SSH key: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        let key: SshKey = response
+            .json()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to parse created SSH key: {}", e),
+            })?;
+
+        tracing::info!("Successfully created SSH key: {}", key.id);
+
+        Ok(key)
+    }
+
+    /// Get a specific SSH key by ID
+    pub async fn get_ssh_key(&self, key_id: &str) -> Result<SshKey> {
+        let url = format!("{}/sshkeys/{}", self.base_url, key_id);
+        let access_token = self.get_access_token().await?;
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to get SSH key: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        let key: SshKey = response
+            .json()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to parse SSH key: {}", e),
+            })?;
+
+        Ok(key)
+    }
+
+    /// Delete an SSH key by ID
+    pub async fn delete_ssh_key_impl(&self, key_id: &str) -> Result<()> {
+        let url = format!("{}/sshkeys/{}", self.base_url, key_id);
+        let access_token = self.get_access_token().await?;
+
+        let response = self
+            .client
+            .delete(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to delete SSH key: {}", e),
+            })?;
+
+        handle_error_response(response, "datacrunch").await?;
+
+        tracing::info!("Successfully deleted SSH key: {}", key_id);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // OS Images
+    // ========================================================================
+
+    /// List available OS images
+    pub async fn list_images(&self) -> Result<Vec<OsImage>> {
+        let url = format!("{}/images", self.base_url);
+        let access_token = self.get_access_token().await?;
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to list images: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        let images: Vec<OsImage> =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "datacrunch".to_string(),
+                    message: format!("Failed to parse images: {}", e),
+                })?;
+
+        Ok(images)
+    }
+
+    // ========================================================================
+    // Instance Deployment and Management
+    // ========================================================================
+
+    /// Deploy a new GPU instance
+    pub async fn deploy_instance(&self, request: DeployInstanceRequest) -> Result<String> {
+        let url = format!("{}/instances", self.base_url);
+        let access_token = self.get_access_token().await?;
+
+        tracing::debug!(
+            "Deploying instance: {} at {}",
+            request.instance_type,
+            request.location_code.as_deref().unwrap_or("FIN-01")
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&access_token)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to deploy instance: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        // The API returns just the instance ID as a string
+        let instance_id: String = response
+            .json()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to parse instance ID: {}", e),
+            })?;
+
+        tracing::info!("Successfully deployed instance: {}", instance_id);
+
+        Ok(instance_id)
+    }
+
+    /// Get instance details by ID
+    pub async fn get_instance(&self, instance_id: &str) -> Result<Instance> {
+        let url = format!("{}/instances/{}", self.base_url, instance_id);
+        let access_token = self.get_access_token().await?;
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to get instance: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        let instance: Instance = response
+            .json()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to parse instance: {}", e),
+            })?;
+
+        Ok(instance)
+    }
+
+    /// List all instances
+    pub async fn list_instances(&self) -> Result<Vec<Instance>> {
+        let url = format!("{}/instances", self.base_url);
+        let access_token = self.get_access_token().await?;
+
+        let response = self
+            .client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to list instances: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "datacrunch").await?;
+
+        let instances: Vec<Instance> =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "datacrunch".to_string(),
+                    message: format!("Failed to parse instances: {}", e),
+                })?;
+
+        Ok(instances)
+    }
+
+    /// Delete an instance
+    pub async fn delete_instance(&self, instance_id: &str) -> Result<()> {
+        let url = format!("{}/instances", self.base_url);
+        let access_token = self.get_access_token().await?;
+
+        let request_body = InstanceActionRequest {
+            action: "delete".to_string(),
+            instance_ids: vec![instance_id.to_string()],
+            volume_ids: None,
+        };
+
+        tracing::debug!("Deleting instance: {}", instance_id);
+
+        let response = self
+            .client
+            .put(&url)
+            .bearer_auth(&access_token)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "datacrunch".to_string(),
+                message: format!("Failed to delete instance: {}", e),
+            })?;
+
+        handle_error_response(response, "datacrunch").await?;
+
+        tracing::info!("Successfully deleted instance: {}", instance_id);
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -409,6 +704,20 @@ impl Provider for DataCrunchProvider {
                 last_error: Some(e.to_string()),
             }),
         }
+    }
+
+    async fn create_ssh_key(&self, name: String, public_key: String) -> Result<String> {
+        let key = self.create_ssh_key_impl(name, public_key).await?;
+        Ok(key.id)
+    }
+
+    async fn delete_ssh_key(&self, provider_key_id: &str) -> Result<()> {
+        self.delete_ssh_key_impl(provider_key_id).await
+    }
+
+    async fn list_ssh_keys(&self) -> Result<Vec<String>> {
+        let keys = self.list_ssh_keys_impl().await?;
+        Ok(keys.into_iter().map(|k| k.id).collect())
     }
 }
 

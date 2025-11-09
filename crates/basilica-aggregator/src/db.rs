@@ -1,5 +1,7 @@
 use crate::error::Result;
-use crate::models::{GpuOffering, Provider, ProviderHealth};
+use crate::models::{
+    Deployment, DeploymentStatus, GpuOffering, Provider, ProviderHealth, ProviderSshKey, SshKey,
+};
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use sqlx::Row;
@@ -211,5 +213,386 @@ impl Database {
             .await?;
 
         Ok(row.and_then(|r| r.get("last_fetch_at")))
+    }
+
+    // ========================================================================
+    // Deployment Management
+    // ========================================================================
+
+    /// Create a new deployment record
+    pub async fn create_deployment(&self, deployment: &Deployment) -> Result<()> {
+        let connection_info = deployment.connection_info.as_ref().map(|v| v.to_string());
+        let raw_response = deployment.raw_response.as_ref().map(|v| v.to_string());
+
+        sqlx::query(
+            r#"
+            INSERT INTO deployments
+            (id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
+             status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
+             error_message, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&deployment.id)
+        .bind(&deployment.user_id)
+        .bind(deployment.provider.as_str())
+        .bind(&deployment.provider_instance_id)
+        .bind(&deployment.offering_id)
+        .bind(&deployment.instance_type)
+        .bind(&deployment.location_code)
+        .bind(deployment.status.as_str())
+        .bind(&deployment.hostname)
+        .bind(&deployment.ssh_key_id)
+        .bind(&deployment.ip_address)
+        .bind(connection_info)
+        .bind(raw_response)
+        .bind(&deployment.error_message)
+        .bind(deployment.created_at)
+        .bind(deployment.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Update deployment status and details
+    pub async fn update_deployment(
+        &self,
+        id: &str,
+        provider_instance_id: Option<String>,
+        status: DeploymentStatus,
+        ip_address: Option<String>,
+        connection_info: Option<serde_json::Value>,
+        raw_response: Option<serde_json::Value>,
+        error_message: Option<String>,
+    ) -> Result<()> {
+        let connection_info_str = connection_info.as_ref().map(|v| v.to_string());
+        let raw_response_str = raw_response.as_ref().map(|v| v.to_string());
+        let now = Utc::now();
+
+        sqlx::query(
+            r#"
+            UPDATE deployments
+            SET provider_instance_id = ?,
+                status = ?,
+                ip_address = ?,
+                connection_info = ?,
+                raw_response = ?,
+                error_message = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(provider_instance_id)
+        .bind(status.as_str())
+        .bind(ip_address)
+        .bind(connection_info_str)
+        .bind(raw_response_str)
+        .bind(error_message)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get deployment by ID
+    pub async fn get_deployment(&self, id: &str) -> Result<Option<Deployment>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
+                   status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
+                   error_message, created_at, updated_at
+            FROM deployments
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let deployment = row.and_then(|r| {
+            let provider_str: String = r.get("provider");
+            let status_str: String = r.get("status");
+            let connection_info_str: Option<String> = r.get("connection_info");
+            let raw_response_str: Option<String> = r.get("raw_response");
+
+            Some(Deployment {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                provider: provider_str.parse().ok()?,
+                provider_instance_id: r.get("provider_instance_id"),
+                offering_id: r.get("offering_id"),
+                instance_type: r.get("instance_type"),
+                location_code: r.get("location_code"),
+                status: status_str.parse().ok()?,
+                hostname: r.get("hostname"),
+                ssh_key_id: r.get("ssh_key_id"),
+                ip_address: r.get("ip_address"),
+                connection_info: connection_info_str.and_then(|s| serde_json::from_str(&s).ok()),
+                raw_response: raw_response_str.and_then(|s| serde_json::from_str(&s).ok()),
+                error_message: r.get("error_message"),
+                created_at: r.get("created_at"),
+                updated_at: r.get("updated_at"),
+            })
+        });
+
+        Ok(deployment)
+    }
+
+    /// List all deployments with optional filters
+    pub async fn list_deployments(
+        &self,
+        provider: Option<Provider>,
+        status: Option<DeploymentStatus>,
+    ) -> Result<Vec<Deployment>> {
+        let mut query = String::from(
+            r#"
+            SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
+                   status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
+                   error_message, created_at, updated_at
+            FROM deployments
+            WHERE 1=1
+            "#,
+        );
+
+        let mut conditions = Vec::new();
+
+        if let Some(p) = provider {
+            conditions.push(format!("provider = '{}'", p.as_str()));
+        }
+
+        if let Some(s) = status {
+            conditions.push(format!("status = '{}'", s.as_str()));
+        }
+
+        if !conditions.is_empty() {
+            query.push_str(" AND ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        query.push_str(" ORDER BY created_at DESC");
+
+        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+
+        let deployments = rows
+            .into_iter()
+            .filter_map(|r| {
+                let provider_str: String = r.get("provider");
+                let status_str: String = r.get("status");
+                let connection_info_str: Option<String> = r.get("connection_info");
+                let raw_response_str: Option<String> = r.get("raw_response");
+
+                Some(Deployment {
+                    id: r.get("id"),
+                    user_id: r.get("user_id"),
+                    provider: provider_str.parse().ok()?,
+                    provider_instance_id: r.get("provider_instance_id"),
+                    offering_id: r.get("offering_id"),
+                    instance_type: r.get("instance_type"),
+                    location_code: r.get("location_code"),
+                    status: status_str.parse().ok()?,
+                    hostname: r.get("hostname"),
+                    ssh_key_id: r.get("ssh_key_id"),
+                    ip_address: r.get("ip_address"),
+                    connection_info: connection_info_str
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    raw_response: raw_response_str.and_then(|s| serde_json::from_str(&s).ok()),
+                    error_message: r.get("error_message"),
+                    created_at: r.get("created_at"),
+                    updated_at: r.get("updated_at"),
+                })
+            })
+            .collect();
+
+        Ok(deployments)
+    }
+
+    /// Delete deployment record
+    pub async fn delete_deployment(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM deployments WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // SSH Key Management
+    // ========================================================================
+
+    /// Create a new SSH key
+    pub async fn create_ssh_key(&self, ssh_key: &SshKey) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO ssh_keys (id, user_id, name, public_key, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&ssh_key.id)
+        .bind(&ssh_key.user_id)
+        .bind(&ssh_key.name)
+        .bind(&ssh_key.public_key)
+        .bind(ssh_key.created_at)
+        .bind(ssh_key.updated_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get SSH key by user ID
+    pub async fn get_ssh_key_by_user(&self, user_id: &str) -> Result<Option<SshKey>> {
+        let row = sqlx::query(
+            "SELECT id, user_id, name, public_key, created_at, updated_at
+             FROM ssh_keys WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| SshKey {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            name: r.get("name"),
+            public_key: r.get("public_key"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    /// Get SSH key by ID
+    pub async fn get_ssh_key_by_id(&self, id: &str) -> Result<Option<SshKey>> {
+        let row = sqlx::query(
+            "SELECT id, user_id, name, public_key, created_at, updated_at
+             FROM ssh_keys WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| SshKey {
+            id: r.get("id"),
+            user_id: r.get("user_id"),
+            name: r.get("name"),
+            public_key: r.get("public_key"),
+            created_at: r.get("created_at"),
+            updated_at: r.get("updated_at"),
+        }))
+    }
+
+    /// Update SSH key
+    pub async fn update_ssh_key(&self, ssh_key: &SshKey) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE ssh_keys
+            SET name = ?, public_key = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(&ssh_key.name)
+        .bind(&ssh_key.public_key)
+        .bind(ssh_key.updated_at)
+        .bind(&ssh_key.id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Delete SSH key (cascades to provider_ssh_keys)
+    pub async fn delete_ssh_key(&self, id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM ssh_keys WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Provider SSH Key Mappings
+    // ========================================================================
+
+    /// Get provider SSH key mapping
+    pub async fn get_provider_ssh_key(
+        &self,
+        ssh_key_id: &str,
+        provider: Provider,
+    ) -> Result<Option<ProviderSshKey>> {
+        let row = sqlx::query(
+            "SELECT id, ssh_key_id, provider, provider_key_id, created_at
+             FROM provider_ssh_keys WHERE ssh_key_id = ? AND provider = ?",
+        )
+        .bind(ssh_key_id)
+        .bind(provider.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.and_then(|r| {
+            let provider_str: String = r.get("provider");
+            Provider::from_str(&provider_str)
+                .ok()
+                .map(|p| ProviderSshKey {
+                    id: r.get("id"),
+                    ssh_key_id: r.get("ssh_key_id"),
+                    provider: p,
+                    provider_key_id: r.get("provider_key_id"),
+                    created_at: r.get("created_at"),
+                })
+        }))
+    }
+
+    /// Create provider SSH key mapping
+    pub async fn create_provider_ssh_key(&self, mapping: &ProviderSshKey) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO provider_ssh_keys (id, ssh_key_id, provider, provider_key_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&mapping.id)
+        .bind(&mapping.ssh_key_id)
+        .bind(mapping.provider.as_str())
+        .bind(&mapping.provider_key_id)
+        .bind(mapping.created_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// List all provider SSH key mappings for a given SSH key
+    pub async fn list_provider_ssh_keys_for_key(
+        &self,
+        ssh_key_id: &str,
+    ) -> Result<Vec<ProviderSshKey>> {
+        let rows = sqlx::query(
+            "SELECT id, ssh_key_id, provider, provider_key_id, created_at
+             FROM provider_ssh_keys WHERE ssh_key_id = ?",
+        )
+        .bind(ssh_key_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mappings = rows
+            .into_iter()
+            .filter_map(|r| {
+                let provider_str: String = r.get("provider");
+                Provider::from_str(&provider_str)
+                    .ok()
+                    .map(|p| ProviderSshKey {
+                        id: r.get("id"),
+                        ssh_key_id: r.get("ssh_key_id"),
+                        provider: p,
+                        provider_key_id: r.get("provider_key_id"),
+                        created_at: r.get("created_at"),
+                    })
+            })
+            .collect();
+
+        Ok(mappings)
     }
 }

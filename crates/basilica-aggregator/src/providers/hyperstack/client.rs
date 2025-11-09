@@ -1,7 +1,10 @@
 use super::normalize::{
     normalize_gpu_type, normalize_region, parse_gpu_memory, parse_interconnect,
 };
-use super::types::FlavorsResponse;
+use super::types::{
+    CreateKeypairRequest, CreateKeypairResponse, DeleteVmRequest, DeployVmRequest,
+    DeployVmResponse, FlavorsResponse, GetVmResponse, Keypair, VirtualMachine,
+};
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
 use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
@@ -56,6 +59,218 @@ impl HyperstackProvider {
                 })?;
 
         Ok(flavors_response)
+    }
+
+    // ========================================================================
+    // SSH Key Management
+    // ========================================================================
+
+    /// Create a new SSH keypair
+    pub async fn create_keypair_impl(
+        &self,
+        name: String,
+        environment_name: String,
+        public_key: String,
+    ) -> Result<Keypair> {
+        let url = format!("{}/core/keypairs", self.base_url);
+
+        let request_body = CreateKeypairRequest {
+            name,
+            environment_name,
+            public_key,
+        };
+
+        tracing::debug!("Creating SSH keypair in Hyperstack");
+
+        let response = self
+            .client
+            .post(&url)
+            .header("api_key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to create keypair: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "hyperstack").await?;
+
+        let create_response: CreateKeypairResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to parse keypair response: {}", e),
+                })?;
+
+        if !create_response.status {
+            return Err(AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to create keypair: {}", create_response.message),
+            }
+            .into());
+        }
+
+        tracing::info!(
+            "Successfully created SSH keypair: {}",
+            create_response.keypair.id
+        );
+
+        Ok(create_response.keypair)
+    }
+
+    /// Delete an SSH keypair
+    pub async fn delete_keypair(&self, keypair_id: u32) -> Result<()> {
+        let url = format!("{}/core/keypairs/{}", self.base_url, keypair_id);
+
+        tracing::debug!("Deleting SSH keypair: {}", keypair_id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("api_key", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to delete keypair: {}", e),
+            })?;
+
+        handle_error_response(response, "hyperstack").await?;
+
+        tracing::info!("Successfully deleted SSH keypair: {}", keypair_id);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Virtual Machine Deployment and Management
+    // ========================================================================
+
+    /// Deploy a new virtual machine
+    pub async fn deploy_vm(&self, request: DeployVmRequest) -> Result<VirtualMachine> {
+        let url = format!("{}/core/virtual-machines", self.base_url);
+
+        tracing::debug!(
+            "Deploying VM: {} with flavor {}",
+            request.name,
+            request.flavor_name
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .header("api_key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to deploy VM: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "hyperstack").await?;
+
+        let deploy_response: DeployVmResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to parse deploy VM response: {}", e),
+                })?;
+
+        if !deploy_response.status {
+            return Err(AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to deploy VM: {}", deploy_response.message),
+            }
+            .into());
+        }
+
+        let vm = deploy_response
+            .virtual_machines
+            .into_iter()
+            .next()
+            .ok_or_else(|| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: "No virtual machine in response".to_string(),
+            })?;
+
+        tracing::info!("Successfully deployed VM: {}", vm.id);
+
+        Ok(vm)
+    }
+
+    /// Get virtual machine details by ID
+    pub async fn get_vm(&self, vm_id: u32) -> Result<VirtualMachine> {
+        let url = format!("{}/core/virtual-machines/{}", self.base_url, vm_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("api_key", &self.api_key)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to get VM: {}", e),
+            })?;
+
+        let response = handle_error_response(response, "hyperstack").await?;
+
+        let vm_response: GetVmResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to parse VM response: {}", e),
+                })?;
+
+        if !vm_response.status {
+            return Err(AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to get VM: {}", vm_response.message),
+            }
+            .into());
+        }
+
+        Ok(vm_response.virtual_machine)
+    }
+
+    /// Delete a virtual machine
+    pub async fn delete_vm(&self, vm_id: u32) -> Result<()> {
+        let url = format!("{}/core/virtual-machines", self.base_url);
+
+        let request_body = DeleteVmRequest {
+            virtual_machine_ids: vec![vm_id],
+        };
+
+        tracing::debug!("Deleting VM: {}", vm_id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("api_key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to delete VM: {}", e),
+            })?;
+
+        handle_error_response(response, "hyperstack").await?;
+
+        tracing::info!("Successfully deleted VM: {}", vm_id);
+
+        Ok(())
     }
 }
 
@@ -177,6 +392,30 @@ impl Provider for HyperstackProvider {
                 last_error: Some(e.to_string()),
             }),
         }
+    }
+
+    async fn create_ssh_key(&self, name: String, public_key: String) -> Result<String> {
+        // Hyperstack requires an environment_name for SSH keys
+        // We use "default" as the environment name (can be made configurable later)
+        let environment_name = "default".to_string();
+
+        let keypair = self
+            .create_keypair_impl(name, environment_name, public_key)
+            .await?;
+
+        // Return the keypair ID as a string
+        Ok(keypair.id.to_string())
+    }
+
+    async fn delete_ssh_key(&self, provider_key_id: &str) -> Result<()> {
+        let keypair_id: u32 = provider_key_id
+            .parse()
+            .map_err(|_| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Invalid keypair ID format: {}", provider_key_id),
+            })?;
+
+        self.delete_keypair(keypair_id).await
     }
 }
 

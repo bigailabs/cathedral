@@ -18,4 +18,16 @@ pub trait Provider: Send + Sync {
 
     /// Health check for provider API
     async fn health_check(&self) -> Result<ProviderHealth>;
+
+    /// Register SSH key with provider
+    /// Returns the provider's SSH key ID
+    async fn create_ssh_key(&self, name: String, public_key: String) -> Result<String>;
+
+    /// Delete SSH key from provider
+    async fn delete_ssh_key(&self, provider_key_id: &str) -> Result<()>;
+
+    /// List SSH keys (optional, for debugging/admin)
+    async fn list_ssh_keys(&self) -> Result<Vec<String>> {
+        Ok(vec![])
+    }
 }

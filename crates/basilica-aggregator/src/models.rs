@@ -79,3 +79,120 @@ pub struct ProviderHealth {
     pub last_success_at: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
 }
+
+/// Deployment status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentStatus {
+    Pending,
+    Provisioning,
+    Running,
+    Error,
+    Deleted,
+}
+
+impl DeploymentStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeploymentStatus::Pending => "pending",
+            DeploymentStatus::Provisioning => "provisioning",
+            DeploymentStatus::Running => "running",
+            DeploymentStatus::Error => "error",
+            DeploymentStatus::Deleted => "deleted",
+        }
+    }
+}
+
+impl std::fmt::Display for DeploymentStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for DeploymentStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(DeploymentStatus::Pending),
+            "provisioning" => Ok(DeploymentStatus::Provisioning),
+            "running" => Ok(DeploymentStatus::Running),
+            "error" => Ok(DeploymentStatus::Error),
+            "deleted" => Ok(DeploymentStatus::Deleted),
+            _ => Err(format!("Unknown deployment status: {}", s)),
+        }
+    }
+}
+
+/// Deployment tracking model
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Deployment {
+    pub id: String,
+    pub user_id: String,
+    pub provider: Provider,
+    pub provider_instance_id: Option<String>,
+    pub offering_id: String,
+    pub instance_type: String,
+    pub location_code: Option<String>,
+    pub status: DeploymentStatus,
+    pub hostname: String,
+    pub ssh_key_id: Option<String>,
+    pub ip_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_info: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_response: Option<serde_json::Value>,
+    pub error_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// User SSH key
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshKey {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub public_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Provider-specific SSH key mapping (lazy registration)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSshKey {
+    pub id: String,
+    pub ssh_key_id: String,
+    pub provider: Provider,
+    pub provider_key_id: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Request to register SSH key
+#[derive(Debug, Deserialize)]
+pub struct RegisterSshKeyRequest {
+    pub name: String,
+    pub public_key: String,
+}
+
+/// SSH key response (excludes public_key for security)
+#[derive(Debug, Serialize)]
+pub struct SshKeyResponse {
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<SshKey> for SshKeyResponse {
+    fn from(key: SshKey) -> Self {
+        Self {
+            id: key.id,
+            user_id: key.user_id,
+            name: key.name,
+            created_at: key.created_at,
+            updated_at: key.updated_at,
+        }
+    }
+}
