@@ -102,7 +102,7 @@ impl Provider for LambdaProvider {
                     id: instance_type.name.clone(),
                     provider: ProviderEnum::Lambda,
                     gpu_type: gpu_type.clone(),
-                    gpu_memory_gb: Some(gpu_info.memory_gb),
+                    gpu_memory_gb_per_gpu: Some(gpu_info.memory_gb),
                     gpu_count: gpu_info.count,
                     interconnect: None,
                     storage: storage.clone(),
@@ -126,7 +126,7 @@ impl Provider for LambdaProvider {
                         id: offering_id,
                         provider: ProviderEnum::Lambda,
                         gpu_type: gpu_type.clone(),
-                        gpu_memory_gb: Some(gpu_info.memory_gb),
+                        gpu_memory_gb_per_gpu: Some(gpu_info.memory_gb),
                         gpu_count: gpu_info.count,
                         interconnect: None, // Lambda API doesn't provide interconnect info
                         storage: storage.clone(),

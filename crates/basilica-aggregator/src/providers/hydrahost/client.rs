@@ -112,11 +112,11 @@ impl Provider for HydraHostProvider {
 
             // Parse GPU memory from model string, falling back to name field
             // For supported GPUs, if we can't parse memory, store as NULL instead of skipping
-            let gpu_memory_gb =
+            let gpu_memory_gb_per_gpu =
                 parse_gpu_memory(gpu_model).or_else(|| parse_gpu_memory(&listing.name));
 
             // Log when we can't determine memory for supported GPUs
-            if gpu_memory_gb.is_none() {
+            if gpu_memory_gb_per_gpu.is_none() {
                 tracing::debug!(
                     "Unable to parse GPU memory from model: '{}' or name: '{}' for supported GPU type {:?}. Storing with NULL memory.",
                     gpu_model,
@@ -156,7 +156,7 @@ impl Provider for HydraHostProvider {
                 id: format!("hydrahost-{}", listing.id),
                 provider: ProviderEnum::HydraHost,
                 gpu_type,
-                gpu_memory_gb,
+                gpu_memory_gb_per_gpu,
                 gpu_count,
                 interconnect: None, // HydraHost API doesn't provide interconnect info
                 storage,

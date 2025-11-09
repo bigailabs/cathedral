@@ -52,7 +52,7 @@ pub struct GpuOffering {
     pub provider: Provider,
     pub gpu_type: GpuCategory,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub gpu_memory_gb: Option<u32>, // GPU memory per card (NULL if provider doesn't specify)
+    pub gpu_memory_gb_per_gpu: Option<u32>, // GPU memory per single GPU card in GB (NULL if provider doesn't specify)
     pub gpu_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub interconnect: Option<String>, // GPU interconnect type (SXM4, SXM5, PCIe, etc.)

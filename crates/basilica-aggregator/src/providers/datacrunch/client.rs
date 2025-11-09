@@ -271,6 +271,11 @@ impl Provider for DataCrunchProvider {
                 }
 
                 for instance_type in &instance_types {
+                    // Skip instances with no GPUs (CPU-only instances)
+                    if instance_type.gpu.number_of_gpus == 0 {
+                        continue;
+                    }
+
                     let gpu_model = instance_type
                         .model
                         .as_ref()
@@ -298,7 +303,11 @@ impl Provider for DataCrunchProvider {
                             id: offering_id,
                             provider: ProviderEnum::DataCrunch,
                             gpu_type: gpu_type.clone(),
-                            gpu_memory_gb: Some(instance_type.gpu_memory.size_in_gigabytes),
+                            // Datacrunch API returns aggregate memory across all GPUs, divide by count to get per-GPU memory
+                            gpu_memory_gb_per_gpu: Some(
+                                instance_type.gpu_memory.size_in_gigabytes
+                                    / instance_type.gpu.number_of_gpus,
+                            ),
                             gpu_count: instance_type.gpu.number_of_gpus,
                             interconnect: interconnect.clone(),
                             storage: storage.clone(),
@@ -333,6 +342,11 @@ impl Provider for DataCrunchProvider {
                 );
 
                 for instance_type in &instance_types {
+                    // Skip instances with no GPUs (CPU-only instances)
+                    if instance_type.gpu.number_of_gpus == 0 {
+                        continue;
+                    }
+
                     let gpu_model = instance_type
                         .model
                         .as_ref()
@@ -349,7 +363,11 @@ impl Provider for DataCrunchProvider {
                         id: instance_type.id.clone(),
                         provider: ProviderEnum::DataCrunch,
                         gpu_type,
-                        gpu_memory_gb: Some(instance_type.gpu_memory.size_in_gigabytes),
+                        // Datacrunch API returns aggregate memory across all GPUs, divide by count to get per-GPU memory
+                        gpu_memory_gb_per_gpu: Some(
+                            instance_type.gpu_memory.size_in_gigabytes
+                                / instance_type.gpu.number_of_gpus,
+                        ),
                         gpu_count: instance_type.gpu.number_of_gpus,
                         interconnect,
                         storage,

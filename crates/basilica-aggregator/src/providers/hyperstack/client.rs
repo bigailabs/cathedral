@@ -103,12 +103,12 @@ impl Provider for HyperstackProvider {
 
                 // Parse GPU memory from group GPU string, falling back to flavor name
                 // For supported GPUs, store as NULL if we can't parse memory
-                let gpu_memory_gb = group_gpu_memory
+                let gpu_memory_gb_per_gpu = group_gpu_memory
                     .or_else(|| parse_gpu_memory(&flavor.name))
                     .or_else(|| parse_gpu_memory(&flavor.gpu));
 
                 // Log when we can't determine memory for supported GPUs
-                if gpu_memory_gb.is_none() {
+                if gpu_memory_gb_per_gpu.is_none() {
                     tracing::debug!(
                         "Unable to parse GPU memory from group GPU: '{}', flavor name: '{}', or flavor GPU: '{}' for supported GPU type {:?}. Storing with NULL memory.",
                         group.gpu,
@@ -140,7 +140,7 @@ impl Provider for HyperstackProvider {
                     id: format!("hyperstack-{}", flavor.id),
                     provider: ProviderEnum::Hyperstack,
                     gpu_type: gpu_type.clone(),
-                    gpu_memory_gb,
+                    gpu_memory_gb_per_gpu,
                     gpu_count: flavor.gpu_count,
                     interconnect,
                     storage,
