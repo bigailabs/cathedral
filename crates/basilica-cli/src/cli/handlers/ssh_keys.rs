@@ -296,14 +296,9 @@ pub async fn handle_list_ssh_keys(client: &BasilicaClient) -> Result<(), CliErro
             println!("{}", style("Registered SSH Key:").bold());
             println!();
             println!("  Name:       {}", style(&key.name).cyan());
-            println!("  ID:         {}", style(&key.id).dim());
             println!(
                 "  Created:    {}",
                 key.created_at.format("%Y-%m-%d %H:%M:%S")
-            );
-            println!(
-                "  Updated:    {}",
-                key.updated_at.format("%Y-%m-%d %H:%M:%S")
             );
             println!();
             println!(
