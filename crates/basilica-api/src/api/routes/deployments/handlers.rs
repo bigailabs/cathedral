@@ -64,7 +64,7 @@ async fn create_k8s_resources(
         config.deployment.max_configmap_size_bytes,
     );
 
-    let service_name = format!("{}-service", instance_name);
+    let service_name = format!("s-{}", instance_name);
     let target_service = format!("{}.{}:{}", service_name, namespace, req.port);
 
     let envoy_host = if req.public {
@@ -86,9 +86,8 @@ async fn create_k8s_resources(
     tracing::debug!(
         namespace = namespace,
         cr_name = cr_name,
-        "Reloading Envoy configuration"
+        "Envoy will auto-reload configuration via watched_directory"
     );
-    envoy_manager.reload_envoy().await?;
 
     Ok(())
 }
@@ -538,8 +537,6 @@ pub async fn delete_deployment(
     envoy_manager
         .remove_route(&deployment.path_prefix, &cluster_name)
         .await?;
-
-    envoy_manager.reload_envoy().await?;
 
     if deployment.public {
         if let Some(dns_provider) = &state.dns_provider {

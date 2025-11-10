@@ -40,6 +40,10 @@ fn sanitize_user_id(user_id: &str) -> String {
     out
 }
 
+fn make_service_name(instance_name: &str) -> String {
+    format!("s-{}", instance_name)
+}
+
 fn build_resources(cpu: &str, memory: &str) -> ResourceRequirements {
     let mut limits = BTreeMap::new();
     let mut requests = BTreeMap::new();
@@ -209,9 +213,11 @@ pub fn render_service(instance_name: &str, namespace: &str, port: u32) -> Servic
     let mut selector = BTreeMap::new();
     selector.insert("app".to_string(), instance_name.to_string());
 
+    let service_name = make_service_name(instance_name);
+
     Service {
         metadata: ObjectMeta {
-            name: Some(format!("{}-service", instance_name)),
+            name: Some(service_name),
             namespace: Some(namespace.to_string()),
             labels: Some(labels),
             ..Default::default()
@@ -294,7 +300,7 @@ impl UserDeploymentController {
         let instance_name = &spec.instance_name;
 
         let deployment_name = format!("{}-deployment", instance_name);
-        let service_name = format!("{}-service", instance_name);
+        let service_name = make_service_name(instance_name);
 
         let deployment_exists = self
             .client
@@ -459,7 +465,7 @@ mod tests {
     fn test_render_service() {
         let service = render_service("my-app", "u-user123", 80);
 
-        assert_eq!(service.metadata.name, Some("my-app-service".to_string()));
+        assert_eq!(service.metadata.name, Some("s-my-app".to_string()));
         assert_eq!(service.metadata.namespace, Some("u-user123".to_string()));
 
         let spec = service.spec.unwrap();
@@ -619,5 +625,24 @@ mod tests {
         );
         assert_eq!(tol.operator, Some("Exists".to_string()));
         assert_eq!(tol.effect, Some("NoSchedule".to_string()));
+    }
+
+    #[test]
+    fn test_make_service_name() {
+        assert_eq!(make_service_name("my-app"), "s-my-app");
+        assert_eq!(make_service_name("30b9d5fe-3285-43dd-847d-2a02736ef23a"), "s-30b9d5fe-3285-43dd-847d-2a02736ef23a");
+        assert_eq!(make_service_name("abc123"), "s-abc123");
+    }
+
+    #[test]
+    fn test_render_service_with_numeric_instance_name() {
+        let service = render_service("30b9d5fe-3285-43dd-847d-2a02736ef23a", "u-user123", 80);
+
+        let name = service.metadata.name.unwrap();
+        assert!(name.starts_with("s-"));
+        assert_eq!(name, "s-30b9d5fe-3285-43dd-847d-2a02736ef23a");
+
+        let first_char = name.chars().next().unwrap();
+        assert!(first_char.is_ascii_alphabetic());
     }
 }

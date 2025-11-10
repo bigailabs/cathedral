@@ -4,7 +4,18 @@ metadata:
   name: basilica-envoy-config
   namespace: basilica-system
 data:
-  envoy.yaml: |
+  bootstrap.yaml: |
+    node:
+      cluster: basilica-envoy
+      id: basilica-envoy-node
+
+    dynamic_resources:
+      cds_config:
+        path_config_source:
+          path: /etc/envoy/dynamic/cds.yaml
+          watched_directory:
+            path: /etc/envoy/dynamic
+
     static_resources:
       listeners:
       - name: listener_http
@@ -18,19 +29,14 @@ data:
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
               stat_prefix: ingress_http
-              route_config:
-                name: local_route
-                virtual_hosts:
-                - name: any
-                  domains: ["*"]
-                  routes:
-                  - match: { prefix: "/" }
-                    route:
-                      cluster: dynamic_forward_proxy_cluster
-                      timeout: 0s
-                      retry_policy:
-                        retry_on: 5xx,connect-failure,refused-stream
-                        num_retries: 2
+              codec_type: AUTO
+              rds:
+                route_config_name: local_route
+                config_source:
+                  path_config_source:
+                    path: /etc/envoy/dynamic/rds.yaml
+                    watched_directory:
+                      path: /etc/envoy/dynamic
               http_filters:
               - name: envoy.filters.http.dynamic_forward_proxy
                 typed_config:
@@ -42,20 +48,48 @@ data:
                 typed_config:
                   "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
-      clusters:
-      - name: dynamic_forward_proxy_cluster
-        connect_timeout: 1s
-        lb_policy: CLUSTER_PROVIDED
-        cluster_type:
-          name: envoy.clusters.dynamic_forward_proxy
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
-            dns_cache_config:
-              name: dynamic_forward_proxy_cache
-              dns_lookup_family: V4_ONLY
-
     admin:
       access_log_path: /tmp/admin_access.log
       address:
-        socket_address: { address: 0.0.0.0, port_value: 9901 }
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
 
+  rds.yaml: |
+    version_info: "1"
+    resources:
+    - "@type": type.googleapis.com/envoy.config.route.v3.RouteConfiguration
+      name: local_route
+      virtual_hosts:
+      - name: user_deployments
+        domains: ["*"]
+        routes:
+        - match:
+            prefix: "/health"
+          direct_response:
+            status: 200
+            body:
+              inline_string: "healthy"
+        - match:
+            prefix: "/"
+          route:
+            cluster: dynamic_forward_proxy_cluster
+            timeout: 0s
+            retry_policy:
+              retry_on: 5xx,connect-failure,refused-stream
+              num_retries: 2
+
+  cds.yaml: |
+    version_info: "1"
+    resources:
+    - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+      name: dynamic_forward_proxy_cluster
+      connect_timeout: 1s
+      lb_policy: CLUSTER_PROVIDED
+      cluster_type:
+        name: envoy.clusters.dynamic_forward_proxy
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+          dns_cache_config:
+            name: dynamic_forward_proxy_cache
+            dns_lookup_family: V4_ONLY

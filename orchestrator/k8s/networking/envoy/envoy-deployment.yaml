@@ -40,7 +40,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - -c
-            - /etc/envoy/envoy.yaml
+            - /etc/envoy/bootstrap.yaml
             - --log-level
             - info
           ports:
@@ -48,10 +48,31 @@ spec:
               containerPort: 8080
             - name: admin
               containerPort: 9901
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: 500m
+              memory: 2Gi
           volumeMounts:
-            - name: config
-              mountPath: /etc/envoy
+            - name: bootstrap-config
+              mountPath: /etc/envoy/bootstrap.yaml
+              subPath: bootstrap.yaml
+            - name: dynamic-config
+              mountPath: /etc/envoy/dynamic
       volumes:
-        - name: config
+        - name: bootstrap-config
           configMap:
             name: basilica-envoy-config
+            items:
+              - key: bootstrap.yaml
+                path: bootstrap.yaml
+        - name: dynamic-config
+          configMap:
+            name: basilica-envoy-config
+            items:
+              - key: rds.yaml
+                path: rds.yaml
+              - key: cds.yaml
+                path: cds.yaml

@@ -75,8 +75,12 @@ impl EnvoyConfigManager {
         cm_data.insert(route_key, route_yaml);
         cm_data.insert(cluster_key, cluster_yaml);
 
-        let full_config = self.build_full_envoy_config(&cm_data);
-        cm_data.insert("envoy.yaml".to_string(), full_config);
+        let version = self.get_next_version(&cm_data);
+        let rds_config = self.build_rds_config(&cm_data, version);
+        let cds_config = self.build_cds_config(&cm_data, version);
+
+        cm_data.insert("rds.yaml".to_string(), rds_config);
+        cm_data.insert("cds.yaml".to_string(), cds_config);
 
         self.k8s_client
             .patch_configmap(&self.namespace, &self.configmap_name, cm_data)
@@ -86,7 +90,8 @@ impl EnvoyConfigManager {
             prefix = %route.prefix,
             cluster = %route.cluster_name,
             host = ?route.host,
-            "Added Envoy route and rebuilt envoy.yaml"
+            version = version,
+            "Added Envoy route, Envoy will auto-reload via watched_directory"
         );
 
         Ok(())
@@ -104,8 +109,12 @@ impl EnvoyConfigManager {
         cm_data.remove(&route_key);
         cm_data.remove(&cluster_key);
 
-        let full_config = self.build_full_envoy_config(&cm_data);
-        cm_data.insert("envoy.yaml".to_string(), full_config);
+        let version = self.get_next_version(&cm_data);
+        let rds_config = self.build_rds_config(&cm_data, version);
+        let cds_config = self.build_cds_config(&cm_data, version);
+
+        cm_data.insert("rds.yaml".to_string(), rds_config);
+        cm_data.insert("cds.yaml".to_string(), cds_config);
 
         self.k8s_client
             .patch_configmap(&self.namespace, &self.configmap_name, cm_data)
@@ -114,51 +123,62 @@ impl EnvoyConfigManager {
         tracing::info!(
             prefix = %prefix,
             cluster = %cluster_name,
-            "Removed Envoy route and rebuilt envoy.yaml"
+            version = version,
+            "Removed Envoy route, Envoy will auto-reload via watched_directory"
         );
 
         Ok(())
     }
 
-    pub async fn reload_envoy(&self) -> Result<()> {
-        self.k8s_client.reload_envoy_pods(&self.namespace).await
+    fn get_next_version(&self, cm_data: &std::collections::BTreeMap<String, String>) -> u64 {
+        cm_data
+            .get("rds.yaml")
+            .and_then(|yaml| {
+                yaml.lines()
+                    .find(|line| line.starts_with("version_info:"))
+                    .and_then(|line| {
+                        line.trim_start_matches("version_info:")
+                            .trim()
+                            .trim_matches('"')
+                            .parse::<u64>()
+                            .ok()
+                    })
+            })
+            .map(|v| v + 1)
+            .unwrap_or(1)
     }
 
-    fn build_full_envoy_config(
+    fn build_rds_config(
         &self,
         cm_data: &std::collections::BTreeMap<String, String>,
+        version: u64,
     ) -> String {
         let mut path_routes = Vec::new();
         let mut host_routes = std::collections::BTreeMap::new();
-        let mut clusters = Vec::new();
 
         for (key, value) in cm_data.iter() {
             if key.starts_with("route_") {
                 if key.contains("__host__") {
                     if let Some(host) = extract_host_from_key(key) {
-                        let indented = indent_lines(value, 18);
+                        let indented = indent_lines(value, 10);
                         host_routes
                             .entry(host)
                             .or_insert_with(Vec::new)
                             .push(indented);
                     }
                 } else {
-                    let indented = indent_lines(value, 18);
+                    let indented = indent_lines(value, 10);
                     path_routes.push(indented);
                 }
-            } else if key.starts_with("cluster_") {
-                let indented = indent_lines(value, 6);
-                clusters.push(indented);
             }
         }
 
         path_routes.sort();
-        clusters.sort();
 
         let path_routes_section = if path_routes.is_empty() {
             String::new()
         } else {
-            format!("\n{}\n                  ", path_routes.join("\n"))
+            format!("\n{}\n          ", path_routes.join("\n"))
         };
 
         let mut virtual_hosts_sections = Vec::new();
@@ -166,9 +186,9 @@ impl EnvoyConfigManager {
         for (host, routes) in host_routes.iter() {
             let routes_str = routes.join("\n");
             let vhost = format!(
-                r#"            - name: {}
-              domains: ["{}"]
-              routes:
+                r#"      - name: {}
+        domains: ["{}"]
+        routes:
 {}"#,
                 sanitize_key(host),
                 host,
@@ -178,83 +198,80 @@ impl EnvoyConfigManager {
         }
 
         let path_based_vhost = format!(
-            r#"            - name: user_deployments
-              domains: ["*"]
-              routes:
-                  - match:
-                      prefix: "/health"
-                    direct_response:
-                      status: 200
-                      body:
-                        inline_string: "healthy"
+            r#"      - name: user_deployments
+        domains: ["*"]
+        routes:
+          - match:
+              prefix: "/health"
+            direct_response:
+              status: 200
+              body:
+                inline_string: "healthy"
 {}
-                  - match:
-                      prefix: "/"
-                    route:
-                      cluster: dynamic_forward_proxy_cluster
-                      timeout: 0s"#,
+          - match:
+              prefix: "/"
+            route:
+              cluster: dynamic_forward_proxy_cluster
+              timeout: 0s
+              retry_policy:
+                retry_on: 5xx,connect-failure,refused-stream
+                num_retries: 2"#,
             path_routes_section
         );
         virtual_hosts_sections.push(path_based_vhost);
 
         let all_virtual_hosts = virtual_hosts_sections.join("\n");
 
-        let clusters_section = if clusters.is_empty() {
+        format!(
+            r#"version_info: "{}"
+resources:
+  - "@type": type.googleapis.com/envoy.config.route.v3.RouteConfiguration
+    name: local_route
+    virtual_hosts:
+{}
+"#,
+            version, all_virtual_hosts
+        )
+    }
+
+    fn build_cds_config(
+        &self,
+        cm_data: &std::collections::BTreeMap<String, String>,
+        version: u64,
+    ) -> String {
+        let mut clusters = Vec::new();
+
+        for (key, value) in cm_data.iter() {
+            if key.starts_with("cluster_") && key != "cluster_dynamic_forward_proxy" {
+                let indented = indent_lines(value, 4);
+                clusters.push(indented);
+            }
+        }
+
+        clusters.sort();
+
+        let user_clusters_section = if clusters.is_empty() {
             String::new()
         } else {
-            format!("{}\n      ", clusters.join("\n"))
+            format!("\n{}\n  ", clusters.join("\n"))
         };
 
         format!(
-            r#"static_resources:
-  listeners:
-  - name: listener_http
-    address:
-      socket_address:
-        address: 0.0.0.0
-        port_value: 8080
-    filter_chains:
-    - filters:
-      - name: envoy.filters.network.http_connection_manager
+            r#"version_info: "{}"
+resources:
+{}  - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+      name: dynamic_forward_proxy_cluster
+      connect_timeout: 1s
+      lb_policy: CLUSTER_PROVIDED
+      cluster_type:
+        name: envoy.clusters.dynamic_forward_proxy
         typed_config:
-          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-          stat_prefix: ingress_http
-          codec_type: AUTO
-          route_config:
-            name: local_route
-            virtual_hosts:
-{}
-          http_filters:
-          - name: envoy.filters.http.dynamic_forward_proxy
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_forward_proxy.v3.FilterConfig
-              dns_cache_config:
-                name: dynamic_forward_proxy_cache_config
-                dns_lookup_family: V4_ONLY
-          - name: envoy.filters.http.router
-            typed_config:
-              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
-
-  clusters:
-{}
-      - name: dynamic_forward_proxy_cluster
-        connect_timeout: 5s
-        lb_policy: CLUSTER_PROVIDED
-        cluster_type:
-          name: envoy.clusters.dynamic_forward_proxy
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
-            dns_cache_config:
-              name: dynamic_forward_proxy_cache_config
-              dns_lookup_family: V4_ONLY
-
-admin:
-  address:
-    socket_address:
-      address: 0.0.0.0
-      port_value: 9901
+          "@type": type.googleapis.com/envoy.extensions.clusters.dynamic_forward_proxy.v3.ClusterConfig
+          dns_cache_config:
+            name: dynamic_forward_proxy_cache
+            dns_lookup_family: V4_ONLY
 "#,
-            all_virtual_hosts, clusters_section
+            version, user_clusters_section
         )
     }
 
@@ -294,7 +311,8 @@ admin:
             .unwrap_or((&route.target_service, "80"));
 
         format!(
-            r#"- name: {}
+            r#"- "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
+  name: {}
   type: STRICT_DNS
   connect_timeout: 5s
   lb_policy: ROUND_ROBIN
@@ -403,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_full_envoy_config() {
+    fn test_build_rds_and_cds_config() {
         let manager = EnvoyConfigManager {
             k8s_client: Arc::new(crate::k8s_client::MockK8sClient::default()),
             namespace: "test".to_string(),
@@ -446,28 +464,30 @@ mod tests {
             manager.render_cluster_snippet(&route2),
         );
 
-        let config = manager.build_full_envoy_config(&cm_data);
+        let rds_config = manager.build_rds_config(&cm_data, 1);
+        let cds_config = manager.build_cds_config(&cm_data, 1);
 
-        assert!(config.contains("static_resources:"));
-        assert!(config.contains("listener_http"));
-        assert!(config.contains("user_deployments"));
-        assert!(config.contains("/health"));
-        assert!(config.contains("healthy"));
-        assert!(config.contains("/deployments/app1/"));
-        assert!(config.contains("/deployments/app2/"));
-        assert!(config.contains("user_deployment_app1"));
-        assert!(config.contains("user_deployment_app2"));
-        assert!(config.contains("app1-service.u-user1"));
-        assert!(config.contains("app2-service.u-user2"));
-        assert!(config.contains("port_value: 8080"));
-        assert!(config.contains("port_value: 9000"));
-        assert!(config.contains("dynamic_forward_proxy_cluster"));
-        assert!(config.contains("admin:"));
-        assert!(config.contains("9901"));
+        assert!(rds_config.contains("version_info: \"1\""));
+        assert!(rds_config.contains("user_deployments"));
+        assert!(rds_config.contains("/health"));
+        assert!(rds_config.contains("healthy"));
+        assert!(rds_config.contains("/deployments/app1/"));
+        assert!(rds_config.contains("/deployments/app2/"));
+        assert!(rds_config.contains("user_deployment_app1"));
+        assert!(rds_config.contains("user_deployment_app2"));
+
+        assert!(cds_config.contains("version_info: \"1\""));
+        assert!(cds_config.contains("user_deployment_app1"));
+        assert!(cds_config.contains("user_deployment_app2"));
+        assert!(cds_config.contains("app1-service.u-user1"));
+        assert!(cds_config.contains("app2-service.u-user2"));
+        assert!(cds_config.contains("port_value: 8080"));
+        assert!(cds_config.contains("port_value: 9000"));
+        assert!(cds_config.contains("dynamic_forward_proxy_cluster"));
     }
 
     #[test]
-    fn test_build_full_envoy_config_empty() {
+    fn test_build_rds_and_cds_config_empty() {
         let manager = EnvoyConfigManager {
             k8s_client: Arc::new(crate::k8s_client::MockK8sClient::default()),
             namespace: "test".to_string(),
@@ -476,12 +496,16 @@ mod tests {
         };
 
         let cm_data = std::collections::BTreeMap::new();
-        let config = manager.build_full_envoy_config(&cm_data);
+        let rds_config = manager.build_rds_config(&cm_data, 1);
+        let cds_config = manager.build_cds_config(&cm_data, 1);
 
-        assert!(config.contains("static_resources:"));
-        assert!(config.contains("/health"));
-        assert!(config.contains("dynamic_forward_proxy_cluster"));
-        assert!(!config.contains("user_deployment_"));
-        assert!(!config.contains("/deployments/"));
+        assert!(rds_config.contains("version_info: \"1\""));
+        assert!(rds_config.contains("/health"));
+        assert!(!rds_config.contains("user_deployment_"));
+        assert!(!rds_config.contains("/deployments/"));
+
+        assert!(cds_config.contains("version_info: \"1\""));
+        assert!(cds_config.contains("dynamic_forward_proxy_cluster"));
+        assert!(!cds_config.contains("user_deployment_"));
     }
 }
