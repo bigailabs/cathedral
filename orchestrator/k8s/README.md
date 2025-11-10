@@ -13,7 +13,7 @@ k8s/
 │       └── operator-tenant-role.yaml (templated)
 │
 ├── services/                # Service deployments
-│   └── operator/           # Basilica K8s operator (deployment + servicemonitor)
+│   └── operator/           # Basilica K8s operator (deployment + pdb)
 │
 ├── observability/           # Telemetry and monitoring
 │   ├── alloy/              # Grafana Alloy telemetry agent (DaemonSet)

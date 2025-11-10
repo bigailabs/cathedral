@@ -12,13 +12,6 @@
   vars:
     tenant_ns: "{{ tenant_namespace | default('basilica-system') }}"
   tasks:
-    - name: Delete ServiceMonitors (if present)
-      ansible.builtin.shell: |
-        set -euo pipefail
-        kubectl delete -f /opt/basilica/k8s/services/operator/operator-servicemonitor.yaml --ignore-not-found || true
-      args:
-        executable: /bin/bash
-
     - name: Delete Operator manifests
       ansible.builtin.shell: |
         set -euo pipefail
