@@ -86,6 +86,12 @@ impl AggregatorService {
             }
         }
 
+        if providers.is_empty() {
+            tracing::warn!("No GPU providers enabled - secure cloud will not function");
+        } else {
+            tracing::info!("Initialized {} GPU provider(s)", providers.len());
+        }
+
         Ok(Self {
             db,
             providers,
@@ -124,10 +130,7 @@ impl AggregatorService {
                     }
                     Err(e) => {
                         tracing::error!("Failed to refresh from {}: {}", provider_id, e);
-                        let _ = self
-                            .db
-                            .update_provider_status(provider_id, false, Some(e.to_string()))
-                            .await;
+                        // Provider status is not persisted - health checks done on-demand
                     }
                 }
             } else {
@@ -184,10 +187,7 @@ impl AggregatorService {
         // Store only supported offerings in database
         self.db.upsert_offerings(&supported_offerings).await?;
 
-        // Update provider status
-        self.db
-            .update_provider_status(provider_id, true, None)
-            .await?;
+        // Provider status is not persisted - health checks done on-demand
 
         Ok(supported_offerings)
     }

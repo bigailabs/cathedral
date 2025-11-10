@@ -1,5 +1,5 @@
--- GPU offerings table
-CREATE TABLE gpu_offerings (
+-- GPU offerings table - cached provider pricing data
+CREATE TABLE IF NOT EXISTS gpu_offerings (
     id TEXT PRIMARY KEY,
     provider TEXT NOT NULL,
     gpu_type TEXT NOT NULL, -- GPU category (A100, H100, B200, OTHER)
@@ -11,24 +11,14 @@ CREATE TABLE gpu_offerings (
     system_memory_gb INTEGER NOT NULL, -- System RAM
     vcpu_count INTEGER NOT NULL,
     region TEXT NOT NULL,
-    hourly_rate TEXT NOT NULL,
+    hourly_rate DECIMAL(10, 4) NOT NULL,
     availability BOOLEAN NOT NULL,
-    raw_metadata TEXT NOT NULL,
-    fetched_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    raw_metadata JSONB NOT NULL, -- Full provider response as JSONB
+    fetched_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_provider_gpu ON gpu_offerings(provider, gpu_type);
-CREATE INDEX idx_fetched_at ON gpu_offerings(fetched_at);
-CREATE INDEX idx_region ON gpu_offerings(region);
-CREATE INDEX idx_availability ON gpu_offerings(availability);
-
--- Provider status tracking
-CREATE TABLE provider_status (
-    provider TEXT PRIMARY KEY,
-    last_fetch_at TIMESTAMP,
-    last_success_at TIMESTAMP,
-    last_error TEXT,
-    is_healthy BOOLEAN NOT NULL DEFAULT 1,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+CREATE INDEX IF NOT EXISTS idx_gpu_offerings_provider_gpu ON gpu_offerings(provider, gpu_type);
+CREATE INDEX IF NOT EXISTS idx_gpu_offerings_fetched_at ON gpu_offerings(fetched_at);
+CREATE INDEX IF NOT EXISTS idx_gpu_offerings_region ON gpu_offerings(region);
+CREATE INDEX IF NOT EXISTS idx_gpu_offerings_availability ON gpu_offerings(availability);

@@ -3,10 +3,6 @@ name = "basilica-aggregator"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "basilica-aggregator"
-path = "src/main.rs"
-
 [dependencies]
 # Basilica dependencies
 basilica-common = { path = "../basilica-common" }
@@ -22,8 +18,8 @@ tokio = { version = "1", features = ["full"] }
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate", "chrono", "json"] }
+# Database (PostgreSQL only)
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json", "rust_decimal"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

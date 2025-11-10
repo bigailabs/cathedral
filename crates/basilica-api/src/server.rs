@@ -7,6 +7,7 @@ use crate::{
     error::{ApiError, Result},
 };
 use axum::Router;
+use basilica_aggregator::{AggregatorService, Database as AggregatorDatabase};
 use basilica_billing::BillingClient;
 use basilica_payments::client::PaymentsClient;
 use basilica_validator::{api::types::RentalStatus, ValidatorClient};
@@ -59,6 +60,9 @@ pub struct AppState {
 
     /// Metrics system
     pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
+
+    /// GPU Aggregator service (Secure Cloud)
+    pub aggregator_service: Arc<AggregatorService>,
 }
 
 /// Process health check for a single rental
@@ -270,6 +274,40 @@ impl Server {
             None
         };
 
+        // Initialize GPU Aggregator service (Secure Cloud)
+        info!("Initializing GPU Aggregator service (Secure Cloud)");
+
+        // Debug: Show provider configuration
+        tracing::debug!(
+            "DataCrunch config: client_id={:?}, has_secret={}, base_url={:?}",
+            config.aggregator.providers.datacrunch.client_id,
+            config
+                .aggregator
+                .providers
+                .datacrunch
+                .client_secret
+                .is_some(),
+            config.aggregator.providers.datacrunch.api_base_url
+        );
+
+        let aggregator_db = Arc::new(
+            AggregatorDatabase::new(&config.database.url)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to initialize aggregator database: {}", e),
+                })?,
+        );
+
+        let aggregator_config = config.to_aggregator_config();
+        let aggregator_service = Arc::new(
+            AggregatorService::new(aggregator_db, aggregator_config).map_err(|e| {
+                ApiError::Internal {
+                    message: format!("Failed to initialize aggregator service: {}", e),
+                }
+            })?,
+        );
+        info!("GPU Aggregator service initialized successfully");
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -282,6 +320,7 @@ impl Server {
             payments_client,
             billing_client,
             metrics,
+            aggregator_service,
         };
 
         // Start optional health check task using HTTP client
@@ -359,6 +398,48 @@ impl Server {
         tracing::info!(
             "Started rental health check task (interval: {} seconds)",
             rental_health_interval.as_secs()
+        );
+
+        // Start GPU offerings refresh task (Secure Cloud)
+        let refresh_aggregator_service = state.aggregator_service.clone();
+        let refresh_interval = std::time::Duration::from_secs(60); // Refresh every 60 seconds
+
+        tokio::spawn(async move {
+            // Do initial refresh immediately on startup
+            tracing::info!("Starting initial GPU offerings refresh...");
+            match refresh_aggregator_service.refresh_all_providers().await {
+                Ok(count) => {
+                    tracing::info!("Initial GPU offerings refresh: fetched {} offerings", count);
+                }
+                Err(e) => {
+                    tracing::error!("Failed initial GPU offerings refresh: {}", e);
+                }
+            }
+
+            // Then start periodic refresh
+            let mut interval = tokio::time::interval(refresh_interval);
+            loop {
+                interval.tick().await;
+
+                tracing::debug!("Running periodic GPU offerings refresh...");
+                match refresh_aggregator_service.refresh_all_providers().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            tracing::info!("GPU offerings refresh: fetched {} offerings", count);
+                        } else {
+                            tracing::debug!("GPU offerings refresh: no new offerings (cooldown or no providers enabled)");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to refresh GPU offerings: {}", e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started GPU offerings refresh task (interval: {} seconds)",
+            refresh_interval.as_secs()
         );
 
         // Build the application router

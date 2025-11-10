@@ -526,7 +526,6 @@ impl Provider for DataCrunchProvider {
 
     async fn fetch_offerings(&self) -> Result<Vec<GpuOffering>> {
         let instance_types = self.fetch_instance_types().await?;
-        dbg!(&instance_types);
 
         let locations = self.fetch_locations().await?;
         let availability_data = self.fetch_availability().await?;
