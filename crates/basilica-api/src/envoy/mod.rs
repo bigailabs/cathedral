@@ -117,7 +117,10 @@ impl EnvoyConfigManager {
                 if key.contains("__host__") {
                     if let Some(host) = extract_host_from_key(key) {
                         let indented = indent_lines(value, 18);
-                        host_routes.entry(host).or_insert_with(Vec::new).push(indented);
+                        host_routes
+                            .entry(host)
+                            .or_insert_with(Vec::new)
+                            .push(indented);
                     }
                 } else {
                     let indented = indent_lines(value, 18);
@@ -315,11 +318,8 @@ fn sanitize_key(s: &str) -> String {
 }
 
 fn extract_host_from_key(key: &str) -> Option<String> {
-    if let Some(stripped) = key.strip_prefix("route__host__") {
-        Some(stripped.replace('_', "."))
-    } else {
-        None
-    }
+    key.strip_prefix("route__host__")
+        .map(|stripped| stripped.replace('_', "."))
 }
 
 #[cfg(test)]
