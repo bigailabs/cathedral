@@ -397,6 +397,10 @@ pub struct ResourceRequirements {
     pub memory: String,
 }
 
+fn default_public() -> bool {
+    true
+}
+
 /// Create deployment request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -415,6 +419,8 @@ pub struct CreateDeploymentRequest {
     pub resources: Option<ResourceRequirements>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl_seconds: Option<u32>,
+    #[serde(default = "default_public")]
+    pub public: bool,
 }
 
 /// Replica status for deployments

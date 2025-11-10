@@ -347,7 +347,8 @@ class BasilicaClient:
         env: Optional[Dict[str, str]] = None,
         cpu: str = "500m",
         memory: str = "512Mi",
-        ttl_seconds: Optional[int] = None
+        ttl_seconds: Optional[int] = None,
+        public: bool = True
     ) -> DeploymentResponse:
         """
         Create a new deployment.
@@ -363,6 +364,7 @@ class BasilicaClient:
             cpu: CPU resource request (default: "500m")
             memory: Memory resource request (default: "512Mi")
             ttl_seconds: Optional time-to-live in seconds
+            public: Create public URL (default: True)
 
         Returns:
             DeploymentResponse: Typed response with deployment details
@@ -378,7 +380,8 @@ class BasilicaClient:
             args=args,
             env=env,
             resources=resources,
-            ttl_seconds=ttl_seconds
+            ttl_seconds=ttl_seconds,
+            public=public
         )
 
         return self._client.create_deployment(request)

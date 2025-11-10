@@ -565,6 +565,7 @@ pub async fn delete_deployment(
     apimetrics::record_request("DELETE /deployments/:name", "200", start, true);
 
     #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct DeleteResponse {
         instance_name: String,
         state: String,

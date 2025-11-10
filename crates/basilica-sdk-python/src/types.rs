@@ -793,13 +793,15 @@ pub struct CreateDeploymentRequest {
     pub resources: Option<ResourceRequirements>,
     #[pyo3(get, set)]
     pub ttl_seconds: Option<u32>,
+    #[pyo3(get, set)]
+    pub public: bool,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl CreateDeploymentRequest {
     #[new]
-    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None))]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         instance_name: String,
@@ -811,6 +813,7 @@ impl CreateDeploymentRequest {
         env: Option<HashMap<String, String>>,
         resources: Option<ResourceRequirements>,
         ttl_seconds: Option<u32>,
+        public: bool,
     ) -> Self {
         Self {
             instance_name,
@@ -822,6 +825,7 @@ impl CreateDeploymentRequest {
             env,
             resources,
             ttl_seconds,
+            public,
         }
     }
 }
@@ -838,6 +842,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             env: req.env,
             resources: req.resources.map(Into::into),
             ttl_seconds: req.ttl_seconds,
+            public: req.public,
         }
     }
 }
