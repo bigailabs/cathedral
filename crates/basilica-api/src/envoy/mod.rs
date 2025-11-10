@@ -15,6 +15,7 @@ pub struct EnvoyConfigManager {
     k8s_client: Arc<dyn ApiK8sClient + Send + Sync>,
     namespace: String,
     configmap_name: String,
+    max_configmap_size_bytes: usize,
 }
 
 impl EnvoyConfigManager {
@@ -22,11 +23,13 @@ impl EnvoyConfigManager {
         k8s_client: Arc<dyn ApiK8sClient + Send + Sync>,
         namespace: String,
         configmap_name: String,
+        max_configmap_size_bytes: usize,
     ) -> Self {
         Self {
             k8s_client,
             namespace,
             configmap_name,
+            max_configmap_size_bytes,
         }
     }
 
@@ -35,6 +38,19 @@ impl EnvoyConfigManager {
             .k8s_client
             .get_configmap(&self.namespace, &self.configmap_name)
             .await?;
+
+        let current_size: usize = cm_data.values().map(|v| v.len()).sum();
+        if current_size > self.max_configmap_size_bytes {
+            tracing::error!(
+                current_size = current_size,
+                max_size = self.max_configmap_size_bytes,
+                "ConfigMap size limit exceeded, cannot add route"
+            );
+            return Err(crate::error::ApiError::ConfigMapSizeLimitExceeded {
+                current: current_size,
+                limit: self.max_configmap_size_bytes,
+            });
+        }
 
         let route_key = if let Some(ref host) = route.host {
             format!("route__host__{}", sanitize_key(host))
@@ -102,6 +118,10 @@ impl EnvoyConfigManager {
         );
 
         Ok(())
+    }
+
+    pub async fn reload_envoy(&self) -> Result<()> {
+        self.k8s_client.reload_envoy_pods(&self.namespace).await
     }
 
     fn build_full_envoy_config(
@@ -341,6 +361,7 @@ mod tests {
             k8s_client: Arc::new(crate::k8s_client::MockK8sClient::default()),
             namespace: "test".to_string(),
             configmap_name: "test-cm".to_string(),
+            max_configmap_size_bytes: 900_000,
         };
 
         let route = EnvoyRoute {
@@ -363,6 +384,7 @@ mod tests {
             k8s_client: Arc::new(crate::k8s_client::MockK8sClient::default()),
             namespace: "test".to_string(),
             configmap_name: "test-cm".to_string(),
+            max_configmap_size_bytes: 900_000,
         };
 
         let route = EnvoyRoute {
@@ -386,6 +408,7 @@ mod tests {
             k8s_client: Arc::new(crate::k8s_client::MockK8sClient::default()),
             namespace: "test".to_string(),
             configmap_name: "test-cm".to_string(),
+            max_configmap_size_bytes: 900_000,
         };
 
         let mut cm_data = std::collections::BTreeMap::new();
@@ -449,6 +472,7 @@ mod tests {
             k8s_client: Arc::new(crate::k8s_client::MockK8sClient::default()),
             namespace: "test".to_string(),
             configmap_name: "test-cm".to_string(),
+            max_configmap_size_bytes: 900_000,
         };
 
         let cm_data = std::collections::BTreeMap::new();

@@ -61,6 +61,7 @@ async fn create_k8s_resources(
         k8s_client.clone(),
         config.deployment.envoy_namespace.clone(),
         config.deployment.envoy_configmap_name.clone(),
+        config.deployment.max_configmap_size_bytes,
     );
 
     let service_name = format!("{}-service", instance_name);
@@ -85,14 +86,9 @@ async fn create_k8s_resources(
     tracing::debug!(
         namespace = namespace,
         cr_name = cr_name,
-        "Restarting Envoy deployment"
+        "Reloading Envoy configuration"
     );
-    k8s_client
-        .restart_deployment(
-            &config.deployment.envoy_namespace,
-            &config.deployment.envoy_deployment_name,
-        )
-        .await?;
+    envoy_manager.reload_envoy().await?;
 
     Ok(())
 }
@@ -535,6 +531,7 @@ pub async fn delete_deployment(
         k8s_client.clone(),
         state.config.deployment.envoy_namespace.clone(),
         state.config.deployment.envoy_configmap_name.clone(),
+        state.config.deployment.max_configmap_size_bytes,
     );
 
     let cluster_name = format!("user_deployment_{}", instance_name);
@@ -542,12 +539,7 @@ pub async fn delete_deployment(
         .remove_route(&deployment.path_prefix, &cluster_name)
         .await?;
 
-    k8s_client
-        .restart_deployment(
-            &state.config.deployment.envoy_namespace,
-            &state.config.deployment.envoy_deployment_name,
-        )
-        .await?;
+    envoy_manager.reload_envoy().await?;
 
     if deployment.public {
         if let Some(dns_provider) = &state.dns_provider {

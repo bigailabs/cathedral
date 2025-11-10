@@ -132,6 +132,8 @@ pub trait ApiK8sClient {
 
     // Deployment management
     async fn restart_deployment(&self, ns: &str, name: &str) -> Result<()>;
+    async fn list_pods(&self, ns: &str, label_selector: &str) -> Result<Vec<String>>;
+    async fn reload_envoy_pods(&self, ns: &str) -> Result<()>;
 
     // User Deployment management
     async fn create_user_deployment(
@@ -550,6 +552,14 @@ impl ApiK8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn list_pods(&self, _ns: &str, _label_selector: &str) -> Result<Vec<String>> {
+        Ok(vec!["mock-pod-1".to_string(), "mock-pod-2".to_string()])
+    }
+
+    async fn reload_envoy_pods(&self, _ns: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn create_user_deployment(
         &self,
         _ns: &str,
@@ -747,6 +757,32 @@ impl K8sClient {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    async fn exec_pod_command(&self, ns: &str, pod_name: &str, command: Vec<String>) -> Result<()> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, AttachParams};
+
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+
+        let params = AttachParams {
+            stdout: false,
+            stderr: false,
+            stdin: false,
+            tty: false,
+            container: None,
+            ..Default::default()
+        };
+
+        let args: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
+        let _ = pods
+            .exec(pod_name, args, &params)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("exec in pod failed: {e}"),
+            })?;
+
+        Ok(())
     }
 }
 
@@ -1370,6 +1406,74 @@ impl ApiK8sClient for K8sClient {
             .map_err(|e| ApiError::Internal {
                 message: format!("restart deployment failed: {e}"),
             })?;
+        Ok(())
+    }
+
+    async fn list_pods(&self, ns: &str, label_selector: &str) -> Result<Vec<String>> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, ListParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+        let lp = ListParams::default().labels(label_selector);
+
+        let pods = api.list(&lp).await.map_err(|e| ApiError::Internal {
+            message: format!("list pods failed: {e}"),
+        })?;
+
+        let pod_names = pods
+            .items
+            .iter()
+            .filter_map(|pod| pod.metadata.name.clone())
+            .collect();
+
+        Ok(pod_names)
+    }
+
+    async fn reload_envoy_pods(&self, ns: &str) -> Result<()> {
+        let pod_names = self.list_pods(ns, "app=basilica-envoy").await?;
+
+        if pod_names.is_empty() {
+            tracing::warn!(namespace = ns, "No Envoy pods found to reload");
+            return Ok(());
+        }
+
+        let mut reload_count = 0;
+        let mut errors = Vec::new();
+
+        for pod_name in &pod_names {
+            match self
+                .exec_pod_command(
+                    ns,
+                    pod_name,
+                    vec!["kill".to_string(), "-HUP".to_string(), "1".to_string()],
+                )
+                .await
+            {
+                Ok(_) => {
+                    reload_count += 1;
+                    tracing::info!(pod = %pod_name, "Sent SIGHUP to Envoy pod for graceful reload");
+                }
+                Err(e) => {
+                    tracing::error!(pod = %pod_name, error = %e, "Failed to reload Envoy pod");
+                    errors.push(format!("{}: {}", pod_name, e));
+                }
+            }
+        }
+
+        if reload_count == 0 {
+            return Err(ApiError::Internal {
+                message: format!("Failed to reload any Envoy pods: {}", errors.join(", ")),
+            });
+        }
+
+        if !errors.is_empty() {
+            tracing::warn!(
+                reloaded = reload_count,
+                failed = errors.len(),
+                "Partial Envoy reload success"
+            );
+        }
+
         Ok(())
     }
 

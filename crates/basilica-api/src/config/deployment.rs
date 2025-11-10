@@ -40,6 +40,10 @@ pub struct DeploymentConfig {
     /// Envoy Deployment name (for restarts)
     #[serde(default = "default_envoy_deployment_name")]
     pub envoy_deployment_name: String,
+
+    /// Maximum ConfigMap size in bytes (K8s limit is 1MB, use 900KB for safety)
+    #[serde(default = "default_max_configmap_size_bytes")]
+    pub max_configmap_size_bytes: usize,
 }
 
 fn default_public_port() -> u16 {
@@ -78,6 +82,10 @@ fn default_envoy_deployment_name() -> String {
     "basilica-envoy".to_string()
 }
 
+fn default_max_configmap_size_bytes() -> usize {
+    900_000
+}
+
 impl Default for DeploymentConfig {
     fn default() -> Self {
         Self {
@@ -91,6 +99,7 @@ impl Default for DeploymentConfig {
             envoy_namespace: default_envoy_namespace(),
             envoy_configmap_name: default_envoy_configmap_name(),
             envoy_deployment_name: default_envoy_deployment_name(),
+            max_configmap_size_bytes: default_max_configmap_size_bytes(),
         }
     }
 }
