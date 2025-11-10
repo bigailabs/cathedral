@@ -90,6 +90,8 @@ docker compose logs -f miner
 11. [Monitoring](#monitoring)
 12. [Troubleshooting](#troubleshooting)
 13. [Advanced Topics](#advanced-topics)
+    - [Time-Based Incentive Ramp-Up](#time-based-incentive-ramp-up)
+    - [Miners & the Ban System](#miners--the-ban-system)
 
 ---
 
@@ -1592,6 +1594,56 @@ chmod +x /opt/basilica/scripts/monitor-gpus.sh
 - **Response times**: gRPC endpoint latency
 - **Error rates**: Failed authentications, SSH failures
 - **Database performance**: Query times, connection pool usage
+
+### Time-Based Incentive Ramp-Up
+
+Validators apply a linear uptime multiplier that reaches 1.0 after roughly 14 days of uninterrupted service and resets when downtime exceeds the validator tolerance window. For detailed formulas, examples, and operational guidance, see [Node Uptime Ramp-up (Incentives Ramp-up)](scoring-and-weights.md#node-uptime-ramp-up-incentives-ramp-up).
+
+### Miners & the Ban System
+
+Validators actively track executor misbehaviour to protect rentals. Each miner/executor pair has an independent ban state backed by persistent storage.
+
+#### Failure thresholds & ban durations (per executor instance)
+
+| Repeated issue | Window | Threshold | Ban duration (baseline) |
+| --- | --- | --- | --- |
+| Light or full validation failures | 1 hour | 2 failures | 30 minutes |
+| Any misbehaviour | 6 hours | 3 failures | 12 hours |
+| Any misbehaviour | 12 hours | 3 failures | 24 hours |
+| Any misbehaviour | 48 hours | 3 failures | 3 days |
+| Any misbehaviour | 7 days | 3 failures | 7 days |
+
+#### What counts as a misbehaviour event?
+
+- Validation failures (lightweight or full)
+- Deployment or startup failures during rentals
+- Executor health checks reporting unhealthy state
+- Connection errors caused by the miner misrouting a validator
+
+#### How validators enforce bans
+
+- Banned executors are excluded from discovery/rental routing
+- Active bans surface in validator logs and Prometheus metrics
+- Validation requests return a specific `executor_banned` error to the miner
+- When a ban expires, validators automatically clear it; miners can attempt deployments again
+
+---
+
+#### Recovering from a ban
+
+1. **Fix the root cause** (ensure executor is reachable, healthy, and has compatible drivers/container images)
+2. **Confirm the ban timer** via validator metrics (`validator_executor_ban_active_status`)
+3. **Wait for the ban duration to elapse** (no manual action needed for standard bans)
+4. **After expiry**, monitor deployment logs to verify validators reconnect successfully
+
+#### Best practices to avoid bans
+
+- Keep executors patched (CUDA, drivers, containers) and aligned with validator expectations
+- Automate health checks and restart loops so degraded nodes self-heal quickly
+- Validate images locally before exposing them to validators
+- Enforce network/firewall rules to avoid intermittent reachability
+- Maintain enough GPU capacity to handle assigned validators without overcommit
+- Document procedures: who on your team handles ban remediation, monitoring, and redeploys
 
 ---
 
