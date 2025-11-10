@@ -96,30 +96,31 @@ pub fn check_and_notify_update() {
         return;
     }
 
-    // Perform the check in a non-blocking way using tokio::spawn
-    // We don't want to block CLI startup
-    tokio::spawn(async move {
-        let current_version = cargo_crate_version!();
+    let cache_path_for_task = cache_path;
 
-        if let Ok(latest_version) = fetch_latest_version_string(current_version) {
-            let cache = UpdateCheckCache {
-                last_check: Utc::now(),
-                latest_version: Some(latest_version.clone()),
-                last_prompt: None, // Will be set when notification is shown
-            };
+    // self_update uses reqwest's blocking client, which manages its own Tokio runtime.
+    // Running it on the async executor causes Tokio to drop a blocking runtime while in
+    // async context, leading to "Cannot drop a runtime in a context where blocking is not allowed".
+    tokio::task::spawn_blocking(move || perform_update_check(cache_path_for_task));
+}
 
-            // Save cache (notification will be shown on next CLI invocation)
-            let _ = save_cache(&cache_path, &cache);
-        } else {
-            // Even if fetch fails, update the last check time to avoid spamming
-            let cache = UpdateCheckCache {
-                last_check: Utc::now(),
-                latest_version: None,
-                last_prompt: None,
-            };
-            let _ = save_cache(&cache_path, &cache);
-        }
-    });
+fn perform_update_check(cache_path: PathBuf) {
+    let current_version = cargo_crate_version!();
+
+    let cache = match fetch_latest_version_string(current_version) {
+        Ok(latest_version) => UpdateCheckCache {
+            last_check: Utc::now(),
+            latest_version: Some(latest_version),
+            last_prompt: None,
+        },
+        Err(_) => UpdateCheckCache {
+            last_check: Utc::now(),
+            latest_version: None,
+            last_prompt: None,
+        },
+    };
+
+    let _ = save_cache(&cache_path, &cache);
 }
 
 /// Get the path to the update check cache file
