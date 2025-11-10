@@ -103,6 +103,12 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/api-keys") => Some("keys:list".to_string()),
         (&Method::DELETE, p) if p.starts_with("/api-keys/") => Some("keys:revoke".to_string()),
 
+        // SSH Key management endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own SSH keys
+        (&Method::POST, "/ssh-keys") => Some(String::new()),
+        (&Method::GET, "/ssh-keys") => Some(String::new()),
+        (&Method::DELETE, "/ssh-keys") => Some(String::new()),
+
         // Payment endpoints - require authentication but no specific scope
         // All authenticated users should be able to manage their own payment accounts
         (&Method::GET, "/payments/deposit-account") => Some(String::new()),
@@ -231,6 +237,28 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/billing/usage/rental-123")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test SSH key endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/ssh-keys")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));

@@ -24,10 +24,6 @@ pub fn create_router(service: Arc<AggregatorService>) -> Router {
             "/deployments/:id/instance",
             get(handlers::get_instance_details),
         )
-        // SSH key endpoints (user-centric)
-        .route("/users/:user_id/ssh-key", post(handlers::register_ssh_key))
-        .route("/users/:user_id/ssh-key", get(handlers::get_ssh_key))
-        .route("/users/:user_id/ssh-key", delete(handlers::delete_ssh_key))
         // OS images endpoint
         .route("/images", get(handlers::list_images))
         .layer(TraceLayer::new_for_http())

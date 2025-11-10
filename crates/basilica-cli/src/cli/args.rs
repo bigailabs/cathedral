@@ -209,6 +209,28 @@ impl Args {
                 }
             }
 
+            // SSH key management
+            Commands::SshKeys { action } => {
+                use crate::cli::commands::SshKeyAction;
+                use crate::client::create_client;
+
+                // Create client with file-based auth (JWT required for SSH key management)
+                let client = create_client(config).await?;
+
+                match action {
+                    SshKeyAction::Add { name, file } => {
+                        handlers::ssh_keys::handle_add_ssh_key(&client, name.clone(), file.clone())
+                            .await?;
+                    }
+                    SshKeyAction::List => {
+                        handlers::ssh_keys::handle_list_ssh_keys(&client).await?;
+                    }
+                    SshKeyAction::Delete { yes } => {
+                        handlers::ssh_keys::handle_delete_ssh_key(&client, *yes).await?;
+                    }
+                }
+            }
+
             // Fund management
             Commands::Fund { action, json } => {
                 use crate::cli::commands::FundAction;

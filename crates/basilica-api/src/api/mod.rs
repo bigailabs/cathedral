@@ -46,6 +46,13 @@ pub fn routes(state: AppState) -> Router<AppState> {
             post(routes::api_keys::create_key).get(routes::api_keys::list_keys),
         )
         .route("/api-keys/:name", delete(routes::api_keys::revoke_key))
+        // SSH key management endpoints (JWT auth only)
+        .route(
+            "/ssh-keys",
+            post(routes::ssh_keys::register_ssh_key)
+                .get(routes::ssh_keys::get_ssh_key)
+                .delete(routes::ssh_keys::delete_ssh_key),
+        )
         // Payment service endpoints
         .nest("/payments", routes::payments::routes())
         // Billing service endpoints

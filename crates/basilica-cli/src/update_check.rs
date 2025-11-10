@@ -96,40 +96,29 @@ pub fn check_and_notify_update() {
         return;
     }
 
-    // Perform the check in a non-blocking way using std::thread
+    // Perform the check in a non-blocking way using tokio::spawn
     // We don't want to block CLI startup
-    std::thread::spawn(move || {
-        // Create a new runtime for this thread
-        let rt = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(_) => return,
-        };
+    tokio::spawn(async move {
+        let current_version = cargo_crate_version!();
 
-        rt.block_on(async {
-            let current_version = cargo_crate_version!();
+        if let Ok(latest_version) = fetch_latest_version_string(current_version) {
+            let cache = UpdateCheckCache {
+                last_check: Utc::now(),
+                latest_version: Some(latest_version.clone()),
+                last_prompt: None, // Will be set when notification is shown
+            };
 
-            if let Ok(latest_version) = fetch_latest_version_string(current_version) {
-                let cache = UpdateCheckCache {
-                    last_check: Utc::now(),
-                    latest_version: Some(latest_version.clone()),
-                    last_prompt: None, // Will be set when notification is shown
-                };
-
-                // Save cache (notification will be shown on next CLI invocation)
-                let _ = save_cache(&cache_path, &cache);
-            } else {
-                // Even if fetch fails, update the last check time to avoid spamming
-                let cache = UpdateCheckCache {
-                    last_check: Utc::now(),
-                    latest_version: None,
-                    last_prompt: None,
-                };
-                let _ = save_cache(&cache_path, &cache);
-            }
-        });
+            // Save cache (notification will be shown on next CLI invocation)
+            let _ = save_cache(&cache_path, &cache);
+        } else {
+            // Even if fetch fails, update the last check time to avoid spamming
+            let cache = UpdateCheckCache {
+                last_check: Utc::now(),
+                latest_version: None,
+                last_prompt: None,
+            };
+            let _ = save_cache(&cache_path, &cache);
+        }
     });
 }
 

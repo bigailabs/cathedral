@@ -245,6 +245,37 @@ pub struct ApiKeyInfo {
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// SSH Key Management Types
+
+/// Request to register an SSH key
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterSshKeyRequest {
+    /// Name for the SSH key
+    pub name: String,
+
+    /// SSH public key content
+    pub public_key: String,
+}
+
+/// SSH key response (without public_key for security)
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SshKeyResponse {
+    /// Key identifier
+    pub id: String,
+
+    /// User identifier
+    pub user_id: String,
+
+    /// Name of the key
+    pub name: String,
+
+    /// Creation timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+
+    /// Last update timestamp
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 // Payment Management Types
 
 /// Deposit account response from API

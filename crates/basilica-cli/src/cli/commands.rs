@@ -131,6 +131,12 @@ pub enum Commands {
         action: TokenAction,
     },
 
+    /// SSH keys management commands
+    SshKeys {
+        #[command(subcommand)]
+        action: SshKeyAction,
+    },
+
     /// Fund your account with Bittensor TAO
     Fund {
         #[command(subcommand)]
@@ -206,6 +212,31 @@ pub enum TokenAction {
     },
 }
 
+/// SSH key management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum SshKeyAction {
+    /// Add a new SSH key
+    Add {
+        /// Name for the SSH key (will prompt if not provided)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Path to SSH public key file (default: auto-detect from ~/.ssh/)
+        #[arg(short, long, value_hint = ValueHint::FilePath)]
+        file: Option<PathBuf>,
+    },
+
+    /// List registered SSH keys
+    List,
+
+    /// Delete the registered SSH key
+    Delete {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
 impl Commands {
     /// Check if this command requires authentication
     pub fn requires_auth(&self) -> bool {
@@ -221,6 +252,7 @@ impl Commands {
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
             | Commands::Tokens { .. }
+            | Commands::SshKeys { .. }
             | Commands::Fund { .. }
             | Commands::Balance { .. } => true,
 

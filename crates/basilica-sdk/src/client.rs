@@ -42,7 +42,8 @@ use crate::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDepositAccountResponse, DepositAccountResponse, HealthCheckResponse,
         ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
-        PackagesResponse, RentalStatusWithSshResponse, RentalUsageResponse, UsageHistoryResponse,
+        PackagesResponse, RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
+        SshKeyResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -220,6 +221,35 @@ impl BasilicaClient {
         let response = self
             .delete_empty(&format!("/api-keys/{}", encoded_name))
             .await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            self.handle_error_response(response).await
+        }
+    }
+
+    // ===== SSH Key Management =====
+
+    /// Register a new SSH key for the authenticated user (requires JWT authentication)
+    /// Only one SSH key per user is allowed.
+    pub async fn register_ssh_key(&self, name: &str, public_key: &str) -> Result<SshKeyResponse> {
+        let request = RegisterSshKeyRequest {
+            name: name.to_string(),
+            public_key: public_key.to_string(),
+        };
+        self.post("/ssh-keys", &request).await
+    }
+
+    /// Get the authenticated user's SSH key (requires JWT authentication)
+    /// Returns None if no SSH key is registered.
+    pub async fn get_ssh_key(&self) -> Result<Option<SshKeyResponse>> {
+        self.get("/ssh-keys").await
+    }
+
+    /// Delete the authenticated user's SSH key (requires JWT authentication)
+    /// Also removes the key from all cloud providers.
+    pub async fn delete_ssh_key(&self) -> Result<()> {
+        let response = self.delete_empty("/ssh-keys").await?;
         if response.status().is_success() {
             Ok(())
         } else {
