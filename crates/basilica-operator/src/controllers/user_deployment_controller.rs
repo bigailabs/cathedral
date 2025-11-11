@@ -630,7 +630,10 @@ mod tests {
     #[test]
     fn test_make_service_name() {
         assert_eq!(make_service_name("my-app"), "s-my-app");
-        assert_eq!(make_service_name("30b9d5fe-3285-43dd-847d-2a02736ef23a"), "s-30b9d5fe-3285-43dd-847d-2a02736ef23a");
+        assert_eq!(
+            make_service_name("30b9d5fe-3285-43dd-847d-2a02736ef23a"),
+            "s-30b9d5fe-3285-43dd-847d-2a02736ef23a"
+        );
         assert_eq!(make_service_name("abc123"), "s-abc123");
     }
 

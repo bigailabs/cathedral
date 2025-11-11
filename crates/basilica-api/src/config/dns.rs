@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = DnsConfig::default();
-        assert!(!config.enabled);
+        assert!(config.enabled);
         assert_eq!(config.domain, "deployments.basilica.ai");
         assert!(config.proxy);
         assert!(config.api_token.is_none());

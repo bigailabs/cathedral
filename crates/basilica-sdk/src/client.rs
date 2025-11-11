@@ -1058,6 +1058,7 @@ mod tests {
             env: None,
             resources: None,
             ttl_seconds: None,
+            public: true,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1092,7 +1093,8 @@ mod tests {
                 "resources": {
                     "cpu": "1000m",
                     "memory": "1Gi"
-                }
+                },
+                "public": true
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "instanceName": "my-app",
@@ -1128,6 +1130,7 @@ mod tests {
                 memory: "1Gi".to_string(),
             }),
             ttl_seconds: None,
+            public: true,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1169,6 +1172,7 @@ mod tests {
             env: None,
             resources: None,
             ttl_seconds: None,
+            public: true,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1380,6 +1384,7 @@ mod tests {
             env: None,
             resources: None,
             ttl_seconds: None,
+            public: true,
         };
 
         let result = client.create_deployment(request).await;
