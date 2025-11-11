@@ -410,3 +410,18 @@ pub struct RentalUsageResponse {
     pub summary: Option<UsageSummary>,
     pub total_cost: String,
 }
+
+// Secure Cloud (GPU Aggregator) Types
+
+// Re-export ComputeCategory from basilica-common
+pub use basilica_common::types::ComputeCategory;
+
+// Re-export GpuOffering from basilica-aggregator
+pub use basilica_aggregator::GpuOffering;
+
+/// List secure cloud GPUs response from aggregator
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListSecureCloudGpusResponse {
+    pub nodes: Vec<GpuOffering>,
+    pub count: usize,
+}

@@ -2370,6 +2370,7 @@ version = "0.5.5"
 dependencies = [
  "axum 0.7.9",
  "base64 0.21.7",
+ "basilica-aggregator",
  "basilica-api",
  "basilica-common",
  "basilica-sdk",
@@ -2538,6 +2539,7 @@ name = "basilica-sdk"
 version = "0.1.0"
 dependencies = [
  "base64 0.21.7",
+ "basilica-aggregator",
  "basilica-common",
  "basilica-validator",
  "chrono",

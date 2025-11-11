@@ -171,6 +171,7 @@ pub fn create_auth_config_with_port(port: u16) -> crate::auth::types::AuthConfig
             "keys:create".to_string(),    // Create API keys
             "keys:list".to_string(),      // List API keys
             "keys:revoke".to_string(),    // Revoke API keys
+            "secure_cloud".to_string(),   // Secure cloud (GPU aggregator) operations
         ],
         additional_params: std::collections::HashMap::new(),
     }

@@ -98,6 +98,9 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),
 
+        // Secure cloud endpoints - require "secure_cloud" scope
+        (&Method::GET, p) if p.starts_with("/secure-cloud/") => Some("secure_cloud".to_string()),
+
         // API Key management endpoints
         (&Method::POST, "/api-keys") => Some("keys:create".to_string()),
         (&Method::GET, "/api-keys") => Some("keys:list".to_string()),
@@ -181,6 +184,14 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some("nodes:list".to_string()));
+
+        // Test secure cloud endpoints (require "secure_cloud" scope)
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/secure-cloud/gpu-prices")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
 
         // Test health endpoint (requires authentication but no specific scope)
         let req = Request::builder()

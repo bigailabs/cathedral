@@ -189,6 +189,62 @@ impl FromStr for GpuCategory {
     }
 }
 
+/// Compute category for marketplace differentiation
+///
+/// Distinguishes between datacenter providers (secure cloud) and miner-provided GPUs (community cloud).
+/// Used for routing compute requests to appropriate infrastructure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeCategory {
+    /// Datacenter providers (aggregator service)
+    /// Examples: DataCrunch, Hyperstack, Lambda Labs, HydraHost
+    SecureCloud,
+    /// Miner-provided GPUs (validator-mediated)
+    /// Bittensor subnet miners providing compute resources
+    CommunityCloud,
+}
+
+impl ComputeCategory {
+    /// Get the display name for this compute category
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ComputeCategory::SecureCloud => "secure-cloud",
+            ComputeCategory::CommunityCloud => "community-cloud",
+        }
+    }
+
+    /// Get a human-readable description
+    pub fn description(&self) -> &'static str {
+        match self {
+            ComputeCategory::SecureCloud => "Datacenter providers",
+            ComputeCategory::CommunityCloud => "Miner-provided GPUs",
+        }
+    }
+}
+
+impl fmt::Display for ComputeCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for ComputeCategory {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "secure-cloud" | "secure_cloud" | "secure" => Ok(ComputeCategory::SecureCloud),
+            "community-cloud" | "community_cloud" | "community" => {
+                Ok(ComputeCategory::CommunityCloud)
+            }
+            _ => Err(format!(
+                "Invalid compute category: {}. Expected 'secure-cloud' or 'community-cloud'",
+                s
+            )),
+        }
+    }
+}
+
 /// Represents a geographic location profile with city, region, and country components
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocationProfile {
@@ -436,5 +492,93 @@ mod tests {
         // Deserialize invalid should fail
         let result: Result<ApiKeyName, _> = serde_json::from_str("\"invalid key\"");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_category_serialization() {
+        use serde_json;
+
+        // Serialize SecureCloud
+        let secure = ComputeCategory::SecureCloud;
+        let serialized = serde_json::to_string(&secure).unwrap();
+        assert_eq!(serialized, "\"secure_cloud\"");
+
+        // Serialize CommunityCloud
+        let community = ComputeCategory::CommunityCloud;
+        let serialized = serde_json::to_string(&community).unwrap();
+        assert_eq!(serialized, "\"community_cloud\"");
+
+        // Deserialize secure_cloud
+        let deserialized: ComputeCategory = serde_json::from_str("\"secure_cloud\"").unwrap();
+        assert_eq!(deserialized, ComputeCategory::SecureCloud);
+
+        // Deserialize community_cloud
+        let deserialized: ComputeCategory = serde_json::from_str("\"community_cloud\"").unwrap();
+        assert_eq!(deserialized, ComputeCategory::CommunityCloud);
+    }
+
+    #[test]
+    fn test_compute_category_from_str() {
+        // Test various input formats for SecureCloud
+        assert_eq!(
+            "secure-cloud".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::SecureCloud
+        );
+        assert_eq!(
+            "secure_cloud".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::SecureCloud
+        );
+        assert_eq!(
+            "secure".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::SecureCloud
+        );
+        assert_eq!(
+            "SECURE-CLOUD".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::SecureCloud
+        );
+
+        // Test various input formats for CommunityCloud
+        assert_eq!(
+            "community-cloud".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::CommunityCloud
+        );
+        assert_eq!(
+            "community_cloud".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::CommunityCloud
+        );
+        assert_eq!(
+            "community".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::CommunityCloud
+        );
+        assert_eq!(
+            "COMMUNITY-CLOUD".parse::<ComputeCategory>().unwrap(),
+            ComputeCategory::CommunityCloud
+        );
+
+        // Test invalid input
+        let result = "invalid".parse::<ComputeCategory>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid compute category"));
+    }
+
+    #[test]
+    fn test_compute_category_display() {
+        assert_eq!(ComputeCategory::SecureCloud.to_string(), "secure-cloud");
+        assert_eq!(
+            ComputeCategory::CommunityCloud.to_string(),
+            "community-cloud"
+        );
+
+        assert_eq!(ComputeCategory::SecureCloud.as_str(), "secure-cloud");
+        assert_eq!(ComputeCategory::CommunityCloud.as_str(), "community-cloud");
+
+        assert_eq!(
+            ComputeCategory::SecureCloud.description(),
+            "Datacenter providers"
+        );
+        assert_eq!(
+            ComputeCategory::CommunityCloud.description(),
+            "Miner-provided GPUs"
+        );
     }
 }

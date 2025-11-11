@@ -62,6 +62,7 @@ self_update = { workspace = true }
 
 
 # Internal crate dependencies
+basilica-aggregator = { path = "../basilica-aggregator" }
 basilica-api = { path = "../basilica-api" }
 basilica-common = { path = "../basilica-common" }
 basilica-sdk = { path = "../basilica-sdk" }

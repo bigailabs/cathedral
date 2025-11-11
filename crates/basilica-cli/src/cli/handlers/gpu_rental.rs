@@ -91,77 +91,99 @@ pub async fn handle_ls(
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    // Convert GPU category to string if provided
-    let gpu_type = gpu_category.map(|gc| gc.as_str());
-
-    // Build query from filters
-    let query = ListAvailableNodesQuery {
-        available: Some(true), // Filter for available nodes only
-        min_gpu_memory: filters.memory_min,
-        gpu_type,
-        min_gpu_count: Some(filters.gpu_min.unwrap_or(0)),
-        location: filters.country.map(|country| LocationProfile {
-            city: None,
-            region: None,
-            country: Some(country),
-        }),
-    };
-
     let spinner = create_spinner("Scanning global GPU availability...");
 
-    // Fetch both available nodes and pricing data in parallel
-    let (response, packages_result) = tokio::join!(
-        api_client.list_available_nodes(Some(query)),
-        api_client.get_packages()
-    );
-
-    let response = response.map_err(|e| -> CliError {
-        complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
-        CliError::Internal(
-            eyre!(e)
-                .suggestion("Check your internet connection and try again")
-                .note("If this persists, nodes may be temporarily unavailable"),
-        )
-    })?;
-
-    // Build pricing map: GPU type -> hourly rate
-    // Package names are like "H100 GPU Package", we need to extract just "h100"
-    let pricing_map: HashMap<String, String> = match packages_result {
-        Ok(packages) => {
-            packages
-                .packages
-                .into_iter()
-                .filter(|p| p.is_active)
-                .filter_map(|p| {
-                    // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
-                    let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
-
-                    gpu_type.map(|t| (t, p.hourly_rate))
-                })
-                .collect()
-        }
-        Err(_e) => HashMap::new(),
-    };
+    // Fetch secure cloud GPUs (datacenter providers)
+    let secure_result = api_client.list_secure_cloud_gpus().await;
 
     complete_spinner_and_clear(spinner);
 
+    let gpus = secure_result.map_err(|e| -> CliError {
+        CliError::Internal(
+            eyre!(e)
+                .suggestion("Check your internet connection and try again")
+                .note("If this persists, GPUs may be temporarily unavailable"),
+        )
+    })?;
+
+    // Apply filters
+    let mut filtered_gpus: Vec<_> = gpus
+        .into_iter()
+        .filter(|gpu| {
+            // Filter by GPU type if specified
+            if let Some(ref category) = gpu_category {
+                let category_str = category.as_str().to_uppercase();
+                if !gpu.gpu_type.as_str().to_uppercase().contains(&category_str) {
+                    return false;
+                }
+            }
+
+            // Filter by availability
+            if !gpu.availability {
+                return false;
+            }
+
+            // Filter by GPU count
+            if let Some(min_count) = filters.gpu_min {
+                if gpu.gpu_count < min_count {
+                    return false;
+                }
+            }
+
+            // Filter by country
+            if let Some(ref country) = filters.country {
+                if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
+    if filtered_gpus.is_empty() {
+        print_info("No GPUs available matching your criteria");
+        return Ok(());
+    }
+
+    // Sort by price (ascending)
+    filtered_gpus.sort_by(|a, b| a.hourly_rate.partial_cmp(&b.hourly_rate).unwrap());
+
     if json {
-        json_output(&response)?;
+        json_output(&filtered_gpus)?;
     } else {
-        // Use table_output module for consistent styling
-        if filters.compact {
-            // Compact view: grouped by country and GPU type
-            table_output::display_available_nodes_compact(&response.available_nodes, &pricing_map)?;
-        } else {
-            // Default or detailed view: show individual nodes
-            // Detailed view includes node IDs
-            table_output::display_available_nodes_detailed(
-                &response.available_nodes,
-                true,
-                filters.detailed,
-                &pricing_map,
-            )?;
+        // Display GPU table
+        use tabled::{settings::Style, Table, Tabled};
+
+        #[derive(Tabled)]
+        struct GpuRow {
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "Count")]
+            count: String,
+            #[tabled(rename = "Price/hr")]
+            price: String,
+            #[tabled(rename = "Region")]
+            region: String,
         }
+
+        let rows: Vec<GpuRow> = filtered_gpus
+            .iter()
+            .map(|gpu| GpuRow {
+                provider: gpu.provider.to_string(),
+                gpu: gpu.gpu_type.to_string(),
+                count: gpu.gpu_count.to_string(),
+                price: format!("${}/hr", gpu.hourly_rate),
+                region: gpu.region.clone(),
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+        println!("\nTotal GPUs: {}", filtered_gpus.len());
     }
 
     Ok(())

@@ -67,7 +67,7 @@ pub struct GpuOffering {
     pub hourly_rate: Decimal,
     pub availability: bool,
     pub fetched_at: DateTime<Utc>,
-    #[serde(skip_serializing)] // Never expose in API
+    #[serde(skip)] // Never expose in API, skip both serializing and deserializing
     pub raw_metadata: serde_json::Value,
 }
 

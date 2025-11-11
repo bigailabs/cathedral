@@ -1,9 +1,33 @@
 use basilica_common::types::GpuCategory;
 use basilica_sdk::types::RentalState;
-use clap::{Subcommand, ValueHint};
+use clap::{Subcommand, ValueEnum, ValueHint};
 use std::path::PathBuf;
 
 use crate::handlers::gpu_rental::TargetType;
+
+/// CLI wrapper for ComputeCategory to implement ValueEnum
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ComputeCategoryArg {
+    #[value(name = "secure-cloud", alias = "secure", alias = "secure_cloud")]
+    SecureCloud,
+    #[value(
+        name = "community-cloud",
+        alias = "community",
+        alias = "community_cloud"
+    )]
+    CommunityCloud,
+}
+
+impl From<ComputeCategoryArg> for basilica_common::types::ComputeCategory {
+    fn from(arg: ComputeCategoryArg) -> Self {
+        match arg {
+            ComputeCategoryArg::SecureCloud => basilica_common::types::ComputeCategory::SecureCloud,
+            ComputeCategoryArg::CommunityCloud => {
+                basilica_common::types::ComputeCategory::CommunityCloud
+            }
+        }
+    }
+}
 
 /// Main CLI commands
 #[derive(Subcommand, Debug, Clone)]
@@ -277,6 +301,10 @@ impl Commands {
 /// Filters for listing GPUs
 #[derive(clap::Args, Debug, Clone)]
 pub struct ListFilters {
+    /// Filter by compute category (secure-cloud or community-cloud)
+    #[arg(long, value_enum)]
+    pub compute: Option<ComputeCategoryArg>,
+
     /// Minimum GPU count
     #[arg(long)]
     pub gpu_min: Option<u32>,

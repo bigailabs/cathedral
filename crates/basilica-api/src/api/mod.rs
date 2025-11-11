@@ -57,6 +57,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .nest("/payments", routes::payments::routes())
         // Billing service endpoints
         .nest("/billing", routes::billing::routes())
+        // Secure Cloud endpoints (GPU aggregator) - proxied through API
+        .route(
+            "/secure-cloud/gpu-prices",
+            get(routes::secure_cloud::list_gpu_prices),
+        )
         // Apply scope validation AFTER auth middleware
         .layer(axum::middleware::from_fn(
             middleware::scope_validation_middleware,

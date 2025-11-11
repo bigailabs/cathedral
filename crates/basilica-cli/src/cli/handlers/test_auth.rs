@@ -400,11 +400,12 @@ pub async fn handle_test_auth(config: &CliConfig) -> Result<(), CliError> {
             .build()
             .map_err(|e| eyre!(format!("Failed to build API key client: {}", e)))?;
 
-        // Test with list_available_nodes endpoint
-        println!("Testing API key with list_available_nodes endpoint...");
-        match api_key_client.list_available_nodes(None).await {
-            Ok(_) => {
+        // Test with secure cloud endpoint (doesn't require validator)
+        println!("Testing API key with secure-cloud endpoint...");
+        match api_key_client.list_secure_cloud_gpus().await {
+            Ok(gpus) => {
                 println!("✅ API key authentication successful!");
+                println!("   Found {} GPU offerings available", gpus.len());
             }
             Err(e) => {
                 println!("❌ API key authentication test failed");
