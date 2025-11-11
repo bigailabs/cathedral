@@ -255,8 +255,6 @@ jobs:
             ## What's Changed
 
             See [CHANGELOG.md](https://github.com/one-covenant/basilica/blob/main/crates/basilica-sdk-python/CHANGELOG.md) for detailed changes.
-          files: |
-            dist/*
-            dist/SHA256SUMS
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
