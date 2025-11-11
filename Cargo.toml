@@ -13,6 +13,8 @@ members = [
   "crates/basilica-sdk-python",
   "crates/integration-tests",
   "crates/collateral-contract",
+  "crates/basilica-operator",
+  "crates/basilica-storage",
 ]
 resolver = "2"
 

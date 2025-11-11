@@ -1,0 +1,95 @@
+# Basilica Persistent Storage Example - Validator-Managed R2 (Recommended)
+#
+# This example uses the validator-managed centralized R2 bucket.
+# No credentials setup required - the validator handles everything!
+#
+# Your data is automatically isolated to your job's unique experiment ID.
+# Files are transparently synced to object storage every 1 second.
+
+apiVersion: basilica.ai/v1
+kind: BasilicaJob
+metadata:
+  name: ml-training-persistent
+spec:
+  # Container configuration
+  image: pytorch/pytorch:2.0.1-cuda11.8-cudnn8-runtime
+  command: ["python"]
+  args: ["train.py"]
+
+  env:
+    - name: DATA_DIR
+      value: "/data"
+    - name: CHECKPOINT_DIR
+      value: "/data/checkpoints"
+    - name: MODEL_DIR
+      value: "/data/models"
+
+  # Resource requirements
+  resources:
+    cpu: "8"
+    memory: "32Gi"
+    gpus:
+      count: 1
+      model: ["A100", "H100"]
+
+  # Persistent storage configuration (centralized validator-managed R2)
+  storage:
+    ephemeral: "50Gi"  # Ephemeral storage for temp files
+    persistent:
+      enabled: true
+      # That's it! No credentials needed - validator manages everything
+      # Your data is automatically isolated to your job ID prefix
+
+      # Optional: Override defaults
+      syncIntervalMs: 1000   # Sync to R2 every 1 second (default: 1000)
+      cacheSizeMb: 2048      # Page cache size in MB (default: 2048)
+      mountPath: "/data"     # Mount point in container (default: /data)
+
+  # Job configuration
+  ttlSeconds: 86400    # 24 hours
+  priority: "high"
+
+---
+# Advanced: Using Your Own R2 Bucket (Optional)
+#
+# If you want to use your own R2 bucket instead of the validator-managed one,
+# you can provide your own credentials secret:
+
+apiVersion: basilica.ai/v1
+kind: BasilicaJob
+metadata:
+  name: ml-training-custom-r2
+spec:
+  image: pytorch/pytorch:2.0.1-cuda11.8-cudnn8-runtime
+  command: ["python"]
+  args: ["train.py"]
+
+  resources:
+    cpu: "8"
+    memory: "32Gi"
+    gpus:
+      count: 1
+      model: ["A100"]
+
+  storage:
+    persistent:
+      enabled: true
+      backend: "r2"
+      bucket: "my-custom-bucket"
+      endpoint: "https://accountid.r2.cloudflarestorage.com"
+      credentialsSecret: "my-r2-credentials"  # Your custom secret
+      mountPath: "/data"
+
+---
+# Example custom credentials secret (only needed for custom bucket)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-r2-credentials
+type: Opaque
+stringData:
+  STORAGE_ACCESS_KEY_ID: "your-access-key-id"
+  STORAGE_SECRET_ACCESS_KEY: "your-secret-access-key"
+  STORAGE_BUCKET: "my-custom-bucket"
+  STORAGE_ENDPOINT: "https://accountid.r2.cloudflarestorage.com"
+  STORAGE_BACKEND: "r2"

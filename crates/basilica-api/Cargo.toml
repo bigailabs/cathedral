@@ -27,10 +27,14 @@ tower-http = { workspace = true, features = ["cors", "timeout", "trace"] }
 
 # HTTP client
 reqwest = { workspace = true }
+uuid = { workspace = true }
+http = "0.2"
+hyper = { version = "0.14", features = ["client", "http1"] }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 toml = { workspace = true }
 prost-types = { workspace = true }
 
@@ -40,6 +44,10 @@ anyhow = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+kube = { version = "0.88", features = ["rustls-tls", "ws"] }
+k8s-openapi = { version = "0.21", default-features = false }
 
 # Configuration
 figment = { workspace = true }
@@ -49,9 +57,13 @@ jsonwebtoken = { workspace = true }
 argon2 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
+async-trait = "0.1"
 
 # Rate limiting
 governor = { workspace = true }
+
+# Validation
+regex = { workspace = true }
 
 
 # Caching
@@ -61,18 +73,10 @@ moka = { workspace = true }
 # Concurrent collections
 dashmap = { workspace = true }
 
-# Metrics
-metrics = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
+# Additional dependencies
 rust_decimal = { workspace = true }
-
-# Async traits
-async-trait = { workspace = true }
-
-# Database
 sqlx = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true }
 clap = { workspace = true }
 clap-verbosity-flag = { workspace = true }
 futures = { workspace = true }
@@ -84,6 +88,7 @@ rand = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [features]
 default = ["server", "utoipa"]
@@ -95,3 +100,7 @@ full = ["server", "client", "utoipa"]
 [[bin]]
 name = "basilica-api"
 path = "src/main.rs"
+
+[[bin]]
+name = "gen-api-key"
+path = "src/bin/gen_api_key.rs"

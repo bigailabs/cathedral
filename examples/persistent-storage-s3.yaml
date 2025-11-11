@@ -1,0 +1,69 @@
+# Basilica Persistent Storage with AWS S3 (Custom Bucket)
+#
+# This example shows how to use your own AWS S3 bucket for persistent storage.
+# You need to provide your own AWS credentials as a Kubernetes Secret.
+#
+# For most users, we recommend using the validator-managed R2 bucket instead
+# (see persistent-storage-job.yaml) which requires zero setup!
+
+apiVersion: basilica.ai/v1
+kind: BasilicaJob
+metadata:
+  name: ml-training-s3
+spec:
+  # Container configuration
+  image: tensorflow/tensorflow:latest-gpu
+  command: ["python"]
+  args: ["train_model.py", "--data-dir", "/data"]
+
+  env:
+    - name: TF_FORCE_GPU_ALLOW_GROWTH
+      value: "true"
+    - name: DATA_DIR
+      value: "/data"
+
+  # Resource requirements
+  resources:
+    cpu: "16"
+    memory: "64Gi"
+    gpus:
+      count: 4
+      model: ["A100"]
+
+  # Persistent storage configuration with AWS S3
+  storage:
+    persistent:
+      enabled: true
+      backend: "s3"
+      bucket: "my-ml-bucket"
+      region: "us-west-2"
+      credentialsSecret: "aws-credentials"  # Your AWS credentials
+      syncIntervalMs: 500        # Faster sync (0.5s) for multi-GPU training
+      cacheSizeMb: 4096          # 4GB cache for multi-GPU workloads
+      mountPath: "/data"
+
+  ttlSeconds: 172800   # 48 hours
+  priority: "high"
+
+---
+# AWS credentials secret (required for S3)
+# Create this secret with your AWS credentials:
+#
+#   kubectl create secret generic aws-credentials \
+#     --from-literal=STORAGE_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE" \
+#     --from-literal=STORAGE_SECRET_ACCESS_KEY="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" \
+#     --from-literal=STORAGE_BACKEND="s3" \
+#     --from-literal=STORAGE_BUCKET="my-ml-bucket" \
+#     --from-literal=STORAGE_REGION="us-west-2"
+#
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aws-credentials
+type: Opaque
+stringData:
+  STORAGE_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE"
+  STORAGE_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+  STORAGE_BACKEND: "s3"
+  STORAGE_BUCKET: "my-ml-bucket"
+  STORAGE_REGION: "us-west-2"

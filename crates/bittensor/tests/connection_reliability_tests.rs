@@ -26,6 +26,7 @@ fn test_config() -> BittensorConfig {
         health_check_interval: Some(Duration::from_millis(100)),
         circuit_breaker_threshold: Some(3),
         circuit_breaker_recovery: Some(Duration::from_secs(1)),
+        read_only: false,
     }
 }
 

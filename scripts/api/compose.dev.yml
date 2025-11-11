@@ -25,14 +25,19 @@ services:
     container_name: basilica-api-dev
     restart: unless-stopped
     
+    env_file:
+      - .env.local
     environment:
       - RUST_LOG='basilica_api=debug'
       - RUST_BACKTRACE=1
       - BASILICA_API_DATABASE__URL=postgres://api:api_dev_password@postgres:5432/basilica_api
+      - TENANT_NAMESPACE=u-test
     
     volumes:
       - ./dummy_wallet:/home/basilica/.bittensor:ro
       - ../../config/api.toml:/app/api.toml:ro
+      - ../subtensor-local/tls/ca.crt:/etc/ssl/certs/subtensor-ca.crt:ro
+      - ../../build/k3s.yaml:/home/basilica/.kube/config:ro
       - ../../crates:/app/crates:ro
       - ../../Cargo.toml:/app/Cargo.toml:ro
       - ../../Cargo.lock:/app/Cargo.lock:ro
@@ -42,6 +47,8 @@ services:
     
     networks:
       - basilica_network_dev
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     
     depends_on:
       postgres:

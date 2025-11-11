@@ -1,0 +1,3 @@
+---
+- name: Basilica Verification - Cluster Health Check
+  import_playbook: 03-verify/cluster-health.yml

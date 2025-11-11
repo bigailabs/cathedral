@@ -1,0 +1,3 @@
+---
+- name: Basilica Application Deployment - Main Stack
+  import_playbook: 02-deploy/basilica.yml

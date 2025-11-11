@@ -49,3 +49,28 @@ resource "aws_secretsmanager_secret_version" "billing_database" {
     url      = "postgresql://${module.rds.db_username}:${module.rds.db_password}@${module.rds.db_endpoint}/basilica_v3_billing"
   })
 }
+
+# K3s kubeconfig for API service to connect to remote K3s cluster
+resource "aws_secretsmanager_secret" "kubeconfig" {
+  name                    = "${local.name_prefix}-kubeconfig"
+  description             = "kubeconfig for Basilica API to connect to K3s cluster"
+  recovery_window_in_days = 7
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-kubeconfig"
+  })
+}
+
+# Automatically upload kubeconfig if path is provided
+resource "aws_secretsmanager_secret_version" "kubeconfig" {
+  count         = var.kubeconfig_path != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.kubeconfig.id
+  secret_string = file(pathexpand(var.kubeconfig_path))
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# Note: If kubeconfig_path is not set, you must manually upload via AWS CLI:
+# aws secretsmanager put-secret-value --secret-id <secret-id> --secret-string "$(cat /path/to/kubeconfig)"

@@ -3,6 +3,7 @@
 //! Core library for the Basilica validator component that performs verification,
 //! scoring, and participates in the Bittensor network.
 
+pub mod agent_installer;
 pub mod api;
 pub mod ban_system;
 pub mod billing;
@@ -12,11 +13,14 @@ pub mod collateral;
 pub mod config;
 pub mod gpu;
 pub mod journal;
+pub mod k8s_profile_publisher;
 pub mod metrics;
 pub mod miner_prover;
+pub mod node_profile;
 pub mod os_process;
 pub mod persistence;
 pub mod rental;
+pub mod rental_adapter;
 pub mod service;
 pub mod ssh;
 
