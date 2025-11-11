@@ -105,34 +105,6 @@ jobs:
           name: wheels-macos-${{ matrix.target }}
           path: dist/*.whl
 
-  build-wheels-windows:
-    name: Build wheels on Windows
-    needs: extract-version
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Install protoc
-        run: choco install protoc
-
-      - name: Build wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          target: x86_64-pc-windows-msvc
-          args: --release --out dist --manifest-path crates/basilica-sdk-python/Cargo.toml
-          sccache: 'true'
-
-      - name: Upload wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-windows-x86_64
-          path: dist/*.whl
-
   build-sdist:
     name: Build source distribution
     needs: extract-version
@@ -165,7 +137,7 @@ jobs:
 
   publish-to-pypi:
     name: Publish to PyPI
-    needs: [extract-version, build-wheels-linux, build-wheels-macos, build-wheels-windows, build-sdist]
+    needs: [extract-version, build-wheels-linux, build-wheels-macos, build-sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -276,8 +248,9 @@ jobs:
 
             - Linux: x86_64
             - macOS: x86_64 (Intel), aarch64 (Apple Silicon)
-            - Windows: x86_64
             - Python: 3.10, 3.11, 3.12, 3.13
+
+            Note: Windows is not supported as Basilica requires Unix/Linux infrastructure (K3s, SSH, process management).
 
             ## What's Changed
 
