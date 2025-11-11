@@ -66,6 +66,7 @@ pub struct AppState {
 }
 
 /// Process health check for a single rental
+#[allow(dead_code)] // TODO: Remove when health checks are re-enabled
 async fn process_rental_health_check(
     rental_id: &str,
     validator_client: &ValidatorClient,
@@ -323,82 +324,83 @@ impl Server {
             aggregator_service,
         };
 
-        // Start optional health check task using HTTP client
-        let health_http_client = http_client;
-        let health_endpoint = validator_endpoint.clone();
-        let health_interval = config.health_check_interval();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(health_interval);
-            loop {
-                interval.tick().await;
-                let health_url = format!("{health_endpoint}/health");
-                match health_http_client.get(&health_url).send().await {
-                    Ok(response) if response.status().is_success() => {
-                        tracing::debug!("Validator health check passed");
-                    }
-                    Ok(response) => {
-                        tracing::warn!(
-                            "Validator health check returned status: {}",
-                            response.status()
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Validator health check failed for {}: {}",
-                            health_endpoint,
-                            e
-                        );
-                    }
-                }
-            }
-        });
+        // TODO: Re-enable validator health checks before merging - temporarily disabled for development
+        // // Start optional health check task using HTTP client
+        // let health_http_client = http_client;
+        // let health_endpoint = validator_endpoint.clone();
+        // let health_interval = config.health_check_interval();
+        // tokio::spawn(async move {
+        //     let mut interval = tokio::time::interval(health_interval);
+        //     loop {
+        //         interval.tick().await;
+        //         let health_url = format!("{health_endpoint}/health");
+        //         match health_http_client.get(&health_url).send().await {
+        //             Ok(response) if response.status().is_success() => {
+        //                 tracing::debug!("Validator health check passed");
+        //             }
+        //             Ok(response) => {
+        //                 tracing::warn!(
+        //                     "Validator health check returned status: {}",
+        //                     response.status()
+        //                 );
+        //             }
+        //             Err(e) => {
+        //                 tracing::warn!(
+        //                     "Validator health check failed for {}: {}",
+        //                     health_endpoint,
+        //                     e
+        //                 );
+        //             }
+        //         }
+        //     }
+        // });
 
-        // Start rental health check task
-        let rental_health_client = validator_client.clone();
-        let rental_health_db = state.db.clone();
-        let rental_health_interval = config.rental_health_check_interval();
+        // // Start rental health check task
+        // let rental_health_client = validator_client.clone();
+        // let rental_health_db = state.db.clone();
+        // let rental_health_interval = config.rental_health_check_interval();
 
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(rental_health_interval);
-            loop {
-                interval.tick().await;
+        // tokio::spawn(async move {
+        //     let mut interval = tokio::time::interval(rental_health_interval);
+        //     loop {
+        //         interval.tick().await;
 
-                // Query all active rentals from the database
-                match sqlx::query_as::<_, (String,)>("SELECT rental_id FROM user_rentals")
-                    .fetch_all(&rental_health_db)
-                    .await
-                {
-                    Ok(rental_records) => {
-                        // TODO: Consider batching these API calls for better performance
-                        // Currently making individual API calls for each rental
-                        for record in &rental_records {
-                            let rental_id = &record.0;
-                            process_rental_health_check(
-                                rental_id,
-                                &rental_health_client,
-                                &rental_health_db,
-                            )
-                            .await;
-                        }
+        //         // Query all active rentals from the database
+        //         match sqlx::query_as::<_, (String,)>("SELECT rental_id FROM user_rentals")
+        //             .fetch_all(&rental_health_db)
+        //             .await
+        //         {
+        //             Ok(rental_records) => {
+        //                 // TODO: Consider batching these API calls for better performance
+        //                 // Currently making individual API calls for each rental
+        //                 for record in &rental_records {
+        //                     let rental_id = &record.0;
+        //                     process_rental_health_check(
+        //                         rental_id,
+        //                         &rental_health_client,
+        //                         &rental_health_db,
+        //                     )
+        //                     .await;
+        //                 }
 
-                        if !rental_records.is_empty() {
-                            tracing::debug!(
-                                "Rental health check completed for {} rentals",
-                                rental_records.len()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to query active rentals for health check: {}", e);
-                    }
-                }
-            }
-        });
+        //                 if !rental_records.is_empty() {
+        //                     tracing::debug!(
+        //                         "Rental health check completed for {} rentals",
+        //                         rental_records.len()
+        //                     );
+        //                 }
+        //             }
+        //             Err(e) => {
+        //                 tracing::error!("Failed to query active rentals for health check: {}", e);
+        //             }
+        //         }
+        //     }
+        // });
 
-        tracing::info!(
-            "Started rental health check task (interval: {} seconds)",
-            rental_health_interval.as_secs()
-        );
+        // tracing::info!(
+        //     "Started rental health check task (interval: {} seconds)",
+        //     rental_health_interval.as_secs()
+        // );
 
         // Start GPU offerings refresh task (Secure Cloud)
         let refresh_aggregator_service = state.aggregator_service.clone();
