@@ -122,14 +122,14 @@ resource "aws_vpc_security_group_ingress_rule" "k3s_server_internal" {
 
 resource "aws_vpc_security_group_ingress_rule" "k3s_server_envoy_from_alb" {
   security_group_id            = aws_security_group.k3s_server.id
-  description                  = "Envoy proxy from deployments ALB"
+  description                  = "Envoy Gateway from deployments ALB"
   ip_protocol                  = "tcp"
-  from_port                    = 32162
-  to_port                      = 32162
+  from_port                    = 30322
+  to_port                      = 30322
   referenced_security_group_id = var.alb_security_group_id
 
   tags = {
-    Name = "envoy-from-alb"
+    Name = "gateway-from-alb"
   }
 }
 

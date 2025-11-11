@@ -20,6 +20,7 @@ pub mod db;
 pub mod dns;
 pub mod envoy;
 pub mod error;
+pub mod gateway;
 pub mod k8s_client;
 pub mod metrics;
 pub mod server;

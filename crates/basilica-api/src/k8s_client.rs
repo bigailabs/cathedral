@@ -71,6 +71,8 @@ pub struct JobStatusDto {
 
 #[async_trait]
 pub trait ApiK8sClient {
+    fn kube_client(&self) -> kube::Client;
+
     async fn create_job(&self, ns: &str, name: &str, spec: JobSpecDto) -> Result<String>;
     async fn get_job_status(&self, ns: &str, name: &str) -> Result<JobStatusDto>;
     async fn delete_job(&self, ns: &str, name: &str) -> Result<()>;
@@ -161,6 +163,10 @@ pub struct MockK8sClient {
 
 #[async_trait]
 impl ApiK8sClient for MockK8sClient {
+    fn kube_client(&self) -> kube::Client {
+        panic!("MockK8sClient::kube_client() should not be called in tests. Use the real K8sClient for Gateway API operations.")
+    }
+
     async fn create_job(&self, ns: &str, name: &str, spec: JobSpecDto) -> Result<String> {
         let mut s = self.specs.write().await;
         // Generate mock endpoints based on ports
@@ -671,6 +677,10 @@ impl K8sClient {
         Ok(Self { client })
     }
 
+    pub fn client(&self) -> &kube::Client {
+        &self.client
+    }
+
     async fn create_client() -> anyhow::Result<kube::Client> {
         // Priority 1: KUBECONFIG_CONTENT environment variable (for AWS Secrets Manager)
         if let Ok(kubeconfig_content) = std::env::var("KUBECONFIG_CONTENT") {
@@ -757,6 +767,10 @@ impl K8sClient {
 
 #[async_trait]
 impl ApiK8sClient for K8sClient {
+    fn kube_client(&self) -> kube::Client {
+        self.client.clone()
+    }
+
     async fn create_job(&self, ns: &str, name: &str, spec: JobSpecDto) -> Result<String> {
         use kube::api::PostParams;
         use serde_json::json;

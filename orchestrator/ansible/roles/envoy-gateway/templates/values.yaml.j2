@@ -1,0 +1,10 @@
+deployment:
+  replicas: {{ gateway_controller_replicas }}
+  envoyGateway:
+    resources:
+      requests:
+        cpu: {{ gateway_controller_cpu_request }}
+        memory: {{ gateway_controller_memory_request }}
+      limits:
+        cpu: {{ gateway_controller_cpu_limit }}
+        memory: {{ gateway_controller_memory_limit }}

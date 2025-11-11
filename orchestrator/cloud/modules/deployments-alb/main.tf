@@ -15,23 +15,23 @@ resource "aws_lb" "deployments" {
   })
 }
 
-# Target group for Envoy proxy on K3s nodes
+# Target group for Envoy Gateway on K3s nodes
 resource "aws_lb_target_group" "envoy" {
-  name     = "${var.name_prefix}-envoy-tg"
-  port     = 32162
+  name     = "${var.name_prefix}-envoygw-tg"
+  port     = 30322
   protocol = "HTTP"
   vpc_id   = var.vpc_id
 
   health_check {
     enabled             = true
-    path                = "/health"
+    path                = "/"
     port                = "traffic-port"
     protocol            = "HTTP"
     healthy_threshold   = 2
     unhealthy_threshold = 2
     timeout             = 5
     interval            = 30
-    matcher             = "200-399"
+    matcher             = "200-499"
   }
 
   deregistration_delay = 30
