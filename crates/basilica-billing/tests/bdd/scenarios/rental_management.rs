@@ -34,6 +34,9 @@ async fn test_track_rental_creates_new_rental() {
             disk_gb: 100,
             network_bandwidth_mbps: 1000,
         }),
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let response = context
@@ -75,6 +78,9 @@ async fn test_track_rental_fails_with_insufficient_balance() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let result = context.client.track_rental(request).await;
@@ -122,6 +128,9 @@ async fn test_update_rental_status_transitions() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let track_response = context
@@ -202,6 +211,9 @@ async fn test_get_active_rentals_by_user() {
             start_time: None,
             metadata: std::collections::HashMap::new(),
             resource_spec: None,
+            base_price_per_gpu: 2.5,
+            gpu_count: 1,
+            markup_percent: 1.2,
         };
 
         let response = context
@@ -286,6 +298,9 @@ async fn test_get_active_rentals_by_node() {
             start_time: None,
             metadata: std::collections::HashMap::new(),
             resource_spec: None,
+            base_price_per_gpu: 2.5,
+            gpu_count: 1,
+            markup_percent: 1.2,
         };
 
         let track_response = context
@@ -352,6 +367,9 @@ async fn test_finalize_rental_charges_correct_amount() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let track_response = context

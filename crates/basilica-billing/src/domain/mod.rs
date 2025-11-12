@@ -13,6 +13,7 @@ pub mod types;
 pub use aggregations::AggregationJobs;
 pub use audit::{CreditTransaction, TransactionType};
 pub use billing_handlers::BillingEventHandlers;
+#[allow(deprecated)]
 pub use cost_calculator::{calculate_legacy_cost, calculate_marketplace_cost};
 pub use credits::{CreditManager, CreditOperations};
 pub use events::{EventStore, EventStoreOperations};

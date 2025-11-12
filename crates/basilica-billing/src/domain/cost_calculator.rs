@@ -91,16 +91,14 @@ pub fn calculate_marketplace_cost(
 
     // Step 3: Apply profit margin
     // total_cost = base_cost × profit_margin
-    let total_cost = base_cost
-        .checked_mul(profit_margin)
-        .unwrap_or_else(|| {
-            tracing::error!(
-                "Total cost calculation overflow: ${} × {}",
-                base_cost,
-                profit_margin
-            );
-            base_cost
-        });
+    let total_cost = base_cost.checked_mul(profit_margin).unwrap_or_else(|| {
+        tracing::error!(
+            "Total cost calculation overflow: ${} × {}",
+            base_cost,
+            profit_margin
+        );
+        base_cost
+    });
 
     // Step 4: Calculate markup amount for transparency
     let markup_amount = total_cost.checked_sub(base_cost).unwrap_or(Decimal::ZERO);
@@ -144,7 +142,9 @@ pub fn calculate_legacy_cost(
 
     // Legacy volume discount: 10% if gpu_count > 1
     let volume_discount = if gpu_count > 1 {
-        raw_gpu_cost.checked_mul(Decimal::from_str("0.10").unwrap()).unwrap_or(Decimal::ZERO)
+        raw_gpu_cost
+            .checked_mul(Decimal::from_str("0.10").unwrap())
+            .unwrap_or(Decimal::ZERO)
     } else {
         Decimal::ZERO
     };

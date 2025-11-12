@@ -257,6 +257,7 @@ impl TestContext {
         .unwrap_or(None)
     }
 
+    #[allow(dead_code)]
     pub async fn get_user_package(&self, user_id: &str) -> Option<String> {
         sqlx::query_scalar::<_, String>(
             "SELECT package_id FROM billing.user_preferences WHERE user_id = $1",

@@ -3,7 +3,7 @@ use crate::domain::processor::{
 };
 use crate::domain::rentals::Rental;
 use crate::domain::types::{
-    CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
+    CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
 };
 use crate::error::{BillingError, Result};
 use crate::storage::{
@@ -395,6 +395,7 @@ impl EventHandlers for BillingEventHandlers {
         Ok(())
     }
 
+    #[allow(deprecated)]
     async fn process_rental_start(&self, event: &UsageEvent) -> Result<()> {
         info!(
             "Processing rental start event {} for rental {}",
@@ -546,7 +547,7 @@ impl EventHandlers for BillingEventHandlers {
 
         let rental_id = RentalId::from_uuid(event.rental_id);
 
-        let mut rental = self
+        let rental = self
             .rental_repository
             .get_rental(&rental_id)
             .await?

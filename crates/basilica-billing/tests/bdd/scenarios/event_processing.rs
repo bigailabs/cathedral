@@ -21,6 +21,9 @@ async fn test_rental_start_event_created() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let response = context
@@ -82,6 +85,9 @@ async fn test_status_change_events_tracked() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let track_response = context
@@ -161,6 +167,9 @@ async fn test_event_timestamps_ordered() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let track_response = context
@@ -239,6 +248,9 @@ async fn test_event_processing_flags() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let track_response = context
@@ -298,6 +310,9 @@ async fn test_event_metadata_preserved() {
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
+        base_price_per_gpu: 2.5,
+        gpu_count: 1,
+        markup_percent: 1.2,
     };
 
     let track_response = context
@@ -356,6 +371,9 @@ async fn test_concurrent_event_creation() {
                 start_time: None,
                 metadata: std::collections::HashMap::new(),
                 resource_spec: None,
+                base_price_per_gpu: 2.5,
+                gpu_count: 1,
+                markup_percent: 1.2,
             };
 
             client

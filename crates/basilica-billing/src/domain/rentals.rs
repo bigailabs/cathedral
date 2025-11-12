@@ -90,7 +90,10 @@ impl Rental {
     }
 
     /// Legacy constructor with package-based pricing (DEPRECATED)
-    #[deprecated(since = "1.0.0", note = "Use new_marketplace for marketplace-2-compute")]
+    #[deprecated(
+        since = "1.0.0",
+        note = "Use new_marketplace for marketplace-2-compute"
+    )]
     pub fn new(
         user_id: UserId,
         node_id: String,
@@ -242,6 +245,7 @@ impl RentalManager {
 
 #[async_trait]
 impl RentalOperations for RentalManager {
+    #[allow(deprecated)]
     async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
         let rental = Rental::new(
             params.user_id,

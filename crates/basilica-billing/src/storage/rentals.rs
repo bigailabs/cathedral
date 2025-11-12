@@ -10,7 +10,6 @@ use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
 use sqlx::{Postgres, Row, Transaction};
 use std::sync::Arc;
-use tracing::warn;
 
 #[async_trait]
 pub trait RentalRepository: Send + Sync {
@@ -62,17 +61,14 @@ impl SqlRentalRepository {
             });
 
         // Package ID is now optional (legacy field)
-        let package_id = r.get::<Option<String>, _>("package_id")
-            .map(PackageId::new);
+        let package_id = r.get::<Option<String>, _>("package_id").map(PackageId::new);
 
         // Read marketplace pricing fields (with defaults for legacy rentals)
         let base_price_per_gpu = r
             .get::<Option<rust_decimal::Decimal>, _>("base_price_per_gpu")
             .unwrap_or(rust_decimal::Decimal::ZERO);
 
-        let gpu_count = r
-            .get::<Option<i32>, _>("gpu_count")
-            .unwrap_or(1) as u32;
+        let gpu_count = r.get::<Option<i32>, _>("gpu_count").unwrap_or(1) as u32;
 
         let markup_percent = r
             .get::<Option<rust_decimal::Decimal>, _>("markup_percent")
@@ -147,7 +143,7 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             Some(&rental.validator_id)
         })
-        .bind(rental.package_id.as_ref().map(|p| p.as_str()))  // Now optional
+        .bind(rental.package_id.as_ref().map(|p| p.as_str())) // Now optional
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
         .bind(hourly_rate)

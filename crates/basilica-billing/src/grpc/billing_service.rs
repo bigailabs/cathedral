@@ -15,10 +15,10 @@ use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 use basilica_protocol::billing::{
     billing_service_server::BillingService, ActiveRental, ApplyCreditsRequest,
     ApplyCreditsResponse, FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
-    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse,
-    RentalStatus, TelemetryData, TrackRentalRequest, TrackRentalResponse,
-    UpdateRentalStatusRequest, UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest,
-    UsageReportResponse, UsageSummary,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse, RentalStatus,
+    TelemetryData, TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
+    UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest, UsageReportResponse,
+    UsageSummary,
 };
 
 use rust_decimal::prelude::*;
@@ -27,7 +27,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid;
 
 pub struct BillingServiceImpl {
@@ -320,7 +320,8 @@ impl BillingService for BillingServiceImpl {
             });
 
             let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
-            let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
+            let idempotency_key =
+                generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
             let rental_start_event = UsageEvent {
                 event_id: uuid::Uuid::new_v4(),

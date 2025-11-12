@@ -18,7 +18,6 @@ pub struct BalanceResponse {
     pub last_updated: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 pub struct UsageHistoryQuery {
     #[serde(default = "default_limit")]

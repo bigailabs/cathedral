@@ -256,7 +256,8 @@ pub async fn start_rental(
         // TODO: Get pricing from node listing or user request once marketplace UI is implemented
         // For now, use placeholder values (should be replaced with actual marketplace pricing)
         let base_price_per_gpu = 2.50; // Placeholder: $2.50/GPU/hour
-        let gpu_count = resource_spec.as_ref()
+        let gpu_count = resource_spec
+            .as_ref()
             .and_then(|spec| spec.gpus.first())
             .map(|gpu| gpu.count)
             .unwrap_or(1);

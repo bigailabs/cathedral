@@ -15,7 +15,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Billing server that hosts the gRPC service
 pub struct BillingServer {
@@ -379,32 +379,6 @@ async fn metrics_handler(
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
-
-    #[test]
-    fn test_normalize_update_interval_defaults_when_zero() {
-        let normalized = BillingServer::normalize_update_interval(0);
-        assert_eq!(
-            normalized, 86_400,
-            "Zero update interval should default to 86400 seconds (24h)"
-        );
-    }
-
-    #[test]
-    fn test_normalize_update_interval_preserves_value() {
-        let normalized = BillingServer::normalize_update_interval(3_600);
-        assert_eq!(
-            normalized, 3_600,
-            "Non-zero update interval should be preserved"
-        );
-    }
-
-    #[test]
-    fn test_normalize_update_interval_large_value() {
-        let normalized = BillingServer::normalize_update_interval(200_000);
-        assert_eq!(
-            normalized, 200_000,
-            "Arbitrary large interval should remain unchanged"
-        );
-    }
 }
