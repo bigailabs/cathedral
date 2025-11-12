@@ -7,10 +7,17 @@
   register: gateway_crds
   failed_when: false
 
+- name: Download Gateway API CRDs manifest when missing
+  ansible.builtin.uri:
+    url: "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml"
+    return_content: true
+  register: gateway_api_crds_manifest
+  when: gateway_crds.resources is not defined or gateway_crds.resources | length == 0
+
 - name: Install Gateway API CRDs if not present
   kubernetes.core.k8s:
     state: present
-    src: "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml"
+    definition: "{{ gateway_api_crds_manifest.content | from_yaml_all | list }}"
   when: gateway_crds.resources is not defined or gateway_crds.resources | length == 0
 
 - name: Create Envoy Gateway namespace

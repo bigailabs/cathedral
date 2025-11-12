@@ -38,3 +38,14 @@ spec:
         externalTrafficPolicy: Cluster
         annotations:
           service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+  backendTrafficPolicy:
+    outlierDetection:
+      consecutive5xx: 5
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+    circuitBreaker:
+      maxConnections: 1024
+      maxPendingRequests: 1024
+      maxRequests: 1024
+      maxRetries: 3
