@@ -312,37 +312,20 @@ impl BillingService for BillingServiceImpl {
                 }
             };
 
-            let package = if !resource_spec.gpu_specs.is_empty() {
-                self.package_repository
-                    .find_package_for_gpu_model(&resource_spec.gpu_specs[0].model)
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to retrieve package: {}", e)))?
-            } else {
-                self.package_repository
-                    .get_package(&PackageId::h100())
-                    .await
-                    .map_err(|e| Status::internal(format!("Failed to retrieve package: {}", e)))?
-            };
+            // Extract marketplace-2-compute pricing from request
+            let base_price_per_gpu = rust_decimal::Decimal::from_f64(req.base_price_per_gpu)
+                .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
 
-            let package_id = package.id.clone();
-            let credit_rate = package.hourly_rate;
+            let gpu_count = req.gpu_count.max(1); // Ensure at least 1 GPU
 
-            if !req.hourly_rate.is_empty() {
-                let api_provided_rate = Self::parse_decimal(&req.hourly_rate)
-                    .map_err(|e| Status::invalid_argument(format!("Invalid hourly rate: {}", e)))?;
-                if (api_provided_rate - credit_rate.as_decimal()).abs() > rust_decimal::Decimal::new(1, 2) {
-                    warn!(
-                        "API-provided hourly_rate ({}) differs from package rate ({}) for rental {}",
-                        api_provided_rate, credit_rate, rental_id
-                    );
-                }
-            }
+            let markup_percent = rust_decimal::Decimal::from_f64(req.markup_percent)
+                .ok_or_else(|| Status::invalid_argument("Invalid markup_percent"))?;
 
             info!(
-                "Tracking rental {} for user {} at {} credits/hour (package: {})",
-                rental_id, user_id, credit_rate, package_id
+                "Tracking rental {} for user {} at ${}/GPU/hour × {} GPUs with {}% markup",
+                rental_id, user_id, base_price_per_gpu, gpu_count, markup_percent
             );
-            let package_id_str = package_id.to_string();
+
             let resource_spec_value =
                 serde_json::to_value(&resource_spec).unwrap_or(serde_json::Value::Null);
             let validator_id = req.validator_id.clone();
@@ -362,39 +345,21 @@ impl BillingService for BillingServiceImpl {
                 return Ok(response);
             }
 
-            // Calculate max duration first
-            // Create rental with the provided ID
+            // Create rental with marketplace pricing
             use crate::domain::rentals::Rental;
-            use crate::domain::types::{CostBreakdown, UsageMetrics};
 
-            let now = chrono::Utc::now();
-            let rental = Rental {
-                id: rental_id,
-                user_id: user_id.clone(),
-                node_id: req.node_id.clone(),
-                validator_id: validator_id.clone(),
-                package_id,
-                state: crate::domain::types::RentalState::Pending,
+            let mut rental = Rental::new_marketplace(
+                user_id.clone(),
+                req.node_id.clone(),
+                validator_id.clone(),
                 resource_spec,
-                usage_metrics: UsageMetrics::zero(),
-                cost_breakdown: CostBreakdown {
-                    base_cost: credit_rate,
-                    usage_cost: CreditBalance::zero(),
-                    volume_discount: CreditBalance::zero(),
-                    discounts: CreditBalance::zero(),
-                    overage_charges: CreditBalance::zero(),
-                    total_cost: CreditBalance::zero(),
-                },
-                started_at: now,
-                updated_at: now,
-                ended_at: None,
-                metadata: Default::default(),
-                created_at: now,
-                last_updated: now,
-                actual_start_time: Some(now),
-                actual_end_time: None,
-                actual_cost: CreditBalance::zero(),
-            };
+                base_price_per_gpu,
+                gpu_count,
+                markup_percent,
+            );
+
+            // Override the auto-generated ID with the provided rental_id
+            rental.id = rental_id;
 
             // Persist to database
             self.rental_repository
@@ -403,8 +368,9 @@ impl BillingService for BillingServiceImpl {
                 .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
 
             let event_data = serde_json::json!({
-                "package_id": package_id_str,
-                "hourly_rate": Self::format_credit_balance(credit_rate),
+                "base_price_per_gpu": base_price_per_gpu.to_string(),
+                "gpu_count": gpu_count,
+                "markup_percent": markup_percent.to_string(),
                 "resource_spec": resource_spec_value,
                 "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
             });
@@ -437,7 +403,7 @@ impl BillingService for BillingServiceImpl {
             if let Some(ref metrics) = self.metrics {
                 metrics
                     .billing_metrics()
-                    .record_rental_tracked(&rental_id.to_string(), &package_id_str)
+                    .record_rental_tracked(&rental_id.to_string(), "marketplace")
                     .await;
             }
 
@@ -623,6 +589,10 @@ impl BillingService for BillingServiceImpl {
                         r.last_updated,
                     ))),
                     metadata: std::collections::HashMap::new(),
+                    // Marketplace-2-compute pricing fields
+                    base_price_per_gpu: r.base_price_per_gpu.to_f64().unwrap_or(0.0),
+                    gpu_count: r.gpu_count,
+                    markup_percent: r.markup_percent.to_f64().unwrap_or(0.0),
                 }
             })
             .collect();

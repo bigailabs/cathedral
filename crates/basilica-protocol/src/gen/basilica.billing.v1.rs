@@ -61,7 +61,7 @@ pub struct TrackRentalRequest {
     pub validator_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
     pub resource_spec: ::core::option::Option<ResourceSpec>,
-    /// Decimal string
+    /// Decimal string (DEPRECATED: use marketplace pricing fields)
     #[prost(string, tag = "6")]
     pub hourly_rate: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "7")]
@@ -71,6 +71,17 @@ pub struct TrackRentalRequest {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
+    /// Marketplace-2-compute pricing fields
+    ///
+    /// Base price per GPU per hour (before markup)
+    #[prost(double, tag = "9")]
+    pub base_price_per_gpu: f64,
+    /// Number of GPUs in this rental
+    #[prost(uint32, tag = "10")]
+    pub gpu_count: u32,
+    /// Markup percentage (e.g., 10.0 for 10%)
+    #[prost(double, tag = "11")]
+    pub markup_percent: f64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -174,7 +185,7 @@ pub struct ActiveRental {
     pub status: i32,
     #[prost(message, optional, tag = "6")]
     pub resource_spec: ::core::option::Option<ResourceSpec>,
-    /// Decimal string
+    /// Decimal string (DEPRECATED: use marketplace pricing fields)
     #[prost(string, tag = "7")]
     pub hourly_rate: ::prost::alloc::string::String,
     /// Decimal string
@@ -189,6 +200,17 @@ pub struct ActiveRental {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
+    /// Marketplace-2-compute pricing fields
+    ///
+    /// Base price per GPU per hour (before markup)
+    #[prost(double, tag = "12")]
+    pub base_price_per_gpu: f64,
+    /// Number of GPUs in this rental
+    #[prost(uint32, tag = "13")]
+    pub gpu_count: u32,
+    /// Markup percentage (e.g., 10.0 for 10%)
+    #[prost(double, tag = "14")]
+    pub markup_percent: f64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

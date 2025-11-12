@@ -1,0 +1,65 @@
+-- Migration 027: Marketplace-2-Compute Refactoring
+-- This migration transitions from package-based pricing to direct marketplace pricing
+--
+-- Changes:
+-- 1. Add marketplace pricing fields to rentals table
+-- 2. Remove package_id dependency from rentals
+-- 3. Drop all package and dynamic pricing infrastructure
+
+-- ============================================================================
+-- PART 1: Add marketplace pricing fields to rentals table
+-- ============================================================================
+
+ALTER TABLE billing.rentals
+    ADD COLUMN base_price_per_gpu DECIMAL(10,4) NOT NULL DEFAULT 0.0,
+    ADD COLUMN gpu_count INT NOT NULL DEFAULT 1,
+    ADD COLUMN markup_percent DECIMAL(5,2) NOT NULL DEFAULT 10.0;
+
+-- Add indexes for query performance
+CREATE INDEX idx_rentals_base_price ON billing.rentals(base_price_per_gpu);
+CREATE INDEX idx_rentals_gpu_count ON billing.rentals(gpu_count);
+
+-- Add comments to document the fields
+COMMENT ON COLUMN billing.rentals.base_price_per_gpu IS
+    'Base price per GPU per hour from rental request (before markup)';
+COMMENT ON COLUMN billing.rentals.gpu_count IS
+    'Number of GPUs in this rental';
+COMMENT ON COLUMN billing.rentals.markup_percent IS
+    'Markup percentage applied to base price (e.g., 10.0 for 10%)';
+
+-- ============================================================================
+-- PART 2: Remove package dependency from rentals
+-- ============================================================================
+
+-- Drop the package_id column entirely (no active rentals during deployment)
+ALTER TABLE billing.rentals DROP COLUMN package_id;
+
+-- ============================================================================
+-- PART 3: Drop package infrastructure tables
+-- ============================================================================
+
+-- Drop dependent tables first (foreign key constraints)
+DROP TABLE IF EXISTS billing.user_packages;
+DROP TABLE IF EXISTS billing.package_gpu_rates;
+
+-- Drop main packages table
+DROP TABLE IF EXISTS billing.billing_packages;
+
+-- ============================================================================
+-- PART 4: Drop dynamic pricing infrastructure
+-- ============================================================================
+
+-- Drop price cache and history tables
+DROP TABLE IF EXISTS billing.price_cache;
+DROP TABLE IF EXISTS billing.price_history;
+
+-- ============================================================================
+-- PART 5: Clean up defaults (optional - for existing data migration)
+-- ============================================================================
+
+-- After migration completes, you may want to remove defaults to enforce
+-- explicit pricing on all new rentals:
+-- ALTER TABLE billing.rentals
+--     ALTER COLUMN base_price_per_gpu DROP DEFAULT,
+--     ALTER COLUMN gpu_count DROP DEFAULT,
+--     ALTER COLUMN markup_percent DROP DEFAULT;

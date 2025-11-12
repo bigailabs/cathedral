@@ -1,6 +1,7 @@
 pub mod aggregations;
 pub mod audit;
 pub mod billing_handlers;
+pub mod cost_calculator;
 pub mod credits;
 pub mod events;
 pub mod idempotency;
@@ -13,6 +14,7 @@ pub mod types;
 pub use aggregations::AggregationJobs;
 pub use audit::{CreditTransaction, TransactionType};
 pub use billing_handlers::BillingEventHandlers;
+pub use cost_calculator::{calculate_legacy_cost, calculate_marketplace_cost};
 pub use credits::{CreditManager, CreditOperations};
 pub use events::{EventStore, EventStoreOperations};
 pub use packages::{BillingPackage, PackageService, RepositoryPackageService};

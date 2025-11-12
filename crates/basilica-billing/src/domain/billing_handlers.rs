@@ -169,13 +169,15 @@ impl EventHandlers for BillingEventHandlers {
             return Ok(());
         }
 
-        let package = self
-            .package_repository
-            .get_package(&rental.package_id)
-            .await?;
+        // Use marketplace-2-compute pricing formula
+        use crate::domain::cost_calculator::calculate_marketplace_cost;
 
-        let cost_breakdown =
-            package.calculate_cost_with_gpu_count(&usage_metrics, usage_metrics.gpu_count);
+        let cost_breakdown = calculate_marketplace_cost(
+            usage_metrics.gpu_hours,
+            rental.base_price_per_gpu,
+            rental.gpu_count,
+            rental.markup_percent,
+        );
 
         let incremental_cost = cost_breakdown.total_cost;
 
@@ -446,18 +448,21 @@ impl EventHandlers for BillingEventHandlers {
             &rental_id.to_string(),
             user_id.as_uuid().ok(),
             serde_json::json!({
-                "package_id": rental.package_id.to_string(),
+                "package_id": rental.package_id.as_ref().map(|p| p.to_string()).unwrap_or_else(|| "marketplace".to_string()),
                 "node_id": event.node_id,
                 "validator_id": event.validator_id,
                 "billing_model": "pay_as_you_go",
+                "base_price_per_gpu": rental.base_price_per_gpu.to_string(),
+                "gpu_count": rental.gpu_count,
+                "markup_percent": rental.markup_percent.to_string(),
                 "timestamp": event.timestamp,
             }),
         )
         .await?;
 
         info!(
-            "Started rental {} for user {} with package {}",
-            rental_id, user_id, rental.package_id
+            "Started rental {} for user {} at ${}/GPU × {} GPUs with {}% markup",
+            rental_id, user_id, rental.base_price_per_gpu, rental.gpu_count, rental.markup_percent
         );
 
         Ok(())
@@ -555,20 +560,12 @@ impl EventHandlers for BillingEventHandlers {
         let new_resources = event.event_data.get("resources").cloned();
 
         if let Some(resources) = new_resources {
-            if let Some(gpu_model) = resources.get("gpu_model").and_then(|v| v.as_str()) {
-                let new_package = self
-                    .package_repository
-                    .find_package_for_gpu_model(gpu_model)
-                    .await?;
-
-                if new_package.id != rental.package_id {
-                    info!(
-                        "Updating rental {} package from {} to {} due to GPU change",
-                        rental_id, rental.package_id, new_package.id
-                    );
-                    rental.package_id = new_package.id;
-                }
-            }
+            // In marketplace-2-compute, pricing is fixed at rental creation
+            // Resource changes don't affect the pricing model
+            info!(
+                "Resource update event for rental {} (marketplace pricing unchanged)",
+                rental_id
+            );
 
             self.rental_repository.update_rental(&rental).await?;
 
@@ -578,7 +575,8 @@ impl EventHandlers for BillingEventHandlers {
                 rental.user_id.as_uuid().ok(),
                 serde_json::json!({
                     "resources": resources,
-                    "package_id": rental.package_id.to_string(),
+                    "base_price_per_gpu": rental.base_price_per_gpu.to_string(),
+                    "gpu_count": rental.gpu_count,
                     "timestamp": event.timestamp,
                 }),
             )

@@ -17,7 +17,9 @@ pub struct Rental {
     pub user_id: UserId,
     pub node_id: String,
     pub validator_id: String,
-    pub package_id: PackageId,
+    /// Legacy package ID (deprecated, kept for backward compatibility)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<PackageId>,
     pub state: RentalState,
     pub resource_spec: ResourceSpec,
     pub usage_metrics: UsageMetrics,
@@ -33,15 +35,26 @@ pub struct Rental {
     pub actual_start_time: Option<DateTime<Utc>>,
     pub actual_end_time: Option<DateTime<Utc>>,
     pub actual_cost: CreditBalance,
+
+    // Marketplace-2-compute pricing fields
+    /// Base price per GPU per hour (before markup)
+    pub base_price_per_gpu: Decimal,
+    /// Number of GPUs in this rental
+    pub gpu_count: u32,
+    /// Markup percentage applied to base price (e.g., 10.0 for 10%)
+    pub markup_percent: Decimal,
 }
 
 impl Rental {
-    pub fn new(
+    /// Create a new rental with marketplace-2-compute pricing
+    pub fn new_marketplace(
         user_id: UserId,
         node_id: String,
         validator_id: String,
-        package_id: PackageId,
         resource_spec: ResourceSpec,
+        base_price_per_gpu: Decimal,
+        gpu_count: u32,
+        markup_percent: Decimal,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -49,7 +62,7 @@ impl Rental {
             user_id,
             node_id,
             validator_id,
-            package_id,
+            package_id: None, // No package in marketplace model
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -70,6 +83,52 @@ impl Rental {
             actual_start_time: None,
             actual_end_time: None,
             actual_cost: CreditBalance::zero(),
+            base_price_per_gpu,
+            gpu_count,
+            markup_percent,
+        }
+    }
+
+    /// Legacy constructor with package-based pricing (DEPRECATED)
+    #[deprecated(since = "1.0.0", note = "Use new_marketplace for marketplace-2-compute")]
+    pub fn new(
+        user_id: UserId,
+        node_id: String,
+        validator_id: String,
+        package_id: PackageId,
+        resource_spec: ResourceSpec,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: RentalId::new(),
+            user_id,
+            node_id,
+            validator_id,
+            package_id: Some(package_id),
+            state: RentalState::Pending,
+            resource_spec,
+            usage_metrics: UsageMetrics::zero(),
+            cost_breakdown: CostBreakdown {
+                base_cost: CreditBalance::zero(),
+                usage_cost: CreditBalance::zero(),
+                volume_discount: CreditBalance::zero(),
+                discounts: CreditBalance::zero(),
+                overage_charges: CreditBalance::zero(),
+                total_cost: CreditBalance::zero(),
+            },
+            started_at: now,
+            updated_at: now,
+            ended_at: None,
+            metadata: HashMap::new(),
+            created_at: now,
+            last_updated: now,
+            actual_start_time: None,
+            actual_end_time: None,
+            actual_cost: CreditBalance::zero(),
+            // Default marketplace pricing (for legacy compatibility)
+            base_price_per_gpu: Decimal::ZERO,
+            gpu_count: 1,
+            markup_percent: Decimal::ZERO,
         }
     }
 

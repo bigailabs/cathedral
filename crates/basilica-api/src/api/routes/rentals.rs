@@ -253,15 +253,28 @@ pub async fn start_rental(
             network_bandwidth_mbps: 0,
         });
 
+        // TODO: Get pricing from node listing or user request once marketplace UI is implemented
+        // For now, use placeholder values (should be replaced with actual marketplace pricing)
+        let base_price_per_gpu = 2.50; // Placeholder: $2.50/GPU/hour
+        let gpu_count = resource_spec.as_ref()
+            .and_then(|spec| spec.gpus.first())
+            .map(|gpu| gpu.count)
+            .unwrap_or(1);
+        let markup_percent = 10.0; // 10% markup
+
         let track_request = TrackRentalRequest {
             rental_id: validator_response.rental_id.clone(),
             user_id: user_id.clone(),
             node_id,
             validator_id: state.validator_hotkey.clone(),
             resource_spec,
-            hourly_rate: "0.00".to_string(),
+            hourly_rate: "0.00".to_string(), // Deprecated field
             start_time: Some(timestamp.clone()),
             metadata: Default::default(),
+            // Marketplace-2-compute pricing fields
+            base_price_per_gpu,
+            gpu_count,
+            markup_percent,
         };
 
         match billing_client.track_rental(track_request).await {

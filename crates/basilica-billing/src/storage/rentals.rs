@@ -61,27 +61,22 @@ impl SqlRentalRepository {
                 network_bandwidth_mbps: 0,
             });
 
-        let package_id = match r.get::<Option<String>, _>("package_id") {
-            Some(pkg_id) => PackageId::new(pkg_id),
-            None => {
-                let rental_id: uuid::Uuid = r.get("rental_id");
-                if !resource_spec.gpu_specs.is_empty() {
-                    let gpu_model = &resource_spec.gpu_specs[0].model;
-                    let inferred_pkg = PackageId::from_gpu_model(gpu_model);
-                    warn!(
-                        "Rental {} has NULL package_id, inferring '{}' from GPU model '{}'",
-                        rental_id, inferred_pkg, gpu_model
-                    );
-                    inferred_pkg
-                } else {
-                    warn!(
-                        "Rental {} has NULL package_id and no GPU specs, defaulting to 'h100'",
-                        rental_id
-                    );
-                    PackageId::h100()
-                }
-            }
-        };
+        // Package ID is now optional (legacy field)
+        let package_id = r.get::<Option<String>, _>("package_id")
+            .map(PackageId::new);
+
+        // Read marketplace pricing fields (with defaults for legacy rentals)
+        let base_price_per_gpu = r
+            .get::<Option<rust_decimal::Decimal>, _>("base_price_per_gpu")
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+
+        let gpu_count = r
+            .get::<Option<i32>, _>("gpu_count")
+            .unwrap_or(1) as u32;
+
+        let markup_percent = r
+            .get::<Option<rust_decimal::Decimal>, _>("markup_percent")
+            .unwrap_or(rust_decimal::Decimal::ZERO);
 
         Rental {
             id: RentalId::from_uuid(r.get("rental_id")),
@@ -120,6 +115,10 @@ impl SqlRentalRepository {
                 .get::<Option<rust_decimal::Decimal>, _>("total_cost")
                 .map(CreditBalance::from_decimal)
                 .unwrap_or_else(CreditBalance::zero),
+            // Marketplace-2-compute fields
+            base_price_per_gpu,
+            gpu_count,
+            markup_percent,
         }
     }
 }
@@ -135,8 +134,9 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             INSERT INTO billing.rentals
             (rental_id, user_id, node_id, validator_id, package_id, status,
-             resource_spec, hourly_rate, start_time, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             resource_spec, hourly_rate, start_time, metadata,
+             base_price_per_gpu, gpu_count, markup_percent)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -147,12 +147,16 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             Some(&rental.validator_id)
         })
-        .bind(Some(rental.package_id.as_str()))
+        .bind(rental.package_id.as_ref().map(|p| p.as_str()))  // Now optional
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
         .bind(hourly_rate)
         .bind(rental.started_at)
         .bind(metadata_json)
+        // Marketplace-2-compute pricing fields
+        .bind(rental.base_price_per_gpu)
+        .bind(rental.gpu_count as i32)
+        .bind(rental.markup_percent)
         .execute(self.connection.pool())
         .await
         .map_err(|e| BillingError::DatabaseError {
@@ -168,7 +172,8 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at
+                   metadata, created_at, updated_at,
+                   base_price_per_gpu, gpu_count, markup_percent
             FROM billing.rentals
             WHERE rental_id = $1
             "#,
@@ -232,7 +237,8 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at
+                       metadata, created_at, updated_at,
+                       base_price_per_gpu, gpu_count, markup_percent
                 FROM billing.rentals
                 WHERE user_id = $1 AND status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -244,7 +250,8 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at
+                       metadata, created_at, updated_at,
+                       base_price_per_gpu, gpu_count, markup_percent
                 FROM billing.rentals
                 WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -267,7 +274,8 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at
+                   metadata, created_at, updated_at,
+                   base_price_per_gpu, gpu_count, markup_percent
             FROM billing.rentals
             WHERE status = $1
             ORDER BY start_time DESC
