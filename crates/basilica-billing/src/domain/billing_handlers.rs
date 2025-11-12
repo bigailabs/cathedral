@@ -3,12 +3,12 @@ use crate::domain::processor::{
 };
 use crate::domain::rentals::Rental;
 use crate::domain::types::{
-    CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
+    CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
 };
 use crate::error::{BillingError, Result};
 use crate::storage::{
-    rentals::RentalRepository, BillingEvent, EventRepository, PackageRepository,
-    SqlCreditRepository, SqlRentalRepository, UsageEvent,
+    rentals::RentalRepository, BillingEvent, EventRepository, SqlCreditRepository,
+    SqlRentalRepository, UsageEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -22,7 +22,6 @@ use uuid::Uuid;
 pub struct BillingEventHandlers {
     rental_repository: Arc<SqlRentalRepository>,
     credit_repository: Arc<SqlCreditRepository>,
-    package_repository: Arc<dyn PackageRepository + Send + Sync>,
     event_repository: Arc<dyn EventRepository + Send + Sync>,
 }
 
@@ -30,13 +29,11 @@ impl BillingEventHandlers {
     pub fn new(
         rental_repository: Arc<SqlRentalRepository>,
         credit_repository: Arc<SqlCreditRepository>,
-        package_repository: Arc<dyn PackageRepository + Send + Sync>,
         event_repository: Arc<dyn EventRepository + Send + Sync>,
     ) -> Self {
         Self {
             rental_repository,
             credit_repository,
-            package_repository,
             event_repository,
         }
     }

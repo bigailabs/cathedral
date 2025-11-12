@@ -121,7 +121,6 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Billing endpoints - require authentication but no specific scope
         // All authenticated users should be able to access their own billing information
         (&Method::GET, "/billing/balance") => Some(String::new()),
-        (&Method::GET, "/billing/packages") => Some(String::new()),
         (&Method::GET, "/billing/usage") => Some(String::new()),
         (&Method::GET, p) if p.starts_with("/billing/usage/") => Some(String::new()),
 
@@ -227,13 +226,6 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/billing/balance")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(get_required_scope(&req), Some(String::new()));
-
-        let req = Request::builder()
-            .method(Method::GET)
-            .uri("/billing/packages")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));

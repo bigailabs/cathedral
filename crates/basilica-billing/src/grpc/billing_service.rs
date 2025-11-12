@@ -3,29 +3,22 @@ use crate::domain::idempotency::{generate_idempotency_key, prepare_event_data_fo
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
     rentals::{RentalManager, RentalOperations},
-    types::{CreditBalance, GpuSpec, PackageId, RentalId, RentalState, ResourceSpec, UserId},
+    types::{CreditBalance, GpuSpec, RentalId, RentalState, ResourceSpec, UserId},
 };
 use crate::error::BillingError;
 use crate::metrics::BillingMetricsSystem;
-use crate::pricing::PricingService;
 use crate::storage::events::{EventType, UsageEvent};
 use crate::storage::rds::RdsConnection;
-use crate::storage::{PackageRepository, SqlPackageRepository};
-use crate::storage::{PriceCacheRepository, SqlPriceCacheRepository};
 use crate::storage::{RentalRepository, SqlCreditRepository, SqlRentalRepository};
-use crate::storage::{SqlUserPreferencesRepository, UserPreferencesRepository};
 use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 
 use basilica_protocol::billing::{
     billing_service_server::BillingService, ActiveRental, ApplyCreditsRequest,
     ApplyCreditsResponse, FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
-    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, GetBillingPackagesRequest,
-    GetBillingPackagesResponse, GetCachedPricesRequest, GetCachedPricesResponse,
-    GetPriceHistoryRequest, GetPriceHistoryResponse, IngestResponse, RentalStatus,
-    SetUserPackageRequest, SetUserPackageResponse, SyncPricesRequest, SyncPricesResponse,
-    TelemetryData, TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
-    UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest, UsageReportResponse,
-    UsageSummary,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse,
+    RentalStatus, TelemetryData, TrackRentalRequest, TrackRentalResponse,
+    UpdateRentalStatusRequest, UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest,
+    UsageReportResponse, UsageSummary,
 };
 
 use rust_decimal::prelude::*;
@@ -44,13 +37,8 @@ pub struct BillingServiceImpl {
     telemetry_processor: Arc<TelemetryProcessor>,
     telemetry_ingester: Arc<TelemetryIngester>,
     rental_repository: Arc<dyn RentalRepository + Send + Sync>,
-    package_repository: Arc<dyn PackageRepository + Send + Sync>,
-    user_preferences_repository: Arc<dyn UserPreferencesRepository + Send + Sync>,
     event_store: Arc<EventStore>,
     metrics: Option<Arc<BillingMetricsSystem>>,
-    pricing_service: Option<Arc<PricingService>>,
-    pricing_config: Option<crate::pricing::types::DynamicPricingConfig>,
-    price_cache: Arc<dyn PriceCacheRepository>,
 }
 
 impl BillingServiceImpl {
@@ -60,31 +48,6 @@ impl BillingServiceImpl {
         telemetry_processor: Arc<TelemetryProcessor>,
         metrics: Option<Arc<BillingMetricsSystem>>,
     ) -> anyhow::Result<Self> {
-        // Create default price cache
-        let price_cache: Arc<dyn PriceCacheRepository> =
-            Arc::new(SqlPriceCacheRepository::new(Arc::clone(&rds_connection)));
-
-        Self::new_with_pricing(
-            rds_connection,
-            telemetry_ingester,
-            telemetry_processor,
-            metrics,
-            None,
-            None,
-            price_cache,
-        )
-        .await
-    }
-
-    pub async fn new_with_pricing(
-        rds_connection: Arc<RdsConnection>,
-        telemetry_ingester: Arc<TelemetryIngester>,
-        telemetry_processor: Arc<TelemetryProcessor>,
-        metrics: Option<Arc<BillingMetricsSystem>>,
-        pricing_service: Option<Arc<PricingService>>,
-        pricing_config: Option<crate::pricing::types::DynamicPricingConfig>,
-        price_cache: Arc<dyn PriceCacheRepository>,
-    ) -> anyhow::Result<Self> {
         let audit_repository = Arc::new(crate::storage::SqlAuditRepository::new(
             rds_connection.clone(),
         ));
@@ -93,20 +56,6 @@ impl BillingServiceImpl {
             audit_repository,
         ));
         let rental_repository = Arc::new(SqlRentalRepository::new(rds_connection.clone()));
-
-        // Create package repository with shared pricing service if available
-        let mut package_repository = SqlPackageRepository::new(rds_connection.pool().clone());
-        if let Some(ref pricing_svc) = pricing_service {
-            package_repository = package_repository.with_pricing_service(pricing_svc.clone());
-        }
-        let package_repository = Arc::new(package_repository);
-
-        package_repository
-            .initialize()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to initialize package repository: {}", e))?;
-        let user_preferences_repository =
-            Arc::new(SqlUserPreferencesRepository::new(rds_connection.clone()));
 
         // Create event repositories using proper pattern
         let event_repository = Arc::new(crate::storage::events::SqlEventRepository::new(
@@ -128,13 +77,8 @@ impl BillingServiceImpl {
             telemetry_processor,
             telemetry_ingester,
             rental_repository: rental_repository.clone(),
-            package_repository: package_repository.clone(),
-            user_preferences_repository: user_preferences_repository.clone(),
             event_store,
             metrics,
-            pricing_service,
-            pricing_config,
-            price_cache,
         })
     }
 
@@ -979,268 +923,6 @@ impl BillingService for BillingServiceImpl {
             total_cost: Self::format_credit_balance(rental.cost_breakdown.total_cost),
         };
 
-        Ok(Response::new(response))
-    }
-
-    async fn get_billing_packages(
-        &self,
-        request: Request<GetBillingPackagesRequest>,
-    ) -> std::result::Result<Response<GetBillingPackagesResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = UserId::new(req.user_id);
-
-        let packages = self
-            .package_repository
-            .list_packages()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to list packages: {}", e)))?;
-
-        let billing_packages = packages.into_iter().map(|p| p.to_proto()).collect();
-
-        // Get the user's current package preference (empty string if none set)
-        // Package assignment happens automatically based on GPU model when creating rentals
-        let current_package_id = match self
-            .user_preferences_repository
-            .get_user_package(&user_id)
-            .await
-        {
-            Ok(Some(pref)) => pref.package_id.to_string(),
-            Ok(None) | Err(_) => String::new(), // No preference set
-        };
-
-        let response = GetBillingPackagesResponse {
-            packages: billing_packages,
-            current_package_id,
-        };
-
-        Ok(Response::new(response))
-    }
-
-    async fn set_user_package(
-        &self,
-        request: Request<SetUserPackageRequest>,
-    ) -> std::result::Result<Response<SetUserPackageResponse>, Status> {
-        let req = request.into_inner();
-        let user_id = UserId::new(req.user_id);
-        let new_package_id = PackageId::new(req.package_id.clone());
-
-        info!("Setting package {} for user {}", new_package_id, user_id);
-
-        let _package = self
-            .package_repository
-            .get_package(&new_package_id)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get package: {}", e)))?;
-
-        let effective_from = req.effective_from.as_ref().map(|timestamp| {
-            chrono::DateTime::from_timestamp(timestamp.seconds, timestamp.nanos as u32)
-                .unwrap_or_else(chrono::Utc::now)
-        });
-
-        let previous_package_id = self
-            .user_preferences_repository
-            .set_user_package(&user_id, &new_package_id, effective_from)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to update user package: {}", e)))?;
-
-        let response = SetUserPackageResponse {
-            success: true,
-            previous_package_id: previous_package_id
-                .unwrap_or_else(PackageId::standard)
-                .to_string(),
-            new_package_id: new_package_id.to_string(),
-            effective_from: req.effective_from,
-        };
-
-        Ok(Response::new(response))
-    }
-
-    async fn sync_prices(
-        &self,
-        request: Request<SyncPricesRequest>,
-    ) -> std::result::Result<Response<SyncPricesResponse>, Status> {
-        let req = request.into_inner();
-
-        info!("Manual price sync requested (force={})", req.force_sync);
-
-        // Check if pricing service is available
-        let pricing_service = self.pricing_service.as_ref().ok_or_else(|| {
-            Status::failed_precondition("Dynamic pricing is not enabled on this server")
-        })?;
-
-        let sync_started_at = chrono::Utc::now();
-
-        // Perform the sync
-        let prices_synced = pricing_service
-            .sync_prices()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to sync prices: {}", e)))?;
-
-        let sync_completed_at = chrono::Utc::now();
-
-        // Calculate next scheduled sync based on update_interval_seconds
-        let next_scheduled_sync = if let Some(ref config) = self.pricing_config {
-            sync_completed_at + chrono::Duration::seconds(config.update_interval_seconds as i64)
-        } else {
-            // Default to 24 hours if config not available
-            sync_completed_at + chrono::Duration::hours(24)
-        };
-
-        let response = SyncPricesResponse {
-            success: true,
-            prices_synced: prices_synced as u32,
-            sync_started_at: Some(prost_types::Timestamp {
-                seconds: sync_started_at.timestamp(),
-                nanos: sync_started_at.timestamp_subsec_nanos() as i32,
-            }),
-            sync_completed_at: Some(prost_types::Timestamp {
-                seconds: sync_completed_at.timestamp(),
-                nanos: sync_completed_at.timestamp_subsec_nanos() as i32,
-            }),
-            next_scheduled_sync: Some(prost_types::Timestamp {
-                seconds: next_scheduled_sync.timestamp(),
-                nanos: next_scheduled_sync.timestamp_subsec_nanos() as i32,
-            }),
-            error_message: String::new(),
-        };
-
-        info!("Price sync completed: {} prices synced", prices_synced);
-        Ok(Response::new(response))
-    }
-
-    async fn get_cached_prices(
-        &self,
-        request: Request<GetCachedPricesRequest>,
-    ) -> std::result::Result<Response<GetCachedPricesResponse>, Status> {
-        let req = request.into_inner();
-
-        info!("Get cached prices requested");
-
-        // Get all cached prices
-        let cached_prices = self
-            .price_cache
-            .get_all()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to get cached prices: {}", e)))?;
-
-        // Filter by GPU models if specified
-        let filtered_prices: Vec<_> = if req.gpu_models.is_empty() {
-            cached_prices
-        } else {
-            cached_prices
-                .into_iter()
-                .filter(|p| req.gpu_models.contains(&p.gpu_model))
-                .collect()
-        };
-
-        // Filter by providers if specified (use source field for provider filtering)
-        let filtered_prices: Vec<_> = if req.providers.is_empty() {
-            filtered_prices
-        } else {
-            filtered_prices
-                .into_iter()
-                .filter(|p| req.providers.contains(&p.source))
-                .collect()
-        };
-
-        // Convert to proto format
-        let prices = filtered_prices
-            .into_iter()
-            .map(|p| basilica_protocol::billing::GpuPrice {
-                gpu_model: p.gpu_model.clone(),
-                vram_gb: p.vram_gb.unwrap_or(0),
-                market_price_per_hour: Self::format_decimal(p.market_price_per_hour),
-                discounted_price_per_hour: Self::format_decimal(p.discounted_price_per_hour),
-                discount_percent: Self::format_decimal(p.discount_percent),
-                source: p.source.clone(),
-                provider: p.source, // Use source as provider for backward compatibility
-                location: String::new(), // No longer stored
-                instance_name: String::new(), // No longer stored
-                updated_at: Some(prost_types::Timestamp {
-                    seconds: p.updated_at.timestamp(),
-                    nanos: p.updated_at.timestamp_subsec_nanos() as i32,
-                }),
-                expires_at: {
-                    let expires = p.updated_at + chrono::Duration::seconds(86400);
-                    Some(prost_types::Timestamp {
-                        seconds: expires.timestamp(),
-                        nanos: expires.timestamp_subsec_nanos() as i32,
-                    })
-                },
-                is_spot: p.is_spot,
-            })
-            .collect();
-
-        let response = GetCachedPricesResponse {
-            prices,
-            cached_at: Some(prost_types::Timestamp {
-                seconds: chrono::Utc::now().timestamp(),
-                nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
-            }),
-        };
-
-        info!("Returned {} cached prices", response.prices.len());
-        Ok(Response::new(response))
-    }
-
-    async fn get_price_history(
-        &self,
-        request: Request<GetPriceHistoryRequest>,
-    ) -> std::result::Result<Response<GetPriceHistoryResponse>, Status> {
-        use crate::storage::PriceHistoryFilter;
-
-        let req = request.into_inner();
-
-        if req.gpu_model.is_empty() {
-            return Err(Status::invalid_argument("gpu_model is required"));
-        }
-
-        info!("Get price history requested for GPU: {}", req.gpu_model);
-
-        // Build filter from request
-        let filter = PriceHistoryFilter {
-            gpu_model: req.gpu_model.clone(),
-            start_time: req
-                .start_time
-                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)),
-            end_time: req
-                .end_time
-                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)),
-            providers: req.providers.clone(),
-            limit: req.limit,
-        };
-
-        // Query repository
-        let history_entries = self
-            .price_cache
-            .get_price_history(filter)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to fetch price history: {}", e)))?;
-
-        // Convert to protocol format
-        let entries = history_entries
-            .into_iter()
-            .map(|entry| basilica_protocol::billing::PriceHistoryEntry {
-                gpu_model: entry.gpu_model,
-                price_per_hour: Self::format_decimal(entry.price_per_hour),
-                source: entry.source,
-                provider: entry.provider,
-                recorded_at: Some(prost_types::Timestamp {
-                    seconds: entry.recorded_at.timestamp(),
-                    nanos: entry.recorded_at.timestamp_subsec_nanos() as i32,
-                }),
-            })
-            .collect::<Vec<_>>();
-
-        let total_count = entries.len() as u64;
-
-        let response = GetPriceHistoryResponse {
-            gpu_model: req.gpu_model,
-            entries,
-            total_count,
-        };
-
-        info!("Returned {} price history entries", total_count);
         Ok(Response::new(response))
     }
 }

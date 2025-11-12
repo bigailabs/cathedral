@@ -18,20 +18,6 @@ pub struct BalanceResponse {
     pub last_updated: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct BillingPackageInfo {
-    pub package_id: String,
-    pub name: String,
-    pub description: String,
-    pub hourly_rate: String,
-    pub is_active: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PackagesResponse {
-    pub packages: Vec<BillingPackageInfo>,
-    pub current_package_id: String,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct UsageHistoryQuery {
@@ -91,7 +77,6 @@ pub struct RentalUsageResponse {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/balance", get(get_balance))
-        .route("/packages", get(get_packages))
         .route("/usage", get(get_usage_history))
         .route("/usage/:rental_id", get(get_rental_usage))
 }
@@ -129,56 +114,6 @@ async fn get_balance(
         available: response.available_balance,
         total: response.total_balance,
         last_updated,
-    }))
-}
-
-async fn get_packages(
-    State(state): State<AppState>,
-    axum::Extension(auth): axum::Extension<AuthContext>,
-) -> Result<Json<PackagesResponse>> {
-    debug!("Getting billing packages for user: {}", auth.user_id);
-
-    let billing_client = state
-        .billing_client
-        .as_ref()
-        .ok_or_else(|| ApiError::ServiceUnavailable)?;
-
-    let response = billing_client
-        .get_billing_packages(&auth.user_id)
-        .await
-        .map_err(|e| {
-            error!("Failed to get billing packages: {}", e);
-            ApiError::Internal {
-                message: format!("Failed to get billing packages: {}", e),
-            }
-        })?;
-
-    let packages: Vec<BillingPackageInfo> = response
-        .packages
-        .into_iter()
-        .map(|pkg| {
-            let hourly_rate = pkg
-                .rates
-                .and_then(|r| {
-                    let mut pairs: Vec<(String, String)> = r.gpu_rates.into_iter().collect();
-                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
-                    pairs.into_iter().next().map(|(_, rate)| rate)
-                })
-                .unwrap_or_default();
-
-            BillingPackageInfo {
-                package_id: pkg.package_id,
-                name: pkg.name,
-                description: pkg.description,
-                hourly_rate,
-                is_active: pkg.is_active,
-            }
-        })
-        .collect();
-
-    Ok(Json(PackagesResponse {
-        packages,
-        current_package_id: response.current_package_id,
     }))
 }
 

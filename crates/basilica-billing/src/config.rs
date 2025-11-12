@@ -1,4 +1,3 @@
-use crate::pricing::types::DynamicPricingConfig;
 use basilica_common::error::ConfigurationError;
 use figment::{
     providers::{Env, Format, Serialized, Toml},
@@ -19,7 +18,6 @@ pub struct BillingConfig {
     pub telemetry: TelemetryConfig,
     pub rules_engine: RulesEngineConfig,
     pub aws: AwsConfig,
-    pub dynamic_pricing: DynamicPricingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +167,6 @@ impl Default for BillingConfig {
                 secret_name: None,
                 endpoint_url: None,
             },
-            dynamic_pricing: DynamicPricingConfig::default(),
         }
     }
 }

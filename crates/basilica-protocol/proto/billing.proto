@@ -20,15 +20,6 @@ service BillingService {
     // Telemetry ingestion
     rpc IngestTelemetry(stream TelemetryData) returns (IngestResponse);
     rpc GetUsageReport(UsageReportRequest) returns (UsageReportResponse);
-
-    // Billing rules and packages
-    rpc GetBillingPackages(GetBillingPackagesRequest) returns (GetBillingPackagesResponse);
-    rpc SetUserPackage(SetUserPackageRequest) returns (SetUserPackageResponse);
-
-    // Dynamic GPU pricing
-    rpc SyncPrices(SyncPricesRequest) returns (SyncPricesResponse);
-    rpc GetCachedPrices(GetCachedPricesRequest) returns (GetCachedPricesResponse);
-    rpc GetPriceHistory(GetPriceHistoryRequest) returns (GetPriceHistoryResponse);
 }
 
 // Credit Management Messages
@@ -237,124 +228,9 @@ message UsageSummary {
     google.protobuf.Duration duration = 6;
 }
 
-// Billing Rules and Packages
-
-message GetBillingPackagesRequest {
-    string user_id = 1;
-}
-
-message GetBillingPackagesResponse {
-    repeated BillingPackage packages = 1;
-    string current_package_id = 2;
-}
-
-message BillingPackage {
-    string package_id = 1;
-    string name = 2;
-    string description = 3;
-    PackageRates rates = 4;
-    IncludedResources included_resources = 5;
-    PackageRates overage_rates = 6;
-    uint32 priority = 7;
-    bool is_active = 8;
-}
-
-message PackageRates {
-    string cpu_rate_per_hour = 1; // Decimal string
-    string memory_rate_per_gb_hour = 2; // Decimal string
-    map<string, string> gpu_rates = 3; // GPU model -> rate per hour
-    string network_rate_per_gb = 4; // Decimal string
-    string disk_iops_rate = 5; // Decimal string
-    string base_rate_per_hour = 6; // Decimal string
-}
-
-message IncludedResources {
-    uint32 cpu_core_hours = 1;
-    uint64 memory_gb_hours = 2;
-    map<string, uint32> gpu_hours = 3; // GPU model -> included hours
-    uint64 network_gb = 4;
-    uint64 disk_iops = 5;
-}
-
-message SetUserPackageRequest {
-    string user_id = 1;
-    string package_id = 2;
-    google.protobuf.Timestamp effective_from = 3;
-}
-
-message SetUserPackageResponse {
-    bool success = 1;
-    string previous_package_id = 2;
-    string new_package_id = 3;
-    google.protobuf.Timestamp effective_from = 4;
-}
-
 // Error details for better error handling
 message ErrorDetail {
     string code = 1;
     string message = 2;
     map<string, string> metadata = 3;
-}
-
-// Dynamic GPU Pricing Messages
-
-message SyncPricesRequest {
-    bool force_sync = 1; // Force immediate sync even if recently synced
-}
-
-message SyncPricesResponse {
-    bool success = 1;
-    uint32 prices_synced = 2;
-    google.protobuf.Timestamp sync_started_at = 3;
-    google.protobuf.Timestamp sync_completed_at = 4;
-    google.protobuf.Timestamp next_scheduled_sync = 5;
-    string error_message = 7;
-}
-
-message GetCachedPricesRequest {
-    repeated string gpu_models = 1; // Filter by GPU models (empty = all)
-    repeated string providers = 2; // Filter by providers (empty = all)
-    bool include_expired = 3; // Include expired cache entries
-}
-
-message GetCachedPricesResponse {
-    repeated GpuPrice prices = 1;
-    google.protobuf.Timestamp cached_at = 2;
-}
-
-message GpuPrice {
-    string gpu_model = 1;
-    uint32 vram_gb = 2;
-    string market_price_per_hour = 3; // Decimal string
-    string discounted_price_per_hour = 4; // Decimal string
-    string discount_percent = 5; // Decimal string
-    string source = 6;
-    string provider = 7;
-    string location = 8;
-    string instance_name = 9;
-    google.protobuf.Timestamp updated_at = 10;
-    google.protobuf.Timestamp expires_at = 11;
-    bool is_spot = 12;
-}
-
-message GetPriceHistoryRequest {
-    string gpu_model = 1; // Required
-    google.protobuf.Timestamp start_time = 2;
-    google.protobuf.Timestamp end_time = 3;
-    repeated string providers = 4; // Filter by providers (empty = all)
-    uint32 limit = 5; // Max number of results (default: 100)
-}
-
-message GetPriceHistoryResponse {
-    string gpu_model = 1;
-    repeated PriceHistoryEntry entries = 2;
-    uint64 total_count = 3;
-}
-
-message PriceHistoryEntry {
-    string gpu_model = 1;
-    string price_per_hour = 2; // Decimal string
-    string source = 3;
-    string provider = 4;
-    google.protobuf.Timestamp recorded_at = 5;
 }
