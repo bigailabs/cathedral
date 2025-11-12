@@ -120,7 +120,7 @@ resource "aws_lb_target_group_attachment" "envoy_on_k3s_servers" {
 
   target_group_arn = module.deployments_alb.target_group_arn
   target_id        = module.k3s_servers.instance_ids[count.index]
-  port             = 32162
+  port             = 30322
 
   depends_on = [module.k3s_servers, module.deployments_alb]
 }

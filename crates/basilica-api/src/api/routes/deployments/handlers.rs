@@ -1,8 +1,8 @@
 use crate::api::middleware::AuthContext;
 use crate::apimetrics;
 use crate::db;
-use crate::envoy::{EnvoyConfigManager, EnvoyRoute};
 use crate::error::{ApiError, Result};
+use crate::gateway::HTTPRoute;
 use crate::server::AppState;
 use axum::{
     extract::{Path, State},
@@ -55,38 +55,47 @@ async fn create_k8s_resources(
     tracing::debug!(
         namespace = namespace,
         cr_name = cr_name,
-        "Configuring Envoy routing"
-    );
-    let envoy_manager = EnvoyConfigManager::new(
-        k8s_client.clone(),
-        config.deployment.envoy_namespace.clone(),
-        config.deployment.envoy_configmap_name.clone(),
-        config.deployment.max_configmap_size_bytes,
+        "Creating HTTPRoute for Gateway API routing"
     );
 
     let service_name = format!("s-{}", instance_name);
-    let target_service = format!("{}.{}:{}", service_name, namespace, req.port);
-
-    let envoy_host = if req.public {
-        config.dns.build_fqdn(instance_name)
+    let httproute = if req.public {
+        if let Some(hostname) = config.dns.build_fqdn(instance_name) {
+            HTTPRoute::new_host_based(
+                instance_name.to_string(),
+                namespace.to_string(),
+                service_name,
+                req.port as i32,
+                hostname,
+            )
+        } else {
+            tracing::warn!(
+                namespace = namespace,
+                instance_name = instance_name,
+                "Public deployment requested but DNS not configured, using path-based routing"
+            );
+            HTTPRoute::new_path_based(
+                instance_name.to_string(),
+                namespace.to_string(),
+                service_name,
+                req.port as i32,
+            )
+        }
     } else {
-        None
+        HTTPRoute::new_path_based(
+            instance_name.to_string(),
+            namespace.to_string(),
+            service_name,
+            req.port as i32,
+        )
     };
 
-    envoy_manager
-        .add_route(EnvoyRoute {
-            prefix: path_prefix.to_string(),
-            cluster_name: format!("user_deployment_{}", instance_name),
-            target_service,
-            rewrite: "/".to_string(),
-            host: envoy_host,
-        })
-        .await?;
+    httproute.create(&k8s_client.kube_client()).await?;
 
     tracing::debug!(
         namespace = namespace,
         cr_name = cr_name,
-        "Envoy will auto-reload configuration via watched_directory"
+        "HTTPRoute created, Envoy Gateway will auto-update via xDS"
     );
 
     Ok(())
@@ -526,17 +535,17 @@ pub async fn delete_deployment(
             .await;
     }
 
-    let envoy_manager = EnvoyConfigManager::new(
-        k8s_client.clone(),
-        state.config.deployment.envoy_namespace.clone(),
-        state.config.deployment.envoy_configmap_name.clone(),
-        state.config.deployment.max_configmap_size_bytes,
-    );
+    let service_name = format!("s-{}", instance_name);
+    let httproute = HTTPRoute {
+        instance_name: instance_name.clone(),
+        namespace: deployment.namespace.clone(),
+        service_name,
+        service_port: deployment.port,
+        path_prefix: None,
+        hostname: None,
+    };
 
-    let cluster_name = format!("user_deployment_{}", instance_name);
-    envoy_manager
-        .remove_route(&deployment.path_prefix, &cluster_name)
-        .await?;
+    httproute.delete(&k8s_client.kube_client()).await?;
 
     if deployment.public {
         if let Some(dns_provider) = &state.dns_provider {
