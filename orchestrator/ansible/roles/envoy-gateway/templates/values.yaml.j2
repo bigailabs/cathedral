@@ -1,5 +1,13 @@
 deployment:
   replicas: {{ gateway_controller_replicas }}
+  pod:
+    tolerations:
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+    - key: basilica.ai/control-plane-only
+      operator: Exists
+      effect: NoSchedule
   envoyGateway:
     resources:
       requests:

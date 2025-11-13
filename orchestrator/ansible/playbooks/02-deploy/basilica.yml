@@ -260,12 +260,8 @@
       changed_when: true
       when: install_envoy_forward_proxy | bool
 
-    - name: Optional — install Gateway API manifests
-      ansible.builtin.shell: |
-        set -euo pipefail
-        kubectl apply -f /opt/basilica/k8s/networking/gateway-api/examples/gatewayclass.yaml || true
-      args:
-        executable: /bin/bash
-      changed_when: true
-      when: install_gateway_api | bool
+    # Gateway API deployment is handled via 06-adhoc/gateway.yml playbook
+    # Run separately: ansible-playbook -i inventories/production.ini playbooks/06-adhoc/gateway.yml
+    # This includes: Envoy Gateway Helm install, GatewayClass, Gateway, EnvoyProxy config,
+    # BackendTrafficPolicy, ReferenceGrant, PDBs, and HPA
 
