@@ -1,10 +1,12 @@
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, PodSecurityContext, PodSpec, PodTemplateSpec, ResourceRequirements,
-    SecurityContext, Service, ServicePort, ServiceSpec, Toleration,
+    Capabilities, Container, HTTPGetAction, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
+    ResourceRequirements, SecurityContext, Service, ServicePort, ServiceSpec, TCPSocketAction,
+    Toleration,
 };
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPort, NetworkPolicySpec,
+    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
+    NetworkPolicySpec,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -68,10 +70,17 @@ fn build_env(env: &[CrdEnvVar]) -> Vec<k8s_openapi::api::core::v1::EnvVar> {
         .collect()
 }
 
+fn build_node_selector() -> BTreeMap<String, String> {
+    let mut selector = BTreeMap::new();
+    selector.insert("basilica.ai/workloads-only".to_string(), "true".to_string());
+    selector
+}
+
 fn build_tolerations() -> Vec<Toleration> {
     vec![Toleration {
-        key: Some("node-role.kubernetes.io/control-plane".into()),
-        operator: Some("Exists".into()),
+        key: Some("basilica.ai/workloads-only".into()),
+        operator: Some("Equal".into()),
+        value: Some("true".into()),
         effect: Some("NoSchedule".into()),
         ..Default::default()
     }]
@@ -108,6 +117,70 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
     (pod_sc, container_sc)
 }
 
+fn build_health_probes(
+    port: u32,
+    health_check: &Option<crate::crd::user_deployment::HealthCheckConfig>,
+) -> (Option<Probe>, Option<Probe>) {
+    match health_check {
+        Some(config) => {
+            let liveness_probe = config.liveness.as_ref().map(|probe_cfg| Probe {
+                http_get: Some(HTTPGetAction {
+                    path: Some(probe_cfg.path.clone()),
+                    port: IntOrString::Int(port as i32),
+                    ..Default::default()
+                }),
+                initial_delay_seconds: Some(probe_cfg.initial_delay_seconds as i32),
+                period_seconds: Some(probe_cfg.period_seconds as i32),
+                timeout_seconds: Some(probe_cfg.timeout_seconds as i32),
+                failure_threshold: Some(probe_cfg.failure_threshold as i32),
+                ..Default::default()
+            });
+
+            let readiness_probe = config.readiness.as_ref().map(|probe_cfg| Probe {
+                http_get: Some(HTTPGetAction {
+                    path: Some(probe_cfg.path.clone()),
+                    port: IntOrString::Int(port as i32),
+                    ..Default::default()
+                }),
+                initial_delay_seconds: Some(probe_cfg.initial_delay_seconds as i32),
+                period_seconds: Some(probe_cfg.period_seconds as i32),
+                timeout_seconds: Some(probe_cfg.timeout_seconds as i32),
+                failure_threshold: Some(probe_cfg.failure_threshold as i32),
+                ..Default::default()
+            });
+
+            (liveness_probe, readiness_probe)
+        }
+        None => {
+            let liveness_probe = Some(Probe {
+                tcp_socket: Some(TCPSocketAction {
+                    port: IntOrString::Int(port as i32),
+                    ..Default::default()
+                }),
+                initial_delay_seconds: Some(30),
+                period_seconds: Some(10),
+                timeout_seconds: Some(5),
+                failure_threshold: Some(3),
+                ..Default::default()
+            });
+
+            let readiness_probe = Some(Probe {
+                tcp_socket: Some(TCPSocketAction {
+                    port: IntOrString::Int(port as i32),
+                    ..Default::default()
+                }),
+                initial_delay_seconds: Some(10),
+                period_seconds: Some(5),
+                timeout_seconds: Some(3),
+                failure_threshold: Some(2),
+                ..Default::default()
+            });
+
+            (liveness_probe, readiness_probe)
+        }
+    }
+}
+
 pub fn render_deployment(
     instance_name: &str,
     namespace: &str,
@@ -115,6 +188,7 @@ pub fn render_deployment(
 ) -> Deployment {
     let (pod_sc, container_sc) = build_security_contexts();
     let (volumes, volume_mounts) = build_writable_volumes();
+    let (liveness_probe, readiness_probe) = build_health_probes(spec.port, &spec.health_check);
 
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), instance_name.to_string());
@@ -159,6 +233,8 @@ pub fn render_deployment(
         resources: Some(resources),
         security_context: container_sc,
         volume_mounts: Some(volume_mounts),
+        liveness_probe,
+        readiness_probe,
         ..Default::default()
     };
 
@@ -170,6 +246,7 @@ pub fn render_deployment(
         spec: Some(PodSpec {
             containers: vec![container],
             security_context: pod_sc,
+            node_selector: Some(build_node_selector()),
             tolerations: Some(build_tolerations()),
             restart_policy: Some("Always".into()),
             automount_service_account_token: Some(false),
@@ -248,6 +325,18 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
     let mut pod_selector_labels = BTreeMap::new();
     pod_selector_labels.insert("app".to_string(), instance_name.to_string());
 
+    let mut envoy_namespace_labels = BTreeMap::new();
+    envoy_namespace_labels.insert(
+        "kubernetes.io/metadata.name".to_string(),
+        "envoy-gateway-system".to_string(),
+    );
+
+    let mut envoy_pod_labels = BTreeMap::new();
+    envoy_pod_labels.insert(
+        "gateway.envoyproxy.io/owning-gateway-name".to_string(),
+        "basilica-gateway".to_string(),
+    );
+
     NetworkPolicy {
         metadata: ObjectMeta {
             name: Some(format!("{}-netpol", instance_name)),
@@ -262,7 +351,17 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
             },
             policy_types: Some(vec!["Ingress".into()]),
             ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![]),
+                from: Some(vec![NetworkPolicyPeer {
+                    namespace_selector: Some(LabelSelector {
+                        match_labels: Some(envoy_namespace_labels),
+                        ..Default::default()
+                    }),
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(envoy_pod_labels),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
                 ports: Some(vec![NetworkPolicyPort {
                     port: Some(IntOrString::Int(port as i32)),
                     protocol: Some("TCP".into()),
@@ -445,6 +544,13 @@ mod tests {
 
         assert_eq!(pod_spec.automount_service_account_token, Some(false));
 
+        assert!(pod_spec.node_selector.is_some());
+        let node_selector = pod_spec.node_selector.unwrap();
+        assert_eq!(
+            node_selector.get("basilica.ai/workloads-only"),
+            Some(&"true".to_string())
+        );
+
         assert!(pod_spec.security_context.is_some());
         let pod_sc = pod_spec.security_context.unwrap();
         assert_eq!(pod_sc.fs_group, Some(1000));
@@ -500,10 +606,20 @@ mod tests {
         assert_eq!(ingress_rules.len(), 1);
 
         let rule = &ingress_rules[0];
+        assert!(rule.from.is_some());
+        let from_peers = rule.from.as_ref().unwrap();
+        assert_eq!(from_peers.len(), 1);
+
+        let peer = &from_peers[0];
+        assert!(peer.namespace_selector.is_some());
+        assert!(peer.pod_selector.is_some());
+
         let ports = rule.ports.as_ref().unwrap();
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].port, Some(IntOrString::Int(80)));
         assert_eq!(ports[0].protocol, Some("TCP".to_string()));
+
+        assert!(spec.egress.is_none());
     }
 
     #[test]
@@ -614,17 +730,26 @@ mod tests {
     }
 
     #[test]
+    fn test_node_selector() {
+        let selector = build_node_selector();
+        assert_eq!(selector.len(), 1);
+        assert_eq!(
+            selector.get("basilica.ai/workloads-only"),
+            Some(&"true".to_string())
+        );
+    }
+
+    #[test]
     fn test_tolerations() {
         let tolerations = build_tolerations();
         assert_eq!(tolerations.len(), 1);
-
-        let tol = &tolerations[0];
         assert_eq!(
-            tol.key,
-            Some("node-role.kubernetes.io/control-plane".to_string())
+            tolerations[0].key.as_deref(),
+            Some("basilica.ai/workloads-only")
         );
-        assert_eq!(tol.operator, Some("Exists".to_string()));
-        assert_eq!(tol.effect, Some("NoSchedule".to_string()));
+        assert_eq!(tolerations[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tolerations[0].value.as_deref(), Some("true"));
+        assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
     }
 
     #[test]

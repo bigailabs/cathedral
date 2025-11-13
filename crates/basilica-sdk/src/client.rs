@@ -518,6 +518,59 @@ impl BasilicaClient {
         self.get("/deployments").await
     }
 
+    /// Get deployment logs
+    ///
+    /// Fetches logs from a deployment's pods.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The deployment instance name
+    /// * `follow` - Whether to stream logs continuously
+    /// * `tail` - Optional number of lines to return from the end
+    ///
+    /// # Returns
+    ///
+    /// Returns a Response that can be used to read logs
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use basilica_sdk::BasilicaClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = BasilicaClient::builder().build().await?;
+    /// let logs = client.get_deployment_logs("my-app", false, Some(100)).await?;
+    /// let body = logs.text().await?;
+    /// println!("Logs: {}", body);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_deployment_logs(
+        &self,
+        instance_name: &str,
+        follow: bool,
+        tail: Option<u32>,
+    ) -> Result<reqwest::Response> {
+        let mut url = format!("{}/deployments/{}/logs", self.base_url, instance_name);
+
+        let mut params = vec![];
+        if follow {
+            params.push(format!("follow={}", follow));
+        }
+        if let Some(t) = tail {
+            params.push(format!("tail={}", t));
+        }
+
+        if !params.is_empty() {
+            url.push('?');
+            url.push_str(&params.join("&"));
+        }
+
+        let request = self.http_client.get(&url);
+        let request = self.apply_auth(request).await?;
+
+        request.send().await.map_err(ApiError::HttpClient)
+    }
+
     // ===== Private Helper Methods =====
 
     /// Apply authentication to request

@@ -19,8 +19,8 @@
       loop:
         - "{{ playbook_dir }}/../../k8s/networking/gateway-api/gatewayclass.yaml"
         - "{{ playbook_dir }}/../../k8s/networking/gateway-api/gateway.yaml"
-        - "{{ playbook_dir }}/../../k8s/networking/gateway-api/referencegrant.yaml"
         - "{{ playbook_dir }}/../../k8s/networking/gateway-api/envoyproxy-config.yaml"
+        - "{{ playbook_dir }}/../../k8s/networking/gateway-api/backend-traffic-policy.yaml"
         - "{{ playbook_dir }}/../../k8s/networking/gateway-api/envoy-pdb.yaml"
         - "{{ playbook_dir }}/../../k8s/networking/gateway-api/controller-pdb.yaml"
 
@@ -39,17 +39,7 @@
         state: present
         src: "/opt/basilica/k8s/networking/gateway-api/gateway.yaml"
 
-    - name: Apply ReferenceGrant
-      kubernetes.core.k8s:
-        state: present
-        src: "/opt/basilica/k8s/networking/gateway-api/referencegrant.yaml"
-
-    - name: Apply Controller PodDisruptionBudget
-      kubernetes.core.k8s:
-        state: present
-        src: "/opt/basilica/k8s/networking/gateway-api/controller-pdb.yaml"
-
-    - name: Wait for Gateway to be ready
+    - name: Wait for Gateway to be ready before applying policies
       kubernetes.core.k8s_info:
         api_version: gateway.networking.k8s.io/v1
         kind: Gateway
@@ -60,7 +50,16 @@
           type: Programmed
           status: "True"
         wait_timeout: 300
-      register: gateway_status
+
+    - name: Apply BackendTrafficPolicy (after Gateway is ready)
+      kubernetes.core.k8s:
+        state: present
+        src: "/opt/basilica/k8s/networking/gateway-api/backend-traffic-policy.yaml"
+
+    - name: Apply Controller PodDisruptionBudget
+      kubernetes.core.k8s:
+        state: present
+        src: "/opt/basilica/k8s/networking/gateway-api/controller-pdb.yaml"
 
     - name: Apply Envoy PodDisruptionBudget (after Gateway creates Envoy pods)
       kubernetes.core.k8s:

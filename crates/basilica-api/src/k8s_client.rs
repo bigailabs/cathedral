@@ -146,10 +146,22 @@ pub trait ApiK8sClient {
         req: &crate::api::routes::deployments::types::CreateDeploymentRequest,
         path_prefix: &str,
     ) -> Result<()>;
+    async fn delete_user_deployment(&self, ns: &str, name: &str) -> Result<()>;
+    async fn delete_deployment(&self, ns: &str, name: &str) -> Result<()>;
+    async fn delete_service(&self, ns: &str, name: &str) -> Result<()>;
+    async fn delete_network_policy(&self, ns: &str, name: &str) -> Result<()>;
 
     async fn user_deployment_exists(&self, ns: &str, name: &str) -> Result<bool>;
 
     async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)>;
+
+    async fn get_user_deployment_logs(
+        &self,
+        ns: &str,
+        name: &str,
+        tail: Option<u32>,
+        since_seconds: Option<u32>,
+    ) -> Result<String>;
 }
 
 #[derive(Default, Clone)]
@@ -573,12 +585,38 @@ impl ApiK8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn delete_user_deployment(&self, _ns: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_deployment(&self, _ns: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_service(&self, _ns: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_network_policy(&self, _ns: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+
     async fn user_deployment_exists(&self, _ns: &str, _name: &str) -> Result<bool> {
         Ok(false)
     }
 
     async fn get_user_deployment_status(&self, _ns: &str, _name: &str) -> Result<(u32, u32)> {
         Ok((2, 2))
+    }
+
+    async fn get_user_deployment_logs(
+        &self,
+        _ns: &str,
+        _name: &str,
+        _tail: Option<u32>,
+        _since_seconds: Option<u32>,
+    ) -> Result<String> {
+        Ok("Mock deployment logs\nLine 1\nLine 2\n".to_string())
     }
 }
 
@@ -762,6 +800,72 @@ impl K8sClient {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    }
+
+    async fn create_reference_grant_for_namespace(&self, user_namespace: &str) -> Result<()> {
+        use kube::{
+            api::{Api, PostParams},
+            core::{ApiResource, DynamicObject, GroupVersionKind},
+        };
+        use serde_json::json;
+
+        let gvk = GroupVersionKind::gvk("gateway.networking.k8s.io", "v1beta1", "ReferenceGrant");
+        let ar = ApiResource::from_gvk(&gvk);
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), "basilica-system", &ar);
+
+        let reference_grant_name = format!("allow-httproutes-{}", user_namespace);
+        let reference_grant = DynamicObject::new(&reference_grant_name, &ar).data(json!({
+            "apiVersion": "gateway.networking.k8s.io/v1beta1",
+            "kind": "ReferenceGrant",
+            "metadata": {
+                "name": reference_grant_name,
+                "namespace": "basilica-system"
+            },
+            "spec": {
+                "from": [{
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "HTTPRoute",
+                    "namespace": user_namespace
+                }],
+                "to": [{
+                    "group": "gateway.networking.k8s.io",
+                    "kind": "Gateway",
+                    "name": "basilica-gateway"
+                }]
+            }
+        }));
+
+        match api.create(&PostParams::default(), &reference_grant).await {
+            Ok(_) => {
+                tracing::info!(
+                    user_namespace = %user_namespace,
+                    reference_grant_name = %reference_grant_name,
+                    "ReferenceGrant created for user namespace"
+                );
+                Ok(())
+            }
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                tracing::debug!(
+                    user_namespace = %user_namespace,
+                    "ReferenceGrant already exists for namespace"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_namespace = %user_namespace,
+                    "Failed to create ReferenceGrant"
+                );
+                Err(ApiError::Internal {
+                    message: format!(
+                        "Failed to create ReferenceGrant for namespace {}: {}",
+                        user_namespace, e
+                    ),
+                })
+            }
+        }
     }
 }
 
@@ -1308,7 +1412,12 @@ impl ApiK8sClient for K8sClient {
         };
 
         match api.create(&PostParams::default(), &ns).await {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                if name.starts_with("u-") {
+                    self.create_reference_grant_for_namespace(name).await?;
+                }
+                Ok(())
+            }
             Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
             Err(e) => Err(ApiError::Internal {
                 message: format!("create namespace failed: {e}"),
@@ -1441,6 +1550,49 @@ impl ApiK8sClient for K8sClient {
             .map(|(k, v)| json!({"name": k, "value": v}))
             .collect();
 
+        let mut spec = json!({
+            "userId": user_id,
+            "instanceName": instance_name,
+            "image": req.image,
+            "replicas": req.replicas,
+            "port": req.port,
+            "command": req.command,
+            "args": req.args,
+            "env": env_objs,
+            "resources": {
+                "cpu": req.resources.as_ref().map(|r| r.cpu.clone()).unwrap_or_else(|| "500m".to_string()),
+                "memory": req.resources.as_ref().map(|r| r.memory.clone()).unwrap_or_else(|| "512Mi".to_string()),
+            },
+            "pathPrefix": path_prefix,
+            "ttlSeconds": req.ttl_seconds,
+        });
+
+        if let Some(ref health_check) = req.health_check {
+            let mut health_check_obj = json!({});
+
+            if let Some(ref liveness) = health_check.liveness {
+                health_check_obj["liveness"] = json!({
+                    "path": liveness.path,
+                    "initialDelaySeconds": liveness.initial_delay_seconds,
+                    "periodSeconds": liveness.period_seconds,
+                    "timeoutSeconds": liveness.timeout_seconds,
+                    "failureThreshold": liveness.failure_threshold,
+                });
+            }
+
+            if let Some(ref readiness) = health_check.readiness {
+                health_check_obj["readiness"] = json!({
+                    "path": readiness.path,
+                    "initialDelaySeconds": readiness.initial_delay_seconds,
+                    "periodSeconds": readiness.period_seconds,
+                    "timeoutSeconds": readiness.timeout_seconds,
+                    "failureThreshold": readiness.failure_threshold,
+                });
+            }
+
+            spec["healthCheck"] = health_check_obj;
+        }
+
         let obj = json!({
             "apiVersion": "basilica.ai/v1",
             "kind": "UserDeployment",
@@ -1448,22 +1600,7 @@ impl ApiK8sClient for K8sClient {
                 "name": name,
                 "namespace": ns,
             },
-            "spec": {
-                "userId": user_id,
-                "instanceName": instance_name,
-                "image": req.image,
-                "replicas": req.replicas,
-                "port": req.port,
-                "command": req.command,
-                "args": req.args,
-                "env": env_objs,
-                "resources": {
-                    "cpu": req.resources.as_ref().map(|r| r.cpu.clone()).unwrap_or_else(|| "500m".to_string()),
-                    "memory": req.resources.as_ref().map(|r| r.memory.clone()).unwrap_or_else(|| "512Mi".to_string()),
-                },
-                "pathPrefix": path_prefix,
-                "ttlSeconds": req.ttl_seconds,
-            }
+            "spec": spec,
         });
 
         let dynobj: kube::core::DynamicObject =
@@ -1478,6 +1615,117 @@ impl ApiK8sClient for K8sClient {
             })?;
 
         Ok(())
+    }
+
+    async fn delete_user_deployment(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        match api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(
+                    namespace = ns,
+                    name = name,
+                    "Successfully deleted UserDeployment CR"
+                );
+                Ok(())
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "UserDeployment CR already gone"
+                );
+                Ok(())
+            }
+            Err(e) => Err(ApiError::Internal {
+                message: format!("delete UserDeployment failed: {e}"),
+            }),
+        }
+    }
+
+    async fn delete_deployment(&self, ns: &str, name: &str) -> Result<()> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        use kube::api::{Api, DeleteParams};
+
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), ns);
+
+        match api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(
+                    namespace = ns,
+                    name = name,
+                    "Successfully deleted Deployment"
+                );
+                Ok(())
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "Deployment not found, already deleted"
+                );
+                Ok(())
+            }
+            Err(e) => Err(ApiError::Internal {
+                message: format!("delete Deployment failed: {e}"),
+            }),
+        }
+    }
+
+    async fn delete_service(&self, ns: &str, name: &str) -> Result<()> {
+        use k8s_openapi::api::core::v1::Service;
+        use kube::api::{Api, DeleteParams};
+
+        let api: Api<Service> = Api::namespaced(self.client.clone(), ns);
+
+        match api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(namespace = ns, name = name, "Successfully deleted Service");
+                Ok(())
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "Service not found, already deleted"
+                );
+                Ok(())
+            }
+            Err(e) => Err(ApiError::Internal {
+                message: format!("delete Service failed: {e}"),
+            }),
+        }
+    }
+
+    async fn delete_network_policy(&self, ns: &str, name: &str) -> Result<()> {
+        use k8s_openapi::api::networking::v1::NetworkPolicy;
+        use kube::api::{Api, DeleteParams};
+
+        let api: Api<NetworkPolicy> = Api::namespaced(self.client.clone(), ns);
+
+        match api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(
+                    namespace = ns,
+                    name = name,
+                    "Successfully deleted NetworkPolicy"
+                );
+                Ok(())
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "NetworkPolicy not found, already deleted"
+                );
+                Ok(())
+            }
+            Err(e) => Err(ApiError::Internal {
+                message: format!("delete NetworkPolicy failed: {e}"),
+            }),
+        }
     }
 
     async fn user_deployment_exists(&self, ns: &str, name: &str) -> Result<bool> {
@@ -1555,6 +1803,65 @@ impl ApiK8sClient for K8sClient {
                 })
             }
         }
+    }
+
+    async fn get_user_deployment_logs(
+        &self,
+        ns: &str,
+        name: &str,
+        tail: Option<u32>,
+        since_seconds: Option<u32>,
+    ) -> Result<String> {
+        use k8s_openapi::api::core::v1::Pod;
+        use kube::api::{Api, LogParams};
+
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+
+        let label_selector = format!("basilica.ai/instance={}", name);
+        let pods = api
+            .list(&kube::api::ListParams::default().labels(&label_selector))
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    namespace = ns,
+                    instance = name,
+                    "Failed to list pods for deployment"
+                );
+                ApiError::Internal {
+                    message: format!("Failed to list pods: {}", e),
+                }
+            })?;
+
+        if pods.items.is_empty() {
+            return Ok(String::new());
+        }
+
+        let pod = &pods.items[0];
+        let pod_name = pod
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| ApiError::Internal {
+                message: "Pod has no name".to_string(),
+            })?;
+
+        let mut log_params = LogParams::default();
+        if let Some(t) = tail {
+            log_params.tail_lines = Some(t as i64);
+        }
+        if let Some(s) = since_seconds {
+            log_params.since_seconds = Some(s as i64);
+        }
+
+        let logs = api.logs(pod_name, &log_params).await.map_err(|e| {
+            tracing::error!(error = %e, namespace = ns, pod = pod_name, "Failed to get pod logs");
+            ApiError::Internal {
+                message: format!("Failed to get logs: {}", e),
+            }
+        })?;
+
+        Ok(logs)
     }
 }
 

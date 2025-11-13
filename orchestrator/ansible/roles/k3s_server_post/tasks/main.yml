@@ -29,6 +29,14 @@
   tags: metallb
   when: metal_lb_mode is defined and kube_vip_lb_ip_range is not defined and (not cilium_bgp or cilium_iface is not defined)
 
+- name: Verify agent node labels
+  ansible.builtin.include_tasks: verify-agent-labels.yml
+  tags: ['k3s', 'post', 'labels']
+
+- name: Apply control plane taints
+  ansible.builtin.include_tasks: taint-control-plane.yml
+  tags: ['k3s', 'post', 'taint']
+
 - name: Remove tmp directory used for manifests
   ansible.builtin.file:
     path: /tmp/k3s

@@ -276,6 +276,73 @@ impl BasilicaClient {
 
         Ok(response.into())
     }
+
+    /// Get deployment logs
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    ///     follow: Whether to follow logs (default: False)
+    ///     tail: Optional number of lines to tail
+    #[pyo3(signature = (instance_name, follow=false, tail=None))]
+    fn get_deployment_logs(
+        &self,
+        py: Python,
+        instance_name: String,
+        follow: bool,
+        tail: Option<u32>,
+    ) -> PyResult<String> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime.block_on(async move {
+                    client
+                        .get_deployment_logs(&instance_name, follow, tail)
+                        .await
+                })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        let text = py
+            .detach(|| self.runtime.block_on(async move { response.text().await }))
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to read response: {}", e)))?;
+
+        Ok(text)
+    }
+
+    /// Get account balance
+    fn get_balance(&self, py: Python) -> PyResult<Py<pyo3::PyAny>> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.get_balance().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        to_pyobject(py, &response)
+    }
+
+    /// List usage history
+    ///
+    /// Args:
+    ///     limit: Maximum number of records (default: 50)
+    ///     offset: Number of records to skip (default: 0)
+    #[pyo3(signature = (limit=50, offset=0))]
+    fn list_usage_history(&self, py: Python, limit: u32, offset: u32) -> PyResult<Py<pyo3::PyAny>> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime.block_on(async move {
+                    client.list_usage_history(Some(limit), Some(offset)).await
+                })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        to_pyobject(py, &response)
+    }
 }
 
 impl BasilicaClient {

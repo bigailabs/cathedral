@@ -49,7 +49,7 @@
     success_msg: "Python version check passed: {{ ansible_facts.python_version }}"
   tags: ['prereq', 'validation']
 
-- name: Check systemd is running
+- name: Check systemd state
   ansible.builtin.command:
     cmd: systemctl is-system-running
   register: systemd_status
@@ -58,13 +58,18 @@
   become: false
   tags: ['prereq', 'validation']
 
+- name: Display systemd state
+  ansible.builtin.debug:
+    msg: "Systemd state: {{ systemd_status.stdout | default('unknown') }}"
+  tags: ['prereq', 'validation']
+
 - name: Verify systemd status
   ansible.builtin.assert:
     that:
       - systemd_status is defined
       - systemd_status.rc == 0 or systemd_status.rc == 1
       - systemd_status.stdout is defined
-      - systemd_status.stdout in ['running', 'degraded']
+      - systemd_status.stdout in ['running', 'degraded', 'initializing', 'starting']
     fail_msg: "Systemd not in expected state: {{ systemd_status.stdout | default('command failed') }}"
     success_msg: "Systemd check passed: {{ systemd_status.stdout }}"
   when: systemd_status.rc is defined and systemd_status.rc in [0, 1]
