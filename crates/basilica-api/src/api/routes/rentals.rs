@@ -269,7 +269,6 @@ pub async fn start_rental(
             node_id,
             validator_id: state.validator_hotkey.clone(),
             resource_spec,
-            hourly_rate: "0.00".to_string(), // Deprecated field
             start_time: Some(timestamp.clone()),
             metadata: Default::default(),
             // Marketplace-2-compute pricing fields

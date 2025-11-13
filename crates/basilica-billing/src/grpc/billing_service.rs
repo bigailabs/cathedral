@@ -525,7 +525,6 @@ impl BillingService for BillingServiceImpl {
                     validator_id: r.validator_id.clone(),
                     status: Self::domain_status_to_proto(r.state).into(),
                     resource_spec,
-                    hourly_rate: Self::format_credit_balance(r.cost_breakdown.base_cost),
                     current_cost: Self::format_credit_balance(r.cost_breakdown.total_cost),
                     start_time: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
                         r.created_at,

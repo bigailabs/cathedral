@@ -159,11 +159,16 @@ async fn get_usage_history(
                 .last_updated
                 .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32))?;
 
+            // Calculate hourly rate from marketplace pricing fields
+            let hourly_rate = rental.base_price_per_gpu
+                * rental.gpu_count as f64
+                * (1.0 + rental.markup_percent / 100.0);
+
             Some(RentalUsageRecord {
                 rental_id: rental.rental_id,
                 node_id: rental.node_id,
                 status: format!("{:?}", rental.status),
-                hourly_rate: rental.hourly_rate,
+                hourly_rate: format!("{:.4}", hourly_rate),
                 current_cost: rental.current_cost,
                 start_time,
                 last_updated,

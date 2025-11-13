@@ -61,9 +61,6 @@ pub struct TrackRentalRequest {
     pub validator_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
     pub resource_spec: ::core::option::Option<ResourceSpec>,
-    /// Decimal string (DEPRECATED: use marketplace pricing fields)
-    #[prost(string, tag = "6")]
-    pub hourly_rate: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "7")]
     pub start_time: ::core::option::Option<::prost_types::Timestamp>,
     #[prost(map = "string, string", tag = "8")]
@@ -185,9 +182,6 @@ pub struct ActiveRental {
     pub status: i32,
     #[prost(message, optional, tag = "6")]
     pub resource_spec: ::core::option::Option<ResourceSpec>,
-    /// Decimal string (DEPRECATED: use marketplace pricing fields)
-    #[prost(string, tag = "7")]
-    pub hourly_rate: ::prost::alloc::string::String,
     /// Decimal string
     #[prost(string, tag = "8")]
     pub current_cost: ::prost::alloc::string::String,

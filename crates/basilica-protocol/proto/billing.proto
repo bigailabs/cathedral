@@ -57,7 +57,7 @@ message TrackRentalRequest {
     string node_id = 3;
     string validator_id = 4;
     ResourceSpec resource_spec = 5;
-    string hourly_rate = 6; // Decimal string (DEPRECATED: use marketplace pricing fields)
+    reserved 6; // Previously hourly_rate (DEPRECATED: removed in favor of marketplace pricing fields)
     google.protobuf.Timestamp start_time = 7;
     map<string, string> metadata = 8;
 
@@ -130,7 +130,7 @@ message ActiveRental {
     string validator_id = 4;
     RentalStatus status = 5;
     ResourceSpec resource_spec = 6;
-    string hourly_rate = 7; // Decimal string (DEPRECATED: use marketplace pricing fields)
+    reserved 7; // Previously hourly_rate (DEPRECATED: removed in favor of marketplace pricing fields)
     string current_cost = 8; // Decimal string
     google.protobuf.Timestamp start_time = 9;
     google.protobuf.Timestamp last_updated = 10;
