@@ -25,6 +25,8 @@ pub struct CreateDeploymentRequest {
     pub ttl_seconds: Option<u32>,
     #[serde(default)]
     pub public: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<HealthCheckConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +34,45 @@ pub struct CreateDeploymentRequest {
 pub struct ResourceRequirements {
     pub cpu: String,
     pub memory: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<ProbeConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ProbeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeConfig {
+    pub path: String,
+    #[serde(default = "default_initial_delay")]
+    pub initial_delay_seconds: u32,
+    #[serde(default = "default_period")]
+    pub period_seconds: u32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+}
+
+fn default_initial_delay() -> u32 {
+    30
+}
+
+fn default_period() -> u32 {
+    10
+}
+
+fn default_timeout() -> u32 {
+    5
+}
+
+fn default_failure_threshold() -> u32 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -510,6 +551,7 @@ mod tests {
             }),
             ttl_seconds: None,
             public: false,
+            health_check: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_ok());
     }
@@ -530,6 +572,7 @@ mod tests {
             }),
             ttl_seconds: None,
             public: false,
+            health_check: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_ok());
     }
@@ -547,6 +590,7 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: false,
+            health_check: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
     }
@@ -567,6 +611,7 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: false,
+            health_check: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
     }
