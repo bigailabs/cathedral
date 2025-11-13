@@ -168,7 +168,7 @@ pub async fn start_secure_cloud_rental(
     .bind(&auth.user_id)
     .bind(&deployment.id)
     .bind(&request.offering_id)
-    .bind(&offering.provider.to_string())
+    .bind(offering.provider.to_string())
     .bind(&request.ssh_public_key_id)
     .bind("running")
     .bind(Utc::now())

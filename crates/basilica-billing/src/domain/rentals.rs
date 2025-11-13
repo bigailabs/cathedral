@@ -219,6 +219,7 @@ impl Rental {
 
 impl SecureCloudRental {
     /// Create a new secure cloud rental with marketplace-2-compute pricing
+    #[allow(clippy::too_many_arguments)]
     pub fn new_marketplace(
         user_id: UserId,
         provider: String,
