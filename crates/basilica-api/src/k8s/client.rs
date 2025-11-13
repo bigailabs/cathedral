@@ -300,6 +300,12 @@ impl ApiK8sClient for K8sClient {
             .map(|(k, v)| json!({"name": k, "value": v}))
             .collect();
 
+        let ports_json: Vec<Value> = spec
+            .container_ports
+            .iter()
+            .map(|p| json!({"containerPort": p.container_port, "protocol": p.protocol}))
+            .collect();
+
         let obj = json!({
             "apiVersion": "basilica.ai/v1",
             "kind": "GpuRental",
@@ -314,7 +320,7 @@ impl ApiK8sClient for K8sClient {
                     "image": spec.container_image,
                     "env": env_objs,
                     "command": spec.container_command,
-                    "ports": spec.container_ports,
+                    "ports": ports_json,
                     "volumes": [],
                     "resources": {
                         "cpu": spec.resources.cpu,
