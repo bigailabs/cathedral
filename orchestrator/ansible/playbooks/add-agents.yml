@@ -1,4 +1,38 @@
 ---
+# Add New K3s Agent Nodes Playbook
+#
+# This playbook safely adds new agent nodes to an existing K3s cluster without
+# recreating or disrupting the control plane.
+#
+# USAGE:
+#   1. Add new agent entries to inventories/production.ini:
+#      agentN ansible_host=<ip> ansible_user=ubuntu ansible_ssh_private_key_file=<path> \
+#             ansible_become=true agent_private_ip=<private_ip>
+#
+#   2. Run this playbook targeting the new agents:
+#      ansible-playbook -i inventories/production.ini playbooks/add-agents.yml \
+#        -e "target_agents=agent3,agent4,agent5"
+#
+#   3. (Optional) Apply labels if not auto-applied:
+#      ansible-playbook -i inventories/production.ini playbooks/01-setup/k3s-cluster.yml \
+#        --tags post,labels
+#
+#   4. Verify:
+#      kubectl --kubeconfig=/root/.kube/k3s-basilica-config get nodes
+#
+# WHAT IT DOES:
+#   - Fetches K3s server token from control plane (read-only)
+#   - Runs prerequisite validation on new agents
+#   - Installs and configures K3s agent
+#   - Joins agents to existing cluster
+#   - Waits for nodes to become Ready
+#
+# SAFETY:
+#   - Zero impact on control plane
+#   - Zero impact on existing agents
+#   - Zero downtime for running workloads
+#
+
 - name: Fetch K3s server token
   hosts: k3s_server[0]
   gather_facts: false
