@@ -174,7 +174,14 @@ impl HTTPRoute {
                 "backendRefs": [{
                     "name": self.service_name.clone(),
                     "port": self.service_port
-                }]
+                }],
+                "timeouts": {
+                    "request": "300s"
+                },
+                "retry": {
+                    "attempts": 2,
+                    "backoff": "1s"
+                }
             }]
         })
     }
@@ -196,7 +203,14 @@ impl HTTPRoute {
                 "backendRefs": [{
                     "name": self.service_name.clone(),
                     "port": self.service_port
-                }]
+                }],
+                "timeouts": {
+                    "request": "300s"
+                },
+                "retry": {
+                    "attempts": 2,
+                    "backoff": "1s"
+                }
             }]
         })
     }
