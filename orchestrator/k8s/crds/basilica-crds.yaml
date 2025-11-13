@@ -721,6 +721,66 @@ spec:
                 type: integer
               userId:
                 type: string
+              healthCheck:
+                nullable: true
+                properties:
+                  liveness:
+                    nullable: true
+                    properties:
+                      failureThreshold:
+                        default: 3
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      initialDelaySeconds:
+                        default: 30
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      path:
+                        type: string
+                      periodSeconds:
+                        default: 10
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      timeoutSeconds:
+                        default: 5
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                    required:
+                    - path
+                    type: object
+                  readiness:
+                    nullable: true
+                    properties:
+                      failureThreshold:
+                        default: 3
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      initialDelaySeconds:
+                        default: 30
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      path:
+                        type: string
+                      periodSeconds:
+                        default: 10
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                      timeoutSeconds:
+                        default: 5
+                        format: uint32
+                        minimum: 0.0
+                        type: integer
+                    required:
+                    - path
+                    type: object
+                type: object
             required:
             - image
             - instanceName
