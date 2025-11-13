@@ -63,6 +63,9 @@ pub struct AppState {
 
     /// GPU Aggregator service (Secure Cloud)
     pub aggregator_service: Arc<AggregatorService>,
+
+    /// Pricing configuration (marketplace markups)
+    pub pricing_config: crate::config::PricingConfig,
 }
 
 /// Process health check for a single rental
@@ -322,6 +325,7 @@ impl Server {
             billing_client,
             metrics,
             aggregator_service,
+            pricing_config: config.pricing.clone(),
         };
 
         // TODO: Re-enable validator health checks before merging - temporarily disabled for development

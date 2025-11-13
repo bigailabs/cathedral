@@ -65,7 +65,7 @@ impl Default for StartRentalRequest {
 }
 
 /// Port mapping request
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct PortMappingRequest {
     pub container_port: u32,
     pub host_port: u32,

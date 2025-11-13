@@ -194,6 +194,35 @@ impl Default for AggregatorProviderConfig {
     }
 }
 
+/// Pricing configuration for marketplace markups
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingConfig {
+    /// Markup percentage for community cloud rentals
+    #[serde(default = "default_community_markup")]
+    pub community_markup_percent: f64,
+
+    /// Markup percentage for secure cloud rentals
+    #[serde(default = "default_secure_cloud_markup")]
+    pub secure_cloud_markup_percent: f64,
+}
+
+fn default_community_markup() -> f64 {
+    10.0
+}
+
+fn default_secure_cloud_markup() -> f64 {
+    15.0
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            community_markup_percent: default_community_markup(),
+            secure_cloud_markup_percent: default_secure_cloud_markup(),
+        }
+    }
+}
+
 /// Main configuration structure for the Basilica API
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -225,6 +254,10 @@ pub struct Config {
     /// GPU Aggregator configuration (secure cloud)
     #[serde(default)]
     pub aggregator: AggregatorConfig,
+
+    /// Pricing configuration (marketplace markups)
+    #[serde(default)]
+    pub pricing: PricingConfig,
 }
 
 impl Config {

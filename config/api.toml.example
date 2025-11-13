@@ -29,3 +29,10 @@ discovery_interval = 30
 # For local development with docker-compose: "postgres://basilica:dev@localhost:5432/basilica"
 url = "postgres://basilica:dev@localhost:5432/basilica"
 max_connections = 5
+
+[pricing]
+# Marketplace pricing markup percentages
+# Community cloud: markup applied to community-provided GPU rentals
+community_markup_percent = 10.0
+# Secure cloud: markup applied to datacenter provider GPU rentals
+secure_cloud_markup_percent = 15.0

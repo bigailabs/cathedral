@@ -55,10 +55,6 @@ pub struct TrackRentalRequest {
     pub rental_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub user_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub node_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "4")]
-    pub validator_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "5")]
     pub resource_spec: ::core::option::Option<ResourceSpec>,
     #[prost(message, optional, tag = "7")]
@@ -68,16 +64,63 @@ pub struct TrackRentalRequest {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
-    /// Marketplace-2-compute pricing fields
-    ///
+    /// Cloud type specific data
+    #[prost(oneof = "track_rental_request::CloudType", tags = "20, 21")]
+    pub cloud_type: ::core::option::Option<track_rental_request::CloudType>,
+}
+/// Nested message and enum types in `TrackRentalRequest`.
+pub mod track_rental_request {
+    /// Cloud type specific data
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum CloudType {
+        #[prost(message, tag = "20")]
+        Community(super::CommunityCloudData),
+        #[prost(message, tag = "21")]
+        Secure(super::SecureCloudData),
+    }
+}
+/// Community cloud rental data (validator-based)
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CommunityCloudData {
+    /// Miner node ID
+    #[prost(string, tag = "1")]
+    pub node_id: ::prost::alloc::string::String,
+    /// Validator hotkey
+    #[prost(string, tag = "2")]
+    pub validator_id: ::prost::alloc::string::String,
     /// Base price per GPU per hour (before markup)
-    #[prost(double, tag = "9")]
+    #[prost(double, tag = "3")]
     pub base_price_per_gpu: f64,
     /// Number of GPUs in this rental
-    #[prost(uint32, tag = "10")]
+    #[prost(uint32, tag = "4")]
     pub gpu_count: u32,
     /// Markup percentage (e.g., 10.0 for 10%)
-    #[prost(double, tag = "11")]
+    #[prost(double, tag = "5")]
+    pub markup_percent: f64,
+}
+/// Secure cloud rental data (direct provider API)
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SecureCloudData {
+    /// Provider's instance ID
+    #[prost(string, tag = "1")]
+    pub provider_instance_id: ::prost::alloc::string::String,
+    /// Provider name (e.g., "datacrunch", "hyperstack")
+    #[prost(string, tag = "2")]
+    pub provider: ::prost::alloc::string::String,
+    /// Original offering ID from aggregator
+    #[prost(string, tag = "3")]
+    pub offering_id: ::prost::alloc::string::String,
+    /// Base price per GPU per hour (before markup)
+    #[prost(double, tag = "4")]
+    pub base_price_per_gpu: f64,
+    /// Number of GPUs in this rental
+    #[prost(uint32, tag = "5")]
+    pub gpu_count: u32,
+    /// Markup percentage (e.g., 15.0 for 15%)
+    #[prost(double, tag = "6")]
     pub markup_percent: f64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -174,10 +217,6 @@ pub struct ActiveRental {
     pub rental_id: ::prost::alloc::string::String,
     #[prost(string, tag = "2")]
     pub user_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub node_id: ::prost::alloc::string::String,
-    #[prost(string, tag = "4")]
-    pub validator_id: ::prost::alloc::string::String,
     #[prost(enumeration = "RentalStatus", tag = "5")]
     pub status: i32,
     #[prost(message, optional, tag = "6")]
@@ -194,17 +233,21 @@ pub struct ActiveRental {
         ::prost::alloc::string::String,
         ::prost::alloc::string::String,
     >,
-    /// Marketplace-2-compute pricing fields
-    ///
-    /// Base price per GPU per hour (before markup)
-    #[prost(double, tag = "12")]
-    pub base_price_per_gpu: f64,
-    /// Number of GPUs in this rental
-    #[prost(uint32, tag = "13")]
-    pub gpu_count: u32,
-    /// Markup percentage (e.g., 10.0 for 10%)
-    #[prost(double, tag = "14")]
-    pub markup_percent: f64,
+    /// Cloud type specific data
+    #[prost(oneof = "active_rental::CloudType", tags = "20, 21")]
+    pub cloud_type: ::core::option::Option<active_rental::CloudType>,
+}
+/// Nested message and enum types in `ActiveRental`.
+pub mod active_rental {
+    /// Cloud type specific data
+    #[allow(clippy::derive_partial_eq_without_eq)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum CloudType {
+        #[prost(message, tag = "20")]
+        Community(super::CommunityCloudData),
+        #[prost(message, tag = "21")]
+        Secure(super::SecureCloudData),
+    }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

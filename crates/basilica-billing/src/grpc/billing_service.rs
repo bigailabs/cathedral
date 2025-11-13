@@ -256,24 +256,13 @@ impl BillingService for BillingServiceImpl {
                 }
             };
 
-            // Extract marketplace-2-compute pricing from request
-            let base_price_per_gpu = rust_decimal::Decimal::from_f64(req.base_price_per_gpu)
-                .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
-
-            let gpu_count = req.gpu_count.max(1); // Ensure at least 1 GPU
-
-            let markup_percent = rust_decimal::Decimal::from_f64(req.markup_percent)
-                .ok_or_else(|| Status::invalid_argument("Invalid markup_percent"))?;
-
-            info!(
-                "Tracking rental {} for user {} at ${}/GPU/hour × {} GPUs with {}% markup",
-                rental_id, user_id, base_price_per_gpu, gpu_count, markup_percent
-            );
+            // Extract cloud type specific data from oneof
+            let cloud_type = req.cloud_type.ok_or_else(|| {
+                Status::invalid_argument("cloud_type is required (community or secure)")
+            })?;
 
             let resource_spec_value =
                 serde_json::to_value(&resource_spec).unwrap_or(serde_json::Value::Null);
-            let validator_id = req.validator_id.clone();
-            let validator_id_copy = validator_id.clone();
 
             // Check if rental already exists (idempotency)
             if let Ok(Some(_existing)) = self.rental_repository.get_rental(&rental_id).await {
@@ -289,61 +278,143 @@ impl BillingService for BillingServiceImpl {
                 return Ok(response);
             }
 
-            // Create rental with marketplace pricing
-            use crate::domain::rentals::Rental;
+            use basilica_protocol::billing::track_rental_request::CloudType;
+            use crate::domain::rentals::{Rental, SecureCloudRental};
 
-            let mut rental = Rental::new_marketplace(
-                user_id.clone(),
-                req.node_id.clone(),
-                validator_id.clone(),
-                resource_spec,
-                base_price_per_gpu,
-                gpu_count,
-                markup_percent,
-            );
+            match cloud_type {
+                CloudType::Community(community_data) => {
+                    let base_price_per_gpu = rust_decimal::Decimal::from_f64(community_data.base_price_per_gpu)
+                        .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
+                    let gpu_count = community_data.gpu_count.max(1);
+                    let markup_percent = rust_decimal::Decimal::from_f64(community_data.markup_percent)
+                        .ok_or_else(|| Status::invalid_argument("Invalid markup_percent"))?;
 
-            // Override the auto-generated ID with the provided rental_id
-            rental.id = rental_id;
+                    info!(
+                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs with {}% markup",
+                        rental_id, user_id, base_price_per_gpu, gpu_count, markup_percent
+                    );
 
-            // Persist to database
-            self.rental_repository
-                .create_rental(&rental)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to create rental: {}", e)))?;
+                    let mut rental = Rental::new_marketplace(
+                        user_id.clone(),
+                        community_data.node_id.clone(),
+                        community_data.validator_id.clone(),
+                        resource_spec.clone(),
+                        base_price_per_gpu,
+                        gpu_count,
+                        markup_percent,
+                    );
+                    rental.id = rental_id;
 
-            let event_data = serde_json::json!({
-                "base_price_per_gpu": base_price_per_gpu.to_string(),
-                "gpu_count": gpu_count,
-                "markup_percent": markup_percent.to_string(),
-                "resource_spec": resource_spec_value,
-                "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
-            });
+                    self.rental_repository
+                        .create_rental(&rental)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to create community rental: {}", e)))?;
 
-            let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
-            let idempotency_key =
-                generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
+                    let event_data = serde_json::json!({
+                        "cloud_type": "community",
+                        "node_id": community_data.node_id,
+                        "validator_id": community_data.validator_id,
+                        "base_price_per_gpu": base_price_per_gpu.to_string(),
+                        "gpu_count": gpu_count,
+                        "markup_percent": markup_percent.to_string(),
+                        "resource_spec": resource_spec_value,
+                        "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
+                    });
 
-            let rental_start_event = UsageEvent {
-                event_id: uuid::Uuid::new_v4(),
-                rental_id: rental_id.as_uuid(),
-                user_id: user_id.to_string(),
-                node_id: req.node_id.clone(),
-                validator_id: validator_id_copy,
-                event_type: EventType::RentalStart,
-                event_data,
-                timestamp: chrono::Utc::now(),
-                processed: false,
-                processed_at: None,
-                batch_id: None,
-                idempotency_key: Some(idempotency_key),
-            };
+                    let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
+                    let idempotency_key =
+                        generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
 
-            self.event_store
-                .append_usage_event(&rental_start_event)
-                .await
-                .map_err(|e| {
-                    Status::internal(format!("Failed to store rental start event: {}", e))
-                })?;
+                    let rental_start_event = UsageEvent {
+                        event_id: uuid::Uuid::new_v4(),
+                        rental_id: rental_id.as_uuid(),
+                        user_id: user_id.to_string(),
+                        node_id: community_data.node_id,
+                        validator_id: community_data.validator_id,
+                        event_type: EventType::RentalStart,
+                        event_data,
+                        timestamp: chrono::Utc::now(),
+                        processed: false,
+                        processed_at: None,
+                        batch_id: None,
+                        idempotency_key: Some(idempotency_key),
+                    };
+
+                    self.event_store
+                        .append_usage_event(&rental_start_event)
+                        .await
+                        .map_err(|e| {
+                            Status::internal(format!("Failed to store community rental start event: {}", e))
+                        })?;
+                }
+                CloudType::Secure(secure_data) => {
+                    let base_price_per_gpu = rust_decimal::Decimal::from_f64(secure_data.base_price_per_gpu)
+                        .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
+                    let gpu_count = secure_data.gpu_count.max(1);
+                    let markup_percent = rust_decimal::Decimal::from_f64(secure_data.markup_percent)
+                        .ok_or_else(|| Status::invalid_argument("Invalid markup_percent"))?;
+
+                    info!(
+                        "Tracking secure cloud rental {} for user {} (provider: {}) at ${}/GPU/hour × {} GPUs with {}% markup",
+                        rental_id, user_id, secure_data.provider, base_price_per_gpu, gpu_count, markup_percent
+                    );
+
+                    let mut rental = SecureCloudRental::new_marketplace(
+                        user_id.clone(),
+                        secure_data.provider.clone(),
+                        secure_data.provider_instance_id.clone(),
+                        secure_data.offering_id.clone(),
+                        resource_spec.clone(),
+                        base_price_per_gpu,
+                        gpu_count,
+                        markup_percent,
+                    );
+                    rental.id = rental_id;
+
+                    self.rental_repository
+                        .create_secure_cloud_rental(&rental)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to create secure cloud rental: {}", e)))?;
+
+                    let event_data = serde_json::json!({
+                        "cloud_type": "secure",
+                        "provider": secure_data.provider,
+                        "provider_instance_id": secure_data.provider_instance_id,
+                        "offering_id": secure_data.offering_id,
+                        "base_price_per_gpu": base_price_per_gpu.to_string(),
+                        "gpu_count": gpu_count,
+                        "markup_percent": markup_percent.to_string(),
+                        "resource_spec": resource_spec_value,
+                        "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
+                    });
+
+                    let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
+                    let idempotency_key =
+                        generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
+
+                    let rental_start_event = UsageEvent {
+                        event_id: uuid::Uuid::new_v4(),
+                        rental_id: rental_id.as_uuid(),
+                        user_id: user_id.to_string(),
+                        node_id: secure_data.provider_instance_id,
+                        validator_id: format!("secure_cloud:{}", secure_data.provider),
+                        event_type: EventType::RentalStart,
+                        event_data,
+                        timestamp: chrono::Utc::now(),
+                        processed: false,
+                        processed_at: None,
+                        batch_id: None,
+                        idempotency_key: Some(idempotency_key),
+                    };
+
+                    self.event_store
+                        .append_usage_event(&rental_start_event)
+                        .await
+                        .map_err(|e| {
+                            Status::internal(format!("Failed to store secure cloud rental start event: {}", e))
+                        })?;
+                }
+            }
 
             if let Some(ref metrics) = self.metrics {
                 metrics
@@ -521,8 +592,6 @@ impl BillingService for BillingServiceImpl {
                 ActiveRental {
                     rental_id: r.id.to_string(),
                     user_id: r.user_id.to_string(),
-                    node_id: r.node_id.clone(),
-                    validator_id: r.validator_id.clone(),
                     status: Self::domain_status_to_proto(r.state).into(),
                     resource_spec,
                     current_cost: Self::format_credit_balance(r.cost_breakdown.total_cost),
@@ -533,10 +602,17 @@ impl BillingService for BillingServiceImpl {
                         r.last_updated,
                     ))),
                     metadata: std::collections::HashMap::new(),
-                    // Marketplace-2-compute pricing fields
-                    base_price_per_gpu: r.base_price_per_gpu.to_f64().unwrap_or(0.0),
-                    gpu_count: r.gpu_count,
-                    markup_percent: r.markup_percent.to_f64().unwrap_or(0.0),
+                    cloud_type: Some(
+                        basilica_protocol::billing::active_rental::CloudType::Community(
+                            basilica_protocol::billing::CommunityCloudData {
+                                node_id: r.node_id.clone(),
+                                validator_id: r.validator_id.clone(),
+                                base_price_per_gpu: r.base_price_per_gpu.to_f64().unwrap_or(0.0),
+                                gpu_count: r.gpu_count,
+                                markup_percent: r.markup_percent.to_f64().unwrap_or(0.0),
+                            },
+                        ),
+                    ),
                 }
             })
             .collect();

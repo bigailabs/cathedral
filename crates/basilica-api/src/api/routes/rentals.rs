@@ -227,7 +227,10 @@ pub async fn start_rental(
 
     // Notify billing service to start tracking this rental
     if let Some(billing_client) = &state.billing_client {
-        use basilica_protocol::billing::{GpuSpec, ResourceSpec, TrackRentalRequest};
+        use basilica_protocol::billing::{
+            track_rental_request::CloudType, CommunityCloudData, GpuSpec, ResourceSpec,
+            TrackRentalRequest,
+        };
 
         let now = chrono::Utc::now();
         let timestamp = prost_types::Timestamp {
@@ -261,20 +264,20 @@ pub async fn start_rental(
             .and_then(|spec| spec.gpus.first())
             .map(|gpu| gpu.count)
             .unwrap_or(1);
-        let markup_percent = 10.0; // 10% markup
 
         let track_request = TrackRentalRequest {
             rental_id: validator_response.rental_id.clone(),
             user_id: user_id.clone(),
-            node_id,
-            validator_id: state.validator_hotkey.clone(),
             resource_spec,
             start_time: Some(timestamp.clone()),
             metadata: Default::default(),
-            // Marketplace-2-compute pricing fields
-            base_price_per_gpu,
-            gpu_count,
-            markup_percent,
+            cloud_type: Some(CloudType::Community(CommunityCloudData {
+                node_id,
+                validator_id: state.validator_hotkey.clone(),
+                base_price_per_gpu,
+                gpu_count,
+                markup_percent: state.pricing_config.community_markup_percent,
+            })),
         };
 
         match billing_client.track_rental(track_request).await {

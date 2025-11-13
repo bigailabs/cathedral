@@ -62,6 +62,14 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/secure-cloud/gpu-prices",
             get(routes::secure_cloud::list_gpu_prices),
         )
+        .route(
+            "/secure-cloud/rentals/start",
+            post(routes::secure_cloud::start_secure_cloud_rental),
+        )
+        .route(
+            "/secure-cloud/rentals/:rental_id/stop",
+            post(routes::secure_cloud::stop_secure_cloud_rental),
+        )
         // Apply scope validation AFTER auth middleware
         .layer(axum::middleware::from_fn(
             middleware::scope_validation_middleware,

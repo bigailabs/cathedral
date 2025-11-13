@@ -54,17 +54,35 @@ message GetBalanceResponse {
 message TrackRentalRequest {
     string rental_id = 1;
     string user_id = 2;
-    string node_id = 3;
-    string validator_id = 4;
     ResourceSpec resource_spec = 5;
     reserved 6; // Previously hourly_rate (DEPRECATED: removed in favor of marketplace pricing fields)
     google.protobuf.Timestamp start_time = 7;
     map<string, string> metadata = 8;
 
-    // Marketplace-2-compute pricing fields
-    double base_price_per_gpu = 9; // Base price per GPU per hour (before markup)
-    uint32 gpu_count = 10;          // Number of GPUs in this rental
-    double markup_percent = 11;     // Markup percentage (e.g., 10.0 for 10%)
+    // Cloud type specific data
+    oneof cloud_type {
+        CommunityCloudData community = 20;
+        SecureCloudData secure = 21;
+    }
+}
+
+// Community cloud rental data (validator-based)
+message CommunityCloudData {
+    string node_id = 1;           // Miner node ID
+    string validator_id = 2;      // Validator hotkey
+    double base_price_per_gpu = 3; // Base price per GPU per hour (before markup)
+    uint32 gpu_count = 4;          // Number of GPUs in this rental
+    double markup_percent = 5;     // Markup percentage (e.g., 10.0 for 10%)
+}
+
+// Secure cloud rental data (direct provider API)
+message SecureCloudData {
+    string provider_instance_id = 1; // Provider's instance ID
+    string provider = 2;              // Provider name (e.g., "datacrunch", "hyperstack")
+    string offering_id = 3;           // Original offering ID from aggregator
+    double base_price_per_gpu = 4;    // Base price per GPU per hour (before markup)
+    uint32 gpu_count = 5;             // Number of GPUs in this rental
+    double markup_percent = 6;        // Markup percentage (e.g., 15.0 for 15%)
 }
 
 message ResourceSpec {
@@ -126,8 +144,6 @@ message GetActiveRentalsResponse {
 message ActiveRental {
     string rental_id = 1;
     string user_id = 2;
-    string node_id = 3;
-    string validator_id = 4;
     RentalStatus status = 5;
     ResourceSpec resource_spec = 6;
     reserved 7; // Previously hourly_rate (DEPRECATED: removed in favor of marketplace pricing fields)
@@ -136,10 +152,11 @@ message ActiveRental {
     google.protobuf.Timestamp last_updated = 10;
     map<string, string> metadata = 11;
 
-    // Marketplace-2-compute pricing fields
-    double base_price_per_gpu = 12; // Base price per GPU per hour (before markup)
-    uint32 gpu_count = 13;          // Number of GPUs in this rental
-    double markup_percent = 14;     // Markup percentage (e.g., 10.0 for 10%)
+    // Cloud type specific data
+    oneof cloud_type {
+        CommunityCloudData community = 20;
+        SecureCloudData secure = 21;
+    }
 }
 
 message FinalizeRentalRequest {

@@ -1,6 +1,7 @@
 //! Type definitions for the Basilica SDK
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // Re-export types from basilica-validator that are used by the client
 pub use basilica_validator::api::types::{
@@ -274,6 +275,70 @@ pub struct SshKeyResponse {
 
     /// Last update timestamp
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+// ============================================================================
+// Secure Cloud Rental Types
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartSecureCloudRentalRequest {
+    /// Offering ID from list_gpu_prices endpoint
+    pub offering_id: String,
+
+    /// User's registered SSH key ID (NOT the public key string)
+    /// Must be a key owned by the authenticated user
+    pub ssh_public_key_id: String,
+
+    /// Docker container image (optional)
+    pub container_image: Option<String>,
+
+    /// Environment variables for the container
+    #[serde(default)]
+    pub environment: HashMap<String, String>,
+
+    /// Port mappings
+    #[serde(default)]
+    pub ports: Vec<PortMappingRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecureCloudRentalResponse {
+    /// Rental ID (for API tracking)
+    pub rental_id: String,
+
+    /// Deployment ID (aggregator service ID)
+    pub deployment_id: String,
+
+    /// Provider name
+    pub provider: String,
+
+    /// Deployment status
+    pub status: String,
+
+    /// IP address of the instance (if available)
+    pub ip_address: Option<String>,
+
+    /// Ready-to-use SSH command
+    pub ssh_command: Option<String>,
+
+    /// Hourly cost in USD (base_price × gpu_count × (1 + markup%/100))
+    pub hourly_cost: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopSecureCloudRentalResponse {
+    /// Rental ID
+    pub rental_id: String,
+
+    /// Final status
+    pub status: String,
+
+    /// Total rental duration in hours
+    pub duration_hours: f64,
+
+    /// Total cost charged
+    pub total_cost: f64,
 }
 
 // Payment Management Types
