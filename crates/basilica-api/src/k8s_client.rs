@@ -1817,7 +1817,7 @@ impl ApiK8sClient for K8sClient {
 
         let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
 
-        let label_selector = format!("app.kubernetes.io/instance={}", name);
+        let label_selector = format!("basilica.ai/instance={}", name);
         let pods = api
             .list(&kube::api::ListParams::default().labels(&label_selector))
             .await
