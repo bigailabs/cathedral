@@ -418,3 +418,57 @@ class BasilicaClient:
             DeploymentListResponse: Typed response with list of deployments
         """
         return self._client.list_deployments()
+
+    def get_deployment_logs(
+        self,
+        instance_name: str,
+        follow: bool = False,
+        tail: Optional[int] = None
+    ) -> str:
+        """
+        Get logs from a deployment.
+
+        Args:
+            instance_name: The deployment instance name
+            follow: Whether to follow logs (stream continuously)
+            tail: Optional number of lines to return from the end
+
+        Returns:
+            str: Log contents
+
+        Example:
+            >>> logs = client.get_deployment_logs("my-app", tail=100)
+            >>> print(logs)
+        """
+        return self._client.get_deployment_logs(instance_name, follow, tail)
+
+    def get_balance(self):
+        """
+        Get account balance.
+
+        Returns:
+            Balance information with available and total amounts
+
+        Example:
+            >>> balance = client.get_balance()
+            >>> print(f"Available: ${balance['available']}")
+        """
+        return self._client.get_balance()
+
+    def list_usage_history(self, limit: int = 50, offset: int = 0):
+        """
+        List usage history for cost tracking.
+
+        Args:
+            limit: Maximum number of records to return (default: 50)
+            offset: Number of records to skip (default: 0)
+
+        Returns:
+            Usage history with rental records and costs
+
+        Example:
+            >>> usage = client.list_usage_history(limit=30)
+            >>> for rental in usage['rentals']:
+            ...     print(f"{rental['rental_id']}: ${rental['current_cost']}")
+        """
+        return self._client.list_usage_history(limit, offset)
