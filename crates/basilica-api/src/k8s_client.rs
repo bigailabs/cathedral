@@ -1622,19 +1622,27 @@ impl ApiK8sClient for K8sClient {
 
         let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
 
-        api.delete(name, &DeleteParams::default())
-            .await
-            .map_err(|e| ApiError::Internal {
+        match api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => {
+                tracing::info!(
+                    namespace = ns,
+                    name = name,
+                    "Successfully deleted UserDeployment CR"
+                );
+                Ok(())
+            }
+            Err(kube::Error::Api(err)) if err.code == 404 => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "UserDeployment CR already gone"
+                );
+                Ok(())
+            }
+            Err(e) => Err(ApiError::Internal {
                 message: format!("delete UserDeployment failed: {e}"),
-            })?;
-
-        tracing::info!(
-            namespace = ns,
-            name = name,
-            "Successfully deleted UserDeployment CR"
-        );
-
-        Ok(())
+            }),
+        }
     }
 
     async fn delete_deployment(&self, ns: &str, name: &str) -> Result<()> {

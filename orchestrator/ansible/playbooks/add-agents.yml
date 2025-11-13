@@ -1,0 +1,46 @@
+---
+- name: Fetch K3s server token
+  hosts: k3s_server[0]
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Read K3s server token
+      ansible.builtin.slurp:
+        src: /var/lib/rancher/k3s/server/node-token
+      register: node_token
+
+    - name: Set K3s server token fact
+      ansible.builtin.set_fact:
+        k3s_server_token: "{{ node_token.content | b64decode | trim }}"
+
+- name: Join new K3s agent nodes
+  hosts: "{{ target_agents | default('k3s_agents') }}"
+  gather_facts: true
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - ../group_vars/all/vault.yml
+    - ../group_vars/all/r2.yml
+    - ../group_vars/all/loadbalancer.yml
+    - ../group_vars/all/cni.yml
+    - ../group_vars/all/infrastructure.yml
+    - ../group_vars/all/application.yml
+  pre_tasks:
+    - name: Determine first master node
+      ansible.builtin.set_fact:
+        first_master: "{{ groups['k3s_server'][0] }}"
+      run_once: true
+
+    - name: Set first master IP for agents
+      ansible.builtin.set_fact:
+        first_master_ip: "{{ hostvars[groups['k3s_server'][0]]['server_private_ip'] | default(hostvars[groups['k3s_server'][0]]['ansible_default_ipv4']['address']) }}"
+
+    - name: Set K3s server token
+      ansible.builtin.set_fact:
+        k3s_server_token: "{{ hostvars[groups['k3s_server'][0]]['k3s_server_token'] }}"
+  vars:
+    k3s_server_address: "{{ first_master_ip }}"
+  roles:
+    - role: prereq
+    - role: download
+    - role: k3s_agent

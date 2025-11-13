@@ -5,8 +5,8 @@ use k8s_openapi::api::core::v1::{
     Toleration,
 };
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
-    NetworkPolicyPort, NetworkPolicySpec,
+    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
+    NetworkPolicySpec,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -77,7 +77,13 @@ fn build_node_selector() -> BTreeMap<String, String> {
 }
 
 fn build_tolerations() -> Vec<Toleration> {
-    vec![]
+    vec![Toleration {
+        key: Some("basilica.ai/workloads-only".into()),
+        operator: Some("Equal".into()),
+        value: Some("true".into()),
+        effect: Some("NoSchedule".into()),
+        ..Default::default()
+    }]
 }
 
 fn build_writable_volumes() -> (
@@ -343,7 +349,7 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
                 match_labels: Some(pod_selector_labels),
                 ..Default::default()
             },
-            policy_types: Some(vec!["Ingress".into(), "Egress".into()]),
+            policy_types: Some(vec!["Ingress".into()]),
             ingress: Some(vec![NetworkPolicyIngressRule {
                 from: Some(vec![NetworkPolicyPeer {
                     namespace_selector: Some(LabelSelector {
@@ -362,24 +368,7 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
                     ..Default::default()
                 }]),
             }]),
-            egress: Some(vec![
-                NetworkPolicyEgressRule {
-                    ports: Some(vec![NetworkPolicyPort {
-                        port: Some(IntOrString::Int(53)),
-                        protocol: Some("UDP".into()),
-                        ..Default::default()
-                    }]),
-                    ..Default::default()
-                },
-                NetworkPolicyEgressRule {
-                    ports: Some(vec![NetworkPolicyPort {
-                        port: Some(IntOrString::Int(443)),
-                        protocol: Some("TCP".into()),
-                        ..Default::default()
-                    }]),
-                    ..Default::default()
-                },
-            ]),
+            egress: None,
         }),
     }
 }
@@ -605,10 +594,7 @@ mod tests {
         assert_eq!(netpol.metadata.namespace, Some("u-user123".to_string()));
 
         let spec = netpol.spec.unwrap();
-        assert_eq!(
-            spec.policy_types,
-            Some(vec!["Ingress".to_string(), "Egress".to_string()])
-        );
+        assert_eq!(spec.policy_types, Some(vec!["Ingress".to_string()]));
 
         let pod_selector = spec.pod_selector;
         assert_eq!(
@@ -633,20 +619,7 @@ mod tests {
         assert_eq!(ports[0].port, Some(IntOrString::Int(80)));
         assert_eq!(ports[0].protocol, Some("TCP".to_string()));
 
-        let egress_rules = spec.egress.unwrap();
-        assert_eq!(egress_rules.len(), 2);
-
-        let dns_rule = &egress_rules[0];
-        let dns_ports = dns_rule.ports.as_ref().unwrap();
-        assert_eq!(dns_ports.len(), 1);
-        assert_eq!(dns_ports[0].port, Some(IntOrString::Int(53)));
-        assert_eq!(dns_ports[0].protocol, Some("UDP".to_string()));
-
-        let https_rule = &egress_rules[1];
-        let https_ports = https_rule.ports.as_ref().unwrap();
-        assert_eq!(https_ports.len(), 1);
-        assert_eq!(https_ports[0].port, Some(IntOrString::Int(443)));
-        assert_eq!(https_ports[0].protocol, Some("TCP".to_string()));
+        assert!(spec.egress.is_none());
     }
 
     #[test]
@@ -769,7 +742,14 @@ mod tests {
     #[test]
     fn test_tolerations() {
         let tolerations = build_tolerations();
-        assert_eq!(tolerations.len(), 0);
+        assert_eq!(tolerations.len(), 1);
+        assert_eq!(
+            tolerations[0].key.as_deref(),
+            Some("basilica.ai/workloads-only")
+        );
+        assert_eq!(tolerations[0].operator.as_deref(), Some("Equal"));
+        assert_eq!(tolerations[0].value.as_deref(), Some("true"));
+        assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
     }
 
     #[test]

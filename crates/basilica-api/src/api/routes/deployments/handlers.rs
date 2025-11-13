@@ -726,7 +726,7 @@ pub async fn stream_deployment_logs(
                 }
             })
         } else {
-            let client_clone = state.k8s.as_ref().unwrap().clone();
+            let client_clone = client.clone();
             Box::pin(async_stream::stream! {
                 use tokio::time::{sleep, Duration, Instant as TokioInstant};
                 let mut last_marker: Option<String> = None;
