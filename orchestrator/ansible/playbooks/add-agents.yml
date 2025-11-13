@@ -35,7 +35,7 @@
 
 - name: Fetch K3s server token
   hosts: k3s_server[0]
-  gather_facts: false
+  gather_facts: true
   become: true
   tasks:
     - name: Read K3s server token
