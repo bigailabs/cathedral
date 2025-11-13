@@ -81,6 +81,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/deployments/:instance_name",
             get(routes::deployments::get_deployment).delete(routes::deployments::delete_deployment),
+        )
+        .route(
+            "/deployments/:instance_name/logs",
+            get(routes::deployments::stream_deployment_logs),
         );
 
     // Conditionally map legacy vs k8s backend under /rentals
