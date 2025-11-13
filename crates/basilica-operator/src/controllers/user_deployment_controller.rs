@@ -320,10 +320,16 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
     pod_selector_labels.insert("app".to_string(), instance_name.to_string());
 
     let mut envoy_namespace_labels = BTreeMap::new();
-    envoy_namespace_labels.insert("kubernetes.io/metadata.name".to_string(), "envoy-gateway-system".to_string());
+    envoy_namespace_labels.insert(
+        "kubernetes.io/metadata.name".to_string(),
+        "envoy-gateway-system".to_string(),
+    );
 
     let mut envoy_pod_labels = BTreeMap::new();
-    envoy_pod_labels.insert("gateway.envoyproxy.io/owning-gateway-name".to_string(), "basilica-gateway".to_string());
+    envoy_pod_labels.insert(
+        "gateway.envoyproxy.io/owning-gateway-name".to_string(),
+        "basilica-gateway".to_string(),
+    );
 
     NetworkPolicy {
         metadata: ObjectMeta {

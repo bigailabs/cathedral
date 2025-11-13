@@ -1674,11 +1674,7 @@ impl ApiK8sClient for K8sClient {
 
         match api.delete(name, &DeleteParams::default()).await {
             Ok(_) => {
-                tracing::info!(
-                    namespace = ns,
-                    name = name,
-                    "Successfully deleted Service"
-                );
+                tracing::info!(namespace = ns, name = name, "Successfully deleted Service");
                 Ok(())
             }
             Err(kube::Error::Api(err)) if err.code == 404 => {
