@@ -514,38 +514,44 @@ pub async fn delete_deployment(
 
     let k8s_client = state.k8s.as_ref().ok_or(ApiError::ServiceUnavailable)?;
 
-    let api_client = reqwest::Client::new();
-    let k8s_server = std::env::var("KUBERNETES_SERVICE_HOST")
-        .unwrap_or_else(|_| "kubernetes.default.svc".to_string());
-    let k8s_port = std::env::var("KUBERNETES_SERVICE_PORT").unwrap_or_else(|_| "443".to_string());
-    let token = tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/token")
-        .await
-        .ok();
+    // Delete UserDeployment CR first
+    k8s_client
+        .delete_user_deployment(&deployment.namespace, &deployment.cr_name)
+        .await?;
 
-    if let Some(token) = token {
-        let url = format!(
-            "https://{}:{}/apis/basilica.ai/v1/namespaces/{}/userdeployments/{}",
-            k8s_server, k8s_port, deployment.namespace, deployment.cr_name
-        );
-
-        let _ = api_client
-            .delete(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .send()
-            .await;
-    }
-
+    // Delete HTTPRoute
     let service_name = format!("s-{}", instance_name);
     let httproute = HTTPRoute {
         instance_name: instance_name.clone(),
         namespace: deployment.namespace.clone(),
-        service_name,
+        service_name: service_name.clone(),
         service_port: deployment.port,
         path_prefix: None,
         hostname: None,
     };
-
     httproute.delete(&k8s_client.kube_client()).await?;
+
+    // Delete K8s resources created by the operator
+    // These don't have owner references, so we need to clean them up manually
+    // Operator naming: Deployment={instance}-deployment, Service=s-{instance}, NetPol={instance}-netpol
+    let deployment_name = deployment.cr_name.clone(); // Already {instance}-deployment
+    let netpol_name = format!("{}-netpol", instance_name);
+
+    // Delete in order: NetworkPolicy, Service, Deployment (which cascades to Pods)
+    k8s_client
+        .delete_network_policy(&deployment.namespace, &netpol_name)
+        .await
+        .ok(); // Don't fail if already deleted
+
+    k8s_client
+        .delete_service(&deployment.namespace, &service_name)
+        .await
+        .ok(); // Don't fail if already deleted
+
+    k8s_client
+        .delete_deployment(&deployment.namespace, &deployment_name)
+        .await
+        .ok(); // Don't fail if already deleted
 
     if deployment.public {
         if let Some(dns_provider) = &state.dns_provider {
@@ -670,6 +676,96 @@ impl DeploymentResponse {
             pods: None,
         }
     }
+}
+
+pub async fn stream_deployment_logs(
+    State(state): State<AppState>,
+    Extension(auth): Extension<crate::api::middleware::AuthContext>,
+    axum::extract::Path(instance_name): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<basilica_sdk::types::LogStreamQuery>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl futures::Stream<Item = std::result::Result<axum::response::sse::Event, std::io::Error>>,
+    >,
+> {
+    use axum::response::sse::{Event, Sse};
+    use futures::Stream;
+    use std::pin::Pin;
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    let client = match state.k8s.as_ref() {
+        Some(c) => c,
+        None => {
+            apimetrics::record_request("deployments.logs", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
+
+    let ns = user_namespace(&auth.user_id);
+    let cr_name = generate_cr_name(&instance_name);
+    let follow = query.follow.unwrap_or(false);
+    let tail = query.tail;
+    let since_seconds = query.since_seconds;
+
+    let stream: Pin<Box<dyn Stream<Item = std::result::Result<Event, std::io::Error>> + Send>> =
+        if !follow {
+            let logs = client
+                .get_user_deployment_logs(&ns, &cr_name, tail, since_seconds)
+                .await?;
+            let lines: Vec<String> = logs.lines().map(|s| s.to_string()).collect();
+            Box::pin(async_stream::stream! {
+                for line in &lines {
+                    let data = serde_json::json!({
+                        "timestamp": chrono::Utc::now(),
+                        "stream": "stdout",
+                        "message": line,
+                    });
+                    yield Ok(Event::default().data(data.to_string()));
+                }
+            })
+        } else {
+            let client_clone = state.k8s.as_ref().unwrap().clone();
+            Box::pin(async_stream::stream! {
+                use tokio::time::{sleep, Duration, Instant as TokioInstant};
+                let mut last_marker: Option<String> = None;
+                let start_at = TokioInstant::now();
+                let max_duration = Duration::from_secs(300);
+                let mut last_heartbeat = TokioInstant::now();
+                loop {
+                    if start_at.elapsed() >= max_duration {
+                        break;
+                    }
+                    if let Ok(body) = client_clone.get_user_deployment_logs(&ns, &cr_name, tail.or(Some(100)), since_seconds).await {
+                        let lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
+                        if !lines.is_empty() {
+                            let start_idx = if let Some(ref marker) = last_marker {
+                                lines.iter().rposition(|l| l == marker).map(|idx| idx + 1).unwrap_or(0)
+                            } else { 0 };
+                            for line in &lines[start_idx..] {
+                                let data = serde_json::json!({
+                                    "timestamp": chrono::Utc::now(),
+                                    "stream": "stdout",
+                                    "message": line,
+                                });
+                                yield Ok(Event::default().data(data.to_string()));
+                            }
+                            last_marker = lines.last().cloned();
+                        }
+                    }
+                    if last_heartbeat.elapsed() >= Duration::from_secs(15) {
+                        let hb = serde_json::json!({"heartbeat": true, "timestamp": chrono::Utc::now()});
+                        yield Ok(Event::default().data(hb.to_string()));
+                        last_heartbeat = TokioInstant::now();
+                    }
+                    sleep(Duration::from_millis(1000)).await;
+                }
+            })
+        };
+
+    apimetrics::record_request("deployments.logs", "GET", start, true);
+    Ok(Sse::new(stream))
 }
 
 #[cfg(test)]
