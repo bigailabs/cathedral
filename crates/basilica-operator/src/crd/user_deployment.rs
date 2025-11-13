@@ -28,6 +28,8 @@ pub struct UserDeploymentSpec {
     pub path_prefix: String,
     #[serde(default)]
     pub ttl_seconds: Option<u32>,
+    #[serde(default)]
+    pub health_check: Option<HealthCheckConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
@@ -42,6 +44,45 @@ pub struct EnvVar {
 pub struct ResourceRequirements {
     pub cpu: String,
     pub memory: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckConfig {
+    #[serde(default)]
+    pub liveness: Option<ProbeConfig>,
+    #[serde(default)]
+    pub readiness: Option<ProbeConfig>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeConfig {
+    pub path: String,
+    #[serde(default = "default_initial_delay")]
+    pub initial_delay_seconds: u32,
+    #[serde(default = "default_period")]
+    pub period_seconds: u32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+}
+
+fn default_initial_delay() -> u32 {
+    30
+}
+
+fn default_period() -> u32 {
+    10
+}
+
+fn default_timeout() -> u32 {
+    5
+}
+
+fn default_failure_threshold() -> u32 {
+    3
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
@@ -90,6 +131,7 @@ impl UserDeploymentSpec {
             resources: None,
             path_prefix,
             ttl_seconds: None,
+            health_check: None,
         }
     }
 
@@ -115,6 +157,11 @@ impl UserDeploymentSpec {
 
     pub fn with_ttl(mut self, ttl_seconds: u32) -> Self {
         self.ttl_seconds = Some(ttl_seconds);
+        self
+    }
+
+    pub fn with_health_check(mut self, health_check: HealthCheckConfig) -> Self {
+        self.health_check = Some(health_check);
         self
     }
 }
