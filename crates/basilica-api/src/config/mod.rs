@@ -25,6 +25,9 @@ use std::time::Duration;
 /// Rental health check interval in seconds
 const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
 
+/// Node token cleanup interval in seconds
+const NODE_TOKEN_CLEANUP_INTERVAL_SECS: u64 = 3600;
+
 /// Bittensor integration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BittensorIntegrationConfig {
@@ -224,6 +227,11 @@ impl Config {
     /// Get rental health check interval as Duration
     pub fn rental_health_check_interval(&self) -> Duration {
         Duration::from_secs(RENTAL_HEALTH_CHECK_INTERVAL_SECS)
+    }
+
+    /// Get node token cleanup interval as Duration
+    pub fn node_token_cleanup_interval(&self) -> Duration {
+        Duration::from_secs(NODE_TOKEN_CLEANUP_INTERVAL_SECS)
     }
 
     /// Create BittensorConfig from our configuration

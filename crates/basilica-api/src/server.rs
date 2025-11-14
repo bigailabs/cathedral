@@ -26,6 +26,8 @@ use tracing::{info, warn};
 pub struct Server {
     config: Arc<Config>,
     app: Router,
+    cancel_token: tokio_util::sync::CancellationToken,
+    background_tasks: Option<tokio::task::JoinSet<()>>,
 }
 
 /// Shared application state
@@ -421,10 +423,46 @@ impl Server {
             rental_health_interval.as_secs()
         );
 
-        // Build the application router
-        let app = Self::build_router(state)?;
+        // Start node token cleanup task
+        let cleanup_db = state.db.clone();
+        let cleanup_interval = config.node_token_cleanup_interval();
 
-        Ok(Self { config, app })
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            loop {
+                interval.tick().await;
+
+                match crate::k8s::cleanup_expired_cluster_tokens(&cleanup_db).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("Node token cleanup: removed {} expired tokens", count);
+                    }
+                    Ok(_) => {
+                        tracing::debug!("Node token cleanup: no expired tokens found");
+                    }
+                    Err(e) => {
+                        tracing::error!("Node token cleanup failed: {}", e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started node token cleanup task (interval: {} seconds)",
+            cleanup_interval.as_secs()
+        );
+
+        // Build the application router
+        let app = Self::build_router(state.clone())?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let background_tasks = tokio::task::JoinSet::new();
+
+        Ok(Self {
+            config,
+            app,
+            cancel_token,
+            background_tasks: Some(background_tasks),
+        })
     }
 
     /// Build the application router with all routes and middleware
@@ -448,7 +486,7 @@ impl Server {
     }
 
     /// Run the server until shutdown signal
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         let addr = self.config.server.bind_address;
 
         info!("Starting HTTP server on {}", addr);
@@ -462,12 +500,28 @@ impl Server {
 
         info!("Basilica API Gateway listening on {}", addr);
 
+        let cancel_token = self.cancel_token.clone();
+        let shutdown_signal = async move {
+            shutdown_signal().await;
+            cancel_token.cancel();
+        };
+
         axum::serve(listener, self.app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|e| ApiError::Internal {
                 message: format!("Server error: {e}"),
             })?;
+
+        if let Some(mut tasks) = self.background_tasks.take() {
+            info!("Waiting for background tasks to complete");
+            while let Some(result) = tasks.join_next().await {
+                if let Err(e) = result {
+                    tracing::error!("Background task error: {}", e);
+                }
+            }
+            info!("All background tasks completed");
+        }
 
         Ok(())
     }
