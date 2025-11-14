@@ -47,7 +47,7 @@ rules:
   # Basilica CRDs
   - apiGroups: ["basilica.ai"]
     resources: ["basilicajobs", "gpurentals", "basilicanodeprofiles", "userdeployments"]
-    verbs: ["get", "list", "watch", "patch", "update"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
   - apiGroups: ["basilica.ai"]
     resources: ["basilicajobs/status", "gpurentals/status", "basilicanodeprofiles/status", "userdeployments/status"]
     verbs: ["patch", "update"]
