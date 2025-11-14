@@ -18,28 +18,30 @@ resource "aws_security_group" "k3s_server" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "k3s_server_ssh" {
+  count             = length(var.allowed_ssh_cidr_blocks)
   security_group_id = aws_security_group.k3s_server.id
-  description       = "SSH access"
+  description       = "SSH access from ${var.allowed_ssh_cidr_blocks[count.index]}"
   ip_protocol       = "tcp"
   from_port         = 22
   to_port           = 22
-  cidr_ipv4         = var.allowed_ssh_cidr_blocks[0]
+  cidr_ipv4         = var.allowed_ssh_cidr_blocks[count.index]
 
   tags = {
-    Name = "ssh-access"
+    Name = "ssh-access-${count.index}"
   }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "k3s_server_api" {
+  count             = length(var.allowed_k8s_api_cidr_blocks)
   security_group_id = aws_security_group.k3s_server.id
-  description       = "K3s API server"
+  description       = "K3s API server from allowed CIDR ${var.allowed_k8s_api_cidr_blocks[count.index]}"
   ip_protocol       = "tcp"
   from_port         = 6443
   to_port           = 6443
-  cidr_ipv4         = "0.0.0.0/0"
+  cidr_ipv4         = var.allowed_k8s_api_cidr_blocks[count.index]
 
   tags = {
-    Name = "k3s-api-server"
+    Name = "k3s-api-server-${count.index}"
   }
 }
 
