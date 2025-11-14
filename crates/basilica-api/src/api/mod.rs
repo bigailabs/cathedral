@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod extractors;
 pub mod middleware;
+pub mod query;
 pub mod routes;
 
 use crate::server::AppState;

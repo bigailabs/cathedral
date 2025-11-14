@@ -2,7 +2,6 @@
 //!
 //! Aggregates GPU pricing data from multiple cloud providers.
 
-pub mod api;
 pub mod background;
 pub mod config;
 pub mod db;

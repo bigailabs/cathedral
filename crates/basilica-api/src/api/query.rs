@@ -1,4 +1,6 @@
-use crate::models::Provider;
+//! Query parameter types for API routes
+
+use basilica_aggregator::models::Provider;
 use basilica_common::types::GpuCategory;
 use rust_decimal::Decimal;
 use serde::Deserialize;

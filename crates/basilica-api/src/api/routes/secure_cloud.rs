@@ -2,6 +2,7 @@
 //! These routes proxy requests to the aggregator service
 
 use crate::api::middleware::AuthContext;
+use crate::api::query::GpuPriceQuery;
 use crate::error::ApiError;
 use crate::server::AppState;
 use axum::{
@@ -10,7 +11,6 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use basilica_aggregator::api::query::GpuPriceQuery;
 use basilica_sdk::types::{
     SecureCloudRentalResponse, StartSecureCloudRentalRequest, StopSecureCloudRentalResponse,
 };
