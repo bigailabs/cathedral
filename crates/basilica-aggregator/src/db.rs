@@ -157,7 +157,7 @@ impl Database {
     pub async fn create_deployment(&self, deployment: &Deployment) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO deployments
+            INSERT INTO secure_cloud_rentals
             (id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
              status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
              error_message, created_at, updated_at)
@@ -202,7 +202,7 @@ impl Database {
 
         sqlx::query(
             r#"
-            UPDATE deployments
+            UPDATE secure_cloud_rentals
             SET provider_instance_id = $1,
                 status = $2,
                 ip_address = $3,
@@ -234,7 +234,7 @@ impl Database {
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at
-            FROM deployments
+            FROM secure_cloud_rentals
             WHERE id = $1
             "#,
         )
@@ -280,7 +280,7 @@ impl Database {
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at
-            FROM deployments
+            FROM secure_cloud_rentals
             WHERE id = $1 AND user_id = $2
             "#,
         )
@@ -323,7 +323,7 @@ impl Database {
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at
-            FROM deployments
+            FROM secure_cloud_rentals
             WHERE user_id = $1
             ORDER BY created_at DESC
             "#,
@@ -373,7 +373,7 @@ impl Database {
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at
-            FROM deployments
+            FROM secure_cloud_rentals
             WHERE 1=1
             "#,
         );
@@ -446,7 +446,7 @@ impl Database {
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at
-            FROM deployments
+            FROM secure_cloud_rentals
             WHERE status IN ('pending', 'provisioning', 'running')
             ORDER BY created_at DESC
             "#,
@@ -486,7 +486,7 @@ impl Database {
 
     /// Delete deployment record
     pub async fn delete_deployment(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM deployments WHERE id = $1")
+        sqlx::query("DELETE FROM secure_cloud_rentals WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;

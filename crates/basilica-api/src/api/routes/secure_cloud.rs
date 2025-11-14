@@ -106,9 +106,6 @@ pub async fn start_secure_cloud_rental(
     Extension(auth): Extension<AuthContext>,
     Json(request): Json<StartSecureCloudRentalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    use chrono::Utc;
-    use uuid::Uuid;
-
     // 1. Validate SSH key ownership and get public key
     let public_key = get_ssh_key_for_user(&state.db, &request.ssh_public_key_id, &auth.user_id)
         .await
@@ -138,7 +135,7 @@ pub async fn start_secure_cloud_rental(
             message: format!("Offering {} not found", request.offering_id),
         })?;
 
-    // 3. Deploy via aggregator
+    // 3. Deploy via aggregator (which creates the rental/deployment record)
     let deployment = state
         .aggregator_service
         .deploy_instance(
@@ -155,33 +152,10 @@ pub async fn start_secure_cloud_rental(
             }
         })?;
 
-    let rental_id = Uuid::new_v4().to_string();
+    let rental_id = deployment.id.clone();
     let provider_instance_id = deployment.provider_instance_id.clone().unwrap_or_default();
 
-    // 4. Store rental in API database
-    sqlx::query(
-        "INSERT INTO secure_cloud_rentals
-         (id, user_id, deployment_id, offering_id, provider, ssh_key_id, status, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    )
-    .bind(&rental_id)
-    .bind(&auth.user_id)
-    .bind(&deployment.id)
-    .bind(&request.offering_id)
-    .bind(offering.provider.to_string())
-    .bind(&request.ssh_public_key_id)
-    .bind("running")
-    .bind(Utc::now())
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database insert failed: {}", e);
-        ApiError::Internal {
-            message: "Failed to store rental".to_string(),
-        }
-    })?;
-
-    // 5. Register with billing service
+    // 4. Register with billing service
     use basilica_protocol::billing::{
         track_rental_request::CloudType, SecureCloudData, TrackRentalRequest,
     };
@@ -228,17 +202,17 @@ pub async fn start_secure_cloud_rental(
             })?;
     }
 
-    // 6. Calculate hourly cost
+    // 5. Calculate hourly cost
     let hourly_cost = offering.hourly_rate.to_f64().unwrap_or(0.0)
         * offering.gpu_count as f64
         * (1.0 + state.pricing_config.secure_cloud_markup_percent / 100.0);
 
-    // 7. Return response
+    // 6. Return response
     Ok((
         StatusCode::CREATED,
         Json(SecureCloudRentalResponse {
-            rental_id,
-            deployment_id: deployment.id,
+            rental_id: rental_id.clone(),
+            deployment_id: rental_id, // Same as rental_id now (consolidated)
             provider: offering.provider.to_string(),
             status: deployment.status.to_string(),
             ip_address: deployment.ip_address.clone(),
@@ -257,8 +231,8 @@ pub async fn stop_secure_cloud_rental(
     use chrono::Utc;
 
     // 1. Get rental and verify ownership
-    let rental: (String, String, chrono::DateTime<Utc>) = sqlx::query_as(
-        "SELECT deployment_id, user_id, created_at
+    let rental: (String, chrono::DateTime<Utc>) = sqlx::query_as(
+        "SELECT user_id, created_at
          FROM secure_cloud_rentals
          WHERE id = $1",
     )
@@ -274,20 +248,20 @@ pub async fn stop_secure_cloud_rental(
         },
     })?;
 
-    if rental.1 != auth.user_id {
+    if rental.0 != auth.user_id {
         return Err(ApiError::Authorization {
             message: "Not authorized to stop this rental".to_string(),
         });
     }
 
     let stop_time = Utc::now();
-    let duration = stop_time.signed_duration_since(rental.2);
+    let duration = stop_time.signed_duration_since(rental.1);
     let duration_hours = duration.num_seconds() as f64 / 3600.0;
 
-    // 2. Delete deployment via aggregator
+    // 2. Delete deployment via aggregator (rental_id IS the deployment_id)
     state
         .aggregator_service
-        .delete_deployment(&rental.0)
+        .delete_deployment(&rental_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete deployment: {}", e);
@@ -296,28 +270,6 @@ pub async fn stop_secure_cloud_rental(
             }
         })?;
 
-    // 3. Update rental status in API database
-    sqlx::query(
-        "UPDATE secure_cloud_rentals
-         SET status = $1, stopped_at = $2
-         WHERE id = $3",
-    )
-    .bind("stopped")
-    .bind(stop_time)
-    .bind(&rental_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to update rental status: {}", e);
-        ApiError::Internal {
-            message: "Failed to update rental".to_string(),
-        }
-    })?;
-
-    // 4. TODO: Send final telemetry to billing (manual calculation)
-    // Note: For secure cloud rentals, billing is calculated manually based on
-    // start/stop timestamps. The billing service will calculate the final cost
-    // when the rental is marked as stopped.
     tracing::info!(
         "Rental {} stopped. Duration: {} GPU hours",
         rental_id,

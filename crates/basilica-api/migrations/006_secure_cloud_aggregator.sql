@@ -26,31 +26,8 @@ CREATE INDEX IF NOT EXISTS idx_gpu_offerings_fetched_at ON gpu_offerings(fetched
 CREATE INDEX IF NOT EXISTS idx_gpu_offerings_region ON gpu_offerings(region);
 CREATE INDEX IF NOT EXISTS idx_gpu_offerings_availability ON gpu_offerings(availability);
 
--- Deployments table for tracking secure cloud GPU instance deployments
-CREATE TABLE IF NOT EXISTS deployments (
-    id TEXT PRIMARY KEY,                    -- Our internal deployment ID (UUID)
-    user_id TEXT NOT NULL,                  -- User ID from Auth0 (matches API auth)
-    provider TEXT NOT NULL,                 -- Provider name (datacrunch, hyperstack, etc.)
-    provider_instance_id TEXT,              -- Provider's instance ID (set after deployment)
-    offering_id TEXT NOT NULL,              -- Reference to gpu_offerings.id
-    instance_type TEXT NOT NULL,            -- Provider's instance type identifier
-    location_code TEXT,                     -- Deployment location/region
-    status TEXT NOT NULL,                   -- pending, provisioning, running, error, deleted
-    hostname TEXT NOT NULL,                 -- Generated hostname (basilica-{id})
-    ssh_key_id TEXT,                        -- Reference to ssh_keys.id
-    ip_address TEXT,                        -- Instance IP address when ready
-    connection_info JSONB,                  -- Connection details (SSH, Jupyter, etc.) as JSONB
-    raw_response JSONB,                     -- Full provider response as JSONB
-    error_message TEXT,                     -- Error message if deployment failed
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_deployments_provider ON deployments(provider);
-CREATE INDEX IF NOT EXISTS idx_deployments_status ON deployments(status);
-CREATE INDEX IF NOT EXISTS idx_deployments_provider_instance_id ON deployments(provider_instance_id);
-CREATE INDEX IF NOT EXISTS idx_deployments_created_at ON deployments(created_at);
-CREATE INDEX IF NOT EXISTS idx_deployments_user_id ON deployments(user_id);
+-- Note: Deployments are tracked in the secure_cloud_rentals table (see migration 007)
+-- This consolidates rental tracking and deployment tracking into a single table
 
 -- User SSH keys (one per user for secure cloud deployments)
 CREATE TABLE IF NOT EXISTS ssh_keys (
