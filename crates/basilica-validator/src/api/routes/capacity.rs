@@ -56,6 +56,7 @@ pub async fn list_available_nodes(
                     cpu_specs: node.cpu_specs,
                     location: node.location,
                     network_speed,
+                    hourly_rate_cents: node.hourly_rate_cents.map(|v| v as i32),
                 };
 
                 available_nodes.push(AvailableNode {

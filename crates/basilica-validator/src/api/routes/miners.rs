@@ -178,6 +178,7 @@ pub async fn list_miner_nodes(
                     cpu_specs: node.cpu_specs,
                     location: node.location,
                     network_speed: None,
+                    hourly_rate_cents: None,
                 })
                 .collect();
 

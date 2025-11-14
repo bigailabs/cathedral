@@ -91,11 +91,34 @@ pub async fn start_rental(
     let memory_mb = request.resources.memory_mb;
     let storage_mb = request.resources.storage_mb;
 
-    // Determine node_id based on the selection strategy
-    let node_id = match &request.node_selection {
+    // Determine node_id and pricing based on the selection strategy
+    let (node_id, node_hourly_rate_cents) = match &request.node_selection {
         NodeSelection::NodeId { node_id } => {
             info!("Starting rental with specified node: {}", node_id);
-            node_id.clone()
+
+            // Fetch the specific node's pricing from validator
+            let query = ListAvailableNodesQuery {
+                available: Some(true),
+                min_gpu_memory: None,
+                gpu_type: None,
+                min_gpu_count: None,
+                location: None,
+            };
+            let nodes_response = state
+                .validator_client
+                .list_available_nodes(Some(query))
+                .await
+                .map_err(|e| crate::error::ApiError::Internal {
+                    message: format!("Failed to query node pricing: {}", e),
+                })?;
+
+            let pricing = nodes_response
+                .available_nodes
+                .iter()
+                .find(|n| n.node.id == *node_id)
+                .and_then(|n| n.node.hourly_rate_cents);
+
+            (node_id.clone(), pricing)
         }
         NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
             info!(
@@ -138,17 +161,19 @@ pub async fn start_rental(
                 });
             }
 
-            // Randomly select an node from the filtered list
-            let selected_id =
+            // Randomly select a node from the filtered list
+            let selected_node =
                 select_best_node(nodes).ok_or_else(|| crate::error::ApiError::Internal {
                     message: "Failed to select node".into(),
                 })?;
 
             info!(
                 "Selected node {} with exactly {} GPU(s)",
-                selected_id, exact_count
+                selected_node.node.id, exact_count
             );
-            selected_id
+
+            // Capture both node_id and pricing from the selected node (no second fetch needed!)
+            (selected_node.node.id, selected_node.node.hourly_rate_cents)
         }
     };
 
@@ -256,9 +281,22 @@ pub async fn start_rental(
             network_bandwidth_mbps: 0,
         });
 
-        // TODO: Get pricing from node listing or user request once marketplace UI is implemented
-        // For now, use placeholder values (should be replaced with actual marketplace pricing)
-        let base_price_per_gpu = 2.50; // Placeholder: $2.50/GPU/hour
+        // Use pricing from node selection - no fallback
+        let base_price_per_gpu = match node_hourly_rate_cents {
+            Some(rate_cents) => rate_cents as f64 / 100.0,
+            None => {
+                error!(
+                    "No pricing configured for node {}. Cannot proceed with rental billing.",
+                    node_id
+                );
+                return Err(crate::error::ApiError::Internal {
+                    message: format!(
+                        "Node pricing not configured for node {}. Please contact support.",
+                        node_id
+                    ),
+                });
+            }
+        };
         let gpu_count = resource_spec
             .as_ref()
             .and_then(|spec| spec.gpus.first())
@@ -612,12 +650,12 @@ pub async fn list_available_nodes(
 
 /// Select a random node from a list of available nodes to distribute
 /// load and allow users to retry with different nodes if issues occur
-fn select_best_node(nodes: Vec<AvailableNode>) -> Option<String> {
+fn select_best_node(nodes: Vec<AvailableNode>) -> Option<AvailableNode> {
     if nodes.is_empty() {
         return None;
     }
 
-    // Randomly select an node from the available list
+    // Randomly select a node from the available list
     let mut rng = rand::thread_rng();
-    nodes.choose(&mut rng).map(|e| e.node.id.clone())
+    nodes.choose(&mut rng).cloned()
 }

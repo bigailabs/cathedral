@@ -681,6 +681,7 @@ impl ValidationNode {
             validation_details: details,
             gpu_count,
             validation_type: ValidationType::Lightweight,
+            hourly_rate_cents: node_info.hourly_rate_cents,
         })
     }
 
@@ -1042,6 +1043,7 @@ impl ValidationNode {
             validation_details,
             gpu_count,
             validation_type: ValidationType::Full,
+            hourly_rate_cents: node_info.hourly_rate_cents,
         })
     }
 

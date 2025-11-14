@@ -72,6 +72,9 @@ pub struct NodeConnectionDetails {
     pub gpu_spec: ::core::option::Option<super::super::common::v1::GpuSpec>,
     #[prost(string, tag = "7")]
     pub status: ::prost::alloc::string::String,
+    /// Price in cents per GPU per hour (e.g., 250 = $2.50/hour)
+    #[prost(uint32, tag = "8")]
+    pub hourly_rate_cents: u32,
 }
 /// Response containing list of available nodes
 #[allow(clippy::derive_partial_eq_without_eq)]

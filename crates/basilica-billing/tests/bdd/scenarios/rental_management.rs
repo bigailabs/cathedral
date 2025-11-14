@@ -1,7 +1,8 @@
 use crate::bdd::TestContext;
 use basilica_protocol::billing::{
-    get_active_rentals_request::Filter, FinalizeRentalRequest, GetActiveRentalsRequest, GpuSpec,
-    RentalStatus, ResourceSpec, TrackRentalRequest, UpdateRentalStatusRequest,
+    active_rental, get_active_rentals_request::Filter, track_rental_request::CloudType,
+    CommunityCloudData, FinalizeRentalRequest, GetActiveRentalsRequest, GpuSpec, RentalStatus,
+    ResourceSpec, TrackRentalRequest, UpdateRentalStatusRequest,
 };
 use uuid::Uuid;
 
@@ -18,8 +19,6 @@ async fn test_track_rental_creates_new_rental() {
     let request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        node_id: node_id.to_string(),
-        validator_id: validator_id.to_string(),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: Some(ResourceSpec {
@@ -33,9 +32,13 @@ async fn test_track_rental_creates_new_rental() {
             disk_gb: 100,
             network_bandwidth_mbps: 1000,
         }),
-        base_price_per_gpu: 2.5,
-        gpu_count: 1,
-        markup_percent: 1.2,
+        cloud_type: Some(CloudType::Community(CommunityCloudData {
+            node_id: node_id.to_string(),
+            validator_id: validator_id.to_string(),
+            base_price_per_gpu: 2.5,
+            gpu_count: 1,
+            markup_percent: 1.2,
+        })),
     };
 
     let response = context
@@ -71,14 +74,16 @@ async fn test_track_rental_fails_with_insufficient_balance() {
     let request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        node_id: "node_002".to_string(),
-        validator_id: "validator_002".to_string(),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
-        base_price_per_gpu: 2.5,
-        gpu_count: 1,
-        markup_percent: 1.2,
+        cloud_type: Some(CloudType::Community(CommunityCloudData {
+            node_id: "node_002".to_string(),
+            validator_id: "validator_002".to_string(),
+            base_price_per_gpu: 2.5,
+            gpu_count: 1,
+            markup_percent: 1.2,
+        })),
     };
 
     let result = context.client.track_rental(request).await;
@@ -120,14 +125,16 @@ async fn test_update_rental_status_transitions() {
     let track_request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        node_id: "node_003".to_string(),
-        validator_id: "validator_003".to_string(),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
-        base_price_per_gpu: 2.5,
-        gpu_count: 1,
-        markup_percent: 1.2,
+        cloud_type: Some(CloudType::Community(CommunityCloudData {
+            node_id: "node_003".to_string(),
+            validator_id: "validator_003".to_string(),
+            base_price_per_gpu: 2.5,
+            gpu_count: 1,
+            markup_percent: 1.2,
+        })),
     };
 
     let track_response = context
@@ -202,14 +209,16 @@ async fn test_get_active_rentals_by_user() {
         let request = TrackRentalRequest {
             rental_id,
             user_id: user_id.to_string(),
-            node_id: format!("node_{}", i),
-            validator_id: format!("validator_{}", i),
             start_time: None,
             metadata: std::collections::HashMap::new(),
             resource_spec: None,
-            base_price_per_gpu: 2.5,
-            gpu_count: 1,
-            markup_percent: 1.2,
+            cloud_type: Some(CloudType::Community(CommunityCloudData {
+                node_id: format!("node_{}", i),
+                validator_id: format!("validator_{}", i),
+                base_price_per_gpu: 2.5,
+                gpu_count: 1,
+                markup_percent: 1.2,
+            })),
         };
 
         let response = context
@@ -288,14 +297,16 @@ async fn test_get_active_rentals_by_node() {
         let request = TrackRentalRequest {
             rental_id: rental_id.clone(),
             user_id: user_id.clone(),
-            node_id: node_id.to_string(),
-            validator_id: "validator_001".to_string(),
             start_time: None,
             metadata: std::collections::HashMap::new(),
             resource_spec: None,
-            base_price_per_gpu: 2.5,
-            gpu_count: 1,
-            markup_percent: 1.2,
+            cloud_type: Some(CloudType::Community(CommunityCloudData {
+                node_id: node_id.to_string(),
+                validator_id: "validator_001".to_string(),
+                base_price_per_gpu: 2.5,
+                gpu_count: 1,
+                markup_percent: 1.2,
+            })),
         };
 
         let track_response = context
@@ -339,7 +350,11 @@ async fn test_get_active_rentals_by_node() {
     );
 
     for rental in &response.rentals {
-        assert_eq!(rental.node_id, node_id);
+        if let Some(active_rental::CloudType::Community(ref community_data)) = rental.cloud_type {
+            assert_eq!(community_data.node_id, node_id);
+        } else {
+            panic!("Expected Community cloud type");
+        }
     }
 
     context.cleanup().await;
@@ -356,14 +371,16 @@ async fn test_finalize_rental_charges_correct_amount() {
     let track_request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: user_id.to_string(),
-        node_id: "node_final".to_string(),
-        validator_id: "validator_final".to_string(),
         start_time: None,
         metadata: std::collections::HashMap::new(),
         resource_spec: None,
-        base_price_per_gpu: 2.5,
-        gpu_count: 1,
-        markup_percent: 1.2,
+        cloud_type: Some(CloudType::Community(CommunityCloudData {
+            node_id: "node_final".to_string(),
+            validator_id: "validator_final".to_string(),
+            base_price_per_gpu: 2.5,
+            gpu_count: 1,
+            markup_percent: 1.2,
+        })),
     };
 
     let track_response = context

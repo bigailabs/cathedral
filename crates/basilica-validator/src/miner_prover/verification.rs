@@ -577,6 +577,7 @@ impl VerificationEngine {
                         "{}@{}:{}",
                         details.username, details.host, details.port
                     ),
+                    hourly_rate_cents: details.hourly_rate_cents,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -786,6 +787,7 @@ impl VerificationEngine {
                         &node_result.node_id.to_string(),
                         &node_result.node_ssh_endpoint,
                         miner_info,
+                        node_result.hourly_rate_cents,
                     )
                     .await?;
 
@@ -796,6 +798,9 @@ impl VerificationEngine {
                         &gpu_infos,
                     )
                     .await?;
+
+                // Node pricing is automatically stored via ensure_miner_node_relationship above,
+                // which receives hourly_rate_cents from NodeConnectionDetails during discovery
 
                 // Create/update GPU profile for this miner after successful verification
                 let gpu_repo = GpuProfileRepository::new(self.persistence.pool().clone());
@@ -1220,12 +1225,12 @@ impl VerificationEngine {
     /// Convert database node data to NodeInfoDetailed
     fn convert_db_data_to_node_info(
         &self,
-        db_data: Vec<(String, String, i32, String)>,
+        db_data: Vec<(String, String, i32, String, u32)>,
         miner_uid: u16,
     ) -> Result<Vec<NodeInfoDetailed>> {
         let mut nodes = Vec::new();
 
-        for (node_id, ssh_endpoint, gpu_count, status) in db_data {
+        for (node_id, ssh_endpoint, gpu_count, status, hourly_rate_cents) in db_data {
             let node_id_parsed = NodeId::from_str(&node_id)
                 .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", node_id, e))?;
 
@@ -1239,6 +1244,7 @@ impl VerificationEngine {
                     vec![]
                 },
                 node_ssh_endpoint: ssh_endpoint,
+                hourly_rate_cents,
             });
         }
 
