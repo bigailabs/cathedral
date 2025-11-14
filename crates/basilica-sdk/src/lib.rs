@@ -8,11 +8,13 @@
 pub mod auth;
 pub mod client;
 pub mod error;
+pub mod jobs;
 pub mod types;
 
 // Re-export main types
 pub use client::{BasilicaClient, ClientBuilder};
 pub use error::{ApiError, ErrorResponse, Result};
+pub use jobs::*;
 pub use types::*;
 
 /// SDK version

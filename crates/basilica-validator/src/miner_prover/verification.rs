@@ -9,9 +9,12 @@ use super::types::{NodeInfoDetailed, NodeVerificationResult, ValidationType};
 use super::validation_states::{StateResult, ValidationState};
 use super::validation_strategy::{ValidationNode, ValidationStrategy, ValidationStrategySelector};
 use super::validation_worker::{ValidationWorkerQueue, WorkerQueueConfig};
+use crate::agent_installer::{build_install_commands, build_uninstall_commands, K3sAgentConfig};
 use crate::config::VerificationConfig;
 use crate::gpu::MinerGpuProfile;
+use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
+use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
@@ -51,6 +54,8 @@ pub struct VerificationEngine {
     validation_node: Arc<tokio::sync::RwLock<ValidationNode>>,
     /// Optional worker queue for decoupled execution
     worker_queue: Option<Arc<ValidationWorkerQueue>>,
+    /// Optional NodeProfile publisher (DI)
+    node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
 }
 
 impl VerificationEngine {
@@ -753,6 +758,19 @@ impl VerificationEngine {
             || node_result.validation_type == ValidationType::Lightweight
                 && node_result.ssh_connection_successful)
         {
+            // Mark NodeProfile health=Invalid (best-effort)
+            if let Some(publisher) = &self.node_profile_publisher {
+                let ns =
+                    std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+                let node_name = node_result.node_id.to_string();
+                let _ = publisher
+                    .set_node_profile_health(&ns, &node_name, "Invalid")
+                    .await;
+            }
+            // Best-effort uninstall k3s agent
+            let _ = self
+                .maybe_uninstall_k3s(miner_uid, &node_result.node_id.to_string())
+                .await;
             self.persistence
                 .cleanup_gpu_assignments(&verification_log.node_id, &miner_id, Some(&mut tx))
                 .await?;
@@ -871,6 +889,30 @@ impl VerificationEngine {
                             node_result.node_id, miner_uid, gpu_type
                         );
                     }
+
+                    // Publish BasilicaNodeProfile CR and apply Node labels
+                    if let Some(ref nr) = node_result.node_result {
+                        if let Err(e) = self
+                            .publish_node_profile_and_labels(
+                                miner_uid,
+                                &node_result.node_id.to_string(),
+                                nr,
+                            )
+                            .await
+                        {
+                            warn!(
+                                security = true,
+                                miner_uid = miner_uid,
+                                node_id = %node_result.node_id,
+                                error = %e,
+                                "Failed to publish node profile or apply labels (non-fatal)"
+                            );
+                        }
+                    }
+
+                    // Join k3s cluster (optional, gated)
+                    self.maybe_join_k3s(miner_uid, &node_result.node_id.to_string())
+                        .await;
                 }
             }
             ValidationType::Lightweight => {
@@ -905,6 +947,201 @@ impl VerificationEngine {
         );
 
         Ok(())
+    }
+
+    async fn publish_node_profile_and_labels(
+        &self,
+        miner_uid: u16,
+        node_id: &str,
+        nr: &super::types::NodeResult,
+    ) -> Result<()> {
+        let (namespace, cr, maybe_labels) = self
+            .prepare_node_profile_cr_and_labels(miner_uid, node_id, nr)
+            .await?;
+
+        if let Some(publisher) = &self.node_profile_publisher {
+            publisher.upsert_node_profile(&namespace, &cr).await?;
+            if let Some((node_name, labels)) = maybe_labels {
+                let _ = publisher.apply_node_labels(&node_name, &labels).await;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn shell_quote_for_bash(s: &str) -> String {
+        // Wrap in single quotes and escape existing single quotes
+        let escaped = s.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    }
+
+    async fn get_node_ssh_details(
+        &self,
+        miner_uid: u16,
+        node_id: &str,
+    ) -> Result<basilica_common::ssh::SshConnectionDetails> {
+        let miner_id = format!("miner_{}", miner_uid);
+        let endpoint = self
+            .persistence
+            .get_node_ssh_endpoint(node_id, &miner_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("SSH endpoint not found for node {}", node_id))?;
+        let key_manager = self
+            .ssh_key_manager
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SSH key manager not available"))?;
+        key_manager
+            .get_ssh_connection_details(&endpoint)
+            .map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    async fn maybe_join_k3s(&self, miner_uid: u16, node_id: &str) {
+        if std::env::var("BASILICA_ENABLE_K3S_JOIN").ok().as_deref() != Some("true") {
+            return;
+        }
+        let url = match std::env::var("BASILICA_K3S_URL") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return,
+        };
+        let token = match std::env::var("BASILICA_K3S_TOKEN") {
+            Ok(v) if !v.is_empty() => v,
+            _ => return,
+        };
+        let channel = std::env::var("BASILICA_K3S_CHANNEL").ok();
+        let exclusive = std::env::var("BASILICA_TAINT_EXCLUSIVE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let mut cfg = K3sAgentConfig::new(url, token);
+        cfg.node_name = Some(node_id.to_string());
+        cfg.extra_args
+            .push("--node-taint basilica.ai/workloads-only=true:NoSchedule".into());
+        if exclusive {
+            cfg.extra_args
+                .push("--node-taint basilica.ai/rental-exclusive=true:NoSchedule".into());
+        }
+        cfg.channel = channel;
+
+        let cmds = build_install_commands(&cfg);
+        let ssh = ValidatorSshClient::new();
+        let details = match self.get_node_ssh_details(miner_uid, node_id).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        for cmd in cmds {
+            let wrapped = format!("bash -lc {}", Self::shell_quote_for_bash(&cmd));
+            let _ = ssh.execute_command(&details, &wrapped, false).await;
+        }
+    }
+
+    async fn maybe_uninstall_k3s(&self, miner_uid: u16, node_id: &str) {
+        if std::env::var("BASILICA_ENABLE_K3S_JOIN").ok().as_deref() != Some("true") {
+            return;
+        }
+        let ssh = ValidatorSshClient::new();
+        let details = match self.get_node_ssh_details(miner_uid, node_id).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        for cmd in build_uninstall_commands() {
+            let wrapped = format!("bash -lc {}", Self::shell_quote_for_bash(&cmd));
+            let _ = ssh.execute_command(&details, &wrapped, false).await;
+        }
+    }
+
+    async fn prepare_node_profile_cr_and_labels(
+        &self,
+        miner_uid: u16,
+        node_id: &str,
+        nr: &super::types::NodeResult,
+    ) -> Result<(
+        String,
+        kube::core::DynamicObject,
+        Option<(String, std::collections::BTreeMap<String, String>)>,
+    )> {
+        // Resolve namespace for CR publishing
+        let namespace =
+            std::env::var("BASILICA_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+
+        // Attempt to derive hostname and region from stored network profile
+        let (hostname_opt, region_opt, org_opt) = match self
+            .persistence
+            .get_node_network_profile(miner_uid, node_id)
+            .await?
+        {
+            Some((
+                _full,
+                _ip,
+                hostname,
+                _city,
+                region,
+                _country,
+                _loc,
+                organization,
+                _postal,
+                _tz,
+                _ts,
+            )) => (hostname, region, organization),
+            None => (None, None, None),
+        };
+
+        let region = region_opt.as_deref().unwrap_or("unknown");
+        let provider = infer_provider_from_org(org_opt.as_deref());
+
+        // Build spec and CR
+        let spec = to_node_profile_spec(&NodeProfileInput {
+            provider,
+            region,
+            node_result: nr,
+        });
+        // Prefer hostname from network profile; fallback to node_id which is used
+        // as the k3s node name during join (see maybe_join_k3s).
+        let kube_node_name = hostname_opt.as_deref().or(Some(node_id));
+        let last_validated = Some(chrono::Utc::now().to_rfc3339());
+        let cr = crate::k8s_profile_publisher::K8sNodeProfilePublisher::build_node_profile_cr(
+            node_id,
+            &namespace,
+            &spec,
+            kube_node_name,
+            last_validated.as_deref(),
+            Some("Valid"),
+        )?;
+
+        // Base labels from validation
+        let node_group = crate::node_profile::assign_node_group(node_id, &self.config.node_groups);
+        let mut labels = labels_from_validation(nr, provider, region, Some(node_group));
+        // Enrich labels with Docker profile if available
+        if let Ok(Some((
+            _full_json,
+            service_active,
+            docker_version,
+            _images,
+            dind_supported,
+            validation_error,
+        ))) = self
+            .persistence
+            .get_node_docker_profile(miner_uid, node_id)
+            .await
+        {
+            labels.insert(
+                "basilica.ai/docker-active".into(),
+                service_active.to_string(),
+            );
+            if let Some(ver) = docker_version {
+                labels.insert("basilica.ai/docker-version".into(), ver);
+            }
+            labels.insert("basilica.ai/dind".into(), dind_supported.to_string());
+            if let Some(err) = validation_error {
+                if !err.is_empty() {
+                    labels.insert("basilica.ai/docker-error".into(), err);
+                }
+            }
+        }
+
+        let maybe_labels = kube_node_name.map(|name| (name.to_string(), labels));
+
+        Ok((namespace, cr, maybe_labels))
     }
 
     /// Sync miners from metagraph to database
@@ -970,6 +1207,7 @@ impl VerificationEngine {
         ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
         bittensor_service: Option<Arc<bittensor::Service>>,
         metrics: Option<Arc<ValidatorMetrics>>,
+        node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
     ) -> Result<Self> {
         // Validate required components for dynamic discovery
         if use_dynamic_discovery && ssh_key_manager.is_none() {
@@ -999,6 +1237,7 @@ impl VerificationEngine {
                 persistence.clone(),
             ))),
             worker_queue: None, // Will be set separately if needed
+            node_profile_publisher,
         })
     }
 
@@ -1281,6 +1520,188 @@ impl VerificationEngine {
         } else {
             None
         }
+    }
+}
+
+fn infer_provider_from_org(org: Option<&str>) -> &'static str {
+    if let Some(o) = org {
+        let low = o.to_ascii_lowercase();
+        if low.contains("amazon") || low.contains("aws") {
+            return "aws";
+        }
+        if low.contains("google") || low.contains("gcp") {
+            return "gcp";
+        }
+        if low.contains("microsoft") || low.contains("azure") {
+            return "azure";
+        }
+    }
+    "onprem"
+}
+
+#[cfg(test)]
+mod node_profile_wiring_tests {
+    use super::*;
+    use crate::config::{AutomaticVerificationConfig, SshSessionConfig};
+    use crate::miner_prover::verification_engine_builder::VerificationEngineBuilder;
+    use crate::persistence::SimplePersistence;
+
+    fn sample_node_result() -> crate::miner_prover::types::NodeResult {
+        use crate::miner_prover::types::*;
+        NodeResult {
+            gpu_name: "NVIDIA A100".into(),
+            gpu_uuid: "GPU-XYZ".into(),
+            gpu_infos: vec![GpuInfo {
+                index: 0,
+                gpu_name: "NVIDIA A100".into(),
+                gpu_uuid: "GPU-XYZ".into(),
+                gpu_memory_gb: 80.0,
+                computation_time_ns: 0,
+                memory_bandwidth_gbps: 0.0,
+                sm_utilization: SmUtilizationStats {
+                    min_utilization: 0.0,
+                    max_utilization: 0.0,
+                    avg_utilization: 0.0,
+                    per_sm_stats: vec![],
+                },
+                active_sms: 0,
+                total_sms: 0,
+                anti_debug_passed: true,
+            }],
+            cpu_info: BinaryCpuInfo {
+                model: "AMD EPYC".into(),
+                cores: 64,
+                threads: 128,
+                frequency_mhz: 0,
+            },
+            memory_info: BinaryMemoryInfo {
+                total_gb: 256.0,
+                available_gb: 0.0,
+            },
+            network_info: BinaryNetworkInfo {
+                interfaces: vec![NetworkInterface {
+                    name: "eth0".into(),
+                    mac_address: "aa:bb".into(),
+                    ip_addresses: vec!["10.0.0.2".into()],
+                }],
+            },
+            matrix_c: CompressedMatrix {
+                rows: 0,
+                cols: 0,
+                data: vec![],
+            },
+            computation_time_ns: 0,
+            checksum: [0u8; 32],
+            sm_utilization: SmUtilizationStats {
+                min_utilization: 0.0,
+                max_utilization: 0.0,
+                avg_utilization: 0.0,
+                per_sm_stats: vec![],
+            },
+            active_sms: 0,
+            total_sms: 0,
+            memory_bandwidth_gbps: 0.0,
+            anti_debug_passed: true,
+            timing_fingerprint: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn prepares_cr_and_labels_from_validation_and_network_profile() -> Result<()> {
+        // Arrange: persistence with network profile
+        let persistence = Arc::new(SimplePersistence::for_testing().await?);
+
+        // Seed network profile with hostname, region, and organization
+        persistence
+            .store_node_network_profile(
+                100u16,
+                "node-abc",
+                Some("192.0.2.10".into()),
+                Some("kube-node-1".into()),
+                Some("City".into()),
+                Some("us-east-1".into()),
+                Some("US".into()),
+                None,
+                Some("Amazon Web Services".into()),
+                None,
+                None,
+                &chrono::Utc::now().to_rfc3339(),
+                "{}",
+            )
+            .await?;
+
+        // Build a minimal engine for calling the helper
+        let config = VerificationConfig::test_default();
+        let builder = VerificationEngineBuilder::new(
+            config.clone(),
+            AutomaticVerificationConfig::test_default(),
+            SshSessionConfig::test_default(),
+            Hotkey::new("5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy".to_string()).unwrap(),
+            persistence.clone(),
+            None,
+        );
+        let engine = builder.build_for_testing().await?;
+
+        // Namespace influence
+        std::env::set_var("BASILICA_NAMESPACE", "testns");
+
+        let nr = sample_node_result();
+        let (ns, cr, maybe_labels) = engine
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .await?;
+
+        // Assert namespace
+        assert_eq!(ns, "testns");
+
+        // Assert CR metadata and spec
+        assert_eq!(cr.metadata.name.as_deref(), Some("node-abc"));
+        assert_eq!(cr.metadata.namespace.as_deref(), Some("testns"));
+        let spec = cr.data.get("spec").expect("spec present");
+        assert_eq!(
+            spec.get("provider").and_then(|v| v.as_str()).unwrap(),
+            "aws"
+        );
+        assert_eq!(
+            spec.get("region").and_then(|v| v.as_str()).unwrap(),
+            "us-east-1"
+        );
+
+        // Assert status
+        let status = cr.data.get("status").expect("status present");
+        assert_eq!(
+            status.get("kubeNodeName").and_then(|v| v.as_str()).unwrap(),
+            "kube-node-1"
+        );
+
+        // Assert labels
+        let (node_name, labels) = maybe_labels.expect("labels present");
+        assert_eq!(node_name, "kube-node-1");
+        assert_eq!(labels.get("basilica.ai/region").unwrap(), "us-east-1");
+        assert_eq!(labels.get("basilica.ai/provider").unwrap(), "aws");
+        assert_eq!(labels.get("basilica.ai/gpu-model").unwrap(), "NVIDIA A100");
+
+        // Seed docker profile then re-run to assert docker labels
+        persistence
+            .store_node_docker_profile(
+                100u16,
+                "node-abc",
+                true,
+                Some("24.0.7".into()),
+                vec![],
+                true,
+                None,
+                "{}",
+            )
+            .await?;
+        let (_ns2, _cr2, maybe_labels2) = engine
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .await?;
+        let (_node2, labels2) = maybe_labels2.expect("labels present");
+        assert_eq!(labels2.get("basilica.ai/docker-active").unwrap(), "true");
+        assert_eq!(labels2.get("basilica.ai/docker-version").unwrap(), "24.0.7");
+        assert_eq!(labels2.get("basilica.ai/dind").unwrap(), "true");
+
+        Ok(())
     }
 }
 

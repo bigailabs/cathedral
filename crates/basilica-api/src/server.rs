@@ -1,5 +1,6 @@
 //! Main server implementation for the Basilica API Gateway
 
+use crate::k8s_client::{ApiK8sClient, K8sClient};
 use crate::{
     api,
     api::extractors::ownership::archive_rental_ownership,
@@ -52,11 +53,17 @@ pub struct AppState {
     /// Database pool for user rental tracking
     pub db: PgPool,
 
+    /// Optional K8s client seam for Jobs/Rentals backed by K3s
+    pub k8s: Option<Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>>,
+
     /// Payments service client
     pub payments_client: Option<Arc<PaymentsClient>>,
 
     /// Billing service client
     pub billing_client: Option<Arc<BillingClient>>,
+
+    /// DNS provider for public deployments
+    pub dns_provider: Option<Arc<dyn crate::dns::DnsProvider>>,
 
     /// Metrics system
     pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
@@ -209,6 +216,22 @@ impl Server {
                 message: format!("Failed to run migrations: {}", e),
             })?;
 
+        // Initialize Kubernetes client (optional)
+        let k8s: Option<Arc<dyn ApiK8sClient + Send + Sync>> = match K8sClient::try_default().await
+        {
+            Ok(c) => {
+                info!("Initialized Kubernetes client for API integration");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                warn!(
+                    "K8s client unavailable: {} (continuing without K8s integration)",
+                    e
+                );
+                None
+            }
+        };
+
         // Initialize payments service client if enabled
         let payments_client = if config.payments.enabled {
             info!(
@@ -312,6 +335,42 @@ impl Server {
         );
         info!("GPU Aggregator service initialized successfully");
 
+        // Initialize DNS provider for public deployments
+        let dns_provider: Option<Arc<dyn crate::dns::DnsProvider>> = if config.dns.enabled {
+            let dns_config = config.dns.from_env();
+            if let Err(e) = dns_config.validate() {
+                warn!(
+                    "DNS configuration invalid: {}. Public deployments will be disabled.",
+                    e
+                );
+                None
+            } else {
+                match crate::dns::cloudflare::CloudflareDnsManager::new(
+                    crate::dns::cloudflare::CloudflareConfig {
+                        api_token: dns_config.api_token.unwrap(),
+                        zone_id: dns_config.zone_id.unwrap(),
+                        domain: dns_config.domain.clone(),
+                        proxy: dns_config.proxy,
+                    },
+                ) {
+                    Ok(manager) => {
+                        info!(
+                            "DNS provider initialized successfully for domain: {}",
+                            dns_config.domain
+                        );
+                        Some(Arc::new(manager) as Arc<dyn crate::dns::DnsProvider>)
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize DNS provider: {}. Public deployments will be disabled.", e);
+                        None
+                    }
+                }
+            }
+        } else {
+            info!("DNS management is disabled");
+            None
+        };
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -321,8 +380,10 @@ impl Server {
             validator_hotkey: config.bittensor.validator_hotkey.clone(),
             http_client: http_client.clone(),
             db,
+            k8s,
             payments_client,
             billing_client,
+            dns_provider,
             metrics,
             aggregator_service,
             pricing_config: config.pricing.clone(),

@@ -10,8 +10,8 @@ Basilica services provide built-in metrics that can be monitored using Prometheu
 
 The repository includes monitoring configurations in:
 
-- `config/monitoring/prometheus.yml` - Prometheus configuration
-- `config/monitoring/grafana-datasources.yml` - Grafana datasource configuration  
+- `orchestrator/config/monitoring/prometheus.yml` - Prometheus configuration
+- `orchestrator/config/monitoring/grafana-datasources.yml` - Grafana datasource configuration  
 - `scripts/localtest/docker-compose-monitoring.yml` - Monitoring stack deployment
 
 ## Quick Start
@@ -59,7 +59,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./config/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./orchestrator/config/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -72,7 +72,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - ./config/monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./orchestrator/config/monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
       - grafana-data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
@@ -207,6 +207,6 @@ The monitoring setup uses these default ports:
 - **Prometheus**: 9090 (web UI)
 - **Grafana**: 3000 (web UI)
 
-Adjust the `config/monitoring/prometheus.yml` file if your services use different ports.
+Adjust the `orchestrator/config/monitoring/prometheus.yml` file if your services use different ports.
 
 **Note**: GPU node metrics are collected by the miner during SSH-based health checks and verification operations.

@@ -1,4 +1,4 @@
-use crate::domain::idempotency::{generate_idempotency_key, prepare_event_data_for_idempotency};
+use crate::domain::idempotency::generate_idempotency_key;
 use crate::domain::types::{RentalId, UsageMetrics};
 use crate::error::{BillingError, Result};
 use crate::storage::events::{EventType, UsageEvent};
@@ -177,8 +177,7 @@ impl TelemetryProcessor {
             "timestamp": telemetry_timestamp.timestamp_millis().to_string(),
         });
 
-        let event_data_for_key = prepare_event_data_for_idempotency(&event_data);
-        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data_for_key);
+        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
 
         let telemetry_event = UsageEvent {
             event_id: Uuid::new_v4(),
@@ -199,7 +198,15 @@ impl TelemetryProcessor {
             .append_usage_event(&telemetry_event)
             .await
             .map_err(|e| {
-                error!("Failed to store telemetry event: {}", e);
+                error!(
+                    "Failed to store telemetry event: {} | rental_id={} node_id={} validator_id={} event_type={:?} idempotency_key={:?}",
+                    e,
+                    rental_id,
+                    data.node_id,
+                    rental.validator_id,
+                    telemetry_event.event_type,
+                    telemetry_event.idempotency_key
+                );
                 BillingError::TelemetryError {
                     source: Box::new(e),
                 }

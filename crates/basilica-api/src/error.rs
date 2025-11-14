@@ -92,6 +92,10 @@ pub enum ApiError {
     #[error("Conflict: {message}")]
     Conflict { message: String },
 
+    /// ConfigMap size limit exceeded
+    #[error("ConfigMap size limit exceeded: current {current} bytes, limit {limit} bytes")]
+    ConfigMapSizeLimitExceeded { current: usize, limit: usize },
+
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -129,6 +133,7 @@ impl ApiError {
             ApiError::NotFound { .. } => "BASILICA_API_NOT_FOUND",
             ApiError::BadRequest { .. } => "BASILICA_API_BAD_REQUEST",
             ApiError::Conflict { .. } => "BASILICA_API_CONFLICT",
+            ApiError::ConfigMapSizeLimitExceeded { .. } => "BASILICA_API_CONFIGMAP_SIZE_LIMIT",
             ApiError::Serialization(_) => "BASILICA_API_SERIALIZATION_ERROR",
             ApiError::Other(_) => "BASILICA_API_OTHER_ERROR",
         }
@@ -196,6 +201,9 @@ impl IntoResponse for ApiError {
             ApiError::NotFound { .. } => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::BadRequest { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
             ApiError::Conflict { .. } => (StatusCode::CONFLICT, self.to_string()),
+            ApiError::ConfigMapSizeLimitExceeded { .. } => {
+                (StatusCode::INSUFFICIENT_STORAGE, self.to_string())
+            }
             ApiError::Serialization(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             ApiError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };

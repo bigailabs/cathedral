@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use sqlx::Row;
 use std::sync::Arc;
+use tracing::error;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -237,6 +238,75 @@ impl SqlEventRepository {
             _ => EventType::Telemetry,
         }
     }
+
+    fn classify_database_error(error: &sqlx::Error, event: &UsageEvent) -> DatabaseErrorDetails {
+        match error {
+            sqlx::Error::Database(db_err) => {
+                let code = db_err.code().map(|c| c.to_string()).unwrap_or_default();
+                let constraint = db_err.constraint().unwrap_or("unknown");
+
+                match code.as_str() {
+                    "23505" => DatabaseErrorDetails {
+                        error_type: "unique_violation".to_string(),
+                        message: format!(
+                            "Duplicate idempotency_key: {}. Event already exists in database (constraint: {})",
+                            event.idempotency_key.as_deref().unwrap_or("None"),
+                            constraint
+                        ),
+                    },
+                    "23502" => DatabaseErrorDetails {
+                        error_type: "not_null_violation".to_string(),
+                        message: format!(
+                            "Required field is NULL (constraint: {})",
+                            constraint
+                        ),
+                    },
+                    "23514" => DatabaseErrorDetails {
+                        error_type: "check_violation".to_string(),
+                        message: format!(
+                            "CHECK constraint failed. Likely empty user_id/validator_id (user_id='{}', validator_id='{}', constraint: {})",
+                            event.user_id,
+                            event.validator_id,
+                            constraint
+                        ),
+                    },
+                    "23503" => DatabaseErrorDetails {
+                        error_type: "foreign_key_violation".to_string(),
+                        message: format!(
+                            "Foreign key constraint failed (constraint: {})",
+                            constraint
+                        ),
+                    },
+                    _ => DatabaseErrorDetails {
+                        error_type: "database_error".to_string(),
+                        message: format!("Database error code {}: {}", code, db_err.message()),
+                    },
+                }
+            }
+            sqlx::Error::PoolTimedOut => DatabaseErrorDetails {
+                error_type: "pool_timeout".to_string(),
+                message: "Connection pool timed out - database overloaded or connection leak"
+                    .to_string(),
+            },
+            sqlx::Error::PoolClosed => DatabaseErrorDetails {
+                error_type: "pool_closed".to_string(),
+                message: "Connection pool closed - service shutting down".to_string(),
+            },
+            sqlx::Error::Io(_) => DatabaseErrorDetails {
+                error_type: "io_error".to_string(),
+                message: "Network I/O error communicating with database".to_string(),
+            },
+            _ => DatabaseErrorDetails {
+                error_type: "unknown".to_string(),
+                message: format!("Unexpected database error: {}", error),
+            },
+        }
+    }
+}
+
+struct DatabaseErrorDetails {
+    error_type: String,
+    message: String,
 }
 
 #[async_trait]
@@ -264,9 +334,21 @@ impl EventRepository for SqlEventRepository {
         .bind(&event.idempotency_key)
         .execute(self.connection.pool())
         .await
-        .map_err(|e| BillingError::EventStoreError {
-            message: "Failed to append usage event".to_string(),
-            source: Box::new(e),
+        .map_err(|e| {
+            let error_details = Self::classify_database_error(&e, event);
+            error!(
+                "Failed to append usage event: {} | event_id={} rental_id={} idempotency_key={:?} error_type={} db_error={}",
+                error_details.message,
+                event.event_id,
+                event.rental_id,
+                event.idempotency_key,
+                error_details.error_type,
+                e
+            );
+            BillingError::EventStoreError {
+                message: error_details.message,
+                source: Box::new(e),
+            }
         })?;
 
         Ok(event.event_id)

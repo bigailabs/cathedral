@@ -34,6 +34,12 @@ pub struct BittensorConfig {
     /// Weight setting interval in seconds
     pub weight_interval_secs: u64,
 
+    /// Read-only mode (default: false)
+    /// When true, wallet is only used for querying metagraph, not signing transactions
+    /// The wallet does not need to hold funds or be registered on-chain
+    #[serde(default)]
+    pub read_only: bool,
+
     /// Connection pool size (default: 3)
     #[serde(default)]
     pub connection_pool_size: Option<usize>,
@@ -61,6 +67,7 @@ impl Default for BittensorConfig {
             chain_endpoint: None,
             fallback_endpoints: Vec::new(),
             weight_interval_secs: 300, // 5 minutes
+            read_only: false,
             connection_pool_size: Some(3),
             health_check_interval: Some(Duration::from_secs(60)),
             circuit_breaker_threshold: Some(5),

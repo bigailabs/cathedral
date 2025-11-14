@@ -6,6 +6,7 @@ pub mod middleware;
 pub mod query;
 pub mod routes;
 
+use crate::config::RentalBackend;
 use crate::server::AppState;
 use axum::{
     routing::{delete, get, post},
@@ -22,7 +23,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/metrics", get(routes::metrics::metrics_handler));
 
     // Routes that require balance validation
-    let rental_creation_route = Router::new()
+    let _rental_creation_route = Router::new()
         .route("/rentals", post(routes::rentals::start_rental))
         // Balance validation (after auth, before handler)
         .layer(axum::middleware::from_fn_with_state(
@@ -31,14 +32,40 @@ pub fn routes(state: AppState) -> Router<AppState> {
         ));
 
     // Protected routes with unified authentication and scope validation
-    let protected_routes = Router::new()
-        .route("/rentals", get(routes::rentals::list_rentals_validator))
-        .merge(rental_creation_route)
-        .route("/rentals/:id", get(routes::rentals::get_rental_status))
-        .route("/rentals/:id", delete(routes::rentals::stop_rental))
+    let mut protected_routes = Router::new()
+        .route("/jobs", post(routes::jobs::create_job))
         .route(
-            "/rentals/:id/logs",
-            get(routes::rentals::stream_rental_logs),
+            "/jobs/:id",
+            get(routes::jobs::get_job_status).delete(routes::jobs::delete_job),
+        )
+        .route("/jobs/:id/logs", get(routes::jobs::get_job_logs))
+        .route("/jobs/:id/read-file", post(routes::jobs::read_job_file))
+        .route("/jobs/:id/suspend", post(routes::jobs::suspend_job))
+        .route("/jobs/:id/resume", post(routes::jobs::resume_job))
+        // v2 rentals namespace is always available when k8s client exists
+        .route(
+            "/v2/rentals",
+            get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental),
+        )
+        .route(
+            "/v2/rentals-compat",
+            post(routes::rentals_v2::create_rental_compat),
+        )
+        .route(
+            "/v2/rentals/:id",
+            get(routes::rentals_v2::get_rental_status).delete(routes::rentals_v2::delete_rental),
+        )
+        .route(
+            "/v2/rentals/:id/logs",
+            get(routes::rentals_v2::stream_rental_logs),
+        )
+        .route(
+            "/v2/rentals/:id/exec",
+            post(routes::rentals_v2::exec_rental),
+        )
+        .route(
+            "/v2/rentals/:id/extend",
+            post(routes::rentals_v2::extend_rental),
         )
         .route("/nodes", get(routes::rentals::list_available_nodes))
         // API key management endpoints (JWT auth only)
@@ -54,9 +81,62 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 .get(routes::ssh_keys::get_ssh_key)
                 .delete(routes::ssh_keys::delete_ssh_key),
         )
-        // Payment service endpoints
+        // User deployment management endpoints
+        .route(
+            "/deployments",
+            post(routes::deployments::create_deployment).get(routes::deployments::list_deployments),
+        )
+        .route(
+            "/deployments/:instance_name",
+            get(routes::deployments::get_deployment).delete(routes::deployments::delete_deployment),
+        )
+        .route(
+            "/deployments/:instance_name/logs",
+            get(routes::deployments::stream_deployment_logs),
+        );
+
+    // Conditionally map legacy vs k8s backend under /rentals
+    let use_k8s_backend = match state.config.rental_backend {
+        RentalBackend::K8s => state.k8s.is_some(),
+        RentalBackend::Auto => state.k8s.is_some(),
+        RentalBackend::Legacy => false,
+    };
+    if use_k8s_backend {
+        protected_routes = protected_routes
+            .route(
+                "/rentals",
+                get(routes::rentals_v2::list_rentals)
+                    .post(routes::rentals_v2::create_rental_compat),
+            )
+            .route(
+                "/rentals/:id",
+                get(routes::rentals_v2::get_rental_status)
+                    .delete(routes::rentals_v2::delete_rental),
+            )
+            .route(
+                "/rentals/:id/logs",
+                get(routes::rentals_v2::stream_rental_logs),
+            )
+            .route("/rentals/:id/exec", post(routes::rentals_v2::exec_rental))
+            .route(
+                "/rentals/:id/extend",
+                post(routes::rentals_v2::extend_rental),
+            );
+    } else {
+        protected_routes = protected_routes
+            .route("/rentals", get(routes::rentals::list_rentals_validator))
+            .route("/rentals", post(routes::rentals::start_rental))
+            .route("/rentals/:id", get(routes::rentals::get_rental_status))
+            .route("/rentals/:id", delete(routes::rentals::stop_rental))
+            .route(
+                "/rentals/:id/logs",
+                get(routes::rentals::stream_rental_logs),
+            );
+    }
+
+    // Add payment and billing service endpoints
+    let protected_routes = protected_routes
         .nest("/payments", routes::payments::routes())
-        // Billing service endpoints
         .nest("/billing", routes::billing::routes())
         // Secure Cloud endpoints (GPU aggregator) - proxied through API
         .route(
@@ -71,11 +151,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/secure-cloud/rentals/:rental_id/stop",
             post(routes::secure_cloud::stop_secure_cloud_rental),
         )
+        // Apply middleware layers
         // Apply scope validation AFTER auth middleware
         .layer(axum::middleware::from_fn(
             middleware::scope_validation_middleware,
         ))
-        // Apply unified authentication first
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::auth_middleware,

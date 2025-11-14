@@ -84,7 +84,7 @@ fn get_required_scope(req: &Request) -> Option<String> {
     let method = req.method();
 
     match (method, path) {
-        // Rental endpoints
+        // Rental endpoints (v1)
         (&Method::GET, "/rentals") => Some("rentals:list".to_string()),
         (&Method::POST, "/rentals") => Some("rentals:create".to_string()),
         (&Method::DELETE, p) if p.starts_with("/rentals/") && !p.contains("/logs") => {
@@ -95,11 +95,42 @@ fn get_required_scope(req: &Request) -> Option<String> {
         }
         (&Method::GET, p) if p.starts_with("/rentals/") => Some("rentals:view".to_string()),
 
+        // Rental endpoints (v2)
+        (&Method::GET, "/v2/rentals") => Some("rentals:list".to_string()),
+        (&Method::POST, "/v2/rentals") => Some("rentals:create".to_string()),
+        (&Method::POST, "/v2/rentals-compat") => Some("rentals:create".to_string()),
+        (&Method::DELETE, p)
+            if p.starts_with("/v2/rentals/")
+                && !p.contains("/logs")
+                && !p.contains("/exec")
+                && !p.contains("/extend") =>
+        {
+            Some("rentals:stop".to_string())
+        }
+        (&Method::GET, p) if p.starts_with("/v2/rentals/") && p.ends_with("/logs") => {
+            Some("rentals:logs".to_string())
+        }
+        (&Method::POST, p) if p.starts_with("/v2/rentals/") && p.ends_with("/exec") => {
+            Some("rentals:exec".to_string())
+        }
+        (&Method::POST, p) if p.starts_with("/v2/rentals/") && p.ends_with("/extend") => {
+            Some("rentals:extend".to_string())
+        }
+        (&Method::GET, p) if p.starts_with("/v2/rentals/") => Some("rentals:view".to_string()),
+
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),
 
         // Secure cloud endpoints - require "secure_cloud" scope
         (&Method::GET, p) if p.starts_with("/secure-cloud/") => Some("secure_cloud".to_string()),
+
+        // Job endpoints (v1)
+        (&Method::POST, "/jobs") => Some("jobs:create".to_string()),
+        (&Method::GET, p) if p.starts_with("/jobs/") && p.ends_with("/logs") => {
+            Some("jobs:logs".to_string())
+        }
+        (&Method::DELETE, p) if p.starts_with("/jobs/") => Some("jobs:delete".to_string()),
+        (&Method::GET, p) if p.starts_with("/jobs/") => Some("jobs:view".to_string()),
 
         // API Key management endpoints
         (&Method::POST, "/api-keys") => Some("keys:create".to_string()),
@@ -123,6 +154,13 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/billing/balance") => Some(String::new()),
         (&Method::GET, "/billing/usage") => Some(String::new()),
         (&Method::GET, p) if p.starts_with("/billing/usage/") => Some(String::new()),
+
+        // Deployment endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own deployments
+        (&Method::POST, "/deployments") => Some(String::new()),
+        (&Method::GET, "/deployments") => Some(String::new()),
+        (&Method::GET, p) if p.starts_with("/deployments/") => Some(String::new()),
+        (&Method::DELETE, p) if p.starts_with("/deployments/") => Some(String::new()),
 
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"

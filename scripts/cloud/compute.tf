@@ -171,8 +171,8 @@ module "billing_service" {
     BILLING_AWS__ENDPOINT_URL            = ""
 
     # Dynamic Pricing Configuration
-    BILLING_DYNAMIC_PRICING__ENABLED              = "true"
-    BILLING_DYNAMIC_PRICING__MARKETPLACE_API_KEY  = var.marketplace_api_key
+    BILLING_DYNAMIC_PRICING__ENABLED             = "true"
+    BILLING_DYNAMIC_PRICING__MARKETPLACE_API_KEY = var.marketplace_api_key
 
     # Logging
     RUST_LOG = "basilica_billing=info,basilica_protocol=info"
@@ -330,6 +330,8 @@ module "basilica_api_service" {
 
   # Environment variables
   environment_variables = {
+    RUST_LOG = "debug"
+
     # Server Configuration
     BASILICA_API_SERVER__BIND_ADDRESS    = "0.0.0.0:8000"
     BASILICA_API_SERVER__MAX_CONNECTIONS = "10000"
@@ -375,12 +377,30 @@ module "basilica_api_service" {
     BASILICA_API_BILLING__ENDPOINT               = "http://billing-v3.${aws_service_discovery_private_dns_namespace.main.name}:50051"
     BASILICA_API_BILLING__ENFORCE_BALANCE_CHECKS = "true"
 
+    # Cloudflare Integration
+    BASILICA_API_DNS__ENABLED      = "true"
+    BASILICA_API_DNS__PROXY        = "true"
+    BASILICA_API_DNS__API_TOKEN    = var.cloudflare_api_token
+    BASILICA_API_DNS__ZONE_ID      = var.cloudflare_zone_id
+    BASILICA_API_DNS__DOMAIN       = var.cloudflare_domain
+    BASILICA_API_DNS__ALB_DNS_NAME = var.deployments_alb_dns_name
+    CLOUDFLARE_API_TOKEN           = var.cloudflare_api_token
+    CLOUDFLARE_ZONE_ID             = var.cloudflare_zone_id
+    CLOUDFLARE_DOMAIN              = var.cloudflare_domain
+    CLOUDFLARE_PROXY               = "true"
+    ALB_DNS_NAME                   = var.deployments_alb_dns_name
+
     # Logging
-    RUST_LOG = "basilica_api=info,basilica_protocol=info"
+    RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
   }
 
-  # No secrets needed currently
-  secrets = []
+  # Secrets from AWS Secrets Manager
+  secrets = [
+    {
+      name      = "KUBECONFIG_CONTENT"
+      valueFrom = aws_secretsmanager_secret.kubeconfig.arn
+    }
+  ]
 
   tags = local.common_tags
 

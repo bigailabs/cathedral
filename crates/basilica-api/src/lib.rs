@@ -13,11 +13,20 @@
 
 // Server modules (always available for backward compatibility)
 pub mod api;
+pub mod apimetrics;
 pub mod config;
 pub mod country_mapping;
+pub mod db;
+pub mod dns;
+pub mod envoy;
 pub mod error;
+pub mod gateway;
+pub mod k8s;
 pub mod metrics;
 pub mod server;
+
+// Backward compatibility alias
+pub use k8s as k8s_client;
 
 // Re-export commonly used types
 pub use config::Config;

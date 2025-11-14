@@ -5,6 +5,7 @@
 
 // pub mod auth_test_utils;  // Commented out - needs refactoring for node-based architecture
 pub mod config;
+pub mod k8s_helpers;
 
 // Re-export commonly used types for convenience
 // pub use auth_test_utils::{
@@ -14,3 +15,4 @@ pub mod config;
 // };
 
 pub use config::{ServiceAvailability, TestConfig};
+pub use k8s_helpers::K8sTestContext;

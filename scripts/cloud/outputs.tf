@@ -81,3 +81,18 @@ output "nat_gateway_public_ip" {
   description = "NAT Gateway public IP - Use this to whitelist AWS ECS services on validator server"
   value       = module.networking.nat_gateway_public_ip
 }
+
+output "vpc_id" {
+  description = "VPC ID - Pass this to orchestrator/cloud as peer_vpc_id for VPC peering"
+  value       = module.networking.vpc_id
+}
+
+output "vpc_cidr" {
+  description = "VPC CIDR block - Pass this to orchestrator/cloud as peer_vpc_cidr for VPC peering"
+  value       = module.networking.vpc_cidr
+}
+
+output "private_route_table_id" {
+  description = "Private route table ID - Pass this to orchestrator/cloud as peer_route_table_id for VPC peering"
+  value       = module.networking.private_route_table_id
+}

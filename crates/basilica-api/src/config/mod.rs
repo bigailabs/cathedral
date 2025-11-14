@@ -1,10 +1,14 @@
 //! Configuration module for the Basilica API gateway
 
 mod cache;
+mod deployment;
+mod dns;
 mod rate_limit;
 mod server;
 
 pub use cache::{CacheBackend, CacheConfig};
+pub use deployment::DeploymentConfig;
+pub use dns::DnsConfig;
 pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
@@ -241,11 +245,23 @@ pub struct Config {
     /// Database configuration
     pub database: DatabaseConfig,
 
+    /// Rental backend selection: "legacy" (validator) or "k8s" (CRDs)
+    #[serde(default)]
+    pub rental_backend: RentalBackend,
+
     /// Payments service configuration
     pub payments: PaymentsServiceConfig,
 
     /// Billing service configuration
     pub billing: BillingServiceConfig,
+
+    /// Deployment configuration
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
+
+    /// DNS configuration for public deployments
+    #[serde(default)]
+    pub dns: DnsConfig,
 
     /// Metrics configuration
     #[serde(default)]
@@ -331,6 +347,7 @@ impl Config {
             wallet_name: "default".to_string(),
             hotkey_name: "default".to_string(),
             weight_interval_secs: 300, // 5 minutes default
+            read_only: true,           // API only needs read-only access for metagraph queries
             ..Default::default()
         }
     }
@@ -447,4 +464,15 @@ mod tests {
         assert!(!config.enabled);
         assert!(!config.enforce_balance_checks);
     }
+}
+/// Rental backend selector
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum RentalBackend {
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+    #[serde(rename = "legacy")]
+    Legacy,
+    #[serde(rename = "k8s")]
+    K8s,
 }
