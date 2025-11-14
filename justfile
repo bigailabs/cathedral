@@ -106,26 +106,6 @@ clean:
     rm -f *.log
 
 # =============================================================================
-# AGGREGATOR COMMANDS
-# =============================================================================
-
-# Run aggregator service
-aggregator:
-    cargo run --bin basilica-aggregator
-
-# Build aggregator
-build-aggregator:
-    cargo build --release -p basilica-aggregator
-
-# Test aggregator
-test-aggregator:
-    cargo test -p basilica-aggregator
-
-# Run aggregator with specific config
-aggregator-config CONFIG:
-    cargo run --bin basilica-aggregator {{CONFIG}}
-
-# =============================================================================
 # SECURITY & QUALITY
 # =============================================================================
 

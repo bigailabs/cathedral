@@ -8,47 +8,47 @@ edition = "2021"
 basilica-common = { path = "../basilica-common" }
 
 # HTTP framework
-axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { workspace = true }
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { workspace = true }
 
 # Database (PostgreSQL only)
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros", "migrate", "chrono", "json", "rust_decimal"] }
+sqlx = { workspace = true, features = ["macros"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Decimal precision for prices
-rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal = { workspace = true, features = ["serde-with-str"] }
 
 # Configuration
 config = "0.14"
 
 # Time handling
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { workspace = true }
 
 # Error handling
-anyhow = "1"
-thiserror = "1"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Async trait support
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 # UUID generation
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { workspace = true }
 
 [dev-dependencies]
 axum-test = "15"
 mockito = "1"
-toml = "0.8"
+toml = { workspace = true }
