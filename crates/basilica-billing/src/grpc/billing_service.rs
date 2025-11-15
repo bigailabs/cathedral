@@ -1,5 +1,5 @@
 use crate::domain::events::EventStore;
-use crate::domain::idempotency::generate_idempotency_key;
+use crate::domain::idempotency::{generate_idempotency_key, prepare_event_data_for_idempotency};
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
     rentals::{RentalManager, RentalOperations},

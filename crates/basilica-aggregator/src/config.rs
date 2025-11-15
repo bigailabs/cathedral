@@ -171,6 +171,28 @@ impl Config {
 
         Ok(())
     }
+
+    /// Create a default config for testing (no providers enabled)
+    pub fn default_for_tests() -> Self {
+        Self {
+            server: ServerConfig {
+                host: default_host(),
+                port: default_port(),
+            },
+            cache: CacheConfig {
+                ttl_seconds: default_ttl(),
+            },
+            providers: ProvidersConfig {
+                datacrunch: ProviderConfig::default(),
+                hyperstack: ProviderConfig::default(),
+                lambda: ProviderConfig::default(),
+                hydrahost: ProviderConfig::default(),
+            },
+            database: DatabaseConfig {
+                path: default_db_path(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

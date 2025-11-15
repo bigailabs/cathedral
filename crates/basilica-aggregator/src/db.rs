@@ -19,15 +19,12 @@ impl Database {
             .connect(database_url)
             .await?;
 
-        // NOTE: Migrations are NOT run here when embedded in basilica-api
-        // The API handles all database migrations including aggregator tables
-        // Only run migrations if using aggregator standalone (which we no longer support)
-        // sqlx::migrate!()
-        //     .run(&pool)
-        //     .await
-        //     .map_err(|e| sqlx::Error::Protocol(format!("Migration failed: {}", e)))?;
-
         Ok(Self { pool })
+    }
+
+    /// Create database from an existing pool (for testing/mocking)
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     /// Insert or update GPU offerings
