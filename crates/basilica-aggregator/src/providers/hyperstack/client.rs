@@ -308,14 +308,26 @@ impl HyperstackProvider {
 
         let response = handle_error_response(response, "hyperstack").await?;
 
+        // Get response body as text first for diagnostic logging
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to read VM response body: {}", e),
+            })?;
+
+        tracing::debug!(
+            "Hyperstack get_vm({}) raw response: {}",
+            vm_id,
+            response_text
+        );
+
         let vm_response: GetVmResponse =
-            response
-                .json()
-                .await
-                .map_err(|e| AggregatorError::Provider {
-                    provider: "hyperstack".to_string(),
-                    message: format!("Failed to parse VM response: {}", e),
-                })?;
+            serde_json::from_str(&response_text).map_err(|e| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to parse VM response: {}", e),
+            })?;
 
         if !vm_response.status {
             return Err(AggregatorError::Provider {
@@ -324,7 +336,7 @@ impl HyperstackProvider {
             });
         }
 
-        Ok(vm_response.virtual_machine)
+        Ok(vm_response.instance.into())
     }
 
     /// Delete a virtual machine

@@ -289,6 +289,59 @@ pub async fn archive_rental_ownership(
     Ok(())
 }
 
+/// Archive a secure cloud rental record to terminated_secure_cloud_rentals table (when rental is stopped)
+/// This preserves rental history instead of deleting it
+pub async fn archive_secure_cloud_rental(
+    db: &PgPool,
+    rental_id: &str,
+    stop_reason: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    // Use a transaction to ensure atomicity
+    let mut tx = db.begin().await?;
+
+    // First, copy the rental to terminated_secure_cloud_rentals table
+    sqlx::query(
+        r#"
+        INSERT INTO terminated_secure_cloud_rentals (
+            id, user_id, provider, provider_instance_id, offering_id, instance_type,
+            location_code, status, hostname, ssh_key_id, ip_address, connection_info,
+            raw_response, error_message, created_at, updated_at, stopped_at, stop_reason
+        )
+        SELECT
+            id, user_id, provider, provider_instance_id, offering_id, instance_type,
+            location_code, status, hostname, ssh_key_id, ip_address, connection_info,
+            raw_response, error_message, created_at, updated_at, NOW(), $2
+        FROM secure_cloud_rentals
+        WHERE id = $1
+        "#,
+    )
+    .bind(rental_id)
+    .bind(stop_reason)
+    .execute(&mut *tx)
+    .await?;
+
+    // Then delete from active rentals table
+    sqlx::query(
+        r#"
+        DELETE FROM secure_cloud_rentals
+        WHERE id = $1
+        "#,
+    )
+    .bind(rental_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // Commit the transaction
+    tx.commit().await?;
+
+    debug!(
+        "Archived secure cloud rental {} to terminated_secure_cloud_rentals",
+        rental_id
+    );
+
+    Ok(())
+}
+
 /// Get historical rentals for a specific user
 #[cfg(test)]
 pub async fn get_user_rental_history(

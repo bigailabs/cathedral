@@ -119,6 +119,80 @@ async fn process_rental_health_check(
     }
 }
 
+/// Process health check for a single secure cloud rental
+async fn process_secure_cloud_health_check(
+    rental_id: &str,
+    aggregator_service: &basilica_aggregator::service::AggregatorService,
+    db: &PgPool,
+) {
+    match aggregator_service.get_deployment(rental_id).await {
+        Ok(deployment) => {
+            use basilica_aggregator::models::DeploymentStatus;
+
+            // Check if deployment is in a terminal state
+            if matches!(
+                deployment.status,
+                DeploymentStatus::Deleted | DeploymentStatus::Error
+            ) {
+                // Archive the rental to terminated_secure_cloud_rentals table
+                if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+                    db,
+                    rental_id,
+                    Some("Health check: deployment no longer accessible"),
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to archive stopped secure cloud rental {}: {}",
+                        rental_id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Health check: Archived {:?} secure cloud rental {}",
+                        deployment.status,
+                        rental_id
+                    );
+                }
+            }
+        }
+        Err(basilica_aggregator::error::AggregatorError::NotFound(_)) => {
+            // VM was deleted externally (404 from provider)
+            tracing::info!(
+                "VM {} not found at provider (deleted externally), archiving rental",
+                rental_id
+            );
+            if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+                db,
+                rental_id,
+                Some("Health check: VM not found at provider (deleted externally)"),
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to archive rental {} after detecting external deletion: {}",
+                    rental_id,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Successfully archived rental {} after detecting external deletion",
+                    rental_id
+                );
+            }
+        }
+        Err(e) => {
+            // Provider unavailable or having issues - don't change rental state
+            // The provider is the source of truth and will report actual status when available
+            tracing::warn!(
+                "Health check failed for secure cloud rental {} (temporary error): {}",
+                rental_id,
+                e
+            );
+        }
+    }
+}
+
 impl Server {
     /// Create a new server instance
     pub async fn new(config: Config) -> Result<Self> {
@@ -507,6 +581,55 @@ impl Server {
         tracing::info!(
             "Started GPU offerings refresh task (interval: {} seconds)",
             refresh_interval.as_secs()
+        );
+
+        // Start Secure Cloud health check task
+        let health_check_aggregator_service = state.aggregator_service.clone();
+        let health_check_db = state.db.clone();
+        let health_check_interval = config.rental_health_check_interval();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(health_check_interval);
+            loop {
+                interval.tick().await;
+
+                // Query all active secure cloud rentals from the database
+                match sqlx::query_as::<_, (String,)>("SELECT id FROM secure_cloud_rentals")
+                    .fetch_all(&health_check_db)
+                    .await
+                {
+                    Ok(rental_records) => {
+                        // Process rentals sequentially to avoid overwhelming provider APIs
+                        for record in &rental_records {
+                            let rental_id = &record.0;
+                            process_secure_cloud_health_check(
+                                rental_id,
+                                &health_check_aggregator_service,
+                                &health_check_db,
+                            )
+                            .await;
+                        }
+
+                        if !rental_records.is_empty() {
+                            tracing::debug!(
+                                "Secure Cloud health check completed for {} rentals",
+                                rental_records.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to query secure cloud rentals for health check: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started Secure Cloud health check task (interval: {} seconds)",
+            health_check_interval.as_secs()
         );
 
         // Build the application router

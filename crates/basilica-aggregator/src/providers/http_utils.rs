@@ -43,6 +43,16 @@ pub async fn handle_error_response(response: Response, provider_name: &str) -> R
     if !response.status().is_success() {
         let status = response.status();
         let error_text = response.text().await.unwrap_or_default();
+
+        // Check for 404 Not Found - instance was deleted externally
+        if status == reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!("{} instance not found (404): {}", provider_name, error_text);
+            return Err(AggregatorError::NotFound(format!(
+                "{} instance not found (may have been deleted externally)",
+                provider_name
+            )));
+        }
+
         tracing::error!(
             "{} API returned error: {} - {}",
             provider_name,

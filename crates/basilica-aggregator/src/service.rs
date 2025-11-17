@@ -652,6 +652,7 @@ impl AggregatorService {
                         deployment.provider,
                         e
                     );
+                    return Err(e);
                 }
             }
         }

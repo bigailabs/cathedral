@@ -287,5 +287,5 @@ pub struct DeployVmResponse {
 pub struct GetVmResponse {
     pub status: bool,
     pub message: String,
-    pub virtual_machine: VirtualMachine,
+    pub instance: DeployVmInstance,
 }

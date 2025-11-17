@@ -1,6 +1,7 @@
 //! Secure cloud (GPU aggregator) route handlers
 //! These routes proxy requests to the aggregator service
 
+use crate::api::extractors::ownership::archive_secure_cloud_rental;
 use crate::api::middleware::AuthContext;
 use crate::api::query::GpuPriceQuery;
 use crate::error::ApiError;
@@ -427,6 +428,13 @@ pub async fn stop_secure_cloud_rental(
                 message: "Failed to stop instance".to_string(),
             }
         })?;
+
+    // 4. Archive rental to terminated_secure_cloud_rentals table
+    if let Err(e) =
+        archive_secure_cloud_rental(&state.db, &rental_id, Some("User requested stop")).await
+    {
+        tracing::error!("Failed to archive secure cloud rental: {}", e);
+    }
 
     tracing::info!(
         "Rental {} stopped. Duration: {} hours, Total cost: ${}",
