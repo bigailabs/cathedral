@@ -401,6 +401,44 @@ impl BasilicaClient {
         Ok(response.nodes)
     }
 
+    /// Start a secure cloud rental
+    ///
+    /// Deploys a GPU instance via datacenter provider (DataCrunch, Hyperstack, etc.)
+    /// and registers it with the billing service for incremental charging.
+    pub async fn start_secure_cloud_rental(
+        &self,
+        request: crate::types::StartSecureCloudRentalRequest,
+    ) -> Result<crate::types::SecureCloudRentalResponse> {
+        self.post("/secure-cloud/rentals/start", &request).await
+    }
+
+    /// Stop a secure cloud rental
+    ///
+    /// Terminates the provider instance, finalizes billing, and returns the total cost.
+    pub async fn stop_secure_cloud_rental(
+        &self,
+        rental_id: &str,
+    ) -> Result<crate::types::StopSecureCloudRentalResponse> {
+        let path = format!("/secure-cloud/rentals/{}/stop", rental_id);
+        self.post(&path, &serde_json::json!({})).await
+    }
+
+    // ===== SSH Key Management =====
+
+    /// Get the authenticated user's registered SSH key
+    ///
+    /// Returns None if no SSH key is registered yet.
+    pub async fn get_user_ssh_key(&self) -> Result<Option<crate::types::SshKeyResponse>> {
+        match self
+            .get::<Option<crate::types::SshKeyResponse>>("/ssh-keys")
+            .await
+        {
+            Ok(Some(key)) => Ok(Some(key)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     // ===== Deployment Management Methods =====
 
     /// Create a new deployment

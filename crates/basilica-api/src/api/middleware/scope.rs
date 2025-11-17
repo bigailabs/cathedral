@@ -121,8 +121,8 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),
 
-        // Secure cloud endpoints - require "secure_cloud" scope
-        (&Method::GET, p) if p.starts_with("/secure-cloud/") => Some("secure_cloud".to_string()),
+        // Secure cloud endpoints - require "secure_cloud" scope for all methods
+        (_, p) if p.starts_with("/secure-cloud/") => Some("secure_cloud".to_string()),
 
         // Job endpoints (v1)
         (&Method::POST, "/jobs") => Some("jobs:create".to_string()),
@@ -222,10 +222,24 @@ mod tests {
             .unwrap();
         assert_eq!(get_required_scope(&req), Some("nodes:list".to_string()));
 
-        // Test secure cloud endpoints (require "secure_cloud" scope)
+        // Test secure cloud endpoints (require "secure_cloud" scope for all methods)
         let req = Request::builder()
             .method(Method::GET)
             .uri("/secure-cloud/gpu-prices")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/secure-cloud/rentals/start")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/secure-cloud/rentals/some-id/stop")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));

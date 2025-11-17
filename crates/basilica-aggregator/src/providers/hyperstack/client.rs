@@ -3,7 +3,7 @@ use super::normalize::{
 };
 use super::types::{
     CreateKeypairRequest, CreateKeypairResponse, DeleteVmRequest, DeployVmRequest,
-    DeployVmResponse, FlavorsResponse, GetVmResponse, Keypair, VirtualMachine,
+    DeployVmResponse, FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, VirtualMachine,
 };
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 pub struct HyperstackProvider {
     client: Client,
@@ -59,6 +60,72 @@ impl HyperstackProvider {
                 })?;
 
         Ok(flavors_response)
+    }
+
+    async fn fetch_pricebook(&self) -> Result<HashMap<String, Decimal>> {
+        let url = format!("{}/pricebook", self.base_url);
+
+        tracing::debug!("Fetching pricebook from Hyperstack: {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("api_key", &self.api_key)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!("Failed to fetch Hyperstack pricebook: {}", e);
+                AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to fetch pricebook: {}", e),
+                }
+            })?;
+
+        let response = handle_error_response(response, "hyperstack").await?;
+
+        let pricebook: PricebookResponse = response.json().await.map_err(|e| {
+            tracing::warn!("Failed to parse Hyperstack pricebook response: {}", e);
+            AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!("Failed to parse pricebook response: {}", e),
+            }
+        })?;
+
+        // Build HashMap mapping GPU model name to hourly price
+        let mut price_map = HashMap::new();
+        for item in pricebook {
+            // Use the actual price (after discounts) not the original value
+            // Parse string value to Decimal
+            let price = item.value.parse::<Decimal>().unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to parse price '{}' for {}: {}",
+                    item.value,
+                    item.name,
+                    e
+                );
+                Decimal::ZERO
+            });
+            price_map.insert(item.name.clone(), price);
+
+            tracing::debug!(
+                "Pricebook entry: {} = ${}/hr{}",
+                item.name,
+                item.value,
+                if item.discount_applied {
+                    " (discounted)"
+                } else {
+                    ""
+                }
+            );
+        }
+
+        tracing::info!(
+            "Loaded {} price entries from Hyperstack pricebook",
+            price_map.len()
+        );
+
+        Ok(price_map)
     }
 
     // ========================================================================
@@ -280,6 +347,16 @@ impl Provider for HyperstackProvider {
     async fn fetch_offerings(&self) -> Result<Vec<GpuOffering>> {
         let flavors_response = self.fetch_flavors().await?;
 
+        // Fetch pricebook for GPU pricing
+        // If this fails, we'll continue with zero prices rather than failing completely
+        let pricebook = self.fetch_pricebook().await.unwrap_or_else(|e| {
+            tracing::warn!(
+                "Failed to fetch Hyperstack pricebook, will use zero prices: {}",
+                e
+            );
+            HashMap::new()
+        });
+
         let fetched_at = Utc::now();
         let mut offerings = Vec::new();
 
@@ -333,9 +410,17 @@ impl Provider for HyperstackProvider {
                 // Convert RAM from float GB to u32
                 let system_memory_gb = flavor.ram.round() as u32;
 
-                // Hyperstack API doesn't include pricing in flavors endpoint
-                // Set to 0 - would need separate pricing API call
-                let hourly_rate = Decimal::ZERO;
+                // Calculate hourly rate from pricebook
+                // For GPU flavors: hourly_rate = gpu_price * gpu_count
+                // (vCPU, RAM, and storage are free for GPU flavors)
+                let gpu_price_per_unit = pricebook.get(&group.gpu).copied().unwrap_or_else(|| {
+                    tracing::warn!(
+                        "No pricing found in pricebook for GPU model '{}', using $0",
+                        group.gpu
+                    );
+                    Decimal::ZERO
+                });
+                let hourly_rate = gpu_price_per_unit * Decimal::from(flavor.gpu_count);
 
                 // Use stock_available from flavor
                 let availability = flavor.stock_available;

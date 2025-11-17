@@ -498,4 +498,65 @@ impl AggregatorService {
     ) -> Result<Vec<Deployment>> {
         self.db.list_deployments(provider, status).await
     }
+
+    // ========================================================================
+    // SSH Key Management
+    // ========================================================================
+
+    /// Get user's registered SSH key
+    ///
+    /// Returns None if the user has not registered an SSH key yet.
+    pub async fn get_user_ssh_key(&self, user_id: &str) -> Result<Option<crate::models::SshKey>> {
+        self.db.get_ssh_key_by_user(user_id).await
+    }
+
+    /// Register or update user's SSH key
+    ///
+    /// Only one SSH key per user is supported. If a key already exists, it will be updated.
+    pub async fn register_ssh_key(
+        &self,
+        user_id: &str,
+        name: String,
+        public_key: String,
+    ) -> Result<crate::models::SshKey> {
+        use chrono::Utc;
+        use uuid::Uuid;
+
+        // Check if user already has an SSH key
+        if let Some(existing_key) = self.db.get_ssh_key_by_user(user_id).await? {
+            // Clone ID and created_at before move
+            let existing_id = existing_key.id.clone();
+            let existing_created_at = existing_key.created_at;
+
+            // Update existing key
+            let updated_key = crate::models::SshKey {
+                id: existing_id.clone(),
+                user_id: user_id.to_string(),
+                name,
+                public_key,
+                created_at: existing_created_at,
+                updated_at: Utc::now(),
+            };
+
+            // Delete old key and create new one (simpler than UPDATE)
+            self.db.delete_ssh_key(&existing_id).await?;
+            self.db.create_ssh_key(&updated_key).await?;
+
+            Ok(updated_key)
+        } else {
+            // Create new key
+            let new_key = crate::models::SshKey {
+                id: Uuid::new_v4().to_string(),
+                user_id: user_id.to_string(),
+                name,
+                public_key,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            self.db.create_ssh_key(&new_key).await?;
+
+            Ok(new_key)
+        }
+    }
 }

@@ -258,7 +258,39 @@ pub async fn stop_secure_cloud_rental(
     let duration = stop_time.signed_duration_since(rental.1);
     let duration_hours = duration.num_seconds() as f64 / 3600.0;
 
-    // 2. Delete deployment via aggregator (rental_id IS the deployment_id)
+    // 2. Finalize rental in billing service (get accumulated cost)
+    let total_cost = if let Some(billing_client) = &state.billing_client {
+        use basilica_protocol::billing::FinalizeRentalRequest;
+        use prost_types::Timestamp;
+
+        let end_timestamp = Timestamp {
+            seconds: stop_time.timestamp(),
+            nanos: stop_time.timestamp_subsec_nanos() as i32,
+        };
+
+        let finalize_request = FinalizeRentalRequest {
+            rental_id: rental_id.clone(),
+            end_time: Some(end_timestamp),
+            final_cost: String::new(), // Let billing service use tracked cost
+            termination_reason: "user_requested".to_string(),
+        };
+
+        match billing_client.finalize_rental(finalize_request).await {
+            Ok(response) => {
+                // Parse total_cost from decimal string
+                response.total_cost.parse::<f64>().unwrap_or(0.0)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to finalize rental in billing service: {}", e);
+                0.0 // Fallback if billing fails
+            }
+        }
+    } else {
+        tracing::warn!("Billing client not available, cannot get final cost");
+        0.0
+    };
+
+    // 3. Delete deployment via aggregator (rental_id IS the deployment_id)
     state
         .aggregator_service
         .delete_deployment(&rental_id)
@@ -271,13 +303,11 @@ pub async fn stop_secure_cloud_rental(
         })?;
 
     tracing::info!(
-        "Rental {} stopped. Duration: {} GPU hours",
+        "Rental {} stopped. Duration: {} hours, Total cost: ${}",
         rental_id,
-        duration_hours
+        duration_hours,
+        total_cost
     );
-
-    // TODO: Get actual total_cost from billing response
-    let total_cost = 0.0; // Placeholder - should come from billing response
 
     Ok((
         StatusCode::OK,

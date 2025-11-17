@@ -90,6 +90,43 @@ pub struct Features {
 }
 
 // ============================================================================
+// Pricebook Types
+// ============================================================================
+
+/// Response from Hyperstack pricebook API
+/// Returns array of resource pricing items
+pub type PricebookResponse = Vec<PricebookItem>;
+
+/// Individual pricebook item containing resource pricing
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PricebookItem {
+    /// Unique pricebook ID
+    pub id: u32,
+
+    /// Resource name (e.g., "H100-80G-PCIe", "A100-80G-SXM4", "vCPU", "RAM")
+    pub name: String,
+
+    /// Actual hourly rate (after discounts if applicable)
+    /// Returned as string by API (e.g., "1.350000000")
+    pub value: String,
+
+    /// Original hourly rate before discounts
+    /// Returned as string by API
+    pub original_value: String,
+
+    /// Whether a discount has been applied to this resource
+    pub discount_applied: bool,
+
+    /// Optional start time for time-based pricing
+    #[serde(default)]
+    pub start_time: Option<String>,
+
+    /// Optional end time for time-based pricing
+    #[serde(default)]
+    pub end_time: Option<String>,
+}
+
+// ============================================================================
 // SSH Key Management Types
 // ============================================================================
 

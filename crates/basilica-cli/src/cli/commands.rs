@@ -38,6 +38,11 @@ pub enum Commands {
         /// Filter by GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         gpu_type: Option<GpuCategory>,
 
+        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
+        /// Defaults to secure-cloud if not specified
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
+
         #[command(flatten)]
         filters: ListFilters,
     },
@@ -47,6 +52,11 @@ pub enum Commands {
     Up {
         /// Target node ID (UUID) or GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         target: Option<TargetType>,
+
+        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
+        /// Defaults to secure-cloud if not specified
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
 
         #[command(flatten)]
         options: UpOptions,
@@ -301,10 +311,6 @@ impl Commands {
 /// Filters for listing GPUs
 #[derive(clap::Args, Debug, Clone)]
 pub struct ListFilters {
-    /// Filter by compute category (secure-cloud or community-cloud)
-    #[arg(long, value_enum)]
-    pub compute: Option<ComputeCategoryArg>,
-
     /// Minimum GPU count
     #[arg(long)]
     pub gpu_min: Option<u32>,

@@ -1,6 +1,6 @@
 //! GPU rental command handlers
 
-use crate::cli::commands::{ListFilters, LogsOptions, PsFilters, UpOptions};
+use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
 use crate::cli::handlers::gpu_rental_helpers::resolve_target_rental;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
@@ -10,7 +10,7 @@ use crate::output::{
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use crate::ssh::{parse_ssh_credentials, SshClient};
 use crate::CliError;
-use basilica_common::types::GpuCategory;
+use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
     GpuRequirements, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile, NodeSelection,
@@ -21,6 +21,7 @@ use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt;
@@ -86,105 +87,433 @@ impl FromStr for TargetType {
 pub async fn handle_ls(
     gpu_category: Option<GpuCategory>,
     filters: ListFilters,
+    compute: Option<ComputeCategoryArg>,
     json: bool,
     config: &CliConfig,
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    let spinner = create_spinner("Scanning global GPU availability...");
+    // Determine compute category (default to secure cloud)
+    let compute_category = compute
+        .map(|c| match c {
+            ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
+            ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
+        })
+        .unwrap_or(ComputeCategory::SecureCloud);
 
-    // Fetch secure cloud GPUs (datacenter providers)
-    let secure_result = api_client.list_secure_cloud_gpus().await;
+    // Branch based on compute type
+    match compute_category {
+        ComputeCategory::SecureCloud => {
+            // Fetch datacenter GPU offerings
+            let spinner = create_spinner("Scanning datacenter GPU availability...");
+            let secure_result = api_client.list_secure_cloud_gpus().await;
+            complete_spinner_and_clear(spinner);
 
-    complete_spinner_and_clear(spinner);
+            let gpus = secure_result.map_err(|e| -> CliError {
+                CliError::Internal(
+                    eyre!(e)
+                        .suggestion("Check your internet connection and try again")
+                        .note("If this persists, GPUs may be temporarily unavailable"),
+                )
+            })?;
 
-    let gpus = secure_result.map_err(|e| -> CliError {
-        CliError::Internal(
-            eyre!(e)
-                .suggestion("Check your internet connection and try again")
-                .note("If this persists, GPUs may be temporarily unavailable"),
-        )
-    })?;
+            // Apply filters
+            let mut filtered_gpus: Vec<_> = gpus
+                .into_iter()
+                .filter(|gpu| {
+                    // Filter by GPU type if specified
+                    if let Some(ref category) = gpu_category {
+                        let category_str = category.as_str().to_uppercase();
+                        if !gpu.gpu_type.as_str().to_uppercase().contains(&category_str) {
+                            return false;
+                        }
+                    }
 
-    // Apply filters
-    let mut filtered_gpus: Vec<_> = gpus
-        .into_iter()
-        .filter(|gpu| {
-            // Filter by GPU type if specified
-            if let Some(ref category) = gpu_category {
-                let category_str = category.as_str().to_uppercase();
-                if !gpu.gpu_type.as_str().to_uppercase().contains(&category_str) {
-                    return false;
+                    // Filter by availability
+                    if !gpu.availability {
+                        return false;
+                    }
+
+                    // Filter by GPU count
+                    if let Some(min_count) = filters.gpu_min {
+                        if gpu.gpu_count < min_count {
+                            return false;
+                        }
+                    }
+
+                    // Filter by country
+                    if let Some(ref country) = filters.country {
+                        if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
+                            return false;
+                        }
+                    }
+
+                    true
+                })
+                .collect();
+
+            if filtered_gpus.is_empty() {
+                print_info("No GPUs available matching your criteria");
+                return Ok(());
+            }
+
+            // Sort by price (ascending)
+            filtered_gpus.sort_by(|a, b| a.hourly_rate.partial_cmp(&b.hourly_rate).unwrap());
+
+            if json {
+                json_output(&filtered_gpus)?;
+            } else {
+                // Display GPU table
+                use tabled::{settings::Style, Table, Tabled};
+
+                #[derive(Tabled)]
+                struct GpuRow {
+                    #[tabled(rename = "Provider")]
+                    provider: String,
+                    #[tabled(rename = "GPU")]
+                    gpu: String,
+                    #[tabled(rename = "Count")]
+                    count: String,
+                    #[tabled(rename = "Price/hr")]
+                    price: String,
+                    #[tabled(rename = "Region")]
+                    region: String,
                 }
-            }
 
-            // Filter by availability
-            if !gpu.availability {
-                return false;
-            }
+                let rows: Vec<GpuRow> = filtered_gpus
+                    .iter()
+                    .map(|gpu| GpuRow {
+                        provider: gpu.provider.to_string(),
+                        gpu: gpu.gpu_type.to_string(),
+                        count: gpu.gpu_count.to_string(),
+                        price: format!("${}/hr", gpu.hourly_rate),
+                        region: gpu.region.clone(),
+                    })
+                    .collect();
 
-            // Filter by GPU count
-            if let Some(min_count) = filters.gpu_min {
-                if gpu.gpu_count < min_count {
-                    return false;
-                }
+                let mut table = Table::new(&rows);
+                table.with(Style::modern());
+                println!("{}", table);
+                println!("\nTotal GPUs: {}", filtered_gpus.len());
             }
+        }
+        ComputeCategory::CommunityCloud => {
+            return Err(CliError::Internal(eyre!(
+                "Community cloud listing not yet implemented via CLI. \
+                     Use --compute secure-cloud to list datacenter GPUs."
+            )));
+        }
+    }
 
-            // Filter by country
-            if let Some(ref country) = filters.country {
-                if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
-                    return false;
-                }
-            }
+    Ok(())
+}
 
-            true
+/// Ensure user has SSH key registered for secure cloud
+///
+/// Auto-registers default SSH key (~/.ssh/id_rsa.pub) with user confirmation.
+/// Returns the SSH key ID if successful.
+async fn ensure_ssh_key_registered(
+    api_client: &basilica_sdk::BasilicaClient,
+) -> Result<String, CliError> {
+    // Check if user already has SSH key
+    if let Some(key) = api_client.get_user_ssh_key().await? {
+        return Ok(key.id);
+    }
+
+    // Find default SSH public key
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| CliError::Internal(eyre!("Could not determine home directory")))?;
+
+    let ssh_key_path = std::path::PathBuf::from(home)
+        .join(".ssh")
+        .join("id_rsa.pub");
+
+    if !ssh_key_path.exists() {
+        return Err(CliError::Internal(eyre!(
+            "No SSH public key found at {}\n\
+                 Please generate one with: ssh-keygen -t rsa -b 4096",
+            ssh_key_path.display()
+        )));
+    }
+
+    // Read public key
+    let public_key = std::fs::read_to_string(&ssh_key_path)
+        .map_err(|e| CliError::Internal(eyre!(e).wrap_err("Failed to read SSH public key")))?;
+
+    // Prompt user for confirmation
+    use dialoguer::Confirm;
+
+    println!("\n🔑 SSH Key Registration Required");
+    println!("─────────────────────────────────");
+    println!("Secure cloud deployments require SSH key registration.");
+    println!("Key path: {}", ssh_key_path.display());
+    println!(
+        "Key type: {}",
+        public_key.split_whitespace().next().unwrap_or("unknown")
+    );
+    println!();
+
+    let confirmed = Confirm::new()
+        .with_prompt("Register this SSH key for secure cloud?")
+        .default(true)
+        .interact()
+        .map_err(|e| CliError::Internal(eyre!(e).wrap_err("Failed to show confirmation prompt")))?;
+
+    if !confirmed {
+        return Err(CliError::Internal(eyre!(
+            "SSH key registration required for secure cloud rentals"
+        )));
+    }
+
+    // Register key
+    let spinner = create_spinner("Registering SSH key...");
+    let result = api_client
+        .register_ssh_key("default", public_key.trim())
+        .await;
+
+    match result {
+        Ok(key) => {
+            complete_spinner_and_clear(spinner);
+            print_success("SSH key registered successfully");
+            Ok(key.id)
+        }
+        Err(e) => {
+            complete_spinner_error(spinner, "Failed to register SSH key");
+            Err(CliError::Api(e))
+        }
+    }
+}
+
+/// Interactive selector for GPU offerings
+///
+/// Displays formatted table and lets user choose with arrow keys.
+/// Returns the selected offering.
+fn interactive_offering_selector(
+    offerings: &[basilica_aggregator::models::GpuOffering],
+) -> Result<basilica_aggregator::models::GpuOffering, CliError> {
+    use dialoguer::Select;
+
+    if offerings.is_empty() {
+        return Err(CliError::Internal(eyre!(
+            "No GPU offerings available matching your criteria"
+        )));
+    }
+
+    // Get markup percentage (using 15% as per design decision)
+    let markup_percent = 15.0;
+
+    // Format offerings for display
+    let options: Vec<String> = offerings
+        .iter()
+        .map(|o| {
+            let base_price = o.hourly_rate.to_f64().unwrap_or(0.0);
+            let total_price = base_price * (1.0 + markup_percent / 100.0);
+
+            let memory_str = if let Some(mem_per_gpu) = o.gpu_memory_gb_per_gpu {
+                format!("{}GB", mem_per_gpu * o.gpu_count)
+            } else {
+                "N/A".to_string()
+            };
+
+            format!(
+                "{:<12} {:>8} {:>4}x {:<8} {:>6} | ${:>6.2}/hr (${:.2} + {}%)",
+                o.provider.as_str(),
+                o.region,
+                o.gpu_count,
+                o.gpu_type.as_str(),
+                memory_str,
+                total_price,
+                base_price,
+                markup_percent
+            )
         })
         .collect();
 
-    if filtered_gpus.is_empty() {
-        print_info("No GPUs available matching your criteria");
+    // Show header
+    println!("\n📊 Available GPU Offerings");
+    println!("─────────────────────────────────────────────────────────────────────────────");
+    println!(
+        "{:<12} {:<8} {:<15} {:<8} {:<20}",
+        "Provider", "Region", "GPU", "Memory", "Price/hr (base + markup)"
+    );
+    println!("─────────────────────────────────────────────────────────────────────────────");
+
+    // Interactive selection
+    let selection = Select::new()
+        .with_prompt("Select GPU offering")
+        .items(&options)
+        .default(0)
+        .interact()
+        .map_err(|e| {
+            CliError::Internal(eyre!(e).wrap_err("Failed to display offering selector"))
+        })?;
+
+    Ok(offerings[selection].clone())
+}
+
+/// Handle secure cloud rental workflow
+async fn handle_secure_cloud_rental(
+    api_client: basilica_sdk::BasilicaClient,
+    target: Option<TargetType>,
+    options: UpOptions,
+) -> Result<(), CliError> {
+    // Step 1: Ensure SSH key registered
+    let ssh_key_id = ensure_ssh_key_registered(&api_client).await?;
+
+    // Step 2: List offerings
+    let spinner = create_spinner("Fetching available GPUs...");
+    let offerings = api_client.list_secure_cloud_gpus().await.map_err(|e| {
+        complete_spinner_error(spinner.clone(), "Failed to fetch GPU offerings");
+        CliError::Api(e)
+    })?;
+    complete_spinner_and_clear(spinner);
+
+    // Step 3: Filter offerings if target specified
+    let filtered_offerings: Vec<_> = if let Some(target_type) = target {
+        match target_type {
+            TargetType::GpuCategory(category) => {
+                // Filter by GPU type
+                offerings
+                    .into_iter()
+                    .filter(|o| {
+                        let category_str = category.as_str().to_uppercase();
+                        o.gpu_type.as_str().to_uppercase().contains(&category_str)
+                    })
+                    .collect()
+            }
+            TargetType::NodeId(_) => {
+                return Err(CliError::Internal(eyre!(
+                    "Node ID selection not supported for secure cloud. \
+                     Use GPU category or interactive selector."
+                )));
+            }
+        }
+    } else {
+        offerings
+    };
+
+    if filtered_offerings.is_empty() {
+        print_info("No GPU offerings available matching your criteria");
         return Ok(());
     }
 
-    // Sort by price (ascending)
-    filtered_gpus.sort_by(|a, b| a.hourly_rate.partial_cmp(&b.hourly_rate).unwrap());
+    // Step 4: Interactive selector
+    let selected = interactive_offering_selector(&filtered_offerings)?;
 
-    if json {
-        json_output(&filtered_gpus)?;
-    } else {
-        // Display GPU table
-        use tabled::{settings::Style, Table, Tabled};
+    // Step 5: Show rental summary
+    let markup_percent = 15.0;
+    let base_price = selected.hourly_rate.to_f64().unwrap_or(0.0);
+    let total_price = base_price * (1.0 + markup_percent / 100.0);
 
-        #[derive(Tabled)]
-        struct GpuRow {
-            #[tabled(rename = "Provider")]
-            provider: String,
-            #[tabled(rename = "GPU")]
-            gpu: String,
-            #[tabled(rename = "Count")]
-            count: String,
-            #[tabled(rename = "Price/hr")]
-            price: String,
-            #[tabled(rename = "Region")]
-            region: String,
-        }
-
-        let rows: Vec<GpuRow> = filtered_gpus
-            .iter()
-            .map(|gpu| GpuRow {
-                provider: gpu.provider.to_string(),
-                gpu: gpu.gpu_type.to_string(),
-                count: gpu.gpu_count.to_string(),
-                price: format!("${}/hr", gpu.hourly_rate),
-                region: gpu.region.clone(),
-            })
-            .collect();
-
-        let mut table = Table::new(&rows);
-        table.with(Style::modern());
-        println!("{}", table);
-        println!("\nTotal GPUs: {}", filtered_gpus.len());
+    println!("\n🚀 Starting Secure Cloud Rental");
+    println!("─────────────────────────────────");
+    println!("Provider:    {}", selected.provider.as_str());
+    println!(
+        "GPU:         {}x {}",
+        selected.gpu_count,
+        selected.gpu_type.as_str()
+    );
+    if let Some(mem_per_gpu) = selected.gpu_memory_gb_per_gpu {
+        println!("Memory:      {}GB total", mem_per_gpu * selected.gpu_count);
     }
+    println!("Region:      {}", selected.region);
+    println!("Base Price:  ${:.2}/hr", base_price);
+    println!(
+        "Total Price: ${:.2}/hr (includes {:.0}% markup)",
+        total_price, markup_percent
+    );
+    println!();
+
+    // Step 6: Confirm
+    use dialoguer::Confirm;
+    let confirmed = Confirm::new()
+        .with_prompt("Proceed with rental?")
+        .default(true)
+        .interact()
+        .map_err(|e| CliError::Internal(eyre!(e).wrap_err("Failed to show confirmation")))?;
+
+    if !confirmed {
+        print_info("Rental cancelled");
+        return Ok(());
+    }
+
+    // Step 7: Start rental
+    let spinner = create_spinner("Provisioning GPU instance...");
+
+    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
+
+    // Parse port mappings if provided
+    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
+        basilica_common::utils::parse_port_mappings(&options.ports)
+            .map_err(|e| {
+                complete_spinner_error(spinner.clone(), "Invalid port mapping");
+                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
+            })?
+            .into_iter()
+            .map(|pm| PortMappingRequest {
+                container_port: pm.container_port,
+                host_port: pm.host_port,
+                protocol: pm.protocol,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Parse environment variables if provided
+    let environment = if !options.env.is_empty() {
+        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Invalid environment variables");
+            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
+        })?
+    } else {
+        HashMap::new()
+    };
+
+    let request = StartSecureCloudRentalRequest {
+        offering_id: selected.id.clone(),
+        ssh_public_key_id: ssh_key_id,
+        container_image: options.image.clone(),
+        environment,
+        ports,
+    };
+
+    let response = api_client
+        .start_secure_cloud_rental(request)
+        .await
+        .map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Failed to start rental");
+            CliError::Api(e)
+        })?;
+    complete_spinner_and_clear(spinner);
+
+    // Step 8: Display rental info
+    print_success("Secure cloud rental started successfully!");
+    println!();
+    println!("Rental Details:");
+    println!("─────────────────────────────────");
+    println!("Rental ID:   {}", response.rental_id);
+    println!("Provider:    {}", response.provider);
+    println!("Status:      {}", response.status);
+
+    if let Some(ip) = &response.ip_address {
+        println!("IP Address:  {}", ip);
+    }
+
+    println!("Hourly Cost: ${:.2}/hr", response.hourly_cost);
+    println!();
+
+    if let Some(ssh_cmd) = &response.ssh_command {
+        println!("SSH Command:");
+        println!("  {}", ssh_cmd);
+    } else {
+        println!("⏳ Instance is starting up. Use 'basilica ps' to check status.");
+    }
+
+    println!();
+    print_info("Monitor with: basilica ps");
+    print_info(&format!("Stop with: basilica down {}", response.rental_id));
 
     Ok(())
 }
@@ -193,9 +522,28 @@ pub async fn handle_ls(
 pub async fn handle_up(
     target: Option<TargetType>,
     options: UpOptions,
+    compute: Option<ComputeCategoryArg>,
     config: &CliConfig,
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
+
+    // Determine compute category (default to secure cloud)
+    let compute_category = compute
+        .map(|c| match c {
+            ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
+            ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
+        })
+        .unwrap_or(ComputeCategory::SecureCloud);
+
+    // Branch based on compute type
+    match compute_category {
+        ComputeCategory::SecureCloud => {
+            return handle_secure_cloud_rental(api_client, target, options).await;
+        }
+        ComputeCategory::CommunityCloud => {
+            // Fall through to existing community cloud implementation
+        }
+    }
 
     // Parse the target to determine node selection strategy
     let node_selection = if let Some(target_type) = target {

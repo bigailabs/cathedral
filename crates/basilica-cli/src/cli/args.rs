@@ -147,17 +147,27 @@ impl Args {
             }
 
             // GPU rental operations
-            Commands::Ls { gpu_type, filters } => {
+            Commands::Ls {
+                gpu_type,
+                filters,
+                compute,
+            } => {
                 handlers::gpu_rental::handle_ls(
                     gpu_type.clone(),
                     filters.clone(),
+                    *compute,
                     self.json,
                     config,
                 )
                 .await?;
             }
-            Commands::Up { target, options } => {
-                handlers::gpu_rental::handle_up(target.clone(), options.clone(), config).await?;
+            Commands::Up {
+                target,
+                options,
+                compute,
+            } => {
+                handlers::gpu_rental::handle_up(target.clone(), options.clone(), *compute, config)
+                    .await?;
             }
             Commands::Ps { filters } => {
                 handlers::gpu_rental::handle_ps(filters.clone(), self.json, config).await?;
