@@ -64,6 +64,11 @@ pub enum Commands {
 
     /// List active rentals and their status
     Ps {
+        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
+        /// Defaults to secure-cloud if not specified
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
+
         #[command(flatten)]
         filters: PsFilters,
     },
@@ -88,6 +93,11 @@ pub enum Commands {
     Down {
         /// Rental UUID to terminate (optional)
         target: Option<String>,
+
+        /// Compute source filter: 'secure-cloud' or 'community-cloud'
+        /// When not specified, interactive mode shows all rental types
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
 
         /// Stop all active rentals
         #[arg(long, conflicts_with = "target")]

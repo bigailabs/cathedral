@@ -166,6 +166,9 @@ pub struct ProviderSshKey {
     pub provider: Provider,
     pub provider_key_id: String,
     pub created_at: DateTime<Utc>,
+    /// Provider-specific metadata (e.g., Hyperstack stores key name here)
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Request to register SSH key

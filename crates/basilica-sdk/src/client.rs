@@ -401,6 +401,16 @@ impl BasilicaClient {
         Ok(response.nodes)
     }
 
+    /// List secure cloud rentals for the authenticated user
+    ///
+    /// Returns all secure cloud (datacenter) rentals including their GPU details,
+    /// status, IP addresses, and cost information.
+    pub async fn list_secure_cloud_rentals(
+        &self,
+    ) -> Result<crate::types::ListSecureCloudRentalsResponse> {
+        self.get("/secure-cloud/rentals").await
+    }
+
     /// Start a secure cloud rental
     ///
     /// Deploys a GPU instance via datacenter provider (DataCrunch, Hyperstack, etc.)

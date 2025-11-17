@@ -12,10 +12,25 @@ use axum::{
     Extension, Json,
 };
 use basilica_sdk::types::{
-    SecureCloudRentalResponse, StartSecureCloudRentalRequest, StopSecureCloudRentalResponse,
+    ListSecureCloudRentalsResponse, SecureCloudRentalListItem, SecureCloudRentalResponse,
+    StartSecureCloudRentalRequest, StopSecureCloudRentalResponse,
 };
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::json;
+
+/// Type alias for secure cloud rental query result from database
+type RentalQueryRow = (
+    String,                                // id
+    String,                                // provider
+    Option<String>,                        // provider_instance_id
+    String,                                // offering_id
+    String,                                // instance_type
+    Option<String>,                        // location_code
+    String,                                // status
+    Option<String>,                        // ip_address
+    chrono::DateTime<chrono::Utc>,         // created_at
+    Option<chrono::DateTime<chrono::Utc>>, // stopped_at
+);
 
 /// Get SSH public key for user and validate ownership
 async fn get_ssh_key_for_user(
@@ -100,14 +115,126 @@ pub async fn list_gpu_prices(
     }
 }
 
+/// List secure cloud rentals for the authenticated user
+pub async fn list_secure_cloud_rentals(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<impl IntoResponse, ApiError> {
+    // 1. Query secure_cloud_rentals table for this user
+    let rentals: Vec<RentalQueryRow> = sqlx::query_as(
+        "SELECT id, provider, provider_instance_id, offering_id, instance_type, \
+         location_code, status, ip_address, created_at, stopped_at \
+         FROM secure_cloud_rentals \
+         WHERE user_id = $1 \
+         ORDER BY created_at DESC",
+    )
+    .bind(&auth.user_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to query secure_cloud_rentals: {}", e);
+        ApiError::Internal {
+            message: "Failed to fetch rentals".to_string(),
+        }
+    })?;
+
+    // 2. Get offerings from aggregator to enrich with GPU details
+    let offerings = state
+        .aggregator_service
+        .get_offerings()
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to fetch offerings, using empty list: {}", e);
+            vec![]
+        });
+
+    // Create a map of offering_id -> GpuOffering for fast lookup
+    let offerings_map: std::collections::HashMap<_, _> =
+        offerings.iter().map(|o| (o.id.as_str(), o)).collect();
+
+    // 3. Build response items by joining rental data with offering data
+    let rental_items: Vec<SecureCloudRentalListItem> = rentals
+        .into_iter()
+        .map(
+            |(
+                rental_id,
+                provider,
+                provider_instance_id,
+                offering_id,
+                instance_type,
+                location_code,
+                status,
+                ip_address,
+                created_at,
+                stopped_at,
+            )| {
+                // Try to find the offering to get GPU details
+                let (gpu_type, gpu_count, hourly_rate, hourly_cost) =
+                    if let Some(offering) = offerings_map.get(offering_id.as_str()) {
+                        let base_rate = offering.hourly_rate.to_f64().unwrap_or(0.0);
+                        let gpu_count = offering.gpu_count;
+                        let hourly_cost = base_rate
+                            * gpu_count as f64
+                            * (1.0 + state.pricing_config.secure_cloud_markup_percent / 100.0);
+
+                        (
+                            offering.gpu_type.to_string(),
+                            gpu_count,
+                            offering.hourly_rate.to_string(),
+                            hourly_cost,
+                        )
+                    } else {
+                        // Fallback if offering not found (e.g., offering expired)
+                        tracing::warn!(
+                            "Offering {} not found for rental {}, using defaults",
+                            offering_id,
+                            rental_id
+                        );
+                        ("unknown".to_string(), 0, "0.00".to_string(), 0.0)
+                    };
+
+                // Generate SSH command if IP available
+                let ssh_command = ip_address.as_ref().map(|ip| format!("ssh root@{}", ip));
+
+                SecureCloudRentalListItem {
+                    rental_id,
+                    provider,
+                    provider_instance_id,
+                    gpu_type,
+                    gpu_count,
+                    instance_type,
+                    location_code,
+                    status,
+                    ip_address,
+                    hourly_rate,
+                    hourly_cost,
+                    created_at,
+                    stopped_at,
+                    ssh_command,
+                }
+            },
+        )
+        .collect();
+
+    let total_count = rental_items.len();
+
+    Ok((
+        StatusCode::OK,
+        Json(ListSecureCloudRentalsResponse {
+            rentals: rental_items,
+            total_count,
+        }),
+    ))
+}
+
 /// Start a secure cloud rental (direct datacenter provisioning)
 pub async fn start_secure_cloud_rental(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
     Json(request): Json<StartSecureCloudRentalRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Validate SSH key ownership and get public key
-    let public_key = get_ssh_key_for_user(&state.db, &request.ssh_public_key_id, &auth.user_id)
+    // 1. Validate SSH key ownership
+    let _public_key = get_ssh_key_for_user(&state.db, &request.ssh_public_key_id, &auth.user_id)
         .await
         .map_err(|e| {
             tracing::error!("SSH key lookup failed: {}", e);
@@ -140,8 +267,7 @@ pub async fn start_secure_cloud_rental(
         .aggregator_service
         .deploy_instance(
             request.offering_id.clone(),
-            public_key,
-            None, // ssh_key_name
+            request.ssh_public_key_id.clone(),
             None, // location_code
         )
         .await

@@ -1623,3 +1623,168 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
 
     Ok(())
 }
+
+/// Display secure cloud rentals in table format
+pub fn display_secure_cloud_rentals(
+    rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
+    standard_view: bool,
+    detailed: bool,
+) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No secure cloud rentals found").yellow());
+        return Ok(());
+    }
+
+    if detailed {
+        // Detailed view with rental ID and instance type
+        #[derive(Tabled)]
+        struct DetailedRow {
+            #[tabled(rename = "RENTAL ID")]
+            rental_id: String,
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "Instance")]
+            instance_type: String,
+            #[tabled(rename = "Region")]
+            region: String,
+            #[tabled(rename = "Rate/hr")]
+            hourly_cost: String,
+            #[tabled(rename = "Created")]
+            created: String,
+        }
+
+        let rows: Vec<DetailedRow> = rentals
+            .iter()
+            .map(|rental| {
+                let gpu_str = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+
+                DetailedRow {
+                    rental_id: rental.rental_id.clone(),
+                    provider: rental.provider.clone(),
+                    gpu: gpu_str,
+                    status: rental.status.clone(),
+                    ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    instance_type: rental.instance_type.clone(),
+                    region: rental
+                        .location_code
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    created: format_timestamp(&rental.created_at.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    } else if standard_view {
+        // Standard view
+        #[derive(Tabled)]
+        struct StandardRow {
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "SSH")]
+            ssh: String,
+            #[tabled(rename = "Region")]
+            region: String,
+            #[tabled(rename = "Rate/hr")]
+            hourly_cost: String,
+            #[tabled(rename = "Created")]
+            created: String,
+        }
+
+        let rows: Vec<StandardRow> = rentals
+            .iter()
+            .map(|rental| {
+                let gpu_str = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+
+                let ssh_cmd = rental
+                    .ssh_command
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string());
+
+                StandardRow {
+                    provider: rental.provider.clone(),
+                    gpu: gpu_str,
+                    status: rental.status.clone(),
+                    ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    ssh: ssh_cmd,
+                    region: rental
+                        .location_code
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    created: format_timestamp(&rental.created_at.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    } else {
+        // Compact view
+        #[derive(Tabled)]
+        struct CompactRow {
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "Rate/hr")]
+            hourly_cost: String,
+            #[tabled(rename = "Created")]
+            created: String,
+        }
+
+        let rows: Vec<CompactRow> = rentals
+            .iter()
+            .map(|rental| {
+                let gpu_str = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+
+                CompactRow {
+                    provider: rental.provider.clone(),
+                    gpu: gpu_str,
+                    status: rental.status.clone(),
+                    ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    created: format_timestamp(&rental.created_at.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    }
+
+    Ok(())
+}

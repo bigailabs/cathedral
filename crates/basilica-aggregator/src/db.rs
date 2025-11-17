@@ -576,7 +576,7 @@ impl Database {
         provider: Provider,
     ) -> Result<Option<ProviderSshKey>> {
         let row = sqlx::query(
-            "SELECT id, ssh_key_id, provider, provider_key_id, created_at
+            "SELECT id, ssh_key_id, provider, provider_key_id, created_at, metadata
              FROM provider_ssh_keys WHERE ssh_key_id = $1 AND provider = $2",
         )
         .bind(ssh_key_id)
@@ -594,6 +594,7 @@ impl Database {
                     provider: p,
                     provider_key_id: r.get("provider_key_id"),
                     created_at: r.get("created_at"),
+                    metadata: r.get("metadata"),
                 })
         }))
     }
@@ -602,8 +603,8 @@ impl Database {
     pub async fn create_provider_ssh_key(&self, mapping: &ProviderSshKey) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO provider_ssh_keys (id, ssh_key_id, provider, provider_key_id, created_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO provider_ssh_keys (id, ssh_key_id, provider, provider_key_id, created_at, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
         )
         .bind(&mapping.id)
@@ -611,6 +612,7 @@ impl Database {
         .bind(mapping.provider.as_str())
         .bind(&mapping.provider_key_id)
         .bind(mapping.created_at)
+        .bind(&mapping.metadata)
         .execute(&self.pool)
         .await?;
 
@@ -623,7 +625,7 @@ impl Database {
         ssh_key_id: &str,
     ) -> Result<Vec<ProviderSshKey>> {
         let rows = sqlx::query(
-            "SELECT id, ssh_key_id, provider, provider_key_id, created_at
+            "SELECT id, ssh_key_id, provider, provider_key_id, created_at, metadata
              FROM provider_ssh_keys WHERE ssh_key_id = $1",
         )
         .bind(ssh_key_id)
@@ -642,6 +644,7 @@ impl Database {
                         provider: p,
                         provider_key_id: r.get("provider_key_id"),
                         created_at: r.get("created_at"),
+                        metadata: r.get("metadata"),
                     })
             })
             .collect();

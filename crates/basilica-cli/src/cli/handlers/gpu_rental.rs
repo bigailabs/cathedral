@@ -764,128 +764,201 @@ pub async fn handle_up(
 }
 
 /// Handle the `ps` command - list active rentals
-pub async fn handle_ps(filters: PsFilters, json: bool, config: &CliConfig) -> Result<(), CliError> {
+pub async fn handle_ps(
+    filters: PsFilters,
+    compute: Option<ComputeCategoryArg>,
+    json: bool,
+    config: &CliConfig,
+) -> Result<(), CliError> {
+    use basilica_common::types::ComputeCategory;
+
+    // Default to SecureCloud (same as `up` command)
+    let compute_category = compute
+        .map(ComputeCategory::from)
+        .unwrap_or(ComputeCategory::SecureCloud);
+
     let api_client = create_authenticated_client(config).await?;
 
-    let spinner = if filters.history {
-        create_spinner("Loading rental history...")
-    } else {
-        create_spinner("Loading active rentals...")
-    };
+    // Branch based on compute category
+    match compute_category {
+        ComputeCategory::CommunityCloud => {
+            // Existing community cloud logic
+            let spinner = if filters.history {
+                create_spinner("Loading rental history...")
+            } else {
+                create_spinner("Loading active rentals...")
+            };
 
-    // Build query from filters - default to "active" if no status specified
-    let query = Some(ListRentalsQuery {
-        status: if filters.history {
-            None // No filter - get all rentals
-        } else {
-            filters.status.or(Some(RentalState::Active)) // Default to active
-        },
-        gpu_type: filters.gpu_type.clone(),
-        min_gpu_count: filters.min_gpu_count,
-    });
+            // Build query from filters - default to "active" if no status specified
+            let query = Some(ListRentalsQuery {
+                status: if filters.history {
+                    None // No filter - get all rentals
+                } else {
+                    filters.status.or(Some(RentalState::Active)) // Default to active
+                },
+                gpu_type: filters.gpu_type.clone(),
+                min_gpu_count: filters.min_gpu_count,
+            });
 
-    // Fetch rentals, usage history, and pricing packages in parallel
-    // Use a reasonable limit for usage history to cover active rentals
-    let (rentals_result, usage_result, packages_result) = tokio::join!(
-        api_client.list_rentals(query),
-        api_client.list_usage_history(Some(100), None),
-        api_client.get_packages()
-    );
+            // Fetch rentals, usage history, and pricing packages in parallel
+            // Use a reasonable limit for usage history to cover active rentals
+            let (rentals_result, usage_result, packages_result) = tokio::join!(
+                api_client.list_rentals(query),
+                api_client.list_usage_history(Some(100), None),
+                api_client.get_packages()
+            );
 
-    let rentals_list = rentals_result
-        .inspect_err(|_| complete_spinner_error(spinner.clone(), "Failed to load rentals"))?;
+            let rentals_list = rentals_result.inspect_err(|_| {
+                complete_spinner_error(spinner.clone(), "Failed to load rentals")
+            })?;
 
-    // Build usage map: rental_id -> usage record
-    // If usage fetch fails, continue with empty map (graceful degradation)
-    let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> = usage_result
-        .ok()
-        .map(|usage| {
-            usage
-                .rentals
-                .into_iter()
-                .map(|record| (record.rental_id.clone(), record))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Build pricing map: GPU type -> hourly rate
-    // Package names are like "H100 GPU Package", we need to extract just "h100"
-    let pricing_map: HashMap<String, String> = match packages_result {
-        Ok(packages) => {
-            packages
-                .packages
-                .into_iter()
-                .filter(|p| p.is_active)
-                .filter_map(|p| {
-                    // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
-                    let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
-
-                    gpu_type.map(|t| (t, p.hourly_rate))
+            // Build usage map: rental_id -> usage record
+            // If usage fetch fails, continue with empty map (graceful degradation)
+            let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> = usage_result
+                .ok()
+                .map(|usage| {
+                    usage
+                        .rentals
+                        .into_iter()
+                        .map(|record| (record.rental_id.clone(), record))
+                        .collect()
                 })
-                .collect()
+                .unwrap_or_default();
+
+            // Build pricing map: GPU type -> hourly rate
+            // Package names are like "H100 GPU Package", we need to extract just "h100"
+            let pricing_map: HashMap<String, String> = match packages_result {
+                Ok(packages) => {
+                    packages
+                        .packages
+                        .into_iter()
+                        .filter(|p| p.is_active)
+                        .filter_map(|p| {
+                            // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
+                            let gpu_type =
+                                p.name.split_whitespace().next().map(|s| s.to_lowercase());
+
+                            gpu_type.map(|t| (t, p.hourly_rate))
+                        })
+                        .collect()
+                }
+                Err(_e) => HashMap::new(),
+            };
+
+            complete_spinner_and_clear(spinner);
+
+            if json {
+                json_output(&rentals_list)?;
+            } else if filters.history {
+                // History mode: use usage_map data and filter out active rentals
+                // Create a set of active rental IDs from the current rentals list
+                let active_rental_ids: std::collections::HashSet<String> = rentals_list
+                    .rentals
+                    .iter()
+                    .filter(|r| {
+                        // Only include rentals that are currently active or provisioning
+                        matches!(r.state, RentalState::Active | RentalState::Provisioning)
+                    })
+                    .map(|r| {
+                        // Strip "rental-" prefix to match usage_map format
+                        r.rental_id
+                            .strip_prefix("rental-")
+                            .unwrap_or(&r.rental_id)
+                            .to_string()
+                    })
+                    .collect();
+
+                // Filter usage_map to exclude active rentals
+                let historical_rentals: Vec<_> = usage_map
+                    .values()
+                    .filter(|r| !active_rental_ids.contains(&r.rental_id))
+                    .collect();
+
+                table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
+
+                let total_cost: Decimal = historical_rentals
+                    .iter()
+                    .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
+                    .sum();
+
+                println!();
+                println!(
+                    "{}: {}",
+                    style("Total Cost").cyan(),
+                    style(format!("${:.2}", total_cost)).green().bold()
+                );
+
+                println!("\nTotal: {} rentals", historical_rentals.len());
+
+                display_ps_quick_start_commands();
+            } else {
+                table_output::display_rental_items(
+                    &rentals_list.rentals[..],
+                    !filters.compact,
+                    filters.detailed,
+                    &usage_map,
+                    &pricing_map,
+                    false,
+                )?;
+
+                println!("\nTotal: {} active rentals", rentals_list.rentals.len());
+
+                display_ps_quick_start_commands();
+            }
         }
-        Err(_e) => HashMap::new(),
-    };
+        ComputeCategory::SecureCloud => {
+            // Secure cloud rentals logic
+            let spinner = if filters.history {
+                create_spinner("Loading secure cloud rental history...")
+            } else {
+                create_spinner("Loading secure cloud rentals...")
+            };
 
-    complete_spinner_and_clear(spinner);
+            // Fetch secure cloud rentals
+            let rentals_result = api_client.list_secure_cloud_rentals().await;
 
-    if json {
-        json_output(&rentals_list)?;
-    } else if filters.history {
-        // History mode: use usage_map data and filter out active rentals
-        // Create a set of active rental IDs from the current rentals list
-        let active_rental_ids: std::collections::HashSet<String> = rentals_list
-            .rentals
-            .iter()
-            .filter(|r| {
-                // Only include rentals that are currently active or provisioning
-                matches!(r.state, RentalState::Active | RentalState::Provisioning)
-            })
-            .map(|r| {
-                // Strip "rental-" prefix to match usage_map format
-                r.rental_id
-                    .strip_prefix("rental-")
-                    .unwrap_or(&r.rental_id)
-                    .to_string()
-            })
-            .collect();
+            let rentals_list = rentals_result.inspect_err(|_| {
+                complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+            })?;
 
-        // Filter usage_map to exclude active rentals
-        let historical_rentals: Vec<_> = usage_map
-            .values()
-            .filter(|r| !active_rental_ids.contains(&r.rental_id))
-            .collect();
+            complete_spinner_and_clear(spinner);
 
-        table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
+            if json {
+                json_output(&rentals_list)?;
+            } else {
+                // Filter rentals based on history flag
+                let rentals_to_display: Vec<_> = if filters.history {
+                    // Show stopped rentals only
+                    rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_some())
+                        .collect()
+                } else {
+                    // Show active/running rentals only
+                    rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_none())
+                        .collect()
+                };
 
-        let total_cost: Decimal = historical_rentals
-            .iter()
-            .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
-            .sum();
+                table_output::display_secure_cloud_rentals(
+                    &rentals_to_display,
+                    !filters.compact,
+                    filters.detailed,
+                )?;
 
-        println!();
-        println!(
-            "{}: {}",
-            style("Total Cost").cyan(),
-            style(format!("${:.2}", total_cost)).green().bold()
-        );
+                let label = if filters.history {
+                    "historical secure cloud rentals"
+                } else {
+                    "active secure cloud rentals"
+                };
+                println!("\nTotal: {} {}", rentals_to_display.len(), label);
 
-        println!("\nTotal: {} rentals", historical_rentals.len());
-
-        display_ps_quick_start_commands();
-    } else {
-        table_output::display_rental_items(
-            &rentals_list.rentals[..],
-            !filters.compact,
-            filters.detailed,
-            &usage_map,
-            &pricing_map,
-            false,
-        )?;
-
-        println!("\nTotal: {} active rentals", rentals_list.rentals.len());
-
-        display_ps_quick_start_commands();
+                display_ps_quick_start_commands();
+            }
+        }
     }
 
     Ok(())
@@ -1038,66 +1111,124 @@ pub async fn handle_logs(
 /// Handle the `down` command - terminate rental
 pub async fn handle_down(
     target: Option<String>,
+    compute: Option<ComputeCategoryArg>,
     all: bool,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    use super::gpu_rental_helpers::resolve_target_rental_unified;
+    use basilica_common::types::ComputeCategory;
+
     let api_client = create_authenticated_client(config).await?;
+    let compute_filter = compute.map(ComputeCategory::from);
 
     if all {
-        // Stop all active rentals
+        // Stop all active rentals based on compute filter
         let spinner = create_spinner("Fetching active rentals...");
 
-        // Fetch all active rentals
-        let query = Some(ListRentalsQuery {
-            status: Some(RentalState::Active),
-            gpu_type: None,
-            min_gpu_count: None,
-        });
-
-        let rentals_list = api_client
-            .list_rentals(query)
-            .await
-            .map_err(|e| -> CliError {
-                complete_spinner_error(spinner.clone(), "Failed to fetch rentals");
-                CliError::Internal(eyre!(e).wrap_err("Failed to fetch active rentals"))
-            })?;
+        // Determine what to fetch based on filter
+        let (community_rentals, secure_rentals) = match compute_filter {
+            Some(ComputeCategory::CommunityCloud) => {
+                // Fetch only community cloud
+                let query = Some(ListRentalsQuery {
+                    status: Some(RentalState::Active),
+                    gpu_type: None,
+                    min_gpu_count: None,
+                });
+                let rentals = api_client.list_rentals(query).await.map_err(|e| {
+                    complete_spinner_error(spinner.clone(), "Failed to fetch rentals");
+                    CliError::Internal(eyre!(e).wrap_err("Failed to fetch active rentals"))
+                })?;
+                (Some(rentals), None)
+            }
+            Some(ComputeCategory::SecureCloud) => {
+                // Fetch only secure cloud
+                let rentals = api_client.list_secure_cloud_rentals().await.map_err(|e| {
+                    complete_spinner_error(spinner.clone(), "Failed to fetch secure cloud rentals");
+                    CliError::Internal(eyre!(e).wrap_err("Failed to fetch secure cloud rentals"))
+                })?;
+                (None, Some(rentals))
+            }
+            None => {
+                // Fetch both types
+                let (community_result, secure_result) = tokio::join!(
+                    api_client.list_rentals(Some(ListRentalsQuery {
+                        status: Some(RentalState::Active),
+                        gpu_type: None,
+                        min_gpu_count: None,
+                    })),
+                    api_client.list_secure_cloud_rentals()
+                );
+                (community_result.ok(), secure_result.ok())
+            }
+        };
 
         complete_spinner_and_clear(spinner);
 
-        if rentals_list.rentals.is_empty() {
-            println!("No active rentals found.");
-            return Ok(());
-        }
-
-        let total_rentals = rentals_list.rentals.len();
-        println!(
-            "Found {} active rental{} to stop.",
-            total_rentals,
-            if total_rentals == 1 { "" } else { "s" }
-        );
-
+        let mut total_count = 0;
         let mut success_count = 0;
         let mut failed_rentals = Vec::new();
 
-        // Stop each rental one by one
-        for rental in rentals_list.rentals {
-            let rental_id = &rental.rental_id;
-            let spinner = create_spinner(&format!("Terminating rental: {}", rental_id));
+        // Stop community cloud rentals
+        if let Some(community) = community_rentals {
+            for rental in community.rentals {
+                total_count += 1;
+                let rental_id = &rental.rental_id;
+                let spinner =
+                    create_spinner(&format!("Stopping community cloud rental: {}", rental_id));
 
-            match api_client.stop_rental(rental_id).await {
-                Ok(_) => {
-                    complete_spinner_and_clear(spinner);
-                    print_success(&format!("Successfully stopped rental: {}", rental_id));
-                    success_count += 1;
-                }
-                Err(e) => {
-                    complete_spinner_error(
-                        spinner,
-                        &format!("Failed to terminate rental: {}", rental_id),
-                    );
-                    failed_rentals.push((rental_id.clone(), e));
+                match api_client.stop_rental(rental_id).await {
+                    Ok(_) => {
+                        complete_spinner_and_clear(spinner);
+                        print_success(&format!("✓ Community cloud rental {} stopped", rental_id));
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        complete_spinner_error(
+                            spinner,
+                            &format!("Failed to stop rental: {}", rental_id),
+                        );
+                        failed_rentals.push((rental_id.clone(), "community".to_string(), e));
+                    }
                 }
             }
+        }
+
+        // Stop secure cloud rentals (only active ones)
+        if let Some(secure) = secure_rentals {
+            for rental in secure.rentals {
+                // Skip stopped rentals
+                if rental.stopped_at.is_some() {
+                    continue;
+                }
+
+                total_count += 1;
+                let rental_id = &rental.rental_id;
+                let spinner =
+                    create_spinner(&format!("Stopping secure cloud rental: {}", rental_id));
+
+                match api_client.stop_secure_cloud_rental(rental_id).await {
+                    Ok(response) => {
+                        complete_spinner_and_clear(spinner);
+                        print_success(&format!(
+                            "✓ Secure cloud rental {} stopped | Duration: {:.2}h | Cost: ${:.2}",
+                            rental_id, response.duration_hours, response.total_cost
+                        ));
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        complete_spinner_error(
+                            spinner,
+                            &format!("Failed to stop rental: {}", rental_id),
+                        );
+                        failed_rentals.push((rental_id.clone(), "secure".to_string(), e));
+                    }
+                }
+            }
+        }
+
+        if total_count == 0 {
+            println!("No active rentals found.");
+            return Ok(());
         }
 
         // Print summary
@@ -1112,38 +1243,79 @@ pub async fn handle_down(
             print_success(&format!(
                 "Successfully stopped {} out of {} rental{}.",
                 success_count,
-                total_rentals,
-                if total_rentals == 1 { "" } else { "s" }
+                total_count,
+                if total_count == 1 { "" } else { "s" }
             ));
 
             if !failed_rentals.is_empty() {
                 println!("\nFailed to stop the following rentals:");
-                for (rental_id, error) in failed_rentals {
-                    println!("  - {}: {}", rental_id, error);
+                for (rental_id, rental_type, error) in failed_rentals {
+                    println!("  - {} ({}): {}", rental_id, rental_type, error);
                 }
             }
         }
     } else {
-        // Single rental termination (existing logic)
-        let rental_id = resolve_target_rental(target, &api_client, false).await?;
-        let spinner = create_spinner(&format!("Terminating rental: {}", rental_id));
+        // Single rental termination using unified resolution
+        let (rental_id, compute_type) =
+            resolve_target_rental_unified(target, compute_filter, &api_client).await?;
 
-        api_client
-            .stop_rental(&rental_id)
-            .await
-            .map_err(|e| -> CliError {
-                complete_spinner_error(spinner.clone(), "Failed to terminate rental");
-                let report = match e {
-                    ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
-                        .suggestion("Try 'basilica ps' to see your active rentals")
-                        .note("The rental may have already been terminated"),
-                    _ => eyre!(e).suggestion("Check your internet connection and try again"),
-                };
-                CliError::Internal(report)
-            })?;
+        let spinner = create_spinner(&format!("Stopping rental: {}", rental_id));
 
-        complete_spinner_and_clear(spinner);
-        print_success(&format!("Successfully stopped rental: {}", rental_id));
+        match compute_type {
+            ComputeCategory::CommunityCloud => {
+                // Stop community cloud rental
+                api_client
+                    .stop_rental(&rental_id)
+                    .await
+                    .map_err(|e| -> CliError {
+                        complete_spinner_error(spinner.clone(), "Failed to stop rental");
+                        let report = match e {
+                            ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
+                                .suggestion("Try 'basilica ps' to see your active rentals")
+                                .note("The rental may have already been stopped"),
+                            _ => {
+                                eyre!(e).suggestion("Check your internet connection and try again")
+                            }
+                        };
+                        CliError::Internal(report)
+                    })?;
+
+                complete_spinner_and_clear(spinner);
+                print_success(&format!(
+                    "✓ Community cloud rental {} stopped successfully",
+                    rental_id
+                ));
+            }
+            ComputeCategory::SecureCloud => {
+                // Stop secure cloud rental
+                let response = api_client
+                    .stop_secure_cloud_rental(&rental_id)
+                    .await
+                    .map_err(|e| -> CliError {
+                        complete_spinner_error(spinner.clone(), "Failed to stop rental");
+                        let report = match e {
+                            ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
+                                .suggestion(
+                                    "Try 'basilica ps --compute secure-cloud' to see your rentals",
+                                )
+                                .note("The rental may have already been stopped"),
+                            _ => {
+                                eyre!(e).suggestion("Check your internet connection and try again")
+                            }
+                        };
+                        CliError::Internal(report)
+                    })?;
+
+                complete_spinner_and_clear(spinner);
+                print_success(&format!(
+                    "✓ Secure cloud rental {} stopped successfully",
+                    rental_id
+                ));
+                println!();
+                println!("  Duration:   {:.2} hours", response.duration_hours);
+                println!("  Total cost: ${:.2}", response.total_cost);
+            }
+        }
     }
 
     Ok(())

@@ -212,12 +212,74 @@ pub struct SecurityRule {
     pub created_at: String,
 }
 
+/// Nested keypair info in deploy response
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NestedKeypair {
+    pub name: String,
+}
+
+/// Nested environment info in deploy response
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NestedEnvironment {
+    pub name: String,
+}
+
+/// Nested image info in deploy response
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NestedImage {
+    pub name: String,
+}
+
+/// Nested flavor info in deploy response
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NestedFlavor {
+    pub name: String,
+}
+
+/// Instance structure from deploy VM response
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeployVmInstance {
+    pub id: u32,
+    pub name: String,
+    pub status: String,
+    pub created_at: String,
+    pub keypair: NestedKeypair,
+    pub environment: NestedEnvironment,
+    pub image: NestedImage,
+    pub flavor: NestedFlavor,
+    #[serde(default)]
+    pub fixed_ip: Option<String>,
+    #[serde(default)]
+    pub floating_ip: Option<String>,
+    #[serde(default)]
+    pub floating_ip_status: Option<String>,
+}
+
+impl From<DeployVmInstance> for VirtualMachine {
+    fn from(instance: DeployVmInstance) -> Self {
+        VirtualMachine {
+            id: instance.id,
+            name: instance.name,
+            status: instance.status,
+            environment_name: instance.environment.name,
+            flavor_name: instance.flavor.name,
+            image_name: Some(instance.image.name),
+            key_name: Some(instance.keypair.name),
+            fixed_ip: instance.fixed_ip,
+            floating_ip: instance.floating_ip,
+            floating_ip_status: instance.floating_ip_status,
+            created_at: instance.created_at,
+            security_rules: vec![], // Deploy response doesn't include security rules
+        }
+    }
+}
+
 /// Response from deploying a VM
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeployVmResponse {
     pub status: bool,
     pub message: String,
-    pub virtual_machines: Vec<VirtualMachine>,
+    pub instances: Vec<DeployVmInstance>,
 }
 
 /// Response for getting VM details
@@ -226,10 +288,4 @@ pub struct GetVmResponse {
     pub status: bool,
     pub message: String,
     pub virtual_machine: VirtualMachine,
-}
-
-/// Request to delete a virtual machine
-#[derive(Debug, Clone, Serialize)]
-pub struct DeleteVmRequest {
-    pub virtual_machine_ids: Vec<u32>,
 }

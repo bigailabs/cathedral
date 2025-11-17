@@ -2,8 +2,8 @@ use super::normalize::{
     normalize_gpu_type, normalize_region, parse_gpu_memory, parse_interconnect,
 };
 use super::types::{
-    CreateKeypairRequest, CreateKeypairResponse, DeleteVmRequest, DeployVmRequest,
-    DeployVmResponse, FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, VirtualMachine,
+    CreateKeypairRequest, CreateKeypairResponse, DeployVmRequest, DeployVmResponse,
+    FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, VirtualMachine,
 };
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
@@ -142,12 +142,22 @@ impl HyperstackProvider {
         let url = format!("{}/core/keypairs", self.base_url);
 
         let request_body = CreateKeypairRequest {
-            name,
-            environment_name,
-            public_key,
+            name: name.clone(),
+            environment_name: environment_name.clone(),
+            public_key: public_key.clone(),
         };
 
-        tracing::debug!("Creating SSH keypair in Hyperstack");
+        tracing::info!(
+            "Creating SSH keypair in Hyperstack: name='{}', environment='{}'",
+            name,
+            environment_name
+        );
+
+        tracing::debug!(
+            "Hyperstack keypair request: url='{}', body={:?}",
+            url,
+            serde_json::to_value(&request_body).unwrap_or_default()
+        );
 
         let response = self
             .client
@@ -174,6 +184,10 @@ impl HyperstackProvider {
                 })?;
 
         if !create_response.status {
+            tracing::error!(
+                "Hyperstack keypair creation failed: {}",
+                create_response.message
+            );
             return Err(AggregatorError::Provider {
                 provider: "hyperstack".to_string(),
                 message: format!("Failed to create keypair: {}", create_response.message),
@@ -181,8 +195,11 @@ impl HyperstackProvider {
         }
 
         tracing::info!(
-            "Successfully created SSH keypair: {}",
-            create_response.keypair.id
+            "✓ Successfully created SSH keypair in Hyperstack: id={}, name='{}', environment='{}', fingerprint='{}'",
+            create_response.keypair.id,
+            create_response.keypair.name,
+            environment_name,
+            create_response.keypair.fingerprint
         );
 
         Ok(create_response.keypair)
@@ -257,14 +274,17 @@ impl HyperstackProvider {
             });
         }
 
-        let vm = deploy_response
-            .virtual_machines
+        let instance = deploy_response
+            .instances
             .into_iter()
             .next()
             .ok_or_else(|| AggregatorError::Provider {
                 provider: "hyperstack".to_string(),
-                message: "No virtual machine in response".to_string(),
+                message: "No instance in deploy response".to_string(),
             })?;
+
+        // Convert DeployVmInstance to VirtualMachine
+        let vm: VirtualMachine = instance.into();
 
         tracing::info!("Successfully deployed VM: {}", vm.id);
 
@@ -309,11 +329,7 @@ impl HyperstackProvider {
 
     /// Delete a virtual machine
     pub async fn delete_vm(&self, vm_id: u32) -> Result<()> {
-        let url = format!("{}/core/virtual-machines", self.base_url);
-
-        let request_body = DeleteVmRequest {
-            virtual_machine_ids: vec![vm_id],
-        };
+        let url = format!("{}/core/virtual-machines/{}", self.base_url, vm_id);
 
         tracing::debug!("Deleting VM: {}", vm_id);
 
@@ -322,7 +338,7 @@ impl HyperstackProvider {
             .delete(&url)
             .header("api_key", &self.api_key)
             .header("Content-Type", "application/json")
-            .json(&request_body)
+            .header("Accept", "application/json")
             .send()
             .await
             .map_err(|e| AggregatorError::Provider {
@@ -519,14 +535,14 @@ impl Provider for HyperstackProvider {
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        // Create SSH keypair
-        let _keypair = self
-            .create_keypair_impl(
-                request.ssh_key_name.clone(),
-                environment_name.clone(),
-                request.ssh_public_key.clone(),
-            )
-            .await?;
+        // Note: SSH key should already be registered with the provider via lazy registration
+        // in the service layer. We just use the key_name from the request.
+        tracing::info!(
+            "Hyperstack VM deployment: environment='{}', key_name='{}', instance_type='{}'",
+            environment_name,
+            request.ssh_key_name,
+            request.instance_type
+        );
 
         // Get default image if not specified
         let image_name = request
@@ -537,7 +553,7 @@ impl Provider for HyperstackProvider {
         // Create deployment request
         let deploy_request = DeployVmRequest {
             name: request.hostname.clone(),
-            environment_name,
+            environment_name: environment_name.clone(),
             image_name,
             flavor_name: request.instance_type.clone(),
             key_name: request.ssh_key_name.clone(),
@@ -546,6 +562,11 @@ impl Provider for HyperstackProvider {
             count: Some(1),
             create_bootable_volume: None,
         };
+
+        tracing::debug!(
+            "Sending Hyperstack deployment request: {:?}",
+            serde_json::to_value(&deploy_request).unwrap_or_default()
+        );
 
         // Deploy VM
         let vm = self.deploy_vm(deploy_request).await?;

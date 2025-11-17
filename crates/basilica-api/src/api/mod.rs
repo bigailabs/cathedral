@@ -144,6 +144,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             get(routes::secure_cloud::list_gpu_prices),
         )
         .route(
+            "/secure-cloud/rentals",
+            get(routes::secure_cloud::list_secure_cloud_rentals),
+        )
+        .route(
             "/secure-cloud/rentals/start",
             post(routes::secure_cloud::start_secure_cloud_rental),
         )

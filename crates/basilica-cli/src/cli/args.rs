@@ -169,8 +169,9 @@ impl Args {
                 handlers::gpu_rental::handle_up(target.clone(), options.clone(), *compute, config)
                     .await?;
             }
-            Commands::Ps { filters } => {
-                handlers::gpu_rental::handle_ps(filters.clone(), self.json, config).await?;
+            Commands::Ps { compute, filters } => {
+                handlers::gpu_rental::handle_ps(filters.clone(), *compute, self.json, config)
+                    .await?;
             }
             Commands::Status { target } => {
                 handlers::gpu_rental::handle_status(target.clone(), self.json, config).await?;
@@ -178,8 +179,12 @@ impl Args {
             Commands::Logs { target, options } => {
                 handlers::gpu_rental::handle_logs(target.clone(), options.clone(), config).await?;
             }
-            Commands::Down { target, all } => {
-                handlers::gpu_rental::handle_down(target.clone(), *all, config).await?;
+            Commands::Down {
+                target,
+                compute,
+                all,
+            } => {
+                handlers::gpu_rental::handle_down(target.clone(), *compute, *all, config).await?;
             }
             Commands::Exec { command, target } => {
                 handlers::gpu_rental::handle_exec(target.clone(), command.clone(), config).await?;

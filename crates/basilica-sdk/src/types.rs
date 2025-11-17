@@ -486,6 +486,59 @@ pub use basilica_common::types::ComputeCategory;
 // Re-export GpuOffering from basilica-aggregator
 pub use basilica_aggregator::GpuOffering;
 
+/// Secure cloud rental list item for PS command display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecureCloudRentalListItem {
+    /// Rental ID
+    pub rental_id: String,
+
+    /// Provider name (datacrunch, hyperstack, lambda, hydrahost)
+    pub provider: String,
+
+    /// Provider's instance ID
+    pub provider_instance_id: Option<String>,
+
+    /// GPU type (e.g., "h100", "a100")
+    pub gpu_type: String,
+
+    /// Number of GPUs
+    pub gpu_count: u32,
+
+    /// Instance type identifier
+    pub instance_type: String,
+
+    /// Region/location code
+    pub location_code: Option<String>,
+
+    /// Deployment status
+    pub status: String,
+
+    /// IP address
+    pub ip_address: Option<String>,
+
+    /// Hourly rate (base price per GPU)
+    pub hourly_rate: String,
+
+    /// Total hourly cost (hourly_rate × gpu_count × markup)
+    pub hourly_cost: f64,
+
+    /// Creation timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+
+    /// Stop timestamp
+    pub stopped_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// SSH connection info
+    pub ssh_command: Option<String>,
+}
+
+/// List secure cloud rentals response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListSecureCloudRentalsResponse {
+    pub rentals: Vec<SecureCloudRentalListItem>,
+    pub total_count: usize,
+}
+
 /// List secure cloud GPUs response from aggregator
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListSecureCloudGpusResponse {
