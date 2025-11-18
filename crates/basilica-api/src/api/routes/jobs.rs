@@ -277,6 +277,7 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         }
     }
 

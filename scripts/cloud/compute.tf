@@ -390,6 +390,17 @@ module "basilica_api_service" {
     CLOUDFLARE_PROXY               = "true"
     ALB_DNS_NAME                   = var.deployments_alb_dns_name
 
+    # K3S_SERVER_URL for interacting with the cluster
+    BASILICA_API_K3S__SERVER_URL = var.k3s_server_url
+    K3S_SERVER_URL               = var.k3s_server_url
+
+    # K3s SSH Configuration for token generation
+    BASILICA_API_K3S_SSH__ENABLED      = var.k3s_ssh_enabled
+    BASILICA_API_K3S_SSH__SERVERS      = var.k3s_ssh_servers
+    BASILICA_API_K3S_SSH__USERNAME     = var.k3s_ssh_username
+    BASILICA_API_K3S_SSH__KEY_PATH     = "/tmp/.ssh/k3s_key"
+    BASILICA_API_K3S_SSH__TIMEOUT_SECS = "30"
+
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
   }
@@ -399,6 +410,10 @@ module "basilica_api_service" {
     {
       name      = "KUBECONFIG_CONTENT"
       valueFrom = aws_secretsmanager_secret.kubeconfig.arn
+    },
+    {
+      name      = "SSH_PRIVATE_KEY"
+      valueFrom = aws_secretsmanager_secret.k3s_ssh_key.arn
     }
   ]
 

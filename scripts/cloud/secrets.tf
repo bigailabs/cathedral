@@ -74,3 +74,25 @@ resource "aws_secretsmanager_secret_version" "kubeconfig" {
 
 # Note: If kubeconfig_path is not set, you must manually upload via AWS CLI:
 # aws secretsmanager put-secret-value --secret-id <secret-id> --secret-string "$(cat /path/to/kubeconfig)"
+
+# K3s SSH private key for API service to create K3s tokens
+resource "aws_secretsmanager_secret" "k3s_ssh_key" {
+  name                    = "${local.name_prefix}-k3s-ssh-key"
+  description             = "SSH private key for API to access K3s servers for token creation"
+  recovery_window_in_days = 7
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-k3s-ssh-key"
+  })
+}
+
+# Automatically upload k3s_ssh_key if path is provided
+resource "aws_secretsmanager_secret_version" "k3s_ssh_key" {
+  count         = var.k3s_ssh_key_path != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.k3s_ssh_key.id
+  secret_string = file(pathexpand(var.k3s_ssh_key_path))
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

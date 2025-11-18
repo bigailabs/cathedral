@@ -13,15 +13,16 @@ resource "aws_security_group" "k3s_agent" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "k3s_agent_ssh" {
+  count             = length(var.allowed_ssh_cidr_blocks)
   security_group_id = aws_security_group.k3s_agent.id
-  description       = "SSH access"
+  description       = "SSH access from ${var.allowed_ssh_cidr_blocks[count.index]}"
   ip_protocol       = "tcp"
   from_port         = 22
   to_port           = 22
-  cidr_ipv4         = var.allowed_ssh_cidr_blocks[0]
+  cidr_ipv4         = var.allowed_ssh_cidr_blocks[count.index]
 
   tags = {
-    Name = "ssh-access"
+    Name = "ssh-access-${count.index}"
   }
 }
 

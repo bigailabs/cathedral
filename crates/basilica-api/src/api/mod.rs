@@ -18,6 +18,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
     let public_routes = Router::new()
         // Health endpoint - no authentication required for ALB health checks
         .route("/health", get(routes::health::health_check))
+        .route("/health/k3s", get(routes::health::k3s_health_check))
         // Metrics endpoint - no authentication required for Prometheus scraping
         .route("/metrics", get(routes::metrics::metrics_handler));
 
@@ -85,6 +86,15 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/deployments/:instance_name/logs",
             get(routes::deployments::stream_deployment_logs),
+        )
+        // GPU node registration endpoints
+        .route(
+            "/v1/gpu-nodes/register",
+            post(routes::gpu_nodes::register_gpu_node),
+        )
+        .route(
+            "/v1/gpu-nodes/revoke",
+            post(routes::gpu_nodes::revoke_gpu_node),
         );
 
     // Conditionally map legacy vs k8s backend under /rentals

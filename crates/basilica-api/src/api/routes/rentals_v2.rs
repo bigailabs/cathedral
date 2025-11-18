@@ -529,6 +529,7 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         }
     }
 
@@ -556,6 +557,7 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
             user_id: "alice".into(),
@@ -650,6 +652,7 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
             user_id: "bob".into(),
@@ -730,6 +733,7 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
             user_id: "bob".into(),

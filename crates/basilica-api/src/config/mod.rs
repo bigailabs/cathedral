@@ -12,6 +12,8 @@ pub use dns::DnsConfig;
 pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
+use crate::ssh::K3sSshConfig;
+
 use basilica_common::config::{types::MetricsConfig, BittensorConfig};
 use basilica_common::ConfigurationError as ConfigError;
 use figment::{
@@ -24,6 +26,9 @@ use std::time::Duration;
 
 /// Rental health check interval in seconds
 const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
+
+/// Node token cleanup interval in seconds
+const NODE_TOKEN_CLEANUP_INTERVAL_SECS: u64 = 3600;
 
 /// Bittensor integration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +167,10 @@ pub struct Config {
     /// Metrics configuration
     #[serde(default)]
     pub metrics: MetricsConfig,
+
+    /// K3s SSH configuration for token generation
+    #[serde(default)]
+    pub k3s_ssh: K3sSshConfig,
 }
 
 impl Config {
@@ -224,6 +233,11 @@ impl Config {
     /// Get rental health check interval as Duration
     pub fn rental_health_check_interval(&self) -> Duration {
         Duration::from_secs(RENTAL_HEALTH_CHECK_INTERVAL_SECS)
+    }
+
+    /// Get node token cleanup interval as Duration
+    pub fn node_token_cleanup_interval(&self) -> Duration {
+        Duration::from_secs(NODE_TOKEN_CLEANUP_INTERVAL_SECS)
     }
 
     /// Create BittensorConfig from our configuration

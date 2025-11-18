@@ -24,6 +24,7 @@ pub mod gateway;
 pub mod k8s;
 pub mod metrics;
 pub mod server;
+pub mod ssh;
 
 // Backward compatibility alias
 pub use k8s as k8s_client;

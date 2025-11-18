@@ -21,6 +21,25 @@ allowed_ssh_cidr_blocks = ["0.0.0.0/0"]
 #   "198.51.100.0/24",  # Your VPN subnet
 # ]
 
+# K8s API Access Control
+# CIDR blocks allowed to access K3s API server (port 6443)
+#
+# ARCHITECTURE: K3s servers are deployed in PRIVATE subnets with NO public IPs
+# - Control plane nodes (servers): Private subnets (10.101.10.x/24)
+# - Worker nodes (agents): Public subnets (10.101.0.x/24) for direct SSH access
+# - All K3s API traffic MUST go through the Network Load Balancer (NLB)
+# - Direct access to K3s servers from internet is architecturally IMPOSSIBLE
+#
+# SECURITY: Because servers are in private subnets without public IPs, it's
+# safe to allow 0.0.0.0/0 here. This rule only applies to traffic that can
+# reach the servers (which is only NLB traffic, not direct internet traffic).
+#
+# Example: Internet → NLB (public) → K3s Servers (private, no public route)
+allowed_k8s_api_cidr_blocks = ["0.0.0.0/0"]
+
+# Note: If you need to restrict access at the network level, configure the
+# NLB security group or use AWS Network Firewall, not this security group.
+
 # K3s Server Configuration (Control Plane)
 # Number of server nodes - must be odd for etcd quorum (1, 3, 5, etc.)
 # Recommended: 3 for HA production, 1 for dev/test

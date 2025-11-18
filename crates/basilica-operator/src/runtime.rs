@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 
 use crate::billing::{BillingClient, HttpBillingClient, MockBillingClient};
 use crate::controllers::job_controller::JobController;
+use crate::controllers::node_profile_controller::NodeProfileController;
 use crate::controllers::node_removal_controller::NodeRemovalController;
 use crate::controllers::rental_controller::RentalController;
 use crate::controllers::user_deployment_controller::UserDeploymentController;
@@ -18,6 +19,7 @@ use crate::crd::gpu_rental::GpuRental;
 use crate::crd::user_deployment::UserDeployment;
 use crate::k8s_client::{K8sClient, KubeClient};
 use crate::metrics_provider::K8sMetricsProvider;
+use k8s_openapi::api::core::v1::Node;
 
 #[derive(Clone)]
 struct JobCtx<C: K8sClient + Clone + 'static> {
@@ -120,7 +122,8 @@ pub async fn run() -> AnyResult<()> {
     // Build controllers
     let mut job_ctrl = JobController::new_with_billing(kube_client.clone(), billing_arc.clone());
     let mut rent_ctrl = RentalController::new_with_arc(kube_client.clone(), billing_arc);
-    let node_ctrl = NodeRemovalController::new(kube_client.clone());
+    let node_removal_ctrl = NodeRemovalController::new(kube_client.clone());
+    let node_profile_ctrl = NodeProfileController::new(kube_client.clone());
 
     let public_ip =
         std::env::var("DEPLOYMENT_PUBLIC_IP").unwrap_or_else(|_| "localhost".to_string());
@@ -146,6 +149,7 @@ pub async fn run() -> AnyResult<()> {
     let gr_api: Api<GpuRental> = Api::all(client.clone());
     let np_api: Api<BasilicaNodeProfile> = Api::all(client.clone());
     let ud_api: Api<UserDeployment> = Api::all(client.clone());
+    let node_api: Api<Node> = Api::all(client.clone());
 
     // Run controllers as streams
     let jobs = Controller::new(bj_api, Default::default())
@@ -177,7 +181,7 @@ pub async fn run() -> AnyResult<()> {
     let node_removal = Controller::new(np_api, Default::default())
         .run(
             |obj, _| {
-                let ctrl = node_ctrl.clone();
+                let ctrl = node_removal_ctrl.clone();
                 async move {
                     if let Err(e) = ctrl.reconcile(&obj).await {
                         return Err(ReconcileError(e));
@@ -198,6 +202,30 @@ pub async fn run() -> AnyResult<()> {
             }
         });
 
+    let node_profile = Controller::new(node_api, Default::default())
+        .run(
+            |obj, _| {
+                let ctrl = node_profile_ctrl.clone();
+                async move {
+                    if let Err(e) = ctrl.reconcile(&obj).await {
+                        return Err(ReconcileError(e));
+                    }
+                    Ok(Action::requeue(Duration::from_secs(60)))
+                }
+            },
+            |_obj, err, _| {
+                warn!("node profile reconcile error: {}", err);
+                Action::requeue(Duration::from_secs(10))
+            },
+            Arc::new(()),
+        )
+        .for_each(|res| async move {
+            match res {
+                Ok(_o) => {}
+                Err(e) => error!("node profile controller stream error: {}", e),
+            }
+        });
+
     let user_deployments = Controller::new(ud_api, Default::default())
         .run(
             reconcile_user_deployment,
@@ -214,6 +242,6 @@ pub async fn run() -> AnyResult<()> {
         });
 
     info!("operator controllers started");
-    futures::future::join4(jobs, rentals, node_removal, user_deployments).await;
+    futures::future::join5(jobs, rentals, node_removal, node_profile, user_deployments).await;
     Ok(())
 }

@@ -28,6 +28,12 @@ variable "allowed_ssh_cidr_blocks" {
   default     = ["0.0.0.0/0"]
 }
 
+variable "allowed_k8s_api_cidr_blocks" {
+  type        = list(string)
+  description = "CIDR blocks allowed to access K3s API server (port 6443). With private subnet architecture, set to 0.0.0.0/0 since direct access is impossible."
+  default     = ["0.0.0.0/0"]
+}
+
 variable "k3s_server_count" {
   type        = number
   description = "Number of K3s server (control plane) nodes - must be odd for etcd quorum (1, 3, 5, etc.)"
