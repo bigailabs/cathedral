@@ -5,6 +5,7 @@ use crate::k8s_client::K8sClient;
 use anyhow::Result;
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::chrono::Utc;
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone)]
 pub struct NodeProfileController<C: K8sClient> {
@@ -106,6 +107,8 @@ impl<C: K8sClient> NodeProfileController<C> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Node has no name"))?;
 
+        debug!(node = %node_name, "NodeProfileController: reconciling node");
+
         let labels = node
             .metadata
             .labels
@@ -114,14 +117,27 @@ impl<C: K8sClient> NodeProfileController<C> {
 
         let datacenter_id = match labels.get("basilica.ai/datacenter") {
             Some(id) => id,
-            None => return Ok(()),
+            None => {
+                debug!(node = %node_name, "Skipping node without datacenter label");
+                return Ok(());
+            }
         };
 
-        Self::validate_node_labels(labels)?;
+        debug!(node = %node_name, datacenter = %datacenter_id, "Node has datacenter label, validating labels");
+
+        if let Err(e) = Self::validate_node_labels(labels) {
+            warn!(node = %node_name, error = %e, "Node label validation failed");
+            return Err(e);
+        }
+
+        debug!(node = %node_name, "Node labels validated successfully");
 
         if !is_node_ready(node) {
+            debug!(node = %node_name, "Skipping node that is not Ready");
             return Ok(());
         }
+
+        info!(node = %node_name, datacenter = %datacenter_id, "Processing GPU node for validation");
 
         let node_id = labels
             .get("basilica.ai/node-id")
@@ -218,20 +234,32 @@ impl<C: K8sClient> NodeProfileController<C> {
             }),
         };
 
+        debug!(node = %node_name, node_id = %node_id, "Creating BasilicaNodeProfile");
+
         self.client
             .create_node_profile("basilica-system", &profile)
             .await
             .or_else(|e| {
                 if e.to_string().contains("AlreadyExists") {
+                    debug!(node = %node_name, "NodeProfile already exists, continuing");
                     Ok(profile)
                 } else {
+                    error!(node = %node_name, error = %e, "Failed to create NodeProfile");
                     Err(e)
                 }
             })?;
 
+        info!(node = %node_name, "NodeProfile created successfully, removing unvalidated taint");
+
         self.client
             .remove_node_taint(node_name, "basilica.ai/unvalidated")
-            .await?;
+            .await
+            .map_err(|e| {
+                error!(node = %node_name, error = %e, "Failed to remove taint");
+                e
+            })?;
+
+        info!(node = %node_name, datacenter = %datacenter_id, "Successfully validated GPU node and removed taint");
 
         Ok(())
     }
