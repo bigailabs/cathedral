@@ -68,6 +68,9 @@ pub struct AppState {
 
     /// Metrics system
     pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
+
+    /// SSH client for K3s token generation
+    pub ssh_client: Arc<crate::ssh::K3sSshClient>,
 }
 
 /// Process health check for a single rental
@@ -330,6 +333,50 @@ impl Server {
             None
         };
 
+        // Write SSH private key to disk if provided via environment variable
+        if let Ok(ssh_key_content) = std::env::var("SSH_PRIVATE_KEY") {
+            let key_dir = std::path::PathBuf::from("/tmp/.ssh");
+            let key_path = key_dir.join("k3s_key");
+
+            std::fs::create_dir_all(&key_dir).map_err(|e| ApiError::Internal {
+                message: format!("Failed to create SSH key directory: {}", e),
+            })?;
+
+            std::fs::write(&key_path, ssh_key_content).map_err(|e| ApiError::Internal {
+                message: format!("Failed to write SSH key: {}", e),
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| ApiError::Internal {
+                        message: format!("Failed to set SSH key permissions: {}", e),
+                    })?;
+            }
+
+            info!("SSH private key written to {}", key_path.display());
+        }
+
+        // Initialize SSH client for K3s token generation
+        let ssh_client = Arc::new(
+            crate::ssh::K3sSshClient::new(&config.k3s_ssh)
+                .map_err(|e| {
+                    warn!(
+                        "Failed to initialize SSH client: {}. SSH token creation will be disabled.",
+                        e
+                    );
+                    e
+                })
+                .unwrap_or_else(|_| crate::ssh::K3sSshClient::disabled()),
+        );
+
+        if ssh_client.is_enabled() {
+            info!("SSH client initialized for K3s token generation");
+        } else {
+            info!("SSH token generation is disabled");
+        }
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -344,6 +391,7 @@ impl Server {
             billing_client,
             dns_provider,
             metrics,
+            ssh_client,
         };
 
         // Start optional health check task using HTTP client
