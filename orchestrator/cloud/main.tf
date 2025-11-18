@@ -154,7 +154,7 @@ module "vpc_peering" {
   name_prefix         = local.name_prefix
   vpc_id              = module.networking.vpc_id
   vpc_cidr            = module.networking.vpc_cidr
-  k3s_route_table_id  = module.networking.private_route_table_id
+  k3s_route_table_id  = module.networking.public_route_table_id
   peer_vpc_id         = var.peer_vpc_id
   peer_vpc_cidr       = var.peer_vpc_cidr
   peer_route_table_id = var.peer_route_table_id

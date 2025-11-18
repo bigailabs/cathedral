@@ -88,11 +88,11 @@ payments_reconciliation_dry_run = true
 # Leave empty "" to manually upload kubeconfig via AWS CLI
 kubeconfig_path = "~/.kube/k3s-basilica-config"
 
-# Alternative: manually upload after terraform apply:
-# kubeconfig_path = ""
-# aws secretsmanager put-secret-value \
-#   --secret-id basilica-dev-v3-kubeconfig \
-#   --secret-string "$(cat ~/.kube/k3s-basilica-config)"
+k3s_server_url   = ""
+k3s_ssh_enabled  = "true"
+k3s_ssh_servers  = ""
+k3s_ssh_username = ""
+k3s_ssh_key_path = ""
 
 cloudflare_api_token     = "your-cloudflare-api-token"
 cloudflare_zone_id       = "your-cloudflare-zone-id"

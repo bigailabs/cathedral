@@ -59,6 +59,20 @@ resource "aws_vpc_security_group_ingress_rule" "k3s_server_api_from_ecs" {
   }
 }
 
+resource "aws_vpc_security_group_ingress_rule" "k3s_server_ssh_from_ecs" {
+  count             = var.peer_vpc_cidr != "" ? 1 : 0
+  security_group_id = aws_security_group.k3s_server.id
+  description       = "SSH access from ECS VPC for K3s token generation (VPC peering)"
+  ip_protocol       = "tcp"
+  from_port         = 22
+  to_port           = 22
+  cidr_ipv4         = var.peer_vpc_cidr
+
+  tags = {
+    Name = "ssh-from-ecs"
+  }
+}
+
 resource "aws_vpc_security_group_ingress_rule" "k3s_server_kubelet" {
   security_group_id = aws_security_group.k3s_server.id
   description       = "Kubelet metrics"
