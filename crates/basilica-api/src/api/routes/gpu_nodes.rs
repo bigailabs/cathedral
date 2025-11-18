@@ -1,7 +1,7 @@
 use axum::{extract::State, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::{
     api::middleware::AuthContext,
@@ -30,6 +30,7 @@ pub struct GpuNodeRegistrationResponse {
     pub node_id: String,
     pub k3s_url: String,
     pub k3s_token: String,
+    pub node_password: Option<String>,
     pub node_labels: HashMap<String, String>,
     pub status: String,
 }
@@ -63,13 +64,38 @@ pub async fn register_gpu_node(
     let k3s_url = crate::k8s::get_k3s_server_url()
         .map_err(|e| ApiError::ConfigError(format!("K3S_SERVER_URL not configured: {}", e)))?;
 
-    let k3s_token = crate::k8s::get_or_create_cluster_token(
-        &state.db,
-        user_id,
-        &req.node_id,
-        &req.datacenter_id,
-    )
-    .await?;
+    let (k3s_token, node_password) = if state.ssh_client.is_enabled() {
+        info!(
+            node_id = %req.node_id,
+            datacenter_id = %req.datacenter_id,
+            "Creating K3s token via SSH"
+        );
+
+        let token_response = state
+            .ssh_client
+            .create_token(&req.node_id, &req.datacenter_id, "24h")
+            .await
+            .map_err(|e| {
+                error!(
+                    node_id = %req.node_id,
+                    error = %e,
+                    "Failed to create K3s token via SSH"
+                );
+                e
+            })?;
+
+        (token_response.token, token_response.node_password)
+    } else {
+        warn!("SSH token creation disabled, using fallback to database-stored token");
+        let token = crate::k8s::get_or_create_cluster_token(
+            &state.db,
+            user_id,
+            &req.node_id,
+            &req.datacenter_id,
+        )
+        .await?;
+        (token, None)
+    };
 
     let node_labels = crate::k8s::build_node_labels(crate::k8s::NodeLabelParams {
         node_id: &req.node_id,
@@ -91,6 +117,7 @@ pub async fn register_gpu_node(
         node_id: req.node_id,
         k3s_url,
         k3s_token,
+        node_password,
         node_labels,
         status: "ready".to_string(),
     }))
