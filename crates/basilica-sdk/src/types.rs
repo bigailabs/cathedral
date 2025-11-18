@@ -516,10 +516,7 @@ pub struct SecureCloudRentalListItem {
     /// IP address
     pub ip_address: Option<String>,
 
-    /// Hourly rate (base price per GPU)
-    pub hourly_rate: String,
-
-    /// Total hourly cost (hourly_rate × gpu_count × markup)
+    /// Hourly cost per hour (total price charged to user)
     pub hourly_cost: f64,
 
     /// Creation timestamp

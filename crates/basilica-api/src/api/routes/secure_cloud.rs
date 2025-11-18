@@ -170,7 +170,7 @@ pub async fn list_secure_cloud_rentals(
                 stopped_at,
             )| {
                 // Try to find the offering to get GPU details
-                let (gpu_type, gpu_count, hourly_rate, hourly_cost) =
+                let (gpu_type, gpu_count, hourly_cost) =
                     if let Some(offering) = offerings_map.get(offering_id.as_str()) {
                         let base_rate = offering.hourly_rate.to_f64().unwrap_or(0.0);
                         let gpu_count = offering.gpu_count;
@@ -181,7 +181,6 @@ pub async fn list_secure_cloud_rentals(
                         (
                             offering.gpu_type.to_string(),
                             gpu_count,
-                            offering.hourly_rate.to_string(),
                             hourly_cost,
                         )
                     } else {
@@ -191,7 +190,7 @@ pub async fn list_secure_cloud_rentals(
                             offering_id,
                             rental_id
                         );
-                        ("unknown".to_string(), 0, "0.00".to_string(), 0.0)
+                        ("unknown".to_string(), 0, 0.0)
                     };
 
                 // Generate SSH command if IP available
@@ -207,7 +206,6 @@ pub async fn list_secure_cloud_rentals(
                     location_code,
                     status,
                     ip_address,
-                    hourly_rate,
                     hourly_cost,
                     created_at,
                     stopped_at,

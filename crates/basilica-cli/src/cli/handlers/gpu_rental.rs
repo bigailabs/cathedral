@@ -317,15 +317,13 @@ fn interactive_offering_selector(
             };
 
             format!(
-                "{:<12} {:>8} {:>4}x {:<8} {:>6} | ${:>6.2}/hr (${:.2} + {}%)",
+                "{:<12} {:>8} {:>4}x {:<8} {:>6} | ${:>6.2}/hr",
                 o.provider.as_str(),
                 o.region,
                 o.gpu_count,
                 o.gpu_type.as_str(),
                 memory_str,
-                total_price,
-                base_price,
-                markup_percent
+                total_price
             )
         })
         .collect();
@@ -335,7 +333,7 @@ fn interactive_offering_selector(
     println!("─────────────────────────────────────────────────────────────────────────────");
     println!(
         "{:<12} {:<8} {:<15} {:<8} {:<20}",
-        "Provider", "Region", "GPU", "Memory", "Price/hr (base + markup)"
+        "Provider", "Region", "GPU", "Memory", "Price/hr"
     );
     println!("─────────────────────────────────────────────────────────────────────────────");
 
@@ -418,11 +416,7 @@ async fn handle_secure_cloud_rental(
         println!("Memory:      {}GB total", mem_per_gpu * selected.gpu_count);
     }
     println!("Region:      {}", selected.region);
-    println!("Base Price:  ${:.2}/hr", base_price);
-    println!(
-        "Total Price: ${:.2}/hr (includes {:.0}% markup)",
-        total_price, markup_percent
-    );
+    println!("Price:       ${:.2}/hr", total_price);
     println!();
 
     // Step 6: Confirm
