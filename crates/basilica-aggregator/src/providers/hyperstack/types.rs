@@ -176,6 +176,8 @@ pub struct DeployVmRequest {
     pub count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create_bootable_volume: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_rules: Option<Vec<SecurityRuleRequest>>,
 }
 
 /// Virtual machine details from Hyperstack API
@@ -197,6 +199,17 @@ pub struct VirtualMachine {
     pub created_at: String,
     #[serde(default)]
     pub security_rules: Vec<SecurityRule>,
+}
+
+/// Security rule for a virtual machine request
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityRuleRequest {
+    pub direction: String,
+    pub ethertype: String,
+    pub protocol: String,
+    pub port_range_min: u32,
+    pub port_range_max: u32,
+    pub remote_ip_prefix: String,
 }
 
 /// Security rule for a virtual machine

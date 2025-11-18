@@ -3,7 +3,8 @@ use super::normalize::{
 };
 use super::types::{
     CreateKeypairRequest, CreateKeypairResponse, DeployVmRequest, DeployVmResponse,
-    FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, VirtualMachine,
+    FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, SecurityRuleRequest,
+    VirtualMachine,
 };
 use crate::error::{AggregatorError, Result};
 use crate::models::{GpuOffering, Provider as ProviderEnum, ProviderHealth};
@@ -573,6 +574,14 @@ impl Provider for HyperstackProvider {
             assign_floating_ip: Some(true),
             count: Some(1),
             create_bootable_volume: None,
+            security_rules: Some(vec![SecurityRuleRequest {
+                direction: "ingress".to_string(),
+                ethertype: "IPv4".to_string(),
+                protocol: "tcp".to_string(),
+                port_range_min: 22,
+                port_range_max: 22,
+                remote_ip_prefix: "0.0.0.0/0".to_string(),
+            }]),
         };
 
         tracing::debug!(
