@@ -165,18 +165,31 @@ register_node() {
 EOF
 )
 
-    local response=$(curl -f -X POST "${BASILICA_API_URL}/v1/gpu-nodes/register" \
+    response=$(curl -sSf -X POST "${BASILICA_API_URL}/v1/gpu-nodes/register" \
         -H "Authorization: Bearer ${BASILICA_DATACENTER_API_KEY}" \
         -H "Content-Type: application/json" \
-        -d "${payload}" 2>&1) || {
-        die "Registration failed. API response: ${response}"
-    }
+        -d "${payload}")
+
+    echo "=== RAW RESPONSE ===" >&2
+    echo "$response" >&2
+    echo "=== END RESPONSE ===" >&2
+    echo "$response" | xxd | head -20 >&2
 
     K3S_URL=$(echo "$response" | jq -r '.k3s_url')
     K3S_TOKEN=$(echo "$response" | jq -r '.k3s_token')
     K3S_NODE_NAME=$(echo "$response" | jq -r '.node_id')
+    NODE_PASSWORD=$(echo "$response" | jq -r '.node_password // empty')
 
     NODE_LABELS=$(echo "$response" | jq -r '.node_labels | to_entries | map("--node-label \(.key)=\(.value)") | join(" ")')
+
+    if [ -n "$NODE_PASSWORD" ]; then
+        log "Setting up node password for K3s authentication"
+        sudo mkdir -p /etc/rancher/node
+        sudo chmod 755 /etc/rancher/node
+        echo -n "$NODE_PASSWORD" | sudo tee /etc/rancher/node/password > /dev/null
+        sudo chown root:root /etc/rancher/node/password
+        sudo chmod 400 /etc/rancher/node/password
+    fi
 
     log "Registration approved"
     log "  K3s URL: ${K3S_URL}"
@@ -189,6 +202,7 @@ join_k3s_cluster() {
     local TAINTS="--kubelet-arg=register-with-taints=basilica.ai/unvalidated=true:NoSchedule"
 
     curl -sfL https://get.k3s.io | \
+        INSTALL_K3S_VERSION="v1.31.1+k3s1" \
         K3S_URL="${K3S_URL}" \
         K3S_TOKEN="${K3S_TOKEN}" \
         K3S_NODE_NAME="${K3S_NODE_NAME}" \
