@@ -11,8 +11,7 @@ where
     }
     s.split(',')
         .map(|server_str| {
-            K3sServer::from_string(server_str.trim())
-                .map_err(serde::de::Error::custom)
+            K3sServer::from_string(server_str.trim()).map_err(serde::de::Error::custom)
         })
         .collect()
 }

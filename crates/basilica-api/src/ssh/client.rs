@@ -187,7 +187,9 @@ impl K3sSshClient {
             .split("datacenter ")
             .nth(1)
             .unwrap_or("unknown");
-        let node_password = self.create_node_password_secret(server, node_id, datacenter_id).await?;
+        let node_password = self
+            .create_node_password_secret(server, node_id, datacenter_id)
+            .await?;
 
         Ok(TokenResponse::with_node_password(
             token_response.token,
@@ -220,7 +222,10 @@ impl K3sSshClient {
                 .map_err(|e| ApiError::ConfigError(format!("Failed to hash password: {}", e)))?;
 
             let salt_hex = hex::encode(salt_bytes);
-            let hash_b64 = base64::engine::general_purpose::STANDARD.encode(hash_output).trim_end_matches('=').to_string();
+            let hash_b64 = base64::engine::general_purpose::STANDARD
+                .encode(hash_output)
+                .trim_end_matches('=')
+                .to_string();
             let password_hash = format!("\\$1:{}:15:8:1:{}", salt_hex, hash_b64);
 
             (password, password_hash)
@@ -242,11 +247,14 @@ impl K3sSshClient {
               basilica.ai/created-at='{}' \
               basilica.ai/expires-at='{}' \
               --overwrite"#,
-            node_id, password_hash,
+            node_id,
+            password_hash,
             node_id,
             node_id,
             node_id,
-            datacenter_id, created_at, expires_at
+            datacenter_id,
+            created_at,
+            expires_at
         );
 
         info!(
