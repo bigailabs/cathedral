@@ -178,11 +178,7 @@ pub async fn list_secure_cloud_rentals(
                             * gpu_count as f64
                             * (1.0 + state.pricing_config.secure_cloud_markup_percent / 100.0);
 
-                        (
-                            offering.gpu_type.to_string(),
-                            gpu_count,
-                            hourly_cost,
-                        )
+                        (offering.gpu_type.to_string(), gpu_count, hourly_cost)
                     } else {
                         // Fallback if offering not found (e.g., offering expired)
                         tracing::warn!(

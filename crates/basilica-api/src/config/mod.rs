@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Rental health check interval in seconds
-const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
+const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 
 /// Bittensor integration configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,7 +215,7 @@ fn default_community_markup() -> f64 {
 }
 
 fn default_secure_cloud_markup() -> f64 {
-    15.0
+    10.0
 }
 
 impl Default for PricingConfig {
