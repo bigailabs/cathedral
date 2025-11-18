@@ -24,6 +24,14 @@ impl K3sServer {
             _ => Err(format!("Invalid server format: {}", s)),
         }
     }
+
+    pub fn to_string(&self) -> String {
+        if self.port == 22 {
+            self.host.clone()
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

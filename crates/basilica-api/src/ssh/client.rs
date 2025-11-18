@@ -455,4 +455,3 @@ impl K3sSshClient {
         Ok(token_id.to_string())
     }
 }
-

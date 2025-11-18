@@ -1,5 +1,5 @@
 use super::types::K3sServer;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 fn deserialize_servers<'de, D>(deserializer: D) -> Result<Vec<K3sServer>, D::Error>
 where
@@ -16,10 +16,21 @@ where
         .collect()
 }
 
+fn serialize_servers<S>(servers: &[K3sServer], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let server_strings: Vec<String> = servers.iter().map(|s| s.to_string()).collect();
+    serializer.serialize_str(&server_strings.join(","))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct K3sSshConfig {
     pub enabled: bool,
-    #[serde(deserialize_with = "deserialize_servers")]
+    #[serde(
+        serialize_with = "serialize_servers",
+        deserialize_with = "deserialize_servers"
+    )]
     pub servers: Vec<K3sServer>,
     pub ssh_key_path: String,
     pub known_hosts_path: Option<String>,

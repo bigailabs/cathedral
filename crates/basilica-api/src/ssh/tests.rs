@@ -61,10 +61,13 @@ fn test_token_format() {
     assert!(token2.starts_with(K3S_TOKEN_PREFIX));
     assert!(TOKEN_FORMAT_REGEX.is_match(token2));
 
+    let server_token = "K1029085c2d48e037ece1c19cc69628dd55bca8d322de0bcdc9d988d2db28684188::server:480d1c4e8d555121c6042508e4e605d8";
+    assert!(server_token.starts_with(K3S_TOKEN_PREFIX));
+    assert!(TOKEN_FORMAT_REGEX.is_match(server_token));
+
     assert!(!TOKEN_FORMAT_REGEX.is_match("invalid"));
     assert!(!TOKEN_FORMAT_REGEX.is_match("K10hash"));
     assert!(!TOKEN_FORMAT_REGEX.is_match(""));
-    assert!(!TOKEN_FORMAT_REGEX.is_match("K1029085c2d48e037ece1c19cc69628dd55bca8d322de0bcdc9d988d2db28684188::server:480d1c4e8d555121c6042508e4e605d8"));
 }
 
 #[test]
