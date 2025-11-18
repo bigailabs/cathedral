@@ -54,19 +54,7 @@ impl AggregatorService {
                     }
                 };
 
-                let base_url = config
-                    .providers
-                    .datacrunch
-                    .api_base_url
-                    .clone()
-                    .ok_or_else(|| AggregatorError::Config("DataCrunch base URL missing".into()))?;
-
-                let provider = DataCrunchProvider::new(
-                    client_id,
-                    client_secret,
-                    base_url,
-                    config.providers.datacrunch.timeout_seconds,
-                )?;
+                let provider = DataCrunchProvider::new(client_id, client_secret)?;
 
                 providers.push(ProviderClient::DataCrunch(provider));
                 tracing::info!("DataCrunch provider initialized");
@@ -85,18 +73,7 @@ impl AggregatorService {
                     }
                 };
 
-                let base_url = config
-                    .providers
-                    .hyperstack
-                    .api_base_url
-                    .clone()
-                    .ok_or_else(|| AggregatorError::Config("Hyperstack base URL missing".into()))?;
-
-                let provider = HyperstackProvider::new(
-                    api_key,
-                    base_url,
-                    config.providers.hyperstack.timeout_seconds,
-                )?;
+                let provider = HyperstackProvider::new(api_key)?;
 
                 providers.push(ProviderClient::Hyperstack(provider));
                 tracing::info!("Hyperstack provider initialized");
@@ -163,14 +140,8 @@ impl AggregatorService {
         let last_fetch = self.db.get_last_fetch_time(provider).await?;
 
         if let Some(last_fetch) = last_fetch {
-            let cooldown = match provider {
-                ProviderEnum::DataCrunch => self.config.providers.datacrunch.cooldown_seconds,
-                ProviderEnum::Hyperstack => self.config.providers.hyperstack.cooldown_seconds,
-                ProviderEnum::Lambda => self.config.providers.lambda.cooldown_seconds,
-                ProviderEnum::HydraHost => self.config.providers.hydrahost.cooldown_seconds,
-            };
-
-            let cooldown_duration = Duration::seconds(cooldown as i64);
+            let cooldown_duration =
+                Duration::seconds(crate::providers::DEFAULT_COOLDOWN_SECONDS as i64);
             let elapsed = Utc::now() - last_fetch;
 
             Ok(elapsed >= cooldown_duration)

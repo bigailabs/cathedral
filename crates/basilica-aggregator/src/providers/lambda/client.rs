@@ -16,13 +16,14 @@ pub struct LambdaProvider {
 }
 
 impl LambdaProvider {
-    pub fn new(api_key: String, base_url: String, timeout_seconds: u64) -> Result<Self> {
-        let client = HttpClientBuilder::new(timeout_seconds).build("lambda")?;
+    pub fn new(api_key: String) -> Result<Self> {
+        let client =
+            HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS).build("lambda")?;
 
         Ok(Self {
             client,
             api_key,
-            base_url,
+            base_url: crate::providers::LAMBDA_API_BASE_URL.to_string(),
         })
     }
 

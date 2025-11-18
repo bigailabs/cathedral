@@ -151,51 +151,13 @@ impl Default for AggregatorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AggregatorProvidersConfig {
     #[serde(default)]
-    pub datacrunch: AggregatorProviderConfig,
+    pub datacrunch: basilica_aggregator::config::ProviderConfig,
     #[serde(default)]
-    pub hyperstack: AggregatorProviderConfig,
+    pub hyperstack: basilica_aggregator::config::ProviderConfig,
     #[serde(default)]
-    pub lambda: AggregatorProviderConfig,
+    pub lambda: basilica_aggregator::config::ProviderConfig,
     #[serde(default)]
-    pub hydrahost: AggregatorProviderConfig,
-}
-
-/// Configuration for a single GPU provider
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AggregatorProviderConfig {
-    /// OAuth client ID (for OAuth providers like DataCrunch)
-    pub client_id: Option<String>,
-    /// OAuth client secret (for OAuth providers like DataCrunch)
-    pub client_secret: Option<String>,
-    /// API key (for API key providers like Hyperstack, Lambda)
-    pub api_key: Option<String>,
-
-    #[serde(default = "default_provider_cooldown")]
-    pub cooldown_seconds: u64,
-    #[serde(default = "default_provider_timeout")]
-    pub timeout_seconds: u64,
-    pub api_base_url: Option<String>,
-}
-
-fn default_provider_cooldown() -> u64 {
-    30
-}
-
-fn default_provider_timeout() -> u64 {
-    10
-}
-
-impl Default for AggregatorProviderConfig {
-    fn default() -> Self {
-        Self {
-            client_id: None,
-            client_secret: None,
-            api_key: None,
-            cooldown_seconds: default_provider_cooldown(),
-            timeout_seconds: default_provider_timeout(),
-            api_base_url: None,
-        }
-    }
+    pub hydrahost: basilica_aggregator::config::ProviderConfig,
 }
 
 /// Pricing configuration for marketplace markups
@@ -363,29 +325,14 @@ impl Config {
                 ttl_seconds: self.aggregator.ttl_seconds,
             },
             providers: basilica_aggregator::config::ProvidersConfig {
-                datacrunch: self.convert_provider_config(&self.aggregator.providers.datacrunch),
-                hyperstack: self.convert_provider_config(&self.aggregator.providers.hyperstack),
-                lambda: self.convert_provider_config(&self.aggregator.providers.lambda),
-                hydrahost: self.convert_provider_config(&self.aggregator.providers.hydrahost),
+                datacrunch: self.aggregator.providers.datacrunch.clone(),
+                hyperstack: self.aggregator.providers.hyperstack.clone(),
+                lambda: self.aggregator.providers.lambda.clone(),
+                hydrahost: self.aggregator.providers.hydrahost.clone(),
             },
             database: basilica_aggregator::config::DatabaseConfig {
                 path: self.database.url.clone(), // Uses PostgreSQL URL from API config
             },
-        }
-    }
-
-    /// Helper to convert API provider config to aggregator provider config
-    fn convert_provider_config(
-        &self,
-        config: &AggregatorProviderConfig,
-    ) -> basilica_aggregator::config::ProviderConfig {
-        basilica_aggregator::config::ProviderConfig {
-            client_id: config.client_id.clone(),
-            client_secret: config.client_secret.clone(),
-            api_key: config.api_key.clone(),
-            cooldown_seconds: config.cooldown_seconds,
-            timeout_seconds: config.timeout_seconds,
-            api_base_url: config.api_base_url.clone(),
         }
     }
 }

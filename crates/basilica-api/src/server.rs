@@ -380,15 +380,14 @@ impl Server {
 
         // Debug: Show provider configuration
         tracing::debug!(
-            "DataCrunch config: client_id={:?}, has_secret={}, base_url={:?}",
+            "DataCrunch config: client_id={:?}, has_secret={}",
             config.aggregator.providers.datacrunch.client_id,
             config
                 .aggregator
                 .providers
                 .datacrunch
                 .client_secret
-                .is_some(),
-            config.aggregator.providers.datacrunch.api_base_url
+                .is_some()
         );
 
         let aggregator_db = Arc::new(

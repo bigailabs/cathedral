@@ -23,13 +23,14 @@ pub struct HyperstackProvider {
 }
 
 impl HyperstackProvider {
-    pub fn new(api_key: String, base_url: String, timeout_seconds: u64) -> Result<Self> {
-        let client = HttpClientBuilder::new(timeout_seconds).build("hyperstack")?;
+    pub fn new(api_key: String) -> Result<Self> {
+        let client = HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS)
+            .build("hyperstack")?;
 
         Ok(Self {
             client,
             api_key,
-            base_url,
+            base_url: crate::providers::HYPERSTACK_API_BASE_URL.to_string(),
         })
     }
 

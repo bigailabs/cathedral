@@ -58,19 +58,15 @@ pub struct DataCrunchProvider {
 }
 
 impl DataCrunchProvider {
-    pub fn new(
-        client_id: String,
-        client_secret: String,
-        base_url: String,
-        timeout_seconds: u64,
-    ) -> Result<Self> {
-        let client = HttpClientBuilder::new(timeout_seconds).build("datacrunch")?;
+    pub fn new(client_id: String, client_secret: String) -> Result<Self> {
+        let client = HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS)
+            .build("datacrunch")?;
 
         Ok(Self {
             client,
             client_id,
             client_secret,
-            base_url,
+            base_url: crate::providers::DATACRUNCH_API_BASE_URL.to_string(),
             token_cache: Arc::new(RwLock::new(None)),
         })
     }

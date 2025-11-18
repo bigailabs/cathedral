@@ -18,13 +18,14 @@ pub struct HydraHostProvider {
 }
 
 impl HydraHostProvider {
-    pub fn new(api_key: String, base_url: String, timeout_seconds: u64) -> Result<Self> {
-        let client = HttpClientBuilder::new(timeout_seconds).build("hydrahost")?;
+    pub fn new(api_key: String) -> Result<Self> {
+        let client =
+            HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS).build("hydrahost")?;
 
         Ok(Self {
             client,
             api_key,
-            base_url,
+            base_url: crate::providers::HYDRAHOST_API_BASE_URL.to_string(),
         })
     }
 

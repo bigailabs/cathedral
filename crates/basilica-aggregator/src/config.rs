@@ -61,7 +61,7 @@ pub enum AuthConfig {
     },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ProviderConfig {
     /// OAuth client ID (for OAuth providers like DataCrunch)
     pub client_id: Option<String>,
@@ -69,12 +69,6 @@ pub struct ProviderConfig {
     pub client_secret: Option<String>,
     /// API key (for API key providers like Lambda)
     pub api_key: Option<String>,
-
-    #[serde(default = "default_cooldown")]
-    pub cooldown_seconds: u64,
-    #[serde(default = "default_timeout")]
-    pub timeout_seconds: u64,
-    pub api_base_url: Option<String>,
 }
 
 impl ProviderConfig {
@@ -96,27 +90,6 @@ impl ProviderConfig {
             _ => None,
         }
     }
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            client_id: None,
-            client_secret: None,
-            api_key: None,
-            cooldown_seconds: default_cooldown(),
-            timeout_seconds: default_timeout(),
-            api_base_url: None,
-        }
-    }
-}
-
-fn default_cooldown() -> u64 {
-    30
-}
-
-fn default_timeout() -> u64 {
-    10
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -255,8 +228,7 @@ mod tests {
                 datacrunch: ProviderConfig {
                     client_id: Some("test-client-id".to_string()),
                     client_secret: Some("test-client-secret".to_string()),
-                    api_base_url: Some("https://api.datacrunch.io/v1".to_string()),
-                    ..Default::default()
+                    api_key: None,
                 },
                 hyperstack: ProviderConfig::default(),
                 lambda: ProviderConfig::default(),
@@ -282,9 +254,9 @@ mod tests {
                 datacrunch: ProviderConfig::default(),
                 hyperstack: ProviderConfig::default(),
                 lambda: ProviderConfig {
+                    client_id: None,
+                    client_secret: None,
                     api_key: Some("test-api-key".to_string()),
-                    api_base_url: Some("https://cloud.lambdalabs.com/api/v1".to_string()),
-                    ..Default::default()
                 },
                 hydrahost: ProviderConfig::default(),
             },
