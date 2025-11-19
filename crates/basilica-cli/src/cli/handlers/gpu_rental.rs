@@ -89,7 +89,6 @@ async fn fetch_and_filter_secure_cloud(
     gpu_category: Option<GpuCategory>,
     filters: &ListFilters,
 ) -> Result<Vec<basilica_aggregator::GpuOffering>, CliError> {
-
     let spinner = create_spinner("Fetching available GPUs...");
     let secure_result = api_client.list_secure_cloud_gpus().await;
     complete_spinner_and_clear(spinner);
@@ -149,7 +148,6 @@ async fn fetch_and_filter_community_cloud(
     gpu_category: Option<GpuCategory>,
     filters: &ListFilters,
 ) -> Result<(Vec<basilica_sdk::AvailableNode>, HashMap<String, String>), CliError> {
-
     // Convert GPU category to string if provided
     let gpu_type = gpu_category.map(|gc| gc.as_str());
 
@@ -169,14 +167,17 @@ async fn fetch_and_filter_community_cloud(
     let spinner = create_spinner("Fetching available GPUs...");
 
     // Fetch available nodes
-    let response = api_client.list_available_nodes(Some(query)).await.map_err(|e| -> CliError {
-        complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
-        CliError::Internal(
-            eyre!(e)
-                .suggestion("Check your internet connection and try again")
-                .note("If this persists, nodes may be temporarily unavailable"),
-        )
-    })?;
+    let response = api_client
+        .list_available_nodes(Some(query))
+        .await
+        .map_err(|e| -> CliError {
+            complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
+            CliError::Internal(
+                eyre!(e)
+                    .suggestion("Check your internet connection and try again")
+                    .note("If this persists, nodes may be temporarily unavailable"),
+            )
+        })?;
 
     complete_spinner_and_clear(spinner);
 
@@ -240,8 +241,8 @@ fn display_community_cloud_table(
     } else {
         table_output::display_available_nodes_detailed(
             nodes,
-            true,  // show_full_gpu_names
-            filters.detailed,  // show_ids
+            true,             // show_full_gpu_names
+            filters.detailed, // show_ids
             pricing_map,
         )?;
     }
@@ -269,7 +270,8 @@ pub async fn handle_ls(
     match compute_category {
         Some(ComputeCategory::SecureCloud) => {
             // Fetch and filter secure cloud GPUs
-            let filtered_gpus = fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters).await?;
+            let filtered_gpus =
+                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters).await?;
 
             if json {
                 json_output(&filtered_gpus)?;
@@ -279,7 +281,8 @@ pub async fn handle_ls(
         }
         Some(ComputeCategory::CommunityCloud) => {
             // Fetch and filter community cloud nodes
-            let (nodes, pricing_map) = fetch_and_filter_community_cloud(&api_client, gpu_category, &filters).await?;
+            let (nodes, pricing_map) =
+                fetch_and_filter_community_cloud(&api_client, gpu_category, &filters).await?;
 
             if json {
                 // Create a simple response structure for JSON output
@@ -287,7 +290,9 @@ pub async fn handle_ls(
                 struct NodesResponse<'a> {
                     available_nodes: &'a [basilica_sdk::AvailableNode],
                 }
-                let response = NodesResponse { available_nodes: &nodes };
+                let response = NodesResponse {
+                    available_nodes: &nodes,
+                };
                 json_output(&response)?;
             } else {
                 display_community_cloud_table(&nodes, &pricing_map, &filters)?;

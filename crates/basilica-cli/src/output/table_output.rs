@@ -1180,7 +1180,10 @@ pub fn display_secure_cloud_offerings_detailed(
                     vcpu: offering.vcpu_count.to_string(),
                     ram: format!("{}GB", offering.system_memory_gb),
                     storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
-                    interconnect: offering.interconnect.clone().unwrap_or_else(|| "-".to_string()),
+                    interconnect: offering
+                        .interconnect
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
                     region: offering.region.clone(),
                     price: format!("${:.2}/hr", offering.hourly_rate),
                 }
@@ -1226,7 +1229,10 @@ pub fn display_secure_cloud_offerings_detailed(
                     vcpu: offering.vcpu_count.to_string(),
                     ram: format!("{}GB", offering.system_memory_gb),
                     storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
-                    interconnect: offering.interconnect.clone().unwrap_or_else(|| "-".to_string()),
+                    interconnect: offering
+                        .interconnect
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
                     region: offering.region.clone(),
                     price: format!("${:.2}/hr", offering.hourly_rate),
                 }
