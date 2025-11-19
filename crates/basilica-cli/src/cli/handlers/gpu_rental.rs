@@ -83,6 +83,172 @@ impl FromStr for TargetType {
     }
 }
 
+/// Helper function to fetch and filter secure cloud GPUs
+async fn fetch_and_filter_secure_cloud(
+    api_client: &basilica_sdk::BasilicaClient,
+    gpu_category: Option<GpuCategory>,
+    filters: &ListFilters,
+) -> Result<Vec<basilica_aggregator::GpuOffering>, CliError> {
+
+    let spinner = create_spinner("Fetching available GPUs...");
+    let secure_result = api_client.list_secure_cloud_gpus().await;
+    complete_spinner_and_clear(spinner);
+
+    let gpus = secure_result.map_err(|e| -> CliError {
+        CliError::Internal(
+            eyre!(e)
+                .suggestion("Check your internet connection and try again")
+                .note("If this persists, GPUs may be temporarily unavailable"),
+        )
+    })?;
+
+    // Apply filters
+    let mut filtered_gpus: Vec<_> = gpus
+        .into_iter()
+        .filter(|gpu| {
+            // Filter by GPU type if specified
+            if let Some(ref category) = gpu_category {
+                let category_str = category.as_str().to_uppercase();
+                if !gpu.gpu_type.as_str().to_uppercase().contains(&category_str) {
+                    return false;
+                }
+            }
+
+            // Filter by availability
+            if !gpu.availability {
+                return false;
+            }
+
+            // Filter by GPU count
+            if let Some(min_count) = filters.gpu_min {
+                if gpu.gpu_count < min_count {
+                    return false;
+                }
+            }
+
+            // Filter by country
+            if let Some(ref country) = filters.country {
+                if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect();
+
+    // Sort by price (ascending)
+    filtered_gpus.sort_by(|a, b| a.hourly_rate.partial_cmp(&b.hourly_rate).unwrap());
+
+    Ok(filtered_gpus)
+}
+
+/// Helper function to fetch and filter community cloud nodes
+async fn fetch_and_filter_community_cloud(
+    api_client: &basilica_sdk::BasilicaClient,
+    gpu_category: Option<GpuCategory>,
+    filters: &ListFilters,
+) -> Result<(Vec<basilica_sdk::AvailableNode>, HashMap<String, String>), CliError> {
+
+    // Convert GPU category to string if provided
+    let gpu_type = gpu_category.map(|gc| gc.as_str());
+
+    // Build query from filters
+    let query = ListAvailableNodesQuery {
+        available: Some(true), // Filter for available nodes only
+        min_gpu_memory: filters.memory_min,
+        gpu_type,
+        min_gpu_count: Some(filters.gpu_min.unwrap_or(0)),
+        location: filters.country.as_ref().map(|country| LocationProfile {
+            city: None,
+            region: None,
+            country: Some(country.clone()),
+        }),
+    };
+
+    let spinner = create_spinner("Fetching available GPUs...");
+
+    // Fetch available nodes
+    let response = api_client.list_available_nodes(Some(query)).await.map_err(|e| -> CliError {
+        complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
+        CliError::Internal(
+            eyre!(e)
+                .suggestion("Check your internet connection and try again")
+                .note("If this persists, nodes may be temporarily unavailable"),
+        )
+    })?;
+
+    complete_spinner_and_clear(spinner);
+
+    // Build pricing map from nodes' hourly_rate_cents field
+    // Map GPU type -> hourly rate string (e.g., "h100" -> "$2.50/hr")
+    let pricing_map: HashMap<String, String> = response
+        .available_nodes
+        .iter()
+        .filter_map(|node| {
+            // Get the first GPU spec to determine GPU type
+            let gpu_spec = node.node.gpu_specs.first()?;
+            let gpu_type = gpu_spec.name.split_whitespace().next()?.to_lowercase();
+
+            // Get pricing from the node's hourly_rate_cents field
+            let cents = node.node.hourly_rate_cents? as f64;
+            let dollars = cents / 100.0;
+            let rate_string = format!("${:.2}/hr", dollars);
+
+            Some((gpu_type, rate_string))
+        })
+        .collect();
+
+    Ok((response.available_nodes, pricing_map))
+}
+
+/// Helper function to display secure cloud GPUs
+fn display_secure_cloud_table(
+    gpus: &[basilica_aggregator::GpuOffering],
+    filters: &ListFilters,
+) -> Result<(), CliError> {
+    if gpus.is_empty() {
+        print_info("No GPUs available matching your criteria");
+        return Ok(());
+    }
+
+    if filters.compact {
+        table_output::display_secure_cloud_offerings_compact(gpus)?;
+    } else {
+        table_output::display_secure_cloud_offerings_detailed(
+            gpus,
+            filters.detailed, // show_ids
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Helper function to display community cloud nodes
+fn display_community_cloud_table(
+    nodes: &[basilica_sdk::AvailableNode],
+    pricing_map: &HashMap<String, String>,
+    filters: &ListFilters,
+) -> Result<(), CliError> {
+    if nodes.is_empty() {
+        print_info("No GPUs available matching your criteria");
+        return Ok(());
+    }
+
+    if filters.compact {
+        table_output::display_available_nodes_compact(nodes, pricing_map)?;
+    } else {
+        table_output::display_available_nodes_detailed(
+            nodes,
+            true,  // show_full_gpu_names
+            filters.detailed,  // show_ids
+            pricing_map,
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Handle the `ls` command - list available nodes for rental
 pub async fn handle_ls(
     gpu_category: Option<GpuCategory>,
@@ -93,156 +259,75 @@ pub async fn handle_ls(
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    // Determine compute category (default to secure cloud)
-    let compute_category = compute
-        .map(|c| match c {
-            ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
-            ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
-        })
-        .unwrap_or(ComputeCategory::SecureCloud);
+    // Convert compute arg to compute category
+    let compute_category = compute.map(|c| match c {
+        ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
+        ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
+    });
 
     // Branch based on compute type
     match compute_category {
-        ComputeCategory::SecureCloud => {
-            // Fetch datacenter GPU offerings
-            let spinner = create_spinner("Scanning datacenter GPU availability...");
-            let secure_result = api_client.list_secure_cloud_gpus().await;
-            complete_spinner_and_clear(spinner);
-
-            let gpus = secure_result.map_err(|e| -> CliError {
-                CliError::Internal(
-                    eyre!(e)
-                        .suggestion("Check your internet connection and try again")
-                        .note("If this persists, GPUs may be temporarily unavailable"),
-                )
-            })?;
-
-            // Apply filters
-            let mut filtered_gpus: Vec<_> = gpus
-                .into_iter()
-                .filter(|gpu| {
-                    // Filter by GPU type if specified
-                    if let Some(ref category) = gpu_category {
-                        let category_str = category.as_str().to_uppercase();
-                        if !gpu.gpu_type.as_str().to_uppercase().contains(&category_str) {
-                            return false;
-                        }
-                    }
-
-                    // Filter by availability
-                    if !gpu.availability {
-                        return false;
-                    }
-
-                    // Filter by GPU count
-                    if let Some(min_count) = filters.gpu_min {
-                        if gpu.gpu_count < min_count {
-                            return false;
-                        }
-                    }
-
-                    // Filter by country
-                    if let Some(ref country) = filters.country {
-                        if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
-                            return false;
-                        }
-                    }
-
-                    true
-                })
-                .collect();
-
-            if filtered_gpus.is_empty() {
-                print_info("No GPUs available matching your criteria");
-                return Ok(());
-            }
-
-            // Sort by price (ascending)
-            filtered_gpus.sort_by(|a, b| a.hourly_rate.partial_cmp(&b.hourly_rate).unwrap());
+        Some(ComputeCategory::SecureCloud) => {
+            // Fetch and filter secure cloud GPUs
+            let filtered_gpus = fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters).await?;
 
             if json {
                 json_output(&filtered_gpus)?;
             } else {
-                // Use table_output module for consistent styling
-                if filters.compact {
-                    table_output::display_secure_cloud_offerings_compact(&filtered_gpus)?;
-                } else {
-                    table_output::display_secure_cloud_offerings_detailed(
-                        &filtered_gpus,
-                        filters.detailed, // show_ids
-                    )?;
-                }
+                display_secure_cloud_table(&filtered_gpus, &filters)?;
             }
         }
-        ComputeCategory::CommunityCloud => {
-            // Convert GPU category to string if provided
-            let gpu_type = gpu_category.map(|gc| gc.as_str());
-
-            // Build query from filters
-            let query = ListAvailableNodesQuery {
-                available: Some(true), // Filter for available nodes only
-                min_gpu_memory: filters.memory_min,
-                gpu_type,
-                min_gpu_count: Some(filters.gpu_min.unwrap_or(0)),
-                location: filters.country.map(|country| LocationProfile {
-                    city: None,
-                    region: None,
-                    country: Some(country),
-                }),
-            };
-
-            let spinner = create_spinner("Scanning global GPU availability...");
-
-            // Fetch both available nodes and pricing data in parallel
-            let (response, packages_result) = tokio::join!(
-                api_client.list_available_nodes(Some(query)),
-                api_client.get_packages()
-            );
-
-            let response = response.map_err(|e| -> CliError {
-                complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
-                CliError::Internal(
-                    eyre!(e)
-                        .suggestion("Check your internet connection and try again")
-                        .note("If this persists, nodes may be temporarily unavailable"),
-                )
-            })?;
-
-            // Build pricing map: GPU type -> hourly rate
-            let pricing_map: HashMap<String, String> = match packages_result {
-                Ok(packages) => {
-                    packages
-                        .packages
-                        .into_iter()
-                        .filter(|p| p.is_active)
-                        .filter_map(|p| {
-                            // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
-                            let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
-                            gpu_type.map(|t| (t, p.hourly_rate))
-                        })
-                        .collect()
-                }
-                Err(_e) => HashMap::new(),
-            };
-
-            complete_spinner_and_clear(spinner);
+        Some(ComputeCategory::CommunityCloud) => {
+            // Fetch and filter community cloud nodes
+            let (nodes, pricing_map) = fetch_and_filter_community_cloud(&api_client, gpu_category, &filters).await?;
 
             if json {
+                // Create a simple response structure for JSON output
+                #[derive(serde::Serialize)]
+                struct NodesResponse<'a> {
+                    available_nodes: &'a [basilica_sdk::AvailableNode],
+                }
+                let response = NodesResponse { available_nodes: &nodes };
                 json_output(&response)?;
             } else {
-                // Use table_output module for consistent styling
-                if filters.compact {
-                    // Compact view: grouped by country and GPU type
-                    table_output::display_available_nodes_compact(&response.available_nodes, &pricing_map)?;
-                } else {
-                    // Default or detailed view: show individual nodes
-                    table_output::display_available_nodes_detailed(
-                        &response.available_nodes,
-                        true,  // show_full_gpu_names
-                        filters.detailed,  // show_ids
-                        &pricing_map,
-                    )?;
+                display_community_cloud_table(&nodes, &pricing_map, &filters)?;
+            }
+        }
+        None => {
+            // Display both tables when --compute flag is not specified
+
+            // Fetch both in parallel
+            let (secure_result, community_result) = tokio::join!(
+                fetch_and_filter_secure_cloud(&api_client, gpu_category.clone(), &filters),
+                fetch_and_filter_community_cloud(&api_client, gpu_category, &filters)
+            );
+
+            let secure_gpus = secure_result?;
+            let (community_nodes, pricing_map) = community_result?;
+
+            if json {
+                // Create combined JSON output
+                #[derive(serde::Serialize)]
+                struct CombinedResponse<'a> {
+                    secure_cloud: &'a [basilica_aggregator::GpuOffering],
+                    community_cloud: &'a [basilica_sdk::AvailableNode],
                 }
+                let response = CombinedResponse {
+                    secure_cloud: &secure_gpus,
+                    community_cloud: &community_nodes,
+                };
+                json_output(&response)?;
+            } else {
+                // Display community cloud table
+                println!("\n{}", style("Community Cloud GPUs").bold());
+                display_community_cloud_table(&community_nodes, &pricing_map, &filters)?;
+
+                // Separator
+                println!();
+
+                // Display secure cloud table
+                println!("{}", style("Secure Cloud GPUs").bold());
+                display_secure_cloud_table(&secure_gpus, &filters)?;
             }
         }
     }
