@@ -898,16 +898,14 @@ pub async fn handle_ps(
 ) -> Result<(), CliError> {
     use basilica_common::types::ComputeCategory;
 
-    // Default to SecureCloud (same as `up` command)
-    let compute_category = compute
-        .map(ComputeCategory::from)
-        .unwrap_or(ComputeCategory::SecureCloud);
+    // Convert to Option<ComputeCategory> - None means show both
+    let compute_category = compute.map(ComputeCategory::from);
 
     let api_client = create_authenticated_client(config).await?;
 
     // Branch based on compute category
     match compute_category {
-        ComputeCategory::CommunityCloud => {
+        Some(ComputeCategory::CommunityCloud) => {
             // Existing community cloud logic
             let spinner = if filters.history {
                 create_spinner("Loading rental history...")
@@ -1032,7 +1030,7 @@ pub async fn handle_ps(
                 display_ps_quick_start_commands();
             }
         }
-        ComputeCategory::SecureCloud => {
+        Some(ComputeCategory::SecureCloud) => {
             // Secure cloud rentals logic
             let spinner = if filters.history {
                 create_spinner("Loading secure cloud rental history...")
@@ -1081,6 +1079,181 @@ pub async fn handle_ps(
                     "active secure cloud rentals"
                 };
                 println!("\nTotal: {} {}", rentals_to_display.len(), label);
+
+                display_ps_quick_start_commands();
+            }
+        }
+        None => {
+            // Dual-table display: show both community cloud and secure cloud rentals
+            let spinner = create_spinner("Fetching rentals...");
+
+            // Fetch both rental types in parallel
+            let (community_result, secure_result) = tokio::join!(
+                // Community cloud: rentals + usage + packages
+                async {
+                    let query = Some(ListRentalsQuery {
+                        status: if filters.history {
+                            None // No filter - get all rentals
+                        } else {
+                            filters.status.or(Some(RentalState::Active)) // Default to active
+                        },
+                        gpu_type: filters.gpu_type.clone(),
+                        min_gpu_count: filters.min_gpu_count,
+                    });
+
+                    let (rentals_result, usage_result, packages_result) = tokio::join!(
+                        api_client.list_rentals(query),
+                        api_client.list_usage_history(Some(100), None),
+                        api_client.get_packages()
+                    );
+
+                    (rentals_result, usage_result, packages_result)
+                },
+                // Secure cloud: just rentals
+                api_client.list_secure_cloud_rentals()
+            );
+
+            // Process community cloud data
+            let (community_rentals_result, community_usage_result, community_packages_result) =
+                community_result;
+
+            let community_rentals_list = community_rentals_result.inspect_err(|_| {
+                complete_spinner_error(spinner.clone(), "Failed to load community cloud rentals")
+            })?;
+
+            // Build usage map: rental_id -> usage record
+            let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> =
+                community_usage_result
+                    .ok()
+                    .map(|usage| {
+                        usage
+                            .rentals
+                            .into_iter()
+                            .map(|record| (record.rental_id.clone(), record))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+            // Build pricing map: GPU type -> hourly rate
+            let pricing_map: HashMap<String, String> = match community_packages_result {
+                Ok(packages) => packages
+                    .packages
+                    .into_iter()
+                    .filter(|p| p.is_active)
+                    .filter_map(|p| {
+                        let gpu_type =
+                            p.name.split_whitespace().next().map(|s| s.to_lowercase());
+                        gpu_type.map(|t| (t, p.hourly_rate))
+                    })
+                    .collect(),
+                Err(_e) => HashMap::new(),
+            };
+
+            // Process secure cloud data
+            let secure_rentals_list = secure_result.inspect_err(|_| {
+                complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+            })?;
+
+            complete_spinner_and_clear(spinner);
+
+            if json {
+                // JSON output: combine both rental types
+                use serde_json::json;
+                let output = json!({
+                    "community_cloud": community_rentals_list,
+                    "secure_cloud": secure_rentals_list
+                });
+                json_output(&output)?;
+            } else {
+                // Display community cloud table
+                println!("\n{}", style("Community Cloud Rentals").bold());
+
+                if filters.history {
+                    // History mode: use usage_map data and filter out active rentals
+                    let active_rental_ids: std::collections::HashSet<String> =
+                        community_rentals_list
+                            .rentals
+                            .iter()
+                            .filter(|r| {
+                                matches!(r.state, RentalState::Active | RentalState::Provisioning)
+                            })
+                            .map(|r| {
+                                r.rental_id
+                                    .strip_prefix("rental-")
+                                    .unwrap_or(&r.rental_id)
+                                    .to_string()
+                            })
+                            .collect();
+
+                    let historical_rentals: Vec<_> = usage_map
+                        .values()
+                        .filter(|r| !active_rental_ids.contains(&r.rental_id))
+                        .collect();
+
+                    table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
+
+                    let total_cost: Decimal = historical_rentals
+                        .iter()
+                        .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", total_cost)).green().bold()
+                    );
+
+                    println!("\nTotal: {} community cloud rentals", historical_rentals.len());
+                } else {
+                    // Active rentals
+                    table_output::display_rental_items(
+                        &community_rentals_list.rentals[..],
+                        !filters.compact,
+                        filters.detailed,
+                        &usage_map,
+                        &pricing_map,
+                        false,
+                    )?;
+
+                    println!(
+                        "\nTotal: {} community cloud rentals",
+                        community_rentals_list.rentals.len()
+                    );
+                }
+
+                // Separator between tables
+                println!();
+
+                // Display secure cloud table
+                println!("{}", style("Secure Cloud Rentals").bold());
+
+                let secure_rentals_to_display: Vec<_> = if filters.history {
+                    secure_rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_some())
+                        .collect()
+                } else {
+                    secure_rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_none())
+                        .collect()
+                };
+
+                table_output::display_secure_cloud_rentals(
+                    &secure_rentals_to_display,
+                    !filters.compact,
+                    filters.detailed,
+                )?;
+
+                let label = if filters.history {
+                    "historical secure cloud rentals"
+                } else {
+                    "secure cloud rentals"
+                };
+                println!("\nTotal: {} {}", secure_rentals_to_display.len(), label);
 
                 display_ps_quick_start_commands();
             }
