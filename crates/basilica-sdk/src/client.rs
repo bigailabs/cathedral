@@ -1112,6 +1112,11 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1147,7 +1152,9 @@ mod tests {
                     "cpu": "1000m",
                     "memory": "1Gi"
                 },
-                "public": true
+                "public": true,
+                "enableBilling": true,
+                "suspended": false
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "instanceName": "my-app",
@@ -1181,9 +1188,15 @@ mod tests {
             resources: Some(crate::types::ResourceRequirements {
                 cpu: "1000m".to_string(),
                 memory: "1Gi".to_string(),
+                gpus: None,
             }),
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1226,6 +1239,11 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1438,6 +1456,11 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let result = client.create_deployment(request).await;
