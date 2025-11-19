@@ -198,10 +198,75 @@ pub async fn handle_ls(
             }
         }
         ComputeCategory::CommunityCloud => {
-            return Err(CliError::Internal(eyre!(
-                "Community cloud listing not yet implemented via CLI. \
-                     Use --compute secure-cloud to list datacenter GPUs."
-            )));
+            // Convert GPU category to string if provided
+            let gpu_type = gpu_category.map(|gc| gc.as_str());
+
+            // Build query from filters
+            let query = ListAvailableNodesQuery {
+                available: Some(true), // Filter for available nodes only
+                min_gpu_memory: filters.memory_min,
+                gpu_type,
+                min_gpu_count: Some(filters.gpu_min.unwrap_or(0)),
+                location: filters.country.map(|country| LocationProfile {
+                    city: None,
+                    region: None,
+                    country: Some(country),
+                }),
+            };
+
+            let spinner = create_spinner("Scanning global GPU availability...");
+
+            // Fetch both available nodes and pricing data in parallel
+            let (response, packages_result) = tokio::join!(
+                api_client.list_available_nodes(Some(query)),
+                api_client.get_packages()
+            );
+
+            let response = response.map_err(|e| -> CliError {
+                complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
+                CliError::Internal(
+                    eyre!(e)
+                        .suggestion("Check your internet connection and try again")
+                        .note("If this persists, nodes may be temporarily unavailable"),
+                )
+            })?;
+
+            // Build pricing map: GPU type -> hourly rate
+            let pricing_map: HashMap<String, String> = match packages_result {
+                Ok(packages) => {
+                    packages
+                        .packages
+                        .into_iter()
+                        .filter(|p| p.is_active)
+                        .filter_map(|p| {
+                            // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
+                            let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
+                            gpu_type.map(|t| (t, p.hourly_rate))
+                        })
+                        .collect()
+                }
+                Err(_e) => HashMap::new(),
+            };
+
+            complete_spinner_and_clear(spinner);
+
+            if json {
+                json_output(&response)?;
+            } else {
+                // Use table_output module for consistent styling
+                if filters.compact {
+                    // Compact view: grouped by country and GPU type
+                    table_output::display_available_nodes_compact(&response.available_nodes, &pricing_map)?;
+                } else {
+                    // Default or detailed view: show individual nodes
+                    table_output::display_available_nodes_detailed(
+                        &response.available_nodes,
+                        true,  // show_full_gpu_names
+                        filters.detailed,  // show_ids
+                        &pricing_map,
+                    )?;
+                }
+            }
         }
     }
 
