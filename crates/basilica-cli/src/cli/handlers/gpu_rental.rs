@@ -163,38 +163,15 @@ pub async fn handle_ls(
             if json {
                 json_output(&filtered_gpus)?;
             } else {
-                // Display GPU table
-                use tabled::{settings::Style, Table, Tabled};
-
-                #[derive(Tabled)]
-                struct GpuRow {
-                    #[tabled(rename = "Provider")]
-                    provider: String,
-                    #[tabled(rename = "GPU")]
-                    gpu: String,
-                    #[tabled(rename = "Count")]
-                    count: String,
-                    #[tabled(rename = "Price/hr")]
-                    price: String,
-                    #[tabled(rename = "Region")]
-                    region: String,
+                // Use table_output module for consistent styling
+                if filters.compact {
+                    table_output::display_secure_cloud_offerings_compact(&filtered_gpus)?;
+                } else {
+                    table_output::display_secure_cloud_offerings_detailed(
+                        &filtered_gpus,
+                        filters.detailed, // show_ids
+                    )?;
                 }
-
-                let rows: Vec<GpuRow> = filtered_gpus
-                    .iter()
-                    .map(|gpu| GpuRow {
-                        provider: gpu.provider.to_string(),
-                        gpu: gpu.gpu_type.to_string(),
-                        count: gpu.gpu_count.to_string(),
-                        price: format!("${}/hr", gpu.hourly_rate),
-                        region: gpu.region.clone(),
-                    })
-                    .collect();
-
-                let mut table = Table::new(&rows);
-                table.with(Style::modern());
-                println!("{}", table);
-                println!("\nTotal GPUs: {}", filtered_gpus.len());
             }
         }
         ComputeCategory::CommunityCloud => {
