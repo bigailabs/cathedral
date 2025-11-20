@@ -449,25 +449,15 @@ fn interactive_offering_selector(
             };
 
             format!(
-                "{:<12} {:>8} {:>4}x {:<8} {:>6} | ${:.2}/hr",
-                o.provider.as_str(),
-                o.region,
+                "{}x {} │ {} │ {} │ ${:.2}/hr",
                 o.gpu_count,
                 o.gpu_type.as_str(),
+                o.region,
                 memory_str,
                 total_price
             )
         })
         .collect();
-
-    // Show header
-    println!("\n📊 Available GPU Offerings");
-    println!("─────────────────────────────────────────────────────────────────────────────");
-    println!(
-        "{:<12} {:<8} {:<15} {:<8} {:<20}",
-        "Provider", "Region", "GPU", "Memory", "Price/hr"
-    );
-    println!("─────────────────────────────────────────────────────────────────────────────");
 
     // Interactive selection
     let selection = Select::new()
@@ -487,6 +477,7 @@ async fn handle_secure_cloud_rental(
     api_client: basilica_sdk::BasilicaClient,
     target: Option<TargetType>,
     options: UpOptions,
+    config: &CliConfig,
 ) -> Result<(), CliError> {
     // Step 1: Ensure SSH key registered
     let ssh_key_id = ensure_ssh_key_registered(&api_client).await?;
@@ -531,40 +522,7 @@ async fn handle_secure_cloud_rental(
     // Step 4: Interactive selector
     let selected = interactive_offering_selector(&filtered_offerings)?;
 
-    // Step 5: Show rental summary
-    let markup_percent = 15.0;
-    let base_price = selected.hourly_rate.to_f64().unwrap_or(0.0);
-    let total_price = base_price * (1.0 + markup_percent / 100.0);
-
-    println!("\n🚀 Starting Secure Cloud Rental");
-    println!("─────────────────────────────────");
-    println!("Provider:    {}", selected.provider.as_str());
-    println!(
-        "GPU:         {}x {}",
-        selected.gpu_count,
-        selected.gpu_type.as_str()
-    );
-    if let Some(mem_per_gpu) = selected.gpu_memory_gb_per_gpu {
-        println!("Memory:      {}GB total", mem_per_gpu * selected.gpu_count);
-    }
-    println!("Region:      {}", selected.region);
-    println!("Price:       ${:.2}/hr", total_price);
-    println!();
-
-    // Step 6: Confirm
-    use dialoguer::Confirm;
-    let confirmed = Confirm::new()
-        .with_prompt("Proceed with rental?")
-        .default(true)
-        .interact()
-        .map_err(|e| CliError::Internal(eyre!(e).wrap_err("Failed to show confirmation")))?;
-
-    if !confirmed {
-        print_info("Rental cancelled");
-        return Ok(());
-    }
-
-    // Step 7: Start rental
+    // Step 5: Start rental
     let spinner = create_spinner("Starting rental...");
 
     use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
@@ -614,35 +572,89 @@ async fn handle_secure_cloud_rental(
         })?;
     complete_spinner_and_clear(spinner);
 
-    // Step 8: Display rental info
     print_success(&format!(
         "Successfully started secure cloud rental {}",
         response.rental_id
     ));
-    println!();
-    println!("Rental Details:");
-    println!("─────────────────────────────────");
-    println!("Rental ID:   {}", response.rental_id);
-    println!("Provider:    {}", response.provider);
-    println!("Status:      {}", response.status);
 
-    if let Some(ip) = &response.ip_address {
-        println!("IP Address:  {}", ip);
+    // Step 6: Check for --detach or --no-ssh flags
+    if options.no_ssh {
+        // SSH disabled entirely
+        return Ok(());
     }
 
-    println!("Hourly Cost: ${:.2}/hr", response.hourly_cost);
-    println!();
+    if options.detach {
+        // Detached mode - show connection instructions and exit
+        if let Some(ssh_cmd) = &response.ssh_command {
+            display_secure_cloud_reconnection_instructions(
+                &response.rental_id,
+                ssh_cmd,
+                config,
+                "To connect to this rental:",
+            )?;
+        } else {
+            println!();
+            print_info("Instance is starting up. Use 'basilica ps' to check status.");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+        return Ok(());
+    }
 
-    if let Some(ssh_cmd) = &response.ssh_command {
-        println!("SSH Command:");
-        println!("  {}", ssh_cmd);
+    // Step 7: Wait for rental to become active
+    print_info("Waiting for rental to become active...");
+
+    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
+
+    if let Some(rental) = rental {
+        // Rental is running, connect via SSH
+        if let Some(ssh_cmd) = &rental.ssh_command {
+            print_info("Connecting to rental...");
+
+            // Parse SSH credentials
+            let (host, port, username) = parse_ssh_credentials(&ssh_cmd)?;
+            let ssh_access = SshAccess {
+                host,
+                port,
+                username,
+            };
+
+            // Establish SSH session
+            let ssh_client = SshClient::new(&config.ssh)?;
+            match ssh_client.interactive_session(&ssh_access).await {
+                Ok(_) => {
+                    // SSH session ended normally
+                    print_info("SSH session closed");
+                    display_secure_cloud_reconnection_instructions(
+                        &response.rental_id,
+                        &ssh_cmd,
+                        config,
+                        "To reconnect to this rental:",
+                    )?;
+                }
+                Err(e) => {
+                    // SSH connection failed
+                    print_error(&format!("SSH connection failed: {}", e));
+                    display_secure_cloud_reconnection_instructions(
+                        &response.rental_id,
+                        &ssh_cmd,
+                        config,
+                        "Try manually connecting using:",
+                    )?;
+                }
+            }
+        } else {
+            // No SSH command available yet
+            println!();
+            print_info("Rental is active but SSH is not yet available");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
     } else {
-        println!("⏳ Instance is starting up. Use 'basilica ps' to check status.");
+        // Timeout - rental didn't become active in time
+        println!();
+        print_info("Rental is taking longer than expected to become active");
+        print_info(&format!("Check status with: basilica ps"));
+        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
     }
-
-    println!();
-    print_info("Monitor with: basilica ps");
-    print_info(&format!("Stop with: basilica down {}", response.rental_id));
 
     Ok(())
 }
@@ -667,7 +679,7 @@ pub async fn handle_up(
     // Branch based on compute type
     match compute_category {
         ComputeCategory::SecureCloud => {
-            return handle_secure_cloud_rental(api_client, target, options).await;
+            return handle_secure_cloud_rental(api_client, target, options, config).await;
         }
         ComputeCategory::CommunityCloud => {
             // Fall through to existing community cloud implementation
@@ -1906,6 +1918,93 @@ async fn poll_rental_status(
     }
 }
 
+/// Poll secure cloud rental status until it becomes running or timeout
+async fn poll_secure_cloud_rental_status(
+    rental_id: &str,
+    api_client: &basilica_sdk::BasilicaClient,
+) -> Result<Option<basilica_sdk::types::SecureCloudRentalListItem>, CliError> {
+    const MAX_WAIT_TIME: Duration = Duration::from_secs(180);
+    const INITIAL_INTERVAL: Duration = Duration::from_secs(5);
+    const MAX_INTERVAL: Duration = Duration::from_secs(15);
+
+    let spinner = create_spinner("Waiting for rental to become active...");
+    let start_time = std::time::Instant::now();
+    let mut interval = INITIAL_INTERVAL;
+    let mut attempt = 0;
+
+    loop {
+        // Check if we've exceeded the maximum wait time
+        if start_time.elapsed() > MAX_WAIT_TIME {
+            complete_spinner_error(spinner, "Timeout waiting for rental to become active");
+            return Ok(None);
+        }
+
+        attempt += 1;
+        spinner.set_message(format!("Checking rental status... (attempt {})", attempt));
+
+        // Get rental from list
+        match api_client.list_secure_cloud_rentals().await {
+            Ok(response) => {
+                // Find our rental
+                if let Some(rental) = response.rentals.iter().find(|r| r.rental_id == rental_id) {
+                    match rental.status.as_str() {
+                        "running" => {
+                            complete_spinner_and_clear(spinner);
+                            return Ok(Some(rental.clone()));
+                        }
+                        "error" => {
+                            complete_spinner_error(spinner, "Rental failed to start");
+                            return Err(CliError::Internal(eyre!(
+                                "Rental failed during provisioning"
+                            )));
+                        }
+                        "deleted" => {
+                            complete_spinner_error(spinner, "Rental was deleted");
+                            return Err(CliError::Internal(eyre!(
+                                "Rental was deleted before becoming active"
+                            )));
+                        }
+                        "pending" | "provisioning" => {
+                            // Still starting, continue polling
+                            spinner.set_message(format!(
+                                "Rental is {}... ({}s elapsed)",
+                                rental.status,
+                                start_time.elapsed().as_secs()
+                            ));
+                        }
+                        _ => {
+                            // Unknown status, continue polling
+                            spinner.set_message(format!(
+                                "Rental status: {}... ({}s elapsed)",
+                                rental.status,
+                                start_time.elapsed().as_secs()
+                            ));
+                        }
+                    }
+                } else {
+                    // Rental not found in list
+                    complete_spinner_error(spinner, "Rental not found");
+                    return Err(CliError::Internal(eyre!(
+                        "Rental {} not found in rental list",
+                        rental_id
+                    )));
+                }
+            }
+            Err(e) => {
+                // Log the error but continue polling
+                debug!("Error checking rental status: {}", e);
+                spinner.set_message("Retrying status check...");
+            }
+        }
+
+        // Wait before next check with exponential backoff
+        tokio::time::sleep(interval).await;
+
+        // Increase interval up to maximum
+        interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+    }
+}
+
 /// Display SSH connection instructions after rental creation
 fn display_ssh_connection_instructions(
     rental_id: &str,
@@ -1915,6 +2014,51 @@ fn display_ssh_connection_instructions(
 ) -> Result<(), CliError> {
     // Parse SSH credentials to get components
     let (host, port, username) = parse_ssh_credentials(ssh_credentials)?;
+
+    // Get the private key path from config
+    let private_key_path = &config.ssh.private_key_path;
+
+    println!();
+    print_info(message);
+    println!();
+
+    // Option 1: Using basilica CLI (simplest)
+    println!("  1. Using Basilica CLI:");
+    println!(
+        "     {}",
+        console::style(format!("basilica ssh {}", rental_id))
+            .cyan()
+            .bold()
+    );
+    println!();
+
+    // Option 2: Using standard SSH command
+    println!("  2. Using standard SSH:");
+    println!(
+        "     {}",
+        console::style(format!(
+            "ssh -i {} -p {} {}@{}",
+            compress_path(private_key_path),
+            port,
+            username,
+            host
+        ))
+        .cyan()
+        .bold()
+    );
+
+    Ok(())
+}
+
+/// Display SSH connection instructions for secure cloud rentals
+fn display_secure_cloud_reconnection_instructions(
+    rental_id: &str,
+    ssh_command: &str,
+    config: &CliConfig,
+    message: &str,
+) -> Result<(), CliError> {
+    // Parse SSH command to get components
+    let (host, port, username) = parse_ssh_credentials(ssh_command)?;
 
     // Get the private key path from config
     let private_key_path = &config.ssh.private_key_path;
