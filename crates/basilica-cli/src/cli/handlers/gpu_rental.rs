@@ -1592,7 +1592,7 @@ pub async fn handle_down(
             }
             ComputeCategory::SecureCloud => {
                 // Stop secure cloud rental
-                let response = api_client
+                api_client
                     .stop_secure_cloud_rental(&rental_id)
                     .await
                     .map_err(|e| -> CliError {
@@ -1615,9 +1615,6 @@ pub async fn handle_down(
                     "✓ Secure cloud rental {} stopped successfully",
                     rental_id
                 ));
-                println!();
-                println!("  Duration:   {:.2} hours", response.duration_hours);
-                println!("  Total cost: ${:.2}", response.total_cost);
             }
         }
     }
