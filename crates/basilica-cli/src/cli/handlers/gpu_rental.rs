@@ -407,7 +407,7 @@ async fn ensure_ssh_key_registered(
     match result {
         Ok(key) => {
             complete_spinner_and_clear(spinner);
-            print_success("SSH key registered successfully");
+            print_success("Successfully registered SSH key");
             Ok(key.id)
         }
         Err(e) => {
@@ -565,7 +565,7 @@ async fn handle_secure_cloud_rental(
     }
 
     // Step 7: Start rental
-    let spinner = create_spinner("Provisioning GPU instance...");
+    let spinner = create_spinner("Starting rental...");
 
     use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
 
@@ -615,7 +615,10 @@ async fn handle_secure_cloud_rental(
     complete_spinner_and_clear(spinner);
 
     // Step 8: Display rental info
-    print_success("Secure cloud rental started successfully!");
+    print_success(&format!(
+        "Successfully started secure cloud rental {}",
+        response.rental_id
+    ));
     println!();
     println!("Rental Details:");
     println!("─────────────────────────────────");
@@ -681,7 +684,7 @@ pub async fn handle_up(
             TargetType::GpuCategory(gpu_category) => {
                 // GPU category specified - use automatic selection with exact matching
                 let spinner =
-                    create_spinner(&format!("Finding available {} nodes...", gpu_category));
+                    create_spinner(&format!("Fetching available {} GPUs...", gpu_category));
                 complete_spinner_and_clear(spinner);
 
                 NodeSelection::ExactGpuConfiguration {
@@ -695,7 +698,7 @@ pub async fn handle_up(
         }
     } else {
         // No target specified - use interactive selection
-        let spinner = create_spinner("Fetching available nodes...");
+        let spinner = create_spinner("Fetching available GPUs...");
 
         // Build query from options
         let query = ListAvailableNodesQuery {
@@ -807,7 +810,7 @@ pub async fn handle_up(
     complete_spinner_and_clear(spinner);
 
     print_success(&format!(
-        "Successfully created rental: {}",
+        "Successfully started community cloud rental {}",
         response.rental_id
     ));
 
@@ -908,9 +911,9 @@ pub async fn handle_ps(
         Some(ComputeCategory::CommunityCloud) => {
             // Existing community cloud logic
             let spinner = if filters.history {
-                create_spinner("Loading rental history...")
+                create_spinner("Fetching rental history...")
             } else {
-                create_spinner("Loading active rentals...")
+                create_spinner("Fetching active rentals...")
             };
 
             // Build query from filters - default to "active" if no status specified
@@ -1033,9 +1036,9 @@ pub async fn handle_ps(
         Some(ComputeCategory::SecureCloud) => {
             // Secure cloud rentals logic
             let spinner = if filters.history {
-                create_spinner("Loading secure cloud rental history...")
+                create_spinner("Fetching rental history...")
             } else {
-                create_spinner("Loading secure cloud rentals...")
+                create_spinner("Fetching active rentals...")
             };
 
             // Fetch secure cloud rentals
@@ -1279,7 +1282,7 @@ pub async fn handle_status(
     // Resolve target rental (fetch and prompt if not provided)
     let target = resolve_target_rental(target, &api_client, false).await?;
 
-    let spinner = create_spinner("Checking rental status...");
+    let spinner = create_spinner("Fetching rental status...");
 
     let status = api_client
         .get_rental_status(&target)
@@ -1477,13 +1480,15 @@ pub async fn handle_down(
             for rental in community.rentals {
                 total_count += 1;
                 let rental_id = &rental.rental_id;
-                let spinner =
-                    create_spinner(&format!("Stopping community cloud rental: {}", rental_id));
+                let spinner = create_spinner(&format!("Stopping rental: {}", rental_id));
 
                 match api_client.stop_rental(rental_id).await {
                     Ok(_) => {
                         complete_spinner_and_clear(spinner);
-                        print_success(&format!("✓ Community cloud rental {} stopped", rental_id));
+                        print_success(&format!(
+                            "Successfully stopped community cloud rental {}",
+                            rental_id
+                        ));
                         success_count += 1;
                     }
                     Err(e) => {
@@ -1507,15 +1512,14 @@ pub async fn handle_down(
 
                 total_count += 1;
                 let rental_id = &rental.rental_id;
-                let spinner =
-                    create_spinner(&format!("Stopping secure cloud rental: {}", rental_id));
+                let spinner = create_spinner(&format!("Stopping rental: {}", rental_id));
 
                 match api_client.stop_secure_cloud_rental(rental_id).await {
-                    Ok(response) => {
+                    Ok(_) => {
                         complete_spinner_and_clear(spinner);
                         print_success(&format!(
-                            "✓ Secure cloud rental {} stopped | Duration: {:.2}h | Cost: ${:.2}",
-                            rental_id, response.duration_hours, response.total_cost
+                            "Successfully stopped secure cloud rental {}",
+                            rental_id
                         ));
                         success_count += 1;
                     }
@@ -1539,13 +1543,13 @@ pub async fn handle_down(
         println!();
         if failed_rentals.is_empty() {
             print_success(&format!(
-                "Successfully stopped all {} rental{}.",
+                "Successfully stopped all {} rental{}",
                 success_count,
                 if success_count == 1 { "" } else { "s" }
             ));
         } else {
             print_success(&format!(
-                "Successfully stopped {} out of {} rental{}.",
+                "Successfully stopped {} out of {} rental{}",
                 success_count,
                 total_count,
                 if total_count == 1 { "" } else { "s" }
@@ -1586,7 +1590,7 @@ pub async fn handle_down(
 
                 complete_spinner_and_clear(spinner);
                 print_success(&format!(
-                    "✓ Community cloud rental {} stopped successfully",
+                    "Successfully stopped community cloud rental {}",
                     rental_id
                 ));
             }
@@ -1612,7 +1616,7 @@ pub async fn handle_down(
 
                 complete_spinner_and_clear(spinner);
                 print_success(&format!(
-                    "✓ Secure cloud rental {} stopped successfully",
+                    "Successfully stopped secure cloud rental {}",
                     rental_id
                 ));
             }
