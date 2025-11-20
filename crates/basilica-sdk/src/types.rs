@@ -527,6 +527,16 @@ pub struct SecureCloudRentalListItem {
 
     /// SSH connection info
     pub ssh_command: Option<String>,
+
+    /// Number of vCPU cores
+    pub vcpu_count: Option<u32>,
+
+    /// System memory in GB
+    pub system_memory_gb: Option<u32>,
+
+    /// Accumulated cost from billing service (actual tracked cost)
+    /// None if billing service is unavailable
+    pub accumulated_cost: Option<String>,
 }
 
 /// List secure cloud rentals response

@@ -31,6 +31,9 @@ type RentalQueryRow = (
     Option<String>,                        // ip_address
     chrono::DateTime<chrono::Utc>,         // created_at
     Option<chrono::DateTime<chrono::Utc>>, // stopped_at
+    Option<i32>,                           // vcpu_count (from gpu_offerings)
+    Option<i32>,                           // system_memory_gb (from gpu_offerings)
+    Option<String>,                        // region (from gpu_offerings)
 );
 
 /// Get SSH public key for user and validate ownership
@@ -121,13 +124,15 @@ pub async fn list_secure_cloud_rentals(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Query secure_cloud_rentals table for this user
+    // 1. Query secure_cloud_rentals table for this user, JOIN with gpu_offerings for resource specs
     let rentals: Vec<RentalQueryRow> = sqlx::query_as(
-        "SELECT id, provider, provider_instance_id, offering_id, instance_type, \
-         location_code, status, ip_address, created_at, stopped_at \
-         FROM secure_cloud_rentals \
-         WHERE user_id = $1 \
-         ORDER BY created_at DESC",
+        "SELECT r.id, r.provider, r.provider_instance_id, r.offering_id, r.instance_type, \
+         r.location_code, r.status, r.ip_address, r.created_at, r.stopped_at, \
+         o.vcpu_count, o.system_memory_gb, o.region \
+         FROM secure_cloud_rentals r \
+         LEFT JOIN gpu_offerings o ON r.offering_id = o.id \
+         WHERE r.user_id = $1 \
+         ORDER BY r.created_at DESC",
     )
     .bind(&auth.user_id)
     .fetch_all(&state.db)
@@ -153,7 +158,28 @@ pub async fn list_secure_cloud_rentals(
     let offerings_map: std::collections::HashMap<_, _> =
         offerings.iter().map(|o| (o.id.as_str(), o)).collect();
 
-    // 3. Build response items by joining rental data with offering data
+    // 3. Get accumulated costs from billing service
+    let cost_map: std::collections::HashMap<String, String> =
+        if let Some(ref billing_client) = state.billing_client {
+            match billing_client
+                .get_active_rentals_for_user(&auth.user_id, None, None)
+                .await
+            {
+                Ok(response) => response
+                    .rentals
+                    .into_iter()
+                    .map(|r| (r.rental_id, r.current_cost))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!("Failed to fetch billing costs, will use None: {}", e);
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
+    // 4. Build response items by joining rental data with offering data
     let rental_items: Vec<SecureCloudRentalListItem> = rentals
         .into_iter()
         .map(
@@ -168,8 +194,11 @@ pub async fn list_secure_cloud_rentals(
                 ip_address,
                 created_at,
                 stopped_at,
+                db_vcpu_count,
+                db_system_memory_gb,
+                db_region,
             )| {
-                // Try to find the offering to get GPU details
+                // Try to find the offering to get GPU details and pricing
                 let (gpu_type, gpu_count, hourly_cost) =
                     if let Some(offering) = offerings_map.get(offering_id.as_str()) {
                         let base_rate = offering.hourly_rate.to_f64().unwrap_or(0.0);
@@ -189,8 +218,18 @@ pub async fn list_secure_cloud_rentals(
                         ("unknown".to_string(), 0, 0.0)
                     };
 
+                // Use resource specs from database JOIN (already available)
+                let vcpu_count = db_vcpu_count.map(|v| v as u32);
+                let system_memory_gb = db_system_memory_gb.map(|v| v as u32);
+
+                // Prefer location_code from rental table, fallback to region from offering
+                let final_location_code = location_code.or(db_region);
+
                 // Generate SSH command if IP available
                 let ssh_command = ip_address.as_ref().map(|ip| format!("ssh root@{}", ip));
+
+                // Get accumulated cost from billing service
+                let accumulated_cost = cost_map.get(&rental_id).cloned();
 
                 SecureCloudRentalListItem {
                     rental_id,
@@ -199,13 +238,16 @@ pub async fn list_secure_cloud_rentals(
                     gpu_type,
                     gpu_count,
                     instance_type,
-                    location_code,
+                    location_code: final_location_code,
                     status,
                     ip_address,
                     hourly_cost,
                     created_at,
                     stopped_at,
                     ssh_command,
+                    vcpu_count,
+                    system_memory_gb,
+                    accumulated_cost,
                 }
             },
         )
@@ -263,7 +305,7 @@ pub async fn start_secure_cloud_rental(
         .deploy_instance(
             request.offering_id.clone(),
             request.ssh_public_key_id.clone(),
-            None, // location_code
+            Some(offering.region.clone()), // Pass region from offering
         )
         .await
         .map_err(|e| {

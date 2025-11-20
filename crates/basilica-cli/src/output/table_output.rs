@@ -1876,16 +1876,22 @@ pub fn display_secure_cloud_rentals(
             provider: String,
             #[tabled(rename = "GPU")]
             gpu: String,
-            #[tabled(rename = "Status")]
+            #[tabled(rename = "State")]
             status: String,
             #[tabled(rename = "IP")]
             ip: String,
             #[tabled(rename = "Instance")]
             instance_type: String,
+            #[tabled(rename = "CPU")]
+            cpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
             #[tabled(rename = "Region")]
             region: String,
             #[tabled(rename = "Rate/hr")]
             hourly_cost: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
             #[tabled(rename = "Created")]
             created: String,
         }
@@ -1899,6 +1905,36 @@ pub fn display_secure_cloud_rentals(
                     rental.gpu_type.to_uppercase()
                 };
 
+                // Format CPU
+                let cpu = rental
+                    .vcpu_count
+                    .map(|cores| format!("{} cores", cores))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Format RAM
+                let ram = rental
+                    .system_memory_gb
+                    .map(|gb| format!("{}GB", gb))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Use accumulated cost from billing service, or fallback to time-based estimate
+                let total_cost = if let Some(accumulated) = &rental.accumulated_cost {
+                    // Use actual cost from billing service (no ~ prefix)
+                    accumulated
+                        .parse::<f64>()
+                        .map(|cost| format!("${:.2}", cost))
+                        .unwrap_or_else(|_| accumulated.clone())
+                } else {
+                    // Fallback to time-based estimate (with ~ prefix)
+                    let duration = if let Some(stopped) = &rental.stopped_at {
+                        stopped.signed_duration_since(rental.created_at)
+                    } else {
+                        chrono::Utc::now().signed_duration_since(rental.created_at)
+                    };
+                    let hours = duration.num_seconds() as f64 / 3600.0;
+                    format!("~${:.2}", rental.hourly_cost * hours)
+                };
+
                 DetailedRow {
                     rental_id: rental.rental_id.clone(),
                     provider: rental.provider.clone(),
@@ -1906,11 +1942,14 @@ pub fn display_secure_cloud_rentals(
                     status: rental.status.clone(),
                     ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
                     instance_type: rental.instance_type.clone(),
+                    cpu,
+                    ram,
                     region: rental
                         .location_code
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
                     hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    total_cost,
                     created: format_timestamp(&rental.created_at.to_rfc3339()),
                 }
             })
@@ -1927,16 +1966,22 @@ pub fn display_secure_cloud_rentals(
             provider: String,
             #[tabled(rename = "GPU")]
             gpu: String,
-            #[tabled(rename = "Status")]
+            #[tabled(rename = "State")]
             status: String,
             #[tabled(rename = "IP")]
             ip: String,
             #[tabled(rename = "SSH")]
             ssh: String,
+            #[tabled(rename = "CPU")]
+            cpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
             #[tabled(rename = "Region")]
             region: String,
             #[tabled(rename = "Rate/hr")]
             hourly_cost: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
             #[tabled(rename = "Created")]
             created: String,
         }
@@ -1955,17 +2000,50 @@ pub fn display_secure_cloud_rentals(
                     .clone()
                     .unwrap_or_else(|| "-".to_string());
 
+                // Format CPU
+                let cpu = rental
+                    .vcpu_count
+                    .map(|cores| format!("{} cores", cores))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Format RAM
+                let ram = rental
+                    .system_memory_gb
+                    .map(|gb| format!("{}GB", gb))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Use accumulated cost from billing service, or fallback to time-based estimate
+                let total_cost = if let Some(accumulated) = &rental.accumulated_cost {
+                    // Use actual cost from billing service (no ~ prefix)
+                    accumulated
+                        .parse::<f64>()
+                        .map(|cost| format!("${:.2}", cost))
+                        .unwrap_or_else(|_| accumulated.clone())
+                } else {
+                    // Fallback to time-based estimate (with ~ prefix)
+                    let duration = if let Some(stopped) = &rental.stopped_at {
+                        stopped.signed_duration_since(rental.created_at)
+                    } else {
+                        chrono::Utc::now().signed_duration_since(rental.created_at)
+                    };
+                    let hours = duration.num_seconds() as f64 / 3600.0;
+                    format!("~${:.2}", rental.hourly_cost * hours)
+                };
+
                 StandardRow {
                     provider: rental.provider.clone(),
                     gpu: gpu_str,
                     status: rental.status.clone(),
                     ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
                     ssh: ssh_cmd,
+                    cpu,
+                    ram,
                     region: rental
                         .location_code
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
                     hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    total_cost,
                     created: format_timestamp(&rental.created_at.to_rfc3339()),
                 }
             })
@@ -1982,7 +2060,7 @@ pub fn display_secure_cloud_rentals(
             provider: String,
             #[tabled(rename = "GPU")]
             gpu: String,
-            #[tabled(rename = "Status")]
+            #[tabled(rename = "State")]
             status: String,
             #[tabled(rename = "IP")]
             ip: String,

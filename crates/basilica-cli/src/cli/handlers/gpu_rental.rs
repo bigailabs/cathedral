@@ -1141,8 +1141,7 @@ pub async fn handle_ps(
                     .into_iter()
                     .filter(|p| p.is_active)
                     .filter_map(|p| {
-                        let gpu_type =
-                            p.name.split_whitespace().next().map(|s| s.to_lowercase());
+                        let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
                         gpu_type.map(|t| (t, p.hourly_rate))
                     })
                     .collect(),
@@ -1190,7 +1189,10 @@ pub async fn handle_ps(
                         .filter(|r| !active_rental_ids.contains(&r.rental_id))
                         .collect();
 
-                    table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
+                    table_output::display_usage_history_for_ps(
+                        &historical_rentals,
+                        filters.detailed,
+                    )?;
 
                     let total_cost: Decimal = historical_rentals
                         .iter()
@@ -1204,7 +1206,10 @@ pub async fn handle_ps(
                         style(format!("${:.2}", total_cost)).green().bold()
                     );
 
-                    println!("\nTotal: {} community cloud rentals", historical_rentals.len());
+                    println!(
+                        "\nTotal: {} community cloud rentals",
+                        historical_rentals.len()
+                    );
                 } else {
                     // Active rentals
                     table_output::display_rental_items(
