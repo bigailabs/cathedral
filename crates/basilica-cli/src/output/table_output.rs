@@ -1880,6 +1880,8 @@ pub fn display_secure_cloud_rentals(
             status: String,
             #[tabled(rename = "IP")]
             ip: String,
+            #[tabled(rename = "SSH")]
+            ssh: String,
             #[tabled(rename = "Instance")]
             instance_type: String,
             #[tabled(rename = "CPU")]
@@ -1903,6 +1905,12 @@ pub fn display_secure_cloud_rentals(
                     format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
                 } else {
                     rental.gpu_type.to_uppercase()
+                };
+
+                let ssh = if rental.ssh_command.is_some() {
+                    "✓"
+                } else {
+                    "✗"
                 };
 
                 // Format CPU
@@ -1941,6 +1949,7 @@ pub fn display_secure_cloud_rentals(
                     gpu: gpu_str,
                     status: rental.status.clone(),
                     ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    ssh: ssh.to_string(),
                     instance_type: rental.instance_type.clone(),
                     cpu,
                     ram,
@@ -1995,10 +2004,11 @@ pub fn display_secure_cloud_rentals(
                     rental.gpu_type.to_uppercase()
                 };
 
-                let ssh_cmd = rental
-                    .ssh_command
-                    .clone()
-                    .unwrap_or_else(|| "-".to_string());
+                let ssh = if rental.ssh_command.is_some() {
+                    "✓"
+                } else {
+                    "✗"
+                };
 
                 // Format CPU
                 let cpu = rental
@@ -2035,7 +2045,7 @@ pub fn display_secure_cloud_rentals(
                     gpu: gpu_str,
                     status: rental.status.clone(),
                     ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
-                    ssh: ssh_cmd,
+                    ssh: ssh.to_string(),
                     cpu,
                     ram,
                     region: rental
@@ -2064,6 +2074,8 @@ pub fn display_secure_cloud_rentals(
             status: String,
             #[tabled(rename = "IP")]
             ip: String,
+            #[tabled(rename = "SSH")]
+            ssh: String,
             #[tabled(rename = "Rate/hr")]
             hourly_cost: String,
             #[tabled(rename = "Created")]
@@ -2079,11 +2091,18 @@ pub fn display_secure_cloud_rentals(
                     rental.gpu_type.to_uppercase()
                 };
 
+                let ssh = if rental.ssh_command.is_some() {
+                    "✓"
+                } else {
+                    "✗"
+                };
+
                 CompactRow {
                     provider: rental.provider.clone(),
                     gpu: gpu_str,
                     status: rental.status.clone(),
                     ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    ssh: ssh.to_string(),
                     hourly_cost: format!("${:.2}", rental.hourly_cost),
                     created: format_timestamp(&rental.created_at.to_rfc3339()),
                 }
