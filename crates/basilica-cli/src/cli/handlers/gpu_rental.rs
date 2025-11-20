@@ -449,7 +449,7 @@ fn interactive_offering_selector(
             };
 
             format!(
-                "{:<12} {:>8} {:>4}x {:<8} {:>6} | ${:>6.2}/hr",
+                "{:<12} {:>8} {:>4}x {:<8} {:>6} | ${:.2}/hr",
                 o.provider.as_str(),
                 o.region,
                 o.gpu_count,

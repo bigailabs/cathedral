@@ -1957,7 +1957,7 @@ pub fn display_secure_cloud_rentals(
                         .location_code
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
-                    hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
                     total_cost,
                     created: format_timestamp(&rental.created_at.to_rfc3339()),
                 }
@@ -2052,7 +2052,7 @@ pub fn display_secure_cloud_rentals(
                         .location_code
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
-                    hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
                     total_cost,
                     created: format_timestamp(&rental.created_at.to_rfc3339()),
                 }
@@ -2103,7 +2103,7 @@ pub fn display_secure_cloud_rentals(
                     status: rental.status.clone(),
                     ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
                     ssh: ssh.to_string(),
-                    hourly_cost: format!("${:.2}", rental.hourly_cost),
+                    hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
                     created: format_timestamp(&rental.created_at.to_rfc3339()),
                 }
             })
