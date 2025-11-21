@@ -24,7 +24,6 @@ async fn test_rental_start_event_created() {
             validator_id: "validator_event_001".to_string(),
             base_price_per_gpu: 2.5,
             gpu_count: 1,
-            markup_percent: 1.2,
         })),
     };
 
@@ -89,7 +88,6 @@ async fn test_status_change_events_tracked() {
             validator_id: "validator_status".to_string(),
             base_price_per_gpu: 2.5,
             gpu_count: 1,
-            markup_percent: 1.2,
         })),
     };
 
@@ -172,7 +170,6 @@ async fn test_event_timestamps_ordered() {
             validator_id: "validator_order".to_string(),
             base_price_per_gpu: 2.5,
             gpu_count: 1,
-            markup_percent: 1.2,
         })),
     };
 
@@ -254,7 +251,6 @@ async fn test_event_processing_flags() {
             validator_id: "validator_flags".to_string(),
             base_price_per_gpu: 2.5,
             gpu_count: 1,
-            markup_percent: 1.2,
         })),
     };
 
@@ -317,7 +313,6 @@ async fn test_event_metadata_preserved() {
             validator_id: validator_id.to_string(),
             base_price_per_gpu: 2.5,
             gpu_count: 1,
-            markup_percent: 1.2,
         })),
     };
 
@@ -379,7 +374,6 @@ async fn test_concurrent_event_creation() {
                     validator_id: format!("validator_concurrent_{}", i),
                     base_price_per_gpu: 2.5,
                     gpu_count: 1,
-                    markup_percent: 1.2,
                 })),
             };
 

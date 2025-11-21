@@ -173,7 +173,6 @@ impl EventHandlers for BillingEventHandlers {
             usage_metrics.gpu_hours,
             rental.base_price_per_gpu,
             rental.gpu_count,
-            rental.markup_percent,
         );
 
         let incremental_cost = cost_breakdown.total_cost;
@@ -452,15 +451,14 @@ impl EventHandlers for BillingEventHandlers {
                 "billing_model": "pay_as_you_go",
                 "base_price_per_gpu": rental.base_price_per_gpu.to_string(),
                 "gpu_count": rental.gpu_count,
-                "markup_percent": rental.markup_percent.to_string(),
                 "timestamp": event.timestamp,
             }),
         )
         .await?;
 
         info!(
-            "Started rental {} for user {} at ${}/GPU × {} GPUs with {}% markup",
-            rental_id, user_id, rental.base_price_per_gpu, rental.gpu_count, rental.markup_percent
+            "Started rental {} for user {} at ${}/GPU × {} GPUs",
+            rental_id, user_id, rental.base_price_per_gpu, rental.gpu_count
         );
 
         Ok(())

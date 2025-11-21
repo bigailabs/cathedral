@@ -7,12 +7,11 @@
 //! ## Formula
 //!
 //! ```text
-//! cost = gpu_hours × base_price_per_gpu × gpu_count × profit_margin
+//! cost = gpu_hours × price_per_gpu × gpu_count
 //!
-//! where:
-//!   profit_margin = 1 + (markup_percent / 100)
+//! Note: price_per_gpu should already include any markup applied by the API layer.
 //!
-//! Example: 10.5 hours × $2.50/GPU × 2 GPUs × 1.10 (10% markup) = $57.75
+//! Example: 10.5 hours × $2.75/GPU × 2 GPUs = $57.75
 //! ```
 
 use rust_decimal::Decimal;
@@ -28,16 +27,14 @@ use crate::domain::types::{CostBreakdown, CreditBalance};
 /// # Arguments
 ///
 /// * `gpu_hours` - Total GPU hours consumed (from telemetry)
-/// * `base_price_per_gpu` - Base price per GPU per hour (before markup)
+/// * `price_per_gpu` - Final price per GPU per hour (should already include any markup)
 /// * `gpu_count` - Number of GPUs in the rental
-/// * `markup_percent` - Markup percentage to apply (e.g., 10.0 for 10%)
 ///
 /// # Returns
 ///
 /// A `CostBreakdown` containing:
-/// - `base_cost`: Cost before markup (gpu_hours × base_price_per_gpu × gpu_count)
-/// - `discounts`: Markup amount (for transparency, stored in discounts field)
-/// - `total_cost`: Final cost including markup
+/// - `base_cost`: Same as total_cost (no markup applied here)
+/// - `total_cost`: Final cost (gpu_hours × price_per_gpu × gpu_count)
 ///
 /// # Examples
 ///
@@ -46,68 +43,44 @@ use crate::domain::types::{CostBreakdown, CreditBalance};
 /// use rust_decimal_macros::dec;
 /// use basilica_billing::domain::cost_calculator::calculate_marketplace_cost;
 ///
-/// // 10 hours × $2.50/GPU × 2 GPUs × 1.10 (10% markup) = $55
+/// // 10 hours × $2.75/GPU × 2 GPUs = $55
 /// let breakdown = calculate_marketplace_cost(
 ///     dec!(10.0),  // gpu_hours
-///     dec!(2.50),  // base_price_per_gpu
+///     dec!(2.75),  // price_per_gpu (already includes markup)
 ///     2,           // gpu_count
-///     dec!(10.0),  // markup_percent
 /// );
 ///
-/// assert_eq!(breakdown.base_cost.as_decimal(), dec!(50.00));
+/// assert_eq!(breakdown.base_cost.as_decimal(), dec!(55.00));
 /// assert_eq!(breakdown.total_cost.as_decimal(), dec!(55.00));
 /// ```
 pub fn calculate_marketplace_cost(
     gpu_hours: Decimal,
-    base_price_per_gpu: Decimal,
+    price_per_gpu: Decimal,
     gpu_count: u32,
-    markup_percent: Decimal,
 ) -> CostBreakdown {
     // Ensure at least 1 GPU for calculation
     let effective_gpu_count = Decimal::from(gpu_count.max(1));
 
-    // Step 1: Calculate base cost (before markup)
-    // base_cost = gpu_hours × base_price_per_gpu × gpu_count
-    let base_cost = gpu_hours
-        .checked_mul(base_price_per_gpu)
+    // Calculate total cost
+    // total_cost = gpu_hours × price_per_gpu × gpu_count
+    let total_cost = gpu_hours
+        .checked_mul(price_per_gpu)
         .and_then(|v| v.checked_mul(effective_gpu_count))
         .unwrap_or_else(|| {
             tracing::error!(
-                "Base cost calculation overflow: {} hours × ${} × {} GPUs",
+                "Cost calculation overflow: {} hours × ${} × {} GPUs",
                 gpu_hours,
-                base_price_per_gpu,
+                price_per_gpu,
                 gpu_count
             );
             Decimal::ZERO
         });
 
-    // Step 2: Calculate profit margin
-    // profit_margin = 1 + (markup_percent / 100)
-    // Example: 10% → 1.10
-    let profit_margin = Decimal::ONE
-        + markup_percent
-            .checked_div(Decimal::from(100))
-            .unwrap_or(Decimal::ZERO);
-
-    // Step 3: Apply profit margin
-    // total_cost = base_cost × profit_margin
-    let total_cost = base_cost.checked_mul(profit_margin).unwrap_or_else(|| {
-        tracing::error!(
-            "Total cost calculation overflow: ${} × {}",
-            base_cost,
-            profit_margin
-        );
-        base_cost
-    });
-
-    // Step 4: Calculate markup amount for transparency
-    let markup_amount = total_cost.checked_sub(base_cost).unwrap_or(Decimal::ZERO);
-
     CostBreakdown {
-        base_cost: CreditBalance::from_decimal(base_cost),
+        base_cost: CreditBalance::from_decimal(total_cost),
         usage_cost: CreditBalance::zero(), // Reserved for future use
         volume_discount: CreditBalance::zero(), // No volume discounts in marketplace model
-        discounts: CreditBalance::from_decimal(markup_amount), // Repurposed to show markup
+        discounts: CreditBalance::zero(),  // No discounts in this model
         overage_charges: CreditBalance::zero(), // Reserved for future use
         total_cost: CreditBalance::from_decimal(total_cost),
     }
@@ -170,72 +143,39 @@ mod tests {
 
     #[test]
     fn test_marketplace_cost_basic() {
-        // 1 hour × $3.00/GPU × 1 GPU × 1.10 (10% markup) = $3.30
+        // 1 hour × $3.30/GPU × 1 GPU = $3.30
         let breakdown = calculate_marketplace_cost(
             dec!(1.0),  // gpu_hours
-            dec!(3.00), // base_price_per_gpu
+            dec!(3.30), // price_per_gpu (already includes markup)
             1,          // gpu_count
-            dec!(10.0), // markup_percent
         );
 
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(3.00));
+        assert_eq!(breakdown.base_cost.as_decimal(), dec!(3.30));
         assert_eq!(breakdown.total_cost.as_decimal(), dec!(3.30));
-        assert_eq!(breakdown.discounts.as_decimal(), dec!(0.30)); // markup amount
-    }
-
-    #[test]
-    fn test_marketplace_cost_multi_gpu() {
-        // 10.5 hours × $2.50/GPU × 2 GPUs × 1.10 (10% markup) = $57.75
-        let breakdown = calculate_marketplace_cost(
-            dec!(10.5), // gpu_hours
-            dec!(2.50), // base_price_per_gpu
-            2,          // gpu_count
-            dec!(10.0), // markup_percent
-        );
-
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(52.50));
-        assert_eq!(breakdown.total_cost.as_decimal(), dec!(57.75));
-        assert_eq!(breakdown.discounts.as_decimal(), dec!(5.25));
-    }
-
-    #[test]
-    fn test_marketplace_cost_zero_markup() {
-        // 5 hours × $1.00/GPU × 1 GPU × 1.00 (0% markup) = $5.00
-        let breakdown = calculate_marketplace_cost(
-            dec!(5.0),  // gpu_hours
-            dec!(1.00), // base_price_per_gpu
-            1,          // gpu_count
-            dec!(0.0),  // markup_percent
-        );
-
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(5.00));
-        assert_eq!(breakdown.total_cost.as_decimal(), dec!(5.00));
         assert_eq!(breakdown.discounts.as_decimal(), dec!(0.00));
     }
 
     #[test]
-    fn test_marketplace_cost_high_markup() {
-        // 1 hour × $10.00/GPU × 1 GPU × 1.50 (50% markup) = $15.00
+    fn test_marketplace_cost_multi_gpu() {
+        // 10.5 hours × $2.75/GPU × 2 GPUs = $57.75
         let breakdown = calculate_marketplace_cost(
-            dec!(1.0),   // gpu_hours
-            dec!(10.00), // base_price_per_gpu
-            1,           // gpu_count
-            dec!(50.0),  // markup_percent
+            dec!(10.5), // gpu_hours
+            dec!(2.75), // price_per_gpu (already includes markup)
+            2,          // gpu_count
         );
 
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(10.00));
-        assert_eq!(breakdown.total_cost.as_decimal(), dec!(15.00));
-        assert_eq!(breakdown.discounts.as_decimal(), dec!(5.00));
+        assert_eq!(breakdown.base_cost.as_decimal(), dec!(57.75));
+        assert_eq!(breakdown.total_cost.as_decimal(), dec!(57.75));
+        assert_eq!(breakdown.discounts.as_decimal(), dec!(0.00));
     }
 
     #[test]
     fn test_marketplace_cost_zero_hours() {
-        // 0 hours × $2.50/GPU × 1 GPU × 1.10 = $0.00
+        // 0 hours × $2.75/GPU × 1 GPU = $0.00
         let breakdown = calculate_marketplace_cost(
             dec!(0.0),  // gpu_hours
-            dec!(2.50), // base_price_per_gpu
+            dec!(2.75), // price_per_gpu
             1,          // gpu_count
-            dec!(10.0), // markup_percent
         );
 
         assert_eq!(breakdown.base_cost.as_decimal(), dec!(0.00));
@@ -247,42 +187,39 @@ mod tests {
         // Edge case: 0 GPUs should be treated as 1 GPU
         let breakdown = calculate_marketplace_cost(
             dec!(1.0),  // gpu_hours
-            dec!(2.00), // base_price_per_gpu
+            dec!(2.20), // price_per_gpu
             0,          // gpu_count (treated as 1)
-            dec!(10.0), // markup_percent
         );
 
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(2.00));
+        assert_eq!(breakdown.base_cost.as_decimal(), dec!(2.20));
         assert_eq!(breakdown.total_cost.as_decimal(), dec!(2.20));
     }
 
     #[test]
     fn test_marketplace_cost_fractional_hours() {
-        // 0.5 hours × $4.00/GPU × 1 GPU × 1.10 = $2.20
+        // 0.5 hours × $4.40/GPU × 1 GPU = $2.20
         let breakdown = calculate_marketplace_cost(
             dec!(0.5),  // gpu_hours
-            dec!(4.00), // base_price_per_gpu
+            dec!(4.40), // price_per_gpu
             1,          // gpu_count
-            dec!(10.0), // markup_percent
         );
 
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(2.00));
+        assert_eq!(breakdown.base_cost.as_decimal(), dec!(2.20));
         assert_eq!(breakdown.total_cost.as_decimal(), dec!(2.20));
     }
 
     #[test]
     fn test_marketplace_cost_large_numbers() {
-        // 1000 hours × $10.00/GPU × 8 GPUs × 1.10 = $88,000
+        // 1000 hours × $11.00/GPU × 8 GPUs = $88,000
         let breakdown = calculate_marketplace_cost(
             dec!(1000.0), // gpu_hours
-            dec!(10.00),  // base_price_per_gpu
+            dec!(11.00),  // price_per_gpu (already includes markup)
             8,            // gpu_count
-            dec!(10.0),   // markup_percent
         );
 
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(80000.00));
+        assert_eq!(breakdown.base_cost.as_decimal(), dec!(88000.00));
         assert_eq!(breakdown.total_cost.as_decimal(), dec!(88000.00));
-        assert_eq!(breakdown.discounts.as_decimal(), dec!(8000.00));
+        assert_eq!(breakdown.discounts.as_decimal(), dec!(0.00));
     }
 
     #[test]

@@ -297,6 +297,12 @@ pub async fn start_rental(
                 });
             }
         };
+
+        // Apply markup to the base price before sending to billing
+        // Billing service will use this as the final price
+        let markup_multiplier = 1.0 + (state.pricing_config.community_markup_percent / 100.0);
+        let marked_up_price = base_price_per_gpu * markup_multiplier;
+
         let gpu_count = resource_spec
             .as_ref()
             .and_then(|spec| spec.gpus.first())
@@ -312,9 +318,8 @@ pub async fn start_rental(
             cloud_type: Some(CloudType::Community(CommunityCloudData {
                 node_id,
                 validator_id: state.validator_hotkey.clone(),
-                base_price_per_gpu,
+                base_price_per_gpu: marked_up_price,
                 gpu_count,
-                markup_percent: state.pricing_config.community_markup_percent,
             })),
         };
 

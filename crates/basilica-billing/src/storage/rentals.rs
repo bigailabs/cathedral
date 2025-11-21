@@ -72,10 +72,6 @@ impl SqlRentalRepository {
 
         let gpu_count = r.get::<Option<i32>, _>("gpu_count").unwrap_or(1) as u32;
 
-        let markup_percent = r
-            .get::<Option<rust_decimal::Decimal>, _>("markup_percent")
-            .unwrap_or(rust_decimal::Decimal::ZERO);
-
         SecureCloudRental {
             id: RentalId::from_uuid(r.get("rental_id")),
             user_id: UserId::new(r.get("user_id")),
@@ -113,7 +109,6 @@ impl SqlRentalRepository {
                 .unwrap_or_else(CreditBalance::zero),
             base_price_per_gpu,
             gpu_count,
-            markup_percent,
         }
     }
 
@@ -140,10 +135,6 @@ impl SqlRentalRepository {
             .unwrap_or(rust_decimal::Decimal::ZERO);
 
         let gpu_count = r.get::<Option<i32>, _>("gpu_count").unwrap_or(1) as u32;
-
-        let markup_percent = r
-            .get::<Option<rust_decimal::Decimal>, _>("markup_percent")
-            .unwrap_or(rust_decimal::Decimal::ZERO);
 
         Rental {
             id: RentalId::from_uuid(r.get("rental_id")),
@@ -185,7 +176,6 @@ impl SqlRentalRepository {
             // Marketplace-2-compute fields
             base_price_per_gpu,
             gpu_count,
-            markup_percent,
         }
     }
 }
@@ -202,8 +192,8 @@ impl RentalRepository for SqlRentalRepository {
             INSERT INTO billing.rentals
             (rental_id, user_id, node_id, validator_id, package_id, status,
              resource_spec, hourly_rate, start_time, metadata,
-             base_price_per_gpu, gpu_count, markup_percent)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             base_price_per_gpu, gpu_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -223,7 +213,6 @@ impl RentalRepository for SqlRentalRepository {
         // Marketplace-2-compute pricing fields
         .bind(rental.base_price_per_gpu)
         .bind(rental.gpu_count as i32)
-        .bind(rental.markup_percent)
         .execute(self.connection.pool())
         .await
         .map_err(|e| BillingError::DatabaseError {
@@ -240,7 +229,7 @@ impl RentalRepository for SqlRentalRepository {
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
-                   base_price_per_gpu, gpu_count, markup_percent
+                   base_price_per_gpu, gpu_count
             FROM billing.rentals
             WHERE rental_id = $1
             "#,
@@ -305,7 +294,7 @@ impl RentalRepository for SqlRentalRepository {
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at,
-                       base_price_per_gpu, gpu_count, markup_percent
+                       base_price_per_gpu, gpu_count
                 FROM billing.rentals
                 WHERE user_id = $1 AND status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -318,7 +307,7 @@ impl RentalRepository for SqlRentalRepository {
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at,
-                       base_price_per_gpu, gpu_count, markup_percent
+                       base_price_per_gpu, gpu_count
                 FROM billing.rentals
                 WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -342,7 +331,7 @@ impl RentalRepository for SqlRentalRepository {
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
-                   base_price_per_gpu, gpu_count, markup_percent
+                   base_price_per_gpu, gpu_count
             FROM billing.rentals
             WHERE status = $1
             ORDER BY start_time DESC
@@ -423,8 +412,8 @@ impl RentalRepository for SqlRentalRepository {
             INSERT INTO billing.secure_cloud_rentals
             (rental_id, user_id, provider, provider_instance_id, offering_id, status,
              resource_spec, hourly_rate, start_time, metadata,
-             base_price_per_gpu, gpu_count, markup_percent)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             base_price_per_gpu, gpu_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -439,7 +428,6 @@ impl RentalRepository for SqlRentalRepository {
         .bind(metadata_json)
         .bind(rental.base_price_per_gpu)
         .bind(rental.gpu_count as i32)
-        .bind(rental.markup_percent)
         .execute(self.connection.pool())
         .await
         .map_err(|e| BillingError::DatabaseError {
@@ -456,7 +444,7 @@ impl RentalRepository for SqlRentalRepository {
             SELECT rental_id, user_id, provider, provider_instance_id, offering_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
-                   base_price_per_gpu, gpu_count, markup_percent
+                   base_price_per_gpu, gpu_count
             FROM billing.secure_cloud_rentals
             WHERE rental_id = $1
             "#,

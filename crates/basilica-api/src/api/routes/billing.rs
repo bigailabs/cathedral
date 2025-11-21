@@ -160,17 +160,14 @@ async fn get_usage_history(
                 .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32))?;
 
             // Calculate hourly rate from marketplace pricing fields (from cloud_type oneof)
+            // Note: base_price_per_gpu already includes any markup applied by API layer
             let (node_id, hourly_rate) = match &rental.cloud_type {
                 Some(basilica_protocol::billing::active_rental::CloudType::Community(data)) => {
-                    let rate = data.base_price_per_gpu
-                        * data.gpu_count as f64
-                        * (1.0 + data.markup_percent / 100.0);
+                    let rate = data.base_price_per_gpu * data.gpu_count as f64;
                     (data.node_id.clone(), rate)
                 }
                 Some(basilica_protocol::billing::active_rental::CloudType::Secure(data)) => {
-                    let rate = data.base_price_per_gpu
-                        * data.gpu_count as f64
-                        * (1.0 + data.markup_percent / 100.0);
+                    let rate = data.base_price_per_gpu * data.gpu_count as f64;
                     (data.provider_instance_id.clone(), rate)
                 }
                 None => {

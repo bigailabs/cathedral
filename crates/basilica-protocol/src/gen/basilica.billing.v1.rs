@@ -90,15 +90,12 @@ pub struct CommunityCloudData {
     /// Validator hotkey
     #[prost(string, tag = "2")]
     pub validator_id: ::prost::alloc::string::String,
-    /// Base price per GPU per hour (before markup)
+    /// Final price per GPU per hour (already includes markup)
     #[prost(double, tag = "3")]
     pub base_price_per_gpu: f64,
     /// Number of GPUs in this rental
     #[prost(uint32, tag = "4")]
     pub gpu_count: u32,
-    /// Markup percentage (e.g., 10.0 for 10%)
-    #[prost(double, tag = "5")]
-    pub markup_percent: f64,
 }
 /// Secure cloud rental data (direct provider API)
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -113,15 +110,12 @@ pub struct SecureCloudData {
     /// Original offering ID from aggregator
     #[prost(string, tag = "3")]
     pub offering_id: ::prost::alloc::string::String,
-    /// Base price per GPU per hour (before markup)
+    /// Final price per GPU per hour (already includes markup)
     #[prost(double, tag = "4")]
     pub base_price_per_gpu: f64,
     /// Number of GPUs in this rental
     #[prost(uint32, tag = "5")]
     pub gpu_count: u32,
-    /// Markup percentage (e.g., 15.0 for 15%)
-    #[prost(double, tag = "6")]
-    pub markup_percent: f64,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

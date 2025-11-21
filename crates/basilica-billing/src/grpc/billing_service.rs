@@ -286,12 +286,10 @@ impl BillingService for BillingServiceImpl {
                     let base_price_per_gpu = rust_decimal::Decimal::from_f64(community_data.base_price_per_gpu)
                         .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
                     let gpu_count = community_data.gpu_count.max(1);
-                    let markup_percent = rust_decimal::Decimal::from_f64(community_data.markup_percent)
-                        .ok_or_else(|| Status::invalid_argument("Invalid markup_percent"))?;
 
                     info!(
-                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs with {}% markup",
-                        rental_id, user_id, base_price_per_gpu, gpu_count, markup_percent
+                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs",
+                        rental_id, user_id, base_price_per_gpu, gpu_count
                     );
 
                     let mut rental = Rental::new_marketplace(
@@ -301,7 +299,6 @@ impl BillingService for BillingServiceImpl {
                         resource_spec.clone(),
                         base_price_per_gpu,
                         gpu_count,
-                        markup_percent,
                     );
                     rental.id = rental_id;
 
@@ -316,7 +313,6 @@ impl BillingService for BillingServiceImpl {
                         "validator_id": community_data.validator_id,
                         "base_price_per_gpu": base_price_per_gpu.to_string(),
                         "gpu_count": gpu_count,
-                        "markup_percent": markup_percent.to_string(),
                         "resource_spec": resource_spec_value,
                         "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
                     });
@@ -351,12 +347,10 @@ impl BillingService for BillingServiceImpl {
                     let base_price_per_gpu = rust_decimal::Decimal::from_f64(secure_data.base_price_per_gpu)
                         .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
                     let gpu_count = secure_data.gpu_count.max(1);
-                    let markup_percent = rust_decimal::Decimal::from_f64(secure_data.markup_percent)
-                        .ok_or_else(|| Status::invalid_argument("Invalid markup_percent"))?;
 
                     info!(
-                        "Tracking secure cloud rental {} for user {} (provider: {}) at ${}/GPU/hour × {} GPUs with {}% markup",
-                        rental_id, user_id, secure_data.provider, base_price_per_gpu, gpu_count, markup_percent
+                        "Tracking secure cloud rental {} for user {} (provider: {}) at ${}/GPU/hour × {} GPUs",
+                        rental_id, user_id, secure_data.provider, base_price_per_gpu, gpu_count
                     );
 
                     let mut rental = SecureCloudRental::new_marketplace(
@@ -367,7 +361,6 @@ impl BillingService for BillingServiceImpl {
                         resource_spec.clone(),
                         base_price_per_gpu,
                         gpu_count,
-                        markup_percent,
                     );
                     rental.id = rental_id;
 
@@ -383,7 +376,6 @@ impl BillingService for BillingServiceImpl {
                         "offering_id": secure_data.offering_id,
                         "base_price_per_gpu": base_price_per_gpu.to_string(),
                         "gpu_count": gpu_count,
-                        "markup_percent": markup_percent.to_string(),
                         "resource_spec": resource_spec_value,
                         "timestamp": chrono::Utc::now().timestamp_millis().to_string(),
                     });
@@ -608,7 +600,6 @@ impl BillingService for BillingServiceImpl {
                                 validator_id: r.validator_id.clone(),
                                 base_price_per_gpu: r.base_price_per_gpu.to_f64().unwrap_or(0.0),
                                 gpu_count: r.gpu_count,
-                                markup_percent: r.markup_percent.to_f64().unwrap_or(0.0),
                             },
                         ),
                     ),

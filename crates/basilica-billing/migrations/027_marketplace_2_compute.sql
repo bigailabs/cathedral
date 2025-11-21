@@ -12,8 +12,7 @@
 
 ALTER TABLE billing.rentals
     ADD COLUMN base_price_per_gpu DECIMAL(10,4) NOT NULL DEFAULT 0.0,
-    ADD COLUMN gpu_count INT NOT NULL DEFAULT 1,
-    ADD COLUMN markup_percent DECIMAL(5,2) NOT NULL DEFAULT 10.0;
+    ADD COLUMN gpu_count INT NOT NULL DEFAULT 1;
 
 -- Add indexes for query performance
 CREATE INDEX idx_rentals_base_price ON billing.rentals(base_price_per_gpu);
@@ -21,11 +20,9 @@ CREATE INDEX idx_rentals_gpu_count ON billing.rentals(gpu_count);
 
 -- Add comments to document the fields
 COMMENT ON COLUMN billing.rentals.base_price_per_gpu IS
-    'Base price per GPU per hour from rental request (before markup)';
+    'Base price per GPU per hour from rental request (including markup)';
 COMMENT ON COLUMN billing.rentals.gpu_count IS
     'Number of GPUs in this rental';
-COMMENT ON COLUMN billing.rentals.markup_percent IS
-    'Markup percentage applied to base price (e.g., 10.0 for 10%)';
 
 -- ============================================================================
 -- PART 2: Remove package dependency from rentals
@@ -61,5 +58,4 @@ DROP TABLE IF EXISTS billing.price_history;
 -- explicit pricing on all new rentals:
 -- ALTER TABLE billing.rentals
 --     ALTER COLUMN base_price_per_gpu DROP DEFAULT,
---     ALTER COLUMN gpu_count DROP DEFAULT,
---     ALTER COLUMN markup_percent DROP DEFAULT;
+--     ALTER COLUMN gpu_count DROP DEFAULT;

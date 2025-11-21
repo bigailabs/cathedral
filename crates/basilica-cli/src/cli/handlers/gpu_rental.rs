@@ -642,11 +642,15 @@ async fn handle_secure_cloud_rental(
                 private_key_path.display()
             );
 
-            // Establish SSH session
+            // Establish SSH session with retry logic
             let ssh_client = SshClient::new(&config.ssh)?;
-            match ssh_client
-                .interactive_session(&ssh_access, Some(private_key_path))
-                .await
+            match retry_ssh_connection(
+                &ssh_client,
+                &ssh_access,
+                Some(private_key_path),
+                Duration::from_secs(60),
+            )
+            .await
             {
                 Ok(_) => {
                     // SSH session ended normally
@@ -659,7 +663,7 @@ async fn handle_secure_cloud_rental(
                     )?;
                 }
                 Err(e) => {
-                    // SSH connection failed
+                    // SSH connection failed after retries
                     print_error(&format!("SSH connection failed: {}", e));
                     display_secure_cloud_reconnection_instructions(
                         &response.rental_id,
@@ -2680,6 +2684,78 @@ async fn poll_secure_cloud_rental_status(
 
         // Increase interval up to maximum
         interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+    }
+}
+
+/// Retry SSH connection with exponential backoff
+///
+/// SSH services may not be immediately available after a rental becomes active.
+/// This function retries the connection for up to `max_wait` duration with exponential backoff.
+async fn retry_ssh_connection(
+    ssh_client: &SshClient,
+    ssh_access: &SshAccess,
+    private_key_override: Option<PathBuf>,
+    max_wait: Duration,
+) -> Result<(), CliError> {
+    const INITIAL_INTERVAL: Duration = Duration::from_secs(2);
+    const MAX_INTERVAL: Duration = Duration::from_secs(10);
+
+    let start_time = std::time::Instant::now();
+    let mut interval = INITIAL_INTERVAL;
+    let mut attempt = 0;
+
+    loop {
+        attempt += 1;
+
+        // Try to connect
+        match ssh_client
+            .interactive_session(ssh_access, private_key_override.clone())
+            .await
+        {
+            Ok(_) => {
+                // Connection succeeded
+                return Ok(());
+            }
+            Err(e) => {
+                // Check if we've exceeded the maximum wait time
+                if start_time.elapsed() >= max_wait {
+                    // Final attempt failed, return error
+                    return Err(CliError::Internal(
+                        eyre!(
+                            "SSH connection failed after {} attempts over {}s: {}",
+                            attempt,
+                            start_time.elapsed().as_secs(),
+                            e
+                        )
+                        .suggestion("The SSH service may still be starting up")
+                        .note("Try connecting manually in a few moments"),
+                    ));
+                }
+
+                // Log the retry attempt
+                debug!(
+                    "SSH connection attempt {} failed ({}s elapsed): {}. Retrying in {}s...",
+                    attempt,
+                    start_time.elapsed().as_secs(),
+                    e,
+                    interval.as_secs()
+                );
+
+                // Print user-friendly message on first few retries
+                if attempt <= 3 {
+                    print_info(&format!(
+                        "SSH not ready yet, retrying... (attempt {})",
+                        attempt
+                    ));
+                }
+
+                // Wait before next attempt
+                tokio::time::sleep(interval).await;
+
+                // Increase interval up to maximum (exponential backoff)
+                interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+            }
+        }
     }
 }
 

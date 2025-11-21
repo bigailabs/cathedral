@@ -38,12 +38,10 @@ pub struct Rental {
     pub actual_cost: CreditBalance,
 
     // Marketplace-2-compute pricing fields
-    /// Base price per GPU per hour (before markup)
+    /// Final price per GPU per hour (already includes any markup applied by API layer)
     pub base_price_per_gpu: Decimal,
     /// Number of GPUs in this rental
     pub gpu_count: u32,
-    /// Markup percentage applied to base price (e.g., 10.0 for 10%)
-    pub markup_percent: Decimal,
 }
 
 /// Secure cloud rental (direct provider API)
@@ -71,12 +69,10 @@ pub struct SecureCloudRental {
     pub actual_cost: CreditBalance,
 
     // Marketplace-2-compute pricing fields
-    /// Base price per GPU per hour (before markup)
+    /// Final price per GPU per hour (already includes any markup applied by API layer)
     pub base_price_per_gpu: Decimal,
     /// Number of GPUs in this rental
     pub gpu_count: u32,
-    /// Markup percentage applied to base price (e.g., 15.0 for 15%)
-    pub markup_percent: Decimal,
 }
 
 impl Rental {
@@ -88,7 +84,6 @@ impl Rental {
         resource_spec: ResourceSpec,
         base_price_per_gpu: Decimal,
         gpu_count: u32,
-        markup_percent: Decimal,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -119,7 +114,6 @@ impl Rental {
             actual_cost: CreditBalance::zero(),
             base_price_per_gpu,
             gpu_count,
-            markup_percent,
         }
     }
 
@@ -165,7 +159,6 @@ impl Rental {
             // Default marketplace pricing (for legacy compatibility)
             base_price_per_gpu: Decimal::ZERO,
             gpu_count: 1,
-            markup_percent: Decimal::ZERO,
         }
     }
 
@@ -228,7 +221,6 @@ impl SecureCloudRental {
         resource_spec: ResourceSpec,
         base_price_per_gpu: Decimal,
         gpu_count: u32,
-        markup_percent: Decimal,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -259,7 +251,6 @@ impl SecureCloudRental {
             actual_cost: CreditBalance::zero(),
             base_price_per_gpu,
             gpu_count,
-            markup_percent,
         }
     }
 

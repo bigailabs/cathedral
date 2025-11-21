@@ -346,6 +346,11 @@ pub async fn start_secure_cloud_rental(
 
     let timestamp = prost_types::Timestamp::from(std::time::SystemTime::now());
 
+    // Apply markup to the base price before sending to billing
+    // Billing service will use this as the final price
+    let markup_multiplier = 1.0 + (state.pricing_config.secure_cloud_markup_percent / 100.0);
+    let marked_up_price = offering.hourly_rate.to_f64().unwrap_or(0.0) * markup_multiplier;
+
     let track_request = TrackRentalRequest {
         rental_id: rental_id.clone(),
         user_id: auth.user_id.clone(),
@@ -356,9 +361,8 @@ pub async fn start_secure_cloud_rental(
             provider_instance_id,
             provider: offering.provider.to_string(),
             offering_id: request.offering_id.clone(),
-            base_price_per_gpu: offering.hourly_rate.to_f64().unwrap_or(0.0),
+            base_price_per_gpu: marked_up_price,
             gpu_count: offering.gpu_count,
-            markup_percent: state.pricing_config.secure_cloud_markup_percent,
         })),
     };
 
@@ -374,10 +378,8 @@ pub async fn start_secure_cloud_rental(
             })?;
     }
 
-    // 5. Calculate hourly cost
-    let hourly_cost = offering.hourly_rate.to_f64().unwrap_or(0.0)
-        * offering.gpu_count as f64
-        * (1.0 + state.pricing_config.secure_cloud_markup_percent / 100.0);
+    // 5. Calculate hourly cost (using already marked-up price)
+    let hourly_cost = marked_up_price * offering.gpu_count as f64;
 
     // 6. Return response
     Ok((

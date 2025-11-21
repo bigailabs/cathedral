@@ -38,9 +38,8 @@ CREATE TABLE billing.secure_cloud_rentals (
     provider_instance_id VARCHAR(255) NOT NULL, -- Provider's instance ID
     offering_id VARCHAR(255) NOT NULL,          -- Original offering ID from aggregator
     resource_spec JSONB NOT NULL DEFAULT '{}',  -- GPU specs, CPU, memory, etc.
-    base_price_per_gpu DECIMAL(10,4) NOT NULL,  -- Base price per GPU per hour (before markup)
+    base_price_per_gpu DECIMAL(10,4) NOT NULL,  -- Base price per GPU per hour (including markup)
     gpu_count INT NOT NULL,                      -- Number of GPUs in this rental
-    markup_percent DECIMAL(5,2) NOT NULL,        -- Markup percentage (e.g., 15.0 for 15%)
     start_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     end_time TIMESTAMPTZ,
     max_duration_hours INTEGER NOT NULL DEFAULT 24,
@@ -86,11 +85,9 @@ COMMENT ON COLUMN billing.secure_cloud_rentals.offering_id IS
 COMMENT ON COLUMN billing.secure_cloud_rentals.resource_spec IS
     'JSON specification of resources being rented';
 COMMENT ON COLUMN billing.secure_cloud_rentals.base_price_per_gpu IS
-    'Base price per GPU per hour from provider (before markup)';
+    'Base price per GPU per hour from provider (including markup)';
 COMMENT ON COLUMN billing.secure_cloud_rentals.gpu_count IS
     'Number of GPUs in this rental';
-COMMENT ON COLUMN billing.secure_cloud_rentals.markup_percent IS
-    'Markup percentage applied to base price (e.g., 15.0 for 15%)';
 COMMENT ON COLUMN billing.secure_cloud_rentals.status IS
     'Current status: pending, active, completed, cancelled, failed';
 COMMENT ON COLUMN billing.secure_cloud_rentals.total_cost IS

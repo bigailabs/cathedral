@@ -70,9 +70,8 @@ message TrackRentalRequest {
 message CommunityCloudData {
     string node_id = 1;           // Miner node ID
     string validator_id = 2;      // Validator hotkey
-    double base_price_per_gpu = 3; // Base price per GPU per hour (before markup)
+    double base_price_per_gpu = 3; // Final price per GPU per hour (already includes markup)
     uint32 gpu_count = 4;          // Number of GPUs in this rental
-    double markup_percent = 5;     // Markup percentage (e.g., 10.0 for 10%)
 }
 
 // Secure cloud rental data (direct provider API)
@@ -80,9 +79,8 @@ message SecureCloudData {
     string provider_instance_id = 1; // Provider's instance ID
     string provider = 2;              // Provider name (e.g., "datacrunch", "hyperstack")
     string offering_id = 3;           // Original offering ID from aggregator
-    double base_price_per_gpu = 4;    // Base price per GPU per hour (before markup)
+    double base_price_per_gpu = 4;    // Final price per GPU per hour (already includes markup)
     uint32 gpu_count = 5;             // Number of GPUs in this rental
-    double markup_percent = 6;        // Markup percentage (e.g., 15.0 for 15%)
 }
 
 message ResourceSpec {
