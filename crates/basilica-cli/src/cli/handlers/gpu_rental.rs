@@ -1,7 +1,7 @@
 //! GPU rental command handlers
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
-use crate::cli::handlers::gpu_rental_helpers::resolve_target_rental;
+use crate::cli::handlers::gpu_rental_helpers::resolve_target_rental_unified;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
 use crate::output::{
@@ -611,22 +611,48 @@ async fn handle_secure_cloud_rental(
             print_info("Connecting to rental...");
 
             // Parse SSH credentials
-            let (host, port, username) = parse_ssh_credentials(&ssh_cmd)?;
+            let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
             let ssh_access = SshAccess {
                 host,
                 port,
                 username,
             };
 
+            // Fetch API-registered SSH key and find matching private key
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+                                .note("SSH keys are required to connect to rentals"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
+
+            debug!(
+                "Using private key for secure cloud auto-SSH: {}",
+                private_key_path.display()
+            );
+
             // Establish SSH session
             let ssh_client = SshClient::new(&config.ssh)?;
-            match ssh_client.interactive_session(&ssh_access).await {
+            match ssh_client
+                .interactive_session(&ssh_access, Some(private_key_path))
+                .await
+            {
                 Ok(_) => {
                     // SSH session ended normally
                     print_info("SSH session closed");
                     display_secure_cloud_reconnection_instructions(
                         &response.rental_id,
-                        &ssh_cmd,
+                        ssh_cmd,
                         config,
                         "To reconnect to this rental:",
                     )?;
@@ -636,7 +662,7 @@ async fn handle_secure_cloud_rental(
                     print_error(&format!("SSH connection failed: {}", e));
                     display_secure_cloud_reconnection_instructions(
                         &response.rental_id,
-                        &ssh_cmd,
+                        ssh_cmd,
                         config,
                         "Try manually connecting using:",
                     )?;
@@ -652,7 +678,7 @@ async fn handle_secure_cloud_rental(
         // Timeout - rental didn't become active in time
         println!();
         print_info("Rental is taking longer than expected to become active");
-        print_info(&format!("Check status with: basilica ps"));
+        print_info("Check status with: basilica ps");
         print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
     }
 
@@ -866,9 +892,35 @@ pub async fn handle_up(
                 username,
             };
 
+            // Fetch API-registered SSH key and find matching private key
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+                                .note("SSH keys are required to connect to rentals"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
+
+            debug!(
+                "Using private key for community cloud auto-SSH: {}",
+                private_key_path.display()
+            );
+
             // Use SSH client to open interactive session
             let ssh_client = SshClient::new(&config.ssh)?;
-            match ssh_client.interactive_session(&ssh_access).await {
+            match ssh_client
+                .interactive_session(&ssh_access, Some(private_key_path))
+                .await
+            {
                 Ok(_) => {
                     // SSH session ended normally
                     print_info("SSH session closed");
@@ -1289,33 +1341,144 @@ pub async fn handle_status(
     json: bool,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    use basilica_common::types::ComputeCategory;
+
     let api_client = create_authenticated_client(config).await?;
 
-    // Resolve target rental (fetch and prompt if not provided)
-    let target = resolve_target_rental(target, &api_client, false).await?;
+    // Determine rental ID and compute type
+    let (rental_id, compute_type) = if let Some(target_id) = target {
+        // Rental ID provided - check both types to find it
+        let spinner = create_spinner("Looking up rental...");
+
+        let (community_result, secure_result) = tokio::join!(
+            api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+                status: Some(basilica_sdk::types::RentalState::Active),
+                gpu_type: None,
+                min_gpu_count: None,
+            })),
+            api_client.list_secure_cloud_rentals()
+        );
+
+        complete_spinner_and_clear(spinner);
+
+        // Check community cloud first
+        if let Ok(community) = community_result {
+            if community.rentals.iter().any(|r| r.rental_id == target_id) {
+                (target_id.clone(), ComputeCategory::CommunityCloud)
+            } else if let Ok(secure) = secure_result {
+                // Check secure cloud
+                if secure.rentals.iter().any(|r| r.rental_id == target_id) {
+                    (target_id.clone(), ComputeCategory::SecureCloud)
+                } else {
+                    return Err(CliError::Internal(
+                        eyre!("Rental '{}' not found", target_id)
+                            .suggestion("Try 'basilica ps' to see your active rentals")
+                            .note("The rental may have expired or been terminated"),
+                    ));
+                }
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals")
+                        .note("The rental may have expired or been terminated"),
+                ));
+            }
+        } else if let Ok(secure) = secure_result {
+            // Community query failed, check secure only
+            if secure.rentals.iter().any(|r| r.rental_id == target_id) {
+                (target_id.clone(), ComputeCategory::SecureCloud)
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else {
+            return Err(CliError::Internal(
+                eyre!("Failed to fetch rentals")
+                    .suggestion("Check your internet connection and try again"),
+            ));
+        }
+    } else {
+        // No rental ID provided - use unified selector
+        resolve_target_rental_unified(None, None, &api_client).await?
+    };
 
     let spinner = create_spinner("Fetching rental status...");
 
-    let status = api_client
-        .get_rental_status(&target)
-        .await
-        .map_err(|e| -> CliError {
-            complete_spinner_error(spinner.clone(), "Failed to get status");
-            let report = match e {
-                ApiError::NotFound { .. } => eyre!("Rental '{}' not found", target)
-                    .suggestion("Try 'basilica ps' to see your active rentals")
-                    .note("The rental may have expired or been terminated"),
-                _ => eyre!(e).suggestion("Check your internet connection and try again"),
-            };
-            CliError::Internal(report)
-        })?;
+    match compute_type {
+        ComputeCategory::CommunityCloud => {
+            // Fetch community cloud status
+            let status =
+                api_client
+                    .get_rental_status(&rental_id)
+                    .await
+                    .map_err(|e| -> CliError {
+                        complete_spinner_error(spinner.clone(), "Failed to get status");
+                        let report = match e {
+                            ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
+                                .suggestion("Try 'basilica ps' to see your active rentals")
+                                .note("The rental may have expired or been terminated"),
+                            _ => {
+                                eyre!(e).suggestion("Check your internet connection and try again")
+                            }
+                        };
+                        CliError::Internal(report)
+                    })?;
 
-    complete_spinner_and_clear(spinner);
+            complete_spinner_and_clear(spinner);
 
-    if json {
-        json_output(&status)?;
-    } else {
-        display_rental_status_with_details(&status, config);
+            if json {
+                json_output(&status)?;
+            } else {
+                display_rental_status_with_details(&status, config);
+            }
+        }
+        ComputeCategory::SecureCloud => {
+            // Fetch secure cloud status
+            let rentals = api_client.list_secure_cloud_rentals().await.map_err(|e| {
+                complete_spinner_error(spinner.clone(), "Failed to get status");
+                CliError::Internal(
+                    eyre!(e).suggestion("Check your internet connection and try again"),
+                )
+            })?;
+
+            let rental = rentals
+                .rentals
+                .iter()
+                .find(|r| r.rental_id == rental_id)
+                .ok_or_else(|| {
+                    complete_spinner_error(spinner.clone(), "Rental not found");
+                    CliError::Internal(
+                        eyre!("Rental '{}' not found", rental_id)
+                            .suggestion("Try 'basilica ps' to see your active rentals")
+                            .note("The rental may have expired or been terminated"),
+                    )
+                })?;
+
+            complete_spinner_and_clear(spinner);
+
+            if json {
+                json_output(&rental)?;
+            } else {
+                // Display secure cloud rental details
+                println!("Rental Status: {}", rental.rental_id);
+                println!("  Provider: {}", rental.provider);
+                println!("  Status: {}", rental.status);
+                println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
+                if let Some(ip) = &rental.ip_address {
+                    println!("  IP Address: {}", ip);
+                }
+                println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
+                println!("  Created: {}", rental.created_at);
+                if let Some(stopped_at) = &rental.stopped_at {
+                    println!("  Stopped: {}", stopped_at);
+                }
+                if let Some(ssh_cmd) = &rental.ssh_command {
+                    println!("  SSH: {}", ssh_cmd);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1327,11 +1490,81 @@ pub async fn handle_logs(
     options: LogsOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    use basilica_common::types::ComputeCategory;
+
     // Create API client
     let api_client = create_authenticated_client(config).await?;
 
-    // Resolve target rental (fetch and prompt if not provided)
-    let target = resolve_target_rental(target, &api_client, false).await?;
+    // Determine rental ID and compute type
+    let (rental_id, compute_type) = if let Some(target_id) = target {
+        // Rental ID provided - check both types to find it
+        let spinner = create_spinner("Looking up rental...");
+
+        let (community_result, secure_result) = tokio::join!(
+            api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+                status: Some(basilica_sdk::types::RentalState::Active),
+                gpu_type: None,
+                min_gpu_count: None,
+            })),
+            api_client.list_secure_cloud_rentals()
+        );
+
+        complete_spinner_and_clear(spinner);
+
+        // Check community cloud first
+        if let Ok(community) = community_result {
+            if community.rentals.iter().any(|r| r.rental_id == target_id) {
+                (target_id.clone(), ComputeCategory::CommunityCloud)
+            } else if let Ok(secure) = secure_result {
+                // Check secure cloud
+                if secure.rentals.iter().any(|r| r.rental_id == target_id) {
+                    (target_id.clone(), ComputeCategory::SecureCloud)
+                } else {
+                    return Err(CliError::Internal(
+                        eyre!("Rental '{}' not found", target_id)
+                            .suggestion("Try 'basilica ps' to see your active rentals"),
+                    ));
+                }
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else if let Ok(secure) = secure_result {
+            // Community query failed, check secure only
+            if secure.rentals.iter().any(|r| r.rental_id == target_id) {
+                (target_id.clone(), ComputeCategory::SecureCloud)
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else {
+            return Err(CliError::Internal(
+                eyre!("Failed to fetch rentals")
+                    .suggestion("Check your internet connection and try again"),
+            ));
+        }
+    } else {
+        // No rental ID provided - use unified selector
+        resolve_target_rental_unified(None, None, &api_client).await?
+    };
+
+    // Check if this is a secure cloud rental
+    if matches!(compute_type, ComputeCategory::SecureCloud) {
+        return Err(CliError::Internal(
+            eyre!("Log streaming is not yet available for secure cloud rentals")
+                .note("Secure cloud logs support is coming soon")
+                .suggestion(format!(
+                    "For now, use SSH to access logs manually: basilica ssh {}",
+                    rental_id
+                )),
+        ));
+    }
+
+    let target = rental_id;
 
     let spinner = create_spinner("Connecting to log stream...");
 
@@ -1644,49 +1877,201 @@ pub async fn handle_exec(
     command: String,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    use basilica_common::types::ComputeCategory;
+
     // Create API client to verify rental status
     let api_client = create_authenticated_client(config).await?;
 
-    // Resolve target rental with SSH requirement
-    let target = resolve_target_rental(target, &api_client, true).await?;
+    // Determine rental ID and compute type
+    let (rental_id, compute_type, ssh_command) = if let Some(target_id) = target {
+        // Rental ID provided - check both types to find it
+        let spinner = create_spinner("Looking up rental...");
 
-    debug!("Executing command on rental: {}", target);
+        let (community_result, secure_result) = tokio::join!(
+            api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+                status: Some(basilica_sdk::types::RentalState::Active),
+                gpu_type: None,
+                min_gpu_count: None,
+            })),
+            api_client.list_secure_cloud_rentals()
+        );
 
-    // Get rental status from API which includes SSH credentials
-    let rental_status = api_client
-        .get_rental_status(&target)
-        .await
-        .map_err(|e| -> CliError {
-            let report = match e {
-                ApiError::NotFound { .. } => eyre!("Rental '{}' not found", target)
-                    .suggestion("Try 'basilica ps' to see your active rentals"),
-                _ => eyre!(e).suggestion("Check your internet connection and try again"),
-            };
-            CliError::Internal(report)
-        })?;
+        complete_spinner_and_clear(spinner);
 
-    // Extract SSH credentials from response
-    let ssh_credentials = rental_status.ssh_credentials.ok_or_else(|| {
-        eyre!("SSH credentials not available")
-            .wrap_err(format!(
-                "The rental '{}' was created without SSH access",
-                target
-            ))
-            .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
-            .note("Create a new rental without --no-ssh to enable SSH access")
-    })?;
+        // Check community cloud first
+        if let Ok(community) = community_result {
+            if let Some(_rental) = community.rentals.iter().find(|r| r.rental_id == target_id) {
+                // Found in community cloud - fetch SSH credentials
+                let rental_status = api_client
+                    .get_rental_status(&target_id)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?;
 
-    // Parse SSH credentials
-    let (host, port, username) = parse_ssh_credentials(&ssh_credentials)?;
+                let ssh_creds = rental_status.ssh_credentials.ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH credentials not available")
+                            .wrap_err(format!(
+                                "The rental '{}' was created without SSH access",
+                                target_id
+                            ))
+                            .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
+                            .note("Create a new rental without --no-ssh to enable SSH access"),
+                    )
+                })?;
+
+                (
+                    target_id.clone(),
+                    ComputeCategory::CommunityCloud,
+                    ssh_creds,
+                )
+            } else if let Ok(secure) = secure_result {
+                // Not in community, check secure cloud
+                if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
+                    let ssh_cmd = rental.ssh_command.clone().ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("SSH command not available")
+                                .wrap_err(format!(
+                                    "The rental '{}' does not have SSH access configured",
+                                    target_id
+                                ))
+                                .note("The rental may still be provisioning or SSH may not be enabled"),
+                        )
+                    })?;
+
+                    (target_id.clone(), ComputeCategory::SecureCloud, ssh_cmd)
+                } else {
+                    return Err(CliError::Internal(
+                        eyre!("Rental '{}' not found", target_id)
+                            .suggestion("Try 'basilica ps' to see your active rentals"),
+                    ));
+                }
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else if let Ok(secure) = secure_result {
+            // Community cloud query failed, check secure cloud only
+            if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
+                let ssh_cmd = rental.ssh_command.clone().ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH command not available")
+                            .wrap_err(format!(
+                                "The rental '{}' does not have SSH access configured",
+                                target_id
+                            ))
+                            .note("The rental may still be provisioning or SSH may not be enabled"),
+                    )
+                })?;
+
+                (target_id.clone(), ComputeCategory::SecureCloud, ssh_cmd)
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else {
+            return Err(CliError::Internal(
+                eyre!("Failed to fetch rentals")
+                    .suggestion("Check your internet connection and try again"),
+            ));
+        }
+    } else {
+        // No rental ID provided - use unified selector
+        let (rental_id, compute_type) =
+            resolve_target_rental_unified(None, None, &api_client).await?;
+
+        // Fetch SSH credentials based on type
+        let ssh_cmd = match compute_type {
+            ComputeCategory::CommunityCloud => {
+                let rental_status = api_client
+                    .get_rental_status(&rental_id)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+                rental_status.ssh_credentials.ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH credentials not available")
+                            .wrap_err(format!(
+                                "The rental '{}' was created without SSH access",
+                                rental_id
+                            ))
+                            .note("Rentals created with --no-ssh flag cannot be accessed via SSH"),
+                    )
+                })?
+            }
+            ComputeCategory::SecureCloud => {
+                let secure_rentals = api_client
+                    .list_secure_cloud_rentals()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+                let rental = secure_rentals
+                    .rentals
+                    .iter()
+                    .find(|r| r.rental_id == rental_id)
+                    .ok_or_else(|| CliError::Internal(eyre!("Rental '{}' not found", rental_id)))?;
+
+                rental.ssh_command.clone().ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH command not available")
+                            .wrap_err(format!(
+                                "The rental '{}' does not have SSH access configured",
+                                rental_id
+                            ))
+                            .note("The rental may still be provisioning or SSH may not be enabled"),
+                    )
+                })?
+            }
+        };
+
+        (rental_id, compute_type, ssh_cmd)
+    };
+
+    debug!(
+        "Executing command on {} rental: {}",
+        match compute_type {
+            ComputeCategory::CommunityCloud => "community cloud",
+            ComputeCategory::SecureCloud => "secure cloud",
+        },
+        rental_id
+    );
+
+    // Parse SSH credentials (format is the same for both types)
+    let (host, port, username) = parse_ssh_credentials(&ssh_command)?;
     let ssh_access = SshAccess {
         host,
         port,
         username,
     };
 
+    // Fetch API-registered SSH key and find matching private key
+    let private_key_path = {
+        let ssh_key = api_client
+            .get_ssh_key()
+            .await
+            .map_err(|e| CliError::Internal(eyre!(e)))?
+            .ok_or_else(|| {
+                CliError::Internal(
+                    eyre!("No SSH key registered with Basilica")
+                        .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+                        .note("SSH keys are required to connect to rentals"),
+                )
+            })?;
+
+        crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+            .map_err(CliError::Internal)?
+    };
+
+    debug!("Using private key for exec: {}", private_key_path.display());
+
     // Use SSH client to execute command
     let ssh_client = SshClient::new(&config.ssh)?;
-    ssh_client.execute_command(&ssh_access, &command).await?;
+    ssh_client
+        .execute_command(&ssh_access, &command, Some(private_key_path))
+        .await?;
     Ok(())
 }
 
@@ -1696,52 +2081,207 @@ pub async fn handle_ssh(
     options: crate::cli::commands::SshOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    use basilica_common::types::ComputeCategory;
+
     // Create API client to verify rental status
     let api_client = create_authenticated_client(config).await?;
 
-    // Resolve target rental with SSH requirement
-    let target = resolve_target_rental(target, &api_client, true).await?;
+    // Determine rental ID and compute type
+    let (rental_id, compute_type, ssh_command) = if let Some(target_id) = target {
+        // Rental ID provided - check both types to find it
+        let spinner = create_spinner("Looking up rental...");
 
-    debug!("Opening SSH connection to rental: {}", target);
+        let (community_result, secure_result) = tokio::join!(
+            api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+                status: Some(basilica_sdk::types::RentalState::Active),
+                gpu_type: None,
+                min_gpu_count: None,
+            })),
+            api_client.list_secure_cloud_rentals()
+        );
 
-    // Get rental status from API which includes SSH credentials
-    let rental_status = api_client
-        .get_rental_status(&target)
-        .await
-        .map_err(|e| -> CliError {
-            let report = match e {
-                ApiError::NotFound { .. } => eyre!("Rental '{}' not found", target)
-                    .suggestion("Try 'basilica ps' to see your active rentals"),
-                _ => eyre!(e).suggestion("Check your internet connection and try again"),
-            };
-            CliError::Internal(report)
-        })?;
+        complete_spinner_and_clear(spinner);
 
-    // Extract SSH credentials from response
-    let ssh_credentials = rental_status.ssh_credentials.ok_or_else(|| {
-        eyre!("SSH credentials not available")
-            .wrap_err(format!(
-                "The rental '{}' was created without SSH access",
-                target
-            ))
-            .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
-            .note("Create a new rental without --no-ssh to enable SSH access")
-    })?;
+        // Check community cloud first
+        if let Ok(community) = community_result {
+            if let Some(_rental) = community.rentals.iter().find(|r| r.rental_id == target_id) {
+                // Found in community cloud - need to fetch SSH credentials
+                let rental_status = api_client
+                    .get_rental_status(&target_id)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?;
 
-    // Parse SSH credentials
-    let (host, port, username) = parse_ssh_credentials(&ssh_credentials)?;
+                let ssh_creds = rental_status.ssh_credentials.ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH credentials not available")
+                            .wrap_err(format!(
+                                "The rental '{}' was created without SSH access",
+                                target_id
+                            ))
+                            .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
+                            .note("Create a new rental without --no-ssh to enable SSH access"),
+                    )
+                })?;
+
+                (
+                    target_id.clone(),
+                    ComputeCategory::CommunityCloud,
+                    ssh_creds,
+                )
+            } else if let Ok(secure) = secure_result {
+                // Not in community, check secure cloud
+                if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
+                    let ssh_cmd = rental.ssh_command.clone().ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("SSH command not available")
+                                .wrap_err(format!(
+                                    "The rental '{}' does not have SSH access configured",
+                                    target_id
+                                ))
+                                .note("The rental may still be provisioning or SSH may not be enabled"),
+                        )
+                    })?;
+
+                    (target_id.clone(), ComputeCategory::SecureCloud, ssh_cmd)
+                } else {
+                    return Err(CliError::Internal(
+                        eyre!("Rental '{}' not found", target_id)
+                            .suggestion("Try 'basilica ps' to see your active rentals"),
+                    ));
+                }
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else if let Ok(secure) = secure_result {
+            // Community cloud query failed, check secure cloud only
+            if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
+                let ssh_cmd = rental.ssh_command.clone().ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH command not available")
+                            .wrap_err(format!(
+                                "The rental '{}' does not have SSH access configured",
+                                target_id
+                            ))
+                            .note("The rental may still be provisioning or SSH may not be enabled"),
+                    )
+                })?;
+
+                (target_id.clone(), ComputeCategory::SecureCloud, ssh_cmd)
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", target_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else {
+            return Err(CliError::Internal(
+                eyre!("Failed to fetch rentals")
+                    .suggestion("Check your internet connection and try again"),
+            ));
+        }
+    } else {
+        // No rental ID provided - show selector with SSH-enabled rentals only
+        let (rental_id, compute_type) =
+            resolve_target_rental_unified(None, None, &api_client).await?;
+
+        // Fetch SSH credentials based on type
+        let ssh_cmd = match compute_type {
+            ComputeCategory::CommunityCloud => {
+                let rental_status = api_client
+                    .get_rental_status(&rental_id)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+                rental_status.ssh_credentials.ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH credentials not available")
+                            .wrap_err(format!(
+                                "The rental '{}' was created without SSH access",
+                                rental_id
+                            ))
+                            .note("Rentals created with --no-ssh flag cannot be accessed via SSH"),
+                    )
+                })?
+            }
+            ComputeCategory::SecureCloud => {
+                let secure_rentals = api_client
+                    .list_secure_cloud_rentals()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+                let rental = secure_rentals
+                    .rentals
+                    .iter()
+                    .find(|r| r.rental_id == rental_id)
+                    .ok_or_else(|| CliError::Internal(eyre!("Rental '{}' not found", rental_id)))?;
+
+                rental.ssh_command.clone().ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH command not available")
+                            .wrap_err(format!(
+                                "The rental '{}' does not have SSH access configured",
+                                rental_id
+                            ))
+                            .note("The rental may still be provisioning or SSH may not be enabled"),
+                    )
+                })?
+            }
+        };
+
+        (rental_id, compute_type, ssh_cmd)
+    };
+
+    debug!(
+        "Opening SSH connection to {} rental: {}",
+        match compute_type {
+            ComputeCategory::CommunityCloud => "community cloud",
+            ComputeCategory::SecureCloud => "secure cloud",
+        },
+        rental_id
+    );
+
+    // Parse SSH credentials (format is the same for both types)
+    debug!("Raw ssh_command: {}", ssh_command);
+    let (host, port, username) = parse_ssh_credentials(&ssh_command)?;
+    debug!(
+        "Parsed credentials - host: {}, port: {}, username: {}",
+        host, port, username
+    );
     let ssh_access = SshAccess {
         host,
         port,
         username,
     };
 
+    // Fetch API-registered SSH key and find matching private key
+    let private_key_path = {
+        let ssh_key = api_client
+            .get_ssh_key()
+            .await
+            .map_err(|e| CliError::Internal(eyre!(e)))?
+            .ok_or_else(|| {
+                CliError::Internal(
+                    eyre!("No SSH key registered with Basilica")
+                        .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+                        .note("SSH keys are required to connect to rentals"),
+                )
+            })?;
+
+        crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+            .map_err(CliError::Internal)?
+    };
+
+    debug!("Using private key: {}", private_key_path.display());
+
     // Use SSH client to handle connection with options
     let ssh_client = SshClient::new(&config.ssh)?;
 
     // Open interactive session with port forwarding options
     ssh_client
-        .interactive_session_with_options(&ssh_access, &options)
+        .interactive_session_with_options(&ssh_access, &options, Some(private_key_path))
         .await?;
     Ok(())
 }
@@ -1781,8 +2321,8 @@ pub async fn handle_cp(
             // First determine if this looks like an upload or download based on path existence
             let source_exists = std::path::Path::new(&source).exists();
 
-            // Resolve target rental with SSH requirement
-            let selected_rental = resolve_target_rental(None, &api_client, true).await
+            // Resolve target rental with unified selection
+            let (selected_rental, _compute_type) = resolve_target_rental_unified(None, None, &api_client).await
                 .map_err(|_| eyre!("No rental ID provided. Specify rental ID explicitly: 'basilica cp <rental_id>:<path> <local_path>' or vice versa"))?;
 
             // Determine direction based on source file existence
@@ -1796,30 +2336,90 @@ pub async fn handle_cp(
         }
     };
 
-    // Get rental status from API which includes SSH credentials
-    let rental_status =
-        api_client
-            .get_rental_status(&rental_id)
-            .await
-            .map_err(|e| -> CliError {
-                let report = match e {
-                    ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
-                        .suggestion("Try 'basilica ps' to see your active rentals"),
-                    _ => eyre!(e).suggestion("Check your internet connection and try again"),
-                };
-                CliError::Internal(report)
-            })?;
+    // Fetch SSH credentials from appropriate source based on rental type
+    // Check both community and secure cloud rentals
+    let spinner = create_spinner("Looking up rental...");
 
-    // Extract SSH credentials from response
-    let ssh_credentials = rental_status.ssh_credentials.ok_or_else(|| {
-        eyre!("SSH credentials not available")
-            .wrap_err(format!(
-                "The rental '{}' was created without SSH access",
-                rental_id
-            ))
-            .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
-            .note("Create a new rental without --no-ssh to enable SSH access")
-    })?;
+    let (community_result, secure_result) = tokio::join!(
+        api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+            status: Some(basilica_sdk::types::RentalState::Active),
+            gpu_type: None,
+            min_gpu_count: None,
+        })),
+        api_client.list_secure_cloud_rentals()
+    );
+
+    complete_spinner_and_clear(spinner);
+
+    let ssh_credentials = if let Ok(community) = community_result {
+        if let Some(_rental) = community.rentals.iter().find(|r| r.rental_id == rental_id) {
+            // Found in community cloud - fetch SSH credentials
+            let rental_status = api_client
+                .get_rental_status(&rental_id)
+                .await
+                .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+            rental_status.ssh_credentials.ok_or_else(|| {
+                CliError::Internal(
+                    eyre!("SSH credentials not available")
+                        .wrap_err(format!(
+                            "The rental '{}' was created without SSH access",
+                            rental_id
+                        ))
+                        .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
+                        .note("Create a new rental without --no-ssh to enable SSH access"),
+                )
+            })?
+        } else if let Ok(secure) = secure_result {
+            // Not in community, check secure cloud
+            if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == rental_id) {
+                rental.ssh_command.clone().ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH command not available")
+                            .wrap_err(format!(
+                                "The rental '{}' does not have SSH access configured",
+                                rental_id
+                            ))
+                            .note("The rental may still be provisioning or SSH may not be enabled"),
+                    )
+                })?
+            } else {
+                return Err(CliError::Internal(
+                    eyre!("Rental '{}' not found", rental_id)
+                        .suggestion("Try 'basilica ps' to see your active rentals"),
+                ));
+            }
+        } else {
+            return Err(CliError::Internal(
+                eyre!("Rental '{}' not found", rental_id)
+                    .suggestion("Try 'basilica ps' to see your active rentals"),
+            ));
+        }
+    } else if let Ok(secure) = secure_result {
+        // Community cloud query failed, check secure cloud only
+        if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == rental_id) {
+            rental.ssh_command.clone().ok_or_else(|| {
+                CliError::Internal(
+                    eyre!("SSH command not available")
+                        .wrap_err(format!(
+                            "The rental '{}' does not have SSH access configured",
+                            rental_id
+                        ))
+                        .note("The rental may still be provisioning or SSH may not be enabled"),
+                )
+            })?
+        } else {
+            return Err(CliError::Internal(
+                eyre!("Rental '{}' not found", rental_id)
+                    .suggestion("Try 'basilica ps' to see your active rentals"),
+            ));
+        }
+    } else {
+        return Err(CliError::Internal(
+            eyre!("Failed to fetch rentals")
+                .suggestion("Check your internet connection and try again"),
+        ));
+    };
 
     // Parse SSH credentials
     let (host, port, username) = parse_ssh_credentials(&ssh_credentials)?;
@@ -1829,17 +2429,50 @@ pub async fn handle_cp(
         username,
     };
 
+    // Fetch API-registered SSH key and find matching private key
+    let private_key_path = {
+        let ssh_key = api_client
+            .get_ssh_key()
+            .await
+            .map_err(|e| CliError::Internal(eyre!(e)))?
+            .ok_or_else(|| {
+                CliError::Internal(
+                    eyre!("No SSH key registered with Basilica")
+                        .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+                        .note("SSH keys are required to connect to rentals"),
+                )
+            })?;
+
+        crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+            .map_err(CliError::Internal)?
+    };
+
+    debug!(
+        "Using private key for file transfer: {}",
+        private_key_path.display()
+    );
+
     // Use SSH client for file transfer
     let ssh_client = SshClient::new(&config.ssh).map_err(|e| eyre!(e))?;
 
     if is_upload {
         ssh_client
-            .upload_file(&ssh_access, &local_path, &remote_path)
+            .upload_file(
+                &ssh_access,
+                &local_path,
+                &remote_path,
+                Some(private_key_path),
+            )
             .await?;
         Ok(())
     } else {
         ssh_client
-            .download_file(&ssh_access, &remote_path, &local_path)
+            .download_file(
+                &ssh_access,
+                &remote_path,
+                &local_path,
+                Some(private_key_path),
+            )
             .await?;
         Ok(())
     }
@@ -1918,6 +2551,26 @@ async fn poll_rental_status(
     }
 }
 
+/// Check if an IP address is private (RFC 1918)
+fn is_private_ip(ip: &str) -> bool {
+    if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+        match addr {
+            std::net::IpAddr::V4(ipv4) => {
+                let octets = ipv4.octets();
+                // 10.0.0.0/8
+                octets[0] == 10 ||
+                // 172.16.0.0/12
+                (octets[0] == 172 && (16..=31).contains(&octets[1])) ||
+                // 192.168.0.0/16
+                (octets[0] == 192 && octets[1] == 168)
+            }
+            std::net::IpAddr::V6(_) => false, // IPv6 private ranges not relevant here
+        }
+    } else {
+        false // If we can't parse it, assume it's not private
+    }
+}
+
 /// Poll secure cloud rental status until it becomes running or timeout
 async fn poll_secure_cloud_rental_status(
     rental_id: &str,
@@ -1949,8 +2602,32 @@ async fn poll_secure_cloud_rental_status(
                 if let Some(rental) = response.rentals.iter().find(|r| r.rental_id == rental_id) {
                     match rental.status.as_str() {
                         "running" => {
-                            complete_spinner_and_clear(spinner);
-                            return Ok(Some(rental.clone()));
+                            // Check if SSH command has a public IP
+                            if let Some(ssh_cmd) = &rental.ssh_command {
+                                // Parse the SSH command to extract the host
+                                if let Ok((host, _, _)) = parse_ssh_credentials(ssh_cmd) {
+                                    if is_private_ip(&host) {
+                                        // Still has private IP, continue polling
+                                        spinner.set_message(format!(
+                                            "Rental running but waiting for public IP... ({}s elapsed)",
+                                            start_time.elapsed().as_secs()
+                                        ));
+                                        // Continue to next iteration
+                                    } else {
+                                        // Has public IP, return success
+                                        complete_spinner_and_clear(spinner);
+                                        return Ok(Some(rental.clone()));
+                                    }
+                                } else {
+                                    // Can't parse SSH command, return anyway
+                                    complete_spinner_and_clear(spinner);
+                                    return Ok(Some(rental.clone()));
+                                }
+                            } else {
+                                // No SSH command yet, return success anyway
+                                complete_spinner_and_clear(spinner);
+                                return Ok(Some(rental.clone()));
+                            }
                         }
                         "error" => {
                             complete_spinner_error(spinner, "Rental failed to start");

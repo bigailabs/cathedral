@@ -260,7 +260,7 @@ pub struct RegisterSshKeyRequest {
     pub public_key: String,
 }
 
-/// SSH key response (without public_key for security)
+/// SSH key response
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SshKeyResponse {
     /// Key identifier
@@ -271,6 +271,9 @@ pub struct SshKeyResponse {
 
     /// Name of the key
     pub name: String,
+
+    /// SSH public key content (needed for local key matching)
+    pub public_key: String,
 
     /// Creation timestamp
     pub created_at: chrono::DateTime<chrono::Utc>,

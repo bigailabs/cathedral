@@ -226,7 +226,7 @@ pub async fn list_secure_cloud_rentals(
                 let final_location_code = location_code.or(db_region);
 
                 // Generate SSH command if IP available
-                let ssh_command = ip_address.as_ref().map(|ip| format!("ssh root@{}", ip));
+                let ssh_command = ip_address.as_ref().map(|ip| format!("ssh ubuntu@{}", ip));
 
                 // Get accumulated cost from billing service
                 let accumulated_cost = cost_map.get(&rental_id).cloned();
@@ -379,7 +379,7 @@ pub async fn start_secure_cloud_rental(
             provider: offering.provider.to_string(),
             status: deployment.status.to_string(),
             ip_address: deployment.ip_address.clone(),
-            ssh_command: deployment.ip_address.map(|ip| format!("ssh root@{}", ip)),
+            ssh_command: deployment.ip_address.map(|ip| format!("ssh ubuntu@{}", ip)),
             hourly_cost,
         }),
     ))

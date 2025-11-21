@@ -23,12 +23,13 @@ pub struct SshKey {
     pub updated_at: DateTime<Utc>,
 }
 
-/// SSH key response (excludes public_key for security)
+/// SSH key response (includes public_key for local key matching)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshKeyResponse {
     pub id: String,
     pub user_id: String,
     pub name: String,
+    pub public_key: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -39,6 +40,7 @@ impl From<SshKey> for SshKeyResponse {
             id: key.id,
             user_id: key.user_id,
             name: key.name,
+            public_key: key.public_key,
             created_at: key.created_at,
             updated_at: key.updated_at,
         }
@@ -192,7 +194,7 @@ pub async fn get_ssh_key(
 
     let row = sqlx::query(
         r#"
-        SELECT id, user_id, name, created_at, updated_at
+        SELECT id, user_id, name, public_key, created_at, updated_at
         FROM ssh_keys
         WHERE user_id = $1
         "#,
@@ -208,6 +210,7 @@ pub async fn get_ssh_key(
         id: r.get("id"),
         user_id: r.get("user_id"),
         name: r.get("name"),
+        public_key: r.get("public_key"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),
     });
