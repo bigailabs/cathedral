@@ -162,6 +162,11 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, p) if p.starts_with("/deployments/") => Some(String::new()),
         (&Method::DELETE, p) if p.starts_with("/deployments/") => Some(String::new()),
 
+        // GPU node registration endpoints - require authentication but no specific scope
+        // All authenticated users should be able to register their own GPU nodes
+        (&Method::POST, "/v1/gpu-nodes/register") => Some(String::new()),
+        (&Method::POST, "/v1/gpu-nodes/revoke") => Some(String::new()),
+
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"
         (&Method::GET, "/health") => Some(String::new()),
@@ -314,6 +319,21 @@ mod tests {
         let req = Request::builder()
             .method(Method::DELETE)
             .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test GPU node registration endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/gpu-nodes/register")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/gpu-nodes/revoke")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));

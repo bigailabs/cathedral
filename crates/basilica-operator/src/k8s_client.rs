@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::crd::basilica_job::BasilicaJob;
+use crate::crd::basilica_node_profile::BasilicaNodeProfile;
 use crate::crd::basilica_queue::BasilicaQueue;
 use crate::crd::gpu_rental::GpuRental;
 use crate::crd::user_deployment::UserDeployment;
@@ -51,6 +52,13 @@ pub trait K8sClient: Send + Sync {
         status: crate::crd::user_deployment::UserDeploymentStatus,
     ) -> Result<()>;
 
+    async fn create_node_profile(
+        &self,
+        ns: &str,
+        obj: &BasilicaNodeProfile,
+    ) -> Result<BasilicaNodeProfile>;
+    async fn get_node_profile(&self, ns: &str, name: &str) -> Result<BasilicaNodeProfile>;
+
     // Core
     async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod>;
     async fn get_pod(&self, ns: &str, name: &str) -> Result<Pod>;
@@ -89,6 +97,7 @@ pub trait K8sClient: Send + Sync {
     async fn cordon_node(&self, name: &str) -> Result<()>;
     async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>>;
     async fn delete_node(&self, name: &str) -> Result<()>;
+    async fn remove_node_taint(&self, name: &str, taint_key: &str) -> Result<()>;
     /// Attempt to evict a pod using the Eviction subresource. Returns Ok(true)
     /// when accepted, Ok(false) when blocked (e.g., by PDB), or Err on errors.
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool>;
@@ -115,6 +124,7 @@ pub struct MockK8sClient {
     job_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaJob>>>>,
     queue_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaQueue>>>>,
     user_deployment_crds: Arc<RwLock<HashMap<String, HashMap<String, UserDeployment>>>>,
+    node_profile_crds: Arc<RwLock<HashMap<String, HashMap<String, BasilicaNodeProfile>>>>,
     deployments: Arc<RwLock<HashMap<String, HashMap<String, Deployment>>>>,
     nodes: Arc<RwLock<HashMap<String, Node>>>,
     evict_block: Arc<RwLock<std::collections::HashSet<String>>>,
@@ -258,6 +268,30 @@ impl K8sClient for MockK8sClient {
             .ok_or_else(|| anyhow!("UserDeployment not found: {}/{}", ns, name))?;
         ud.status = Some(status);
         Ok(())
+    }
+
+    async fn create_node_profile(
+        &self,
+        ns: &str,
+        obj: &BasilicaNodeProfile,
+    ) -> Result<BasilicaNodeProfile> {
+        let name = obj.name_any();
+        if name.is_empty() {
+            return Err(anyhow!("BasilicaNodeProfile missing metadata.name"));
+        }
+        let mut map = self.node_profile_crds.write().await;
+        map.entry(key(ns))
+            .or_default()
+            .insert(name.clone(), obj.clone());
+        Ok(obj.clone())
+    }
+
+    async fn get_node_profile(&self, ns: &str, name: &str) -> Result<BasilicaNodeProfile> {
+        let map = self.node_profile_crds.read().await;
+        map.get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("BasilicaNodeProfile not found: {}/{}", ns, name))
     }
 
     async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod> {
@@ -485,6 +519,18 @@ impl K8sClient for MockK8sClient {
     async fn delete_node(&self, name: &str) -> Result<()> {
         let mut nodes = self.nodes.write().await;
         nodes.remove(name);
+        Ok(())
+    }
+
+    async fn remove_node_taint(&self, name: &str, taint_key: &str) -> Result<()> {
+        let mut nodes = self.nodes.write().await;
+        if let Some(node) = nodes.get_mut(name) {
+            if let Some(spec) = &mut node.spec {
+                if let Some(taints) = &mut spec.taints {
+                    taints.retain(|t| t.key != taint_key);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -723,6 +769,25 @@ impl K8sClient for KubeClient {
             .map_err(|e| anyhow!(e))
     }
 
+    async fn create_node_profile(
+        &self,
+        ns: &str,
+        obj: &BasilicaNodeProfile,
+    ) -> Result<BasilicaNodeProfile> {
+        use kube::api::PostParams;
+        let api: kube::Api<BasilicaNodeProfile> = self.api(ns);
+        match api.create(&PostParams::default(), obj).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(obj.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_node_profile(&self, ns: &str, name: &str) -> Result<BasilicaNodeProfile> {
+        let api: kube::Api<BasilicaNodeProfile> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
     async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod> {
         use kube::api::PostParams;
         let api: kube::Api<Pod> = self.api(ns);
@@ -921,6 +986,39 @@ impl K8sClient for KubeClient {
         use kube::api::{Api, DeleteParams};
         let api: Api<Node> = Api::all(self.client.clone());
         api.delete(name, &DeleteParams::default())
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
+
+    async fn remove_node_taint(&self, name: &str, taint_key: &str) -> Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+        let api: Api<Node> = Api::all(self.client.clone());
+
+        let node = api.get(name).await.map_err(|e| anyhow!(e))?;
+
+        let current_taints: Vec<serde_json::Value> = node
+            .spec
+            .and_then(|s| s.taints)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.key != taint_key)
+            .map(|t| {
+                serde_json::json!({
+                    "key": t.key,
+                    "value": t.value,
+                    "effect": t.effect,
+                })
+            })
+            .collect();
+
+        let patch = serde_json::json!({
+            "spec": {
+                "taints": current_taints
+            }
+        });
+
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await
             .map(|_| ())
             .map_err(|e| anyhow!(e))

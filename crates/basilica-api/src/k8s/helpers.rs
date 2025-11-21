@@ -120,3 +120,157 @@ pub async fn create_reference_grant_for_namespace(
         }
     }
 }
+
+pub fn create_temp_kubeconfig(kubeconfig_content: &str) -> anyhow::Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+
+    let mut temp_file = tempfile::NamedTempFile::new()?;
+    temp_file.write_all(kubeconfig_content.as_bytes())?;
+    temp_file.flush()?;
+    Ok(temp_file)
+}
+
+pub async fn execute_k3s_command_with_kubeconfig(
+    args: &[&str],
+) -> anyhow::Result<std::process::Output> {
+    let mut cmd = tokio::process::Command::new("k3s");
+    cmd.args(args);
+
+    let _temp_kubeconfig;
+    let _temp_data_dir;
+
+    if let Ok(kubeconfig_content) = std::env::var("KUBECONFIG_CONTENT") {
+        _temp_kubeconfig = create_temp_kubeconfig(&kubeconfig_content)?;
+        let kubeconfig_path = _temp_kubeconfig
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Failed to convert kubeconfig path to string"))?;
+        cmd.env("KUBECONFIG", kubeconfig_path);
+
+        _temp_data_dir = tempfile::tempdir()?;
+        cmd.arg("--data-dir").arg(_temp_data_dir.path());
+    } else if let Ok(kubeconfig_path) = std::env::var("KUBECONFIG") {
+        cmd.env("KUBECONFIG", kubeconfig_path);
+
+        _temp_data_dir = tempfile::tempdir()?;
+        cmd.arg("--data-dir").arg(_temp_data_dir.path());
+    } else {
+        return Err(anyhow::anyhow!(
+            "Neither KUBECONFIG_CONTENT nor KUBECONFIG is set"
+        ));
+    }
+
+    cmd.output().await.map_err(Into::into)
+}
+
+pub fn get_k3s_server_url() -> anyhow::Result<String> {
+    std::env::var("K3S_SERVER_URL")
+        .map_err(|_| anyhow::anyhow!("K3S_SERVER_URL environment variable not set"))
+}
+
+pub fn validate_node_id(node_id: &str) -> anyhow::Result<()> {
+    if node_id.is_empty() {
+        return Err(anyhow::anyhow!("node_id cannot be empty"));
+    }
+
+    if node_id.len() > 253 {
+        return Err(anyhow::anyhow!("node_id cannot exceed 253 characters"));
+    }
+
+    if !node_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err(anyhow::anyhow!(
+            "node_id must be DNS-1123 compliant (alphanumeric, '-', or '.')"
+        ));
+    }
+
+    if node_id.starts_with('-') || node_id.ends_with('-') {
+        return Err(anyhow::anyhow!("node_id cannot start or end with '-'"));
+    }
+
+    Ok(())
+}
+
+pub struct NodeLabelParams<'a> {
+    pub node_id: &'a str,
+    pub datacenter_id: &'a str,
+    pub gpu_model: &'a str,
+    pub gpu_count: u32,
+    pub gpu_memory_gb: u32,
+    pub driver_version: &'a str,
+    pub cuda_version: &'a str,
+}
+
+fn sanitize_label_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+pub fn build_node_labels(params: NodeLabelParams) -> std::collections::HashMap<String, String> {
+    let mut labels = std::collections::HashMap::new();
+    labels.insert("basilica.ai/node-type".to_string(), "gpu".to_string());
+    labels.insert(
+        "basilica.ai/datacenter".to_string(),
+        sanitize_label_value(params.datacenter_id),
+    );
+    labels.insert(
+        "basilica.ai/node-id".to_string(),
+        params.node_id.to_string(),
+    );
+    labels.insert(
+        "basilica.ai/gpu-model".to_string(),
+        sanitize_label_value(params.gpu_model),
+    );
+    labels.insert(
+        "basilica.ai/gpu-count".to_string(),
+        params.gpu_count.to_string(),
+    );
+    labels.insert(
+        "basilica.ai/gpu-memory-gb".to_string(),
+        params.gpu_memory_gb.to_string(),
+    );
+    labels.insert(
+        "basilica.ai/driver-version".to_string(),
+        params.driver_version.to_string(),
+    );
+    labels.insert(
+        "basilica.ai/cuda-version".to_string(),
+        params.cuda_version.to_string(),
+    );
+    labels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_label_value_with_pipe() {
+        assert_eq!(sanitize_label_value("github|434149"), "github-434149");
+    }
+
+    #[test]
+    fn test_sanitize_label_value_valid_chars() {
+        assert_eq!(sanitize_label_value("abc-123_xyz.456"), "abc-123_xyz.456");
+    }
+
+    #[test]
+    fn test_sanitize_label_value_multiple_invalid() {
+        assert_eq!(sanitize_label_value("test@value#123"), "test-value-123");
+    }
+
+    #[test]
+    fn test_sanitize_label_value_spaces() {
+        assert_eq!(sanitize_label_value("NVIDIA RTX A4000"), "NVIDIA-RTX-A4000");
+    }
+}

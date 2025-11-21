@@ -543,6 +543,7 @@ mod tests {
             metrics: None,
             aggregator_service,
             pricing_config: crate::config::PricingConfig::default(),
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         }
     }
 
@@ -584,6 +585,7 @@ mod tests {
             metrics: None,
             aggregator_service,
             pricing_config: crate::config::PricingConfig::default(),
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
             user_id: "alice".into(),
@@ -692,6 +694,7 @@ mod tests {
             metrics: None,
             aggregator_service,
             pricing_config: crate::config::PricingConfig::default(),
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
             user_id: "bob".into(),
@@ -786,6 +789,7 @@ mod tests {
             metrics: None,
             aggregator_service,
             pricing_config: crate::config::PricingConfig::default(),
+            ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
             user_id: "bob".into(),

@@ -107,6 +107,22 @@
         dest: /opt/basilica/
         mode: '0644'
 
+    - name: Copy RBAC validation script to server
+      ansible.builtin.copy:
+        src: "{{ repo_root_final }}/orchestrator/ansible/scripts/validate-rbac-prerequisites.sh"
+        dest: /opt/basilica/validate-rbac-prerequisites.sh
+        mode: '0755'
+
+    - name: Validate RBAC prerequisites for bootstrap token support
+      ansible.builtin.command: /opt/basilica/validate-rbac-prerequisites.sh
+      register: rbac_validation
+      changed_when: false
+      failed_when: rbac_validation.rc != 0
+
+    - name: Display RBAC validation results
+      ansible.builtin.debug:
+        var: rbac_validation.stdout_lines
+
     - name: Apply namespaces and RBAC
       ansible.builtin.shell: |
         set -euo pipefail
@@ -115,6 +131,11 @@
         sed "s/TENANT_NAMESPACE/{{ tenant_namespace | default('basilica-system') }}/g" /opt/basilica/k8s/core/rbac/operator-tenant-role.yaml | kubectl apply -f -
       args:
         executable: /bin/bash
+      changed_when: true
+      run_once: true
+
+    - name: Apply bootstrap token RBAC (requires validated prerequisites)
+      ansible.builtin.command: kubectl apply -f /opt/basilica/k8s/core/rbac/bootstrap-token-rbac.yaml
       changed_when: true
       run_once: true
 

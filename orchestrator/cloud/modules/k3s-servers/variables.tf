@@ -58,6 +58,11 @@ variable "allowed_ssh_cidr_blocks" {
   description = "CIDR blocks allowed to SSH"
 }
 
+variable "allowed_k8s_api_cidr_blocks" {
+  type        = list(string)
+  description = "CIDR blocks allowed to access K3s API server (port 6443)"
+}
+
 variable "vpc_cidr" {
   type        = string
   description = "VPC CIDR block for internal communication"

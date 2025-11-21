@@ -100,6 +100,46 @@ pub enum ApiError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// SSH connection failed
+    #[error("SSH connection failed to {0}: {1}")]
+    SshConnectionFailed(String, String),
+
+    /// SSH command failed
+    #[error("SSH command failed: {0}")]
+    SshCommandFailed(String),
+
+    /// SSH command timeout
+    #[error("SSH command timeout")]
+    SshCommandTimeout,
+
+    /// K3s token creation failed
+    #[error("K3s token creation failed (exit code {exit_code}): {stderr}")]
+    K3sTokenCreationFailed { stderr: String, exit_code: u32 },
+
+    /// K3s token deletion failed
+    #[error("K3s token deletion failed (exit code {exit_code}): {stderr}")]
+    K3sTokenDeletionFailed { stderr: String, exit_code: u32 },
+
+    /// All K3s servers unavailable
+    #[error("All K3s servers unavailable")]
+    NoK3sServersAvailable,
+
+    /// Invalid TTL format
+    #[error("Invalid TTL format: {0} (must be \\d+(h|m|s))")]
+    InvalidTtlFormat(String),
+
+    /// Invalid description
+    #[error("Invalid description: {0}")]
+    InvalidDescription(String),
+
+    /// Invalid token format
+    #[error("Invalid token format")]
+    InvalidTokenFormat,
+
+    /// Invalid token ID
+    #[error("Invalid token ID")]
+    InvalidTokenId,
+
     /// Other errors
     #[error("{0}")]
     Other(#[from] anyhow::Error),
@@ -135,6 +175,16 @@ impl ApiError {
             ApiError::Conflict { .. } => "BASILICA_API_CONFLICT",
             ApiError::ConfigMapSizeLimitExceeded { .. } => "BASILICA_API_CONFIGMAP_SIZE_LIMIT",
             ApiError::Serialization(_) => "BASILICA_API_SERIALIZATION_ERROR",
+            ApiError::SshConnectionFailed(_, _) => "BASILICA_API_SSH_CONNECTION_FAILED",
+            ApiError::SshCommandFailed(_) => "BASILICA_API_SSH_COMMAND_FAILED",
+            ApiError::SshCommandTimeout => "BASILICA_API_SSH_TIMEOUT",
+            ApiError::K3sTokenCreationFailed { .. } => "BASILICA_API_K3S_TOKEN_CREATE_FAILED",
+            ApiError::K3sTokenDeletionFailed { .. } => "BASILICA_API_K3S_TOKEN_DELETE_FAILED",
+            ApiError::NoK3sServersAvailable => "BASILICA_API_NO_K3S_SERVERS",
+            ApiError::InvalidTtlFormat(_) => "BASILICA_API_INVALID_TTL",
+            ApiError::InvalidDescription(_) => "BASILICA_API_INVALID_DESCRIPTION",
+            ApiError::InvalidTokenFormat => "BASILICA_API_INVALID_TOKEN_FORMAT",
+            ApiError::InvalidTokenId => "BASILICA_API_INVALID_TOKEN_ID",
             ApiError::Other(_) => "BASILICA_API_OTHER_ERROR",
         }
     }
@@ -147,6 +197,9 @@ impl ApiError {
                 | ApiError::ValidatorCommunication { .. }
                 | ApiError::Timeout
                 | ApiError::ServiceUnavailable
+                | ApiError::SshConnectionFailed(_, _)
+                | ApiError::SshCommandTimeout
+                | ApiError::NoK3sServersAvailable
         )
     }
 
@@ -162,6 +215,10 @@ impl ApiError {
                 | ApiError::NotFound { .. }
                 | ApiError::BadRequest { .. }
                 | ApiError::Conflict { .. }
+                | ApiError::InvalidTtlFormat(_)
+                | ApiError::InvalidDescription(_)
+                | ApiError::InvalidTokenFormat
+                | ApiError::InvalidTokenId
         )
     }
 }
@@ -205,6 +262,22 @@ impl IntoResponse for ApiError {
                 (StatusCode::INSUFFICIENT_STORAGE, self.to_string())
             }
             ApiError::Serialization(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            ApiError::SshConnectionFailed(_, _) => {
+                (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
+            }
+            ApiError::SshCommandFailed(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            ApiError::SshCommandTimeout => (StatusCode::GATEWAY_TIMEOUT, self.to_string()),
+            ApiError::K3sTokenCreationFailed { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
+            ApiError::K3sTokenDeletionFailed { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
+            ApiError::NoK3sServersAvailable => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
+            ApiError::InvalidTtlFormat(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            ApiError::InvalidDescription(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            ApiError::InvalidTokenFormat => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            ApiError::InvalidTokenId => (StatusCode::BAD_REQUEST, self.to_string()),
             ApiError::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 

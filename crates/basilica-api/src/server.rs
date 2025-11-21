@@ -27,6 +27,8 @@ use tracing::{info, warn};
 pub struct Server {
     config: Arc<Config>,
     app: Router,
+    cancel_token: tokio_util::sync::CancellationToken,
+    background_tasks: Option<tokio::task::JoinSet<()>>,
 }
 
 /// Shared application state
@@ -73,6 +75,9 @@ pub struct AppState {
 
     /// Pricing configuration (marketplace markups)
     pub pricing_config: crate::config::PricingConfig,
+
+    /// SSH client for K3s token generation
+    pub ssh_client: Arc<crate::ssh::K3sSshClient>,
 }
 
 /// Process health check for a single rental
@@ -444,6 +449,50 @@ impl Server {
             None
         };
 
+        // Write SSH private key to disk if provided via environment variable
+        if let Ok(ssh_key_content) = std::env::var("SSH_PRIVATE_KEY") {
+            let key_dir = std::path::PathBuf::from("/tmp/.ssh");
+            let key_path = key_dir.join("k3s_key");
+
+            std::fs::create_dir_all(&key_dir).map_err(|e| ApiError::Internal {
+                message: format!("Failed to create SSH key directory: {}", e),
+            })?;
+
+            std::fs::write(&key_path, ssh_key_content).map_err(|e| ApiError::Internal {
+                message: format!("Failed to write SSH key: {}", e),
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| ApiError::Internal {
+                        message: format!("Failed to set SSH key permissions: {}", e),
+                    })?;
+            }
+
+            info!("SSH private key written to {}", key_path.display());
+        }
+
+        // Initialize SSH client for K3s token generation
+        let ssh_client = Arc::new(
+            crate::ssh::K3sSshClient::new(&config.k3s_ssh)
+                .map_err(|e| {
+                    warn!(
+                        "Failed to initialize SSH client: {}. SSH token creation will be disabled.",
+                        e
+                    );
+                    e
+                })
+                .unwrap_or_else(|_| crate::ssh::K3sSshClient::disabled()),
+        );
+
+        if ssh_client.is_enabled() {
+            info!("SSH client initialized for K3s token generation");
+        } else {
+            info!("SSH token generation is disabled");
+        }
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -460,6 +509,7 @@ impl Server {
             metrics,
             aggregator_service,
             pricing_config: config.pricing.clone(),
+            ssh_client,
         };
 
         // TODO: Re-enable validator health checks before merging - temporarily disabled for development
@@ -631,10 +681,46 @@ impl Server {
             health_check_interval.as_secs()
         );
 
-        // Build the application router
-        let app = Self::build_router(state)?;
+        // Start node token cleanup task
+        let cleanup_db = state.db.clone();
+        let cleanup_interval = config.node_token_cleanup_interval();
 
-        Ok(Self { config, app })
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            loop {
+                interval.tick().await;
+
+                match crate::k8s::cleanup_expired_cluster_tokens(&cleanup_db).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("Node token cleanup: removed {} expired tokens", count);
+                    }
+                    Ok(_) => {
+                        tracing::debug!("Node token cleanup: no expired tokens found");
+                    }
+                    Err(e) => {
+                        tracing::error!("Node token cleanup failed: {}", e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started node token cleanup task (interval: {} seconds)",
+            cleanup_interval.as_secs()
+        );
+
+        // Build the application router
+        let app = Self::build_router(state.clone())?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let background_tasks = tokio::task::JoinSet::new();
+
+        Ok(Self {
+            config,
+            app,
+            cancel_token,
+            background_tasks: Some(background_tasks),
+        })
     }
 
     /// Build the application router with all routes and middleware
@@ -658,7 +744,7 @@ impl Server {
     }
 
     /// Run the server until shutdown signal
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         let addr = self.config.server.bind_address;
 
         info!("Starting HTTP server on {}", addr);
@@ -672,12 +758,28 @@ impl Server {
 
         info!("Basilica API Gateway listening on {}", addr);
 
+        let cancel_token = self.cancel_token.clone();
+        let shutdown_signal = async move {
+            shutdown_signal().await;
+            cancel_token.cancel();
+        };
+
         axum::serve(listener, self.app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|e| ApiError::Internal {
                 message: format!("Server error: {e}"),
             })?;
+
+        if let Some(mut tasks) = self.background_tasks.take() {
+            info!("Waiting for background tasks to complete");
+            while let Some(result) = tasks.join_next().await {
+                if let Err(e) = result {
+                    tracing::error!("Background task error: {}", e);
+                }
+            }
+            info!("All background tasks completed");
+        }
 
         Ok(())
     }

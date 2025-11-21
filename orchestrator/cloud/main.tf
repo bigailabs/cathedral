@@ -86,19 +86,20 @@ module "deployments_alb" {
 module "k3s_servers" {
   source = "./modules/k3s-servers"
 
-  name_prefix             = local.name_prefix
-  vpc_id                  = module.networking.vpc_id
-  vpc_cidr                = module.networking.vpc_cidr
-  subnet_ids              = module.networking.public_subnet_ids
-  ssh_key_name            = var.ssh_key_name == "" ? aws_key_pair.k3s[0].key_name : var.ssh_key_name
-  instance_type           = local.workspace_config.k3s_server_instance_type
-  server_count            = local.workspace_config.k3s_server_count
-  root_volume_size        = local.workspace_config.k3s_server_root_volume_size
-  ubuntu_ami_id           = data.aws_ami.ubuntu.id
-  allowed_ssh_cidr_blocks = var.allowed_ssh_cidr_blocks
-  nlb_dns_name            = module.k3s_nlb.nlb_dns_name
-  peer_vpc_cidr           = var.peer_vpc_cidr
-  alb_security_group_id   = module.deployments_alb.alb_security_group_id
+  name_prefix                  = local.name_prefix
+  vpc_id                       = module.networking.vpc_id
+  vpc_cidr                     = module.networking.vpc_cidr
+  subnet_ids                   = module.networking.public_subnet_ids
+  ssh_key_name                 = var.ssh_key_name == "" ? aws_key_pair.k3s[0].key_name : var.ssh_key_name
+  instance_type                = local.workspace_config.k3s_server_instance_type
+  server_count                 = local.workspace_config.k3s_server_count
+  root_volume_size             = local.workspace_config.k3s_server_root_volume_size
+  ubuntu_ami_id                = data.aws_ami.ubuntu.id
+  allowed_ssh_cidr_blocks      = var.allowed_ssh_cidr_blocks
+  allowed_k8s_api_cidr_blocks  = var.allowed_k8s_api_cidr_blocks
+  nlb_dns_name                 = module.k3s_nlb.nlb_dns_name
+  peer_vpc_cidr                = var.peer_vpc_cidr
+  alb_security_group_id        = module.deployments_alb.alb_security_group_id
 
   tags = local.common_tags
 
@@ -153,7 +154,7 @@ module "vpc_peering" {
   name_prefix         = local.name_prefix
   vpc_id              = module.networking.vpc_id
   vpc_cidr            = module.networking.vpc_cidr
-  k3s_route_table_id  = module.networking.private_route_table_id
+  k3s_route_table_id  = module.networking.public_route_table_id
   peer_vpc_id         = var.peer_vpc_id
   peer_vpc_cidr       = var.peer_vpc_cidr
   peer_route_table_id = var.peer_route_table_id
