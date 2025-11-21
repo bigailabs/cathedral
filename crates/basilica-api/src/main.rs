@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
 
     // Initialize logging using the unified system
     let binary_name = env!("CARGO_BIN_NAME").replace("-", "_");
-    let default_filter = format!("{}=info", binary_name);
+    let default_filter = format!("{}=info,basilica_aggregator=debug", binary_name);
     basilica_common::logging::init_logging(&args.verbosity, &binary_name, &default_filter)?;
 
     // Install Prometheus metrics recorder and expose /metrics on a separate listener

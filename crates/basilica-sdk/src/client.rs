@@ -47,7 +47,8 @@ use crate::{
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
         DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
         ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
-        PackagesResponse, RentalStatusWithSshResponse, RentalUsageResponse, UsageHistoryResponse,
+        PackagesResponse, RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
+        SshKeyResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -232,6 +233,35 @@ impl BasilicaClient {
         }
     }
 
+    // ===== SSH Key Management =====
+
+    /// Register a new SSH key for the authenticated user (requires JWT authentication)
+    /// Only one SSH key per user is allowed.
+    pub async fn register_ssh_key(&self, name: &str, public_key: &str) -> Result<SshKeyResponse> {
+        let request = RegisterSshKeyRequest {
+            name: name.to_string(),
+            public_key: public_key.to_string(),
+        };
+        self.post("/ssh-keys", &request).await
+    }
+
+    /// Get the authenticated user's SSH key (requires JWT authentication)
+    /// Returns None if no SSH key is registered.
+    pub async fn get_ssh_key(&self) -> Result<Option<SshKeyResponse>> {
+        self.get("/ssh-keys").await
+    }
+
+    /// Delete the authenticated user's SSH key (requires JWT authentication)
+    /// Also removes the key from all cloud providers.
+    pub async fn delete_ssh_key(&self) -> Result<()> {
+        let response = self.delete_empty("/ssh-keys").await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            self.handle_error_response(response).await
+        }
+    }
+
     // ===== Jobs API =====
 
     /// Create a new job
@@ -358,6 +388,65 @@ impl BasilicaClient {
     pub async fn get_rental_usage(&self, rental_id: &str) -> Result<RentalUsageResponse> {
         let path = format!("/billing/usage/{}", rental_id);
         self.get(&path).await
+    }
+
+    // ===== Secure Cloud (GPU Aggregator) =====
+
+    /// List secure cloud GPU offerings from datacenter providers
+    /// Returns GPUs available from providers like DataCrunch, Hyperstack, Lambda Labs, etc.
+    pub async fn list_secure_cloud_gpus(&self) -> Result<Vec<crate::types::GpuOffering>> {
+        let response: crate::types::ListSecureCloudGpusResponse = self
+            .get("/secure-cloud/gpu-prices?available_only=true")
+            .await?;
+        Ok(response.nodes)
+    }
+
+    /// List secure cloud rentals for the authenticated user
+    ///
+    /// Returns all secure cloud (datacenter) rentals including their GPU details,
+    /// status, IP addresses, and cost information.
+    pub async fn list_secure_cloud_rentals(
+        &self,
+    ) -> Result<crate::types::ListSecureCloudRentalsResponse> {
+        self.get("/secure-cloud/rentals").await
+    }
+
+    /// Start a secure cloud rental
+    ///
+    /// Deploys a GPU instance via datacenter provider (DataCrunch, Hyperstack, etc.)
+    /// and registers it with the billing service for incremental charging.
+    pub async fn start_secure_cloud_rental(
+        &self,
+        request: crate::types::StartSecureCloudRentalRequest,
+    ) -> Result<crate::types::SecureCloudRentalResponse> {
+        self.post("/secure-cloud/rentals/start", &request).await
+    }
+
+    /// Stop a secure cloud rental
+    ///
+    /// Terminates the provider instance, finalizes billing, and returns the total cost.
+    pub async fn stop_secure_cloud_rental(
+        &self,
+        rental_id: &str,
+    ) -> Result<crate::types::StopSecureCloudRentalResponse> {
+        let path = format!("/secure-cloud/rentals/{}/stop", rental_id);
+        self.post(&path, &serde_json::json!({})).await
+    }
+
+    // ===== SSH Key Management =====
+
+    /// Get the authenticated user's registered SSH key
+    ///
+    /// Returns None if no SSH key is registered yet.
+    pub async fn get_user_ssh_key(&self) -> Result<Option<crate::types::SshKeyResponse>> {
+        match self
+            .get::<Option<crate::types::SshKeyResponse>>("/ssh-keys")
+            .await
+        {
+            Ok(Some(key)) => Ok(Some(key)),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     // ===== Deployment Management Methods =====

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// Rental health check interval in seconds
-const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
+const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 
 /// Node token cleanup interval in seconds
 const NODE_TOKEN_CLEANUP_INTERVAL_SECS: u64 = 3600;
@@ -128,6 +128,72 @@ impl Default for BillingServiceConfig {
     }
 }
 
+/// GPU Aggregator configuration (for secure cloud)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregatorConfig {
+    /// Cache TTL for GPU offerings in seconds
+    #[serde(default = "default_aggregator_ttl")]
+    pub ttl_seconds: u64,
+
+    /// GPU provider configurations
+    pub providers: AggregatorProvidersConfig,
+}
+
+fn default_aggregator_ttl() -> u64 {
+    45
+}
+
+impl Default for AggregatorConfig {
+    fn default() -> Self {
+        Self {
+            ttl_seconds: default_aggregator_ttl(),
+            providers: AggregatorProvidersConfig::default(),
+        }
+    }
+}
+
+/// GPU providers configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AggregatorProvidersConfig {
+    #[serde(default)]
+    pub datacrunch: basilica_aggregator::config::ProviderConfig,
+    #[serde(default)]
+    pub hyperstack: basilica_aggregator::config::ProviderConfig,
+    #[serde(default)]
+    pub lambda: basilica_aggregator::config::ProviderConfig,
+    #[serde(default)]
+    pub hydrahost: basilica_aggregator::config::ProviderConfig,
+}
+
+/// Pricing configuration for marketplace markups
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PricingConfig {
+    /// Markup percentage for community cloud rentals
+    #[serde(default = "default_community_markup")]
+    pub community_markup_percent: f64,
+
+    /// Markup percentage for secure cloud rentals
+    #[serde(default = "default_secure_cloud_markup")]
+    pub secure_cloud_markup_percent: f64,
+}
+
+fn default_community_markup() -> f64 {
+    10.0
+}
+
+fn default_secure_cloud_markup() -> f64 {
+    10.0
+}
+
+impl Default for PricingConfig {
+    fn default() -> Self {
+        Self {
+            community_markup_percent: default_community_markup(),
+            secure_cloud_markup_percent: default_secure_cloud_markup(),
+        }
+    }
+}
+
 /// Main configuration structure for the Basilica API
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
@@ -167,6 +233,14 @@ pub struct Config {
     /// Metrics configuration
     #[serde(default)]
     pub metrics: MetricsConfig,
+
+    /// GPU Aggregator configuration (secure cloud)
+    #[serde(default)]
+    pub aggregator: AggregatorConfig,
+
+    /// Pricing configuration (marketplace markups)
+    #[serde(default)]
+    pub pricing: PricingConfig,
 
     /// K3s SSH configuration for token generation
     #[serde(default)]
@@ -251,6 +325,28 @@ impl Config {
             weight_interval_secs: 300, // 5 minutes default
             read_only: true,           // API only needs read-only access for metagraph queries
             ..Default::default()
+        }
+    }
+
+    /// Create aggregator config from API config
+    pub fn to_aggregator_config(&self) -> basilica_aggregator::AggregatorConfig {
+        basilica_aggregator::AggregatorConfig {
+            server: basilica_aggregator::config::ServerConfig {
+                host: "0.0.0.0".to_string(), // Not used when embedded in API
+                port: 0,                     // Not used when embedded in API
+            },
+            cache: basilica_aggregator::config::CacheConfig {
+                ttl_seconds: self.aggregator.ttl_seconds,
+            },
+            providers: basilica_aggregator::config::ProvidersConfig {
+                datacrunch: self.aggregator.providers.datacrunch.clone(),
+                hyperstack: self.aggregator.providers.hyperstack.clone(),
+                lambda: self.aggregator.providers.lambda.clone(),
+                hydrahost: self.aggregator.providers.hydrahost.clone(),
+            },
+            database: basilica_aggregator::config::DatabaseConfig {
+                path: self.database.url.clone(), // Uses PostgreSQL URL from API config
+            },
         }
     }
 }

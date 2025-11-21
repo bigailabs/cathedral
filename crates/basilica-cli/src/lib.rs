@@ -25,6 +25,7 @@ pub mod interactive;
 pub mod output;
 pub mod progress;
 pub mod ssh;
+pub mod types;
 pub mod update_check;
 
 pub use cli::*;

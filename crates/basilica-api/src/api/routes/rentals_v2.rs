@@ -509,6 +509,18 @@ mod tests {
 
     async fn build_state() -> AppState {
         let client = crate::k8s_client::MockK8sClient::default();
+
+        // Create a dummy aggregator service for tests
+        let aggregator_pool =
+            sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/aggregator_db")
+                .expect("lazy PG pool dsn should be valid");
+        let aggregator_db = Arc::new(basilica_aggregator::Database::from_pool(aggregator_pool));
+        let aggregator_config = basilica_aggregator::AggregatorConfig::default_for_tests();
+        let aggregator_service = Arc::new(
+            basilica_aggregator::AggregatorService::new(aggregator_db, aggregator_config)
+                .expect("Failed to create aggregator service"),
+        );
+
         AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
             validator_client: std::sync::Arc::new(
@@ -529,6 +541,8 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            aggregator_service,
+            pricing_config: crate::config::PricingConfig::default(),
             ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         }
     }
@@ -537,6 +551,18 @@ mod tests {
     async fn compat_create_maps_legacy_request() {
         // Build explicit state with a shared MockK8sClient so we can inspect the captured spec
         let client = crate::k8s_client::MockK8sClient::default();
+
+        // Create a dummy aggregator service for tests
+        let aggregator_pool =
+            sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/aggregator_db")
+                .expect("lazy PG pool dsn should be valid");
+        let aggregator_db = Arc::new(basilica_aggregator::Database::from_pool(aggregator_pool));
+        let aggregator_config = basilica_aggregator::AggregatorConfig::default_for_tests();
+        let aggregator_service = Arc::new(
+            basilica_aggregator::AggregatorService::new(aggregator_db, aggregator_config)
+                .expect("Failed to create aggregator service"),
+        );
+
         let state = AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
             validator_client: std::sync::Arc::new(
@@ -557,6 +583,8 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            aggregator_service,
+            pricing_config: crate::config::PricingConfig::default(),
             ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
@@ -632,6 +660,18 @@ mod tests {
     async fn v2_rental_logs_tail() {
         // Arrange state and create a rental
         let client = crate::k8s_client::MockK8sClient::default();
+
+        // Create a dummy aggregator service for tests
+        let aggregator_pool =
+            sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/aggregator_db")
+                .expect("lazy PG pool dsn should be valid");
+        let aggregator_db = Arc::new(basilica_aggregator::Database::from_pool(aggregator_pool));
+        let aggregator_config = basilica_aggregator::AggregatorConfig::default_for_tests();
+        let aggregator_service = Arc::new(
+            basilica_aggregator::AggregatorService::new(aggregator_db, aggregator_config)
+                .expect("Failed to create aggregator service"),
+        );
+
         let state = AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
             validator_client: std::sync::Arc::new(
@@ -652,6 +692,8 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            aggregator_service,
+            pricing_config: crate::config::PricingConfig::default(),
             ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {
@@ -713,6 +755,18 @@ mod tests {
 
         // Arrange state and create a rental
         let client = crate::k8s_client::MockK8sClient::default();
+
+        // Create a dummy aggregator service for tests
+        let aggregator_pool =
+            sqlx::PgPool::connect_lazy("postgres://user:pass@localhost/aggregator_db")
+                .expect("lazy PG pool dsn should be valid");
+        let aggregator_db = Arc::new(basilica_aggregator::Database::from_pool(aggregator_pool));
+        let aggregator_config = basilica_aggregator::AggregatorConfig::default_for_tests();
+        let aggregator_service = Arc::new(
+            basilica_aggregator::AggregatorService::new(aggregator_db, aggregator_config)
+                .expect("Failed to create aggregator service"),
+        );
+
         let state = AppState {
             config: std::sync::Arc::new(crate::config::Config::default()),
             validator_client: std::sync::Arc::new(
@@ -733,6 +787,8 @@ mod tests {
             billing_client: None,
             dns_provider: None,
             metrics: None,
+            aggregator_service,
+            pricing_config: crate::config::PricingConfig::default(),
             ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         };
         let auth = AuthContext {

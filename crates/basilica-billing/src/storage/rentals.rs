@@ -1,5 +1,5 @@
 use crate::domain::{
-    rentals::{Rental, RentalStatistics},
+    rentals::{Rental, RentalStatistics, SecureCloudRental},
     types::{
         CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
         UserId,
@@ -10,16 +10,21 @@ use crate::storage::rds::RdsConnection;
 use async_trait::async_trait;
 use sqlx::{Postgres, Row, Transaction};
 use std::sync::Arc;
-use tracing::warn;
 
 #[async_trait]
 pub trait RentalRepository: Send + Sync {
+    // Community cloud rental methods
     async fn create_rental(&self, rental: &Rental) -> Result<()>;
     async fn get_rental(&self, id: &RentalId) -> Result<Option<Rental>>;
     async fn update_rental(&self, rental: &Rental) -> Result<()>;
     async fn get_active_rentals(&self, user_id: Option<&UserId>) -> Result<Vec<Rental>>;
     async fn get_rentals_by_state(&self, state: RentalState) -> Result<Vec<Rental>>;
     async fn get_rental_statistics(&self, user_id: Option<&UserId>) -> Result<RentalStatistics>;
+
+    // Secure cloud rental methods
+    async fn create_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()>;
+    async fn get_secure_cloud_rental(&self, id: &RentalId) -> Result<Option<SecureCloudRental>>;
+    async fn update_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()>;
 }
 
 pub struct SqlRentalRepository {
@@ -47,6 +52,66 @@ impl SqlRentalRepository {
         }
     }
 
+    fn secure_cloud_rental_from_row(r: &sqlx::postgres::PgRow) -> SecureCloudRental {
+        let status_str: String = r.get("status");
+        let state = Self::parse_rental_state(&status_str);
+
+        let resource_spec: ResourceSpec =
+            serde_json::from_value(r.get("resource_spec")).unwrap_or(ResourceSpec {
+                gpu_specs: vec![],
+                cpu_cores: 0,
+                memory_gb: 0,
+                storage_gb: 0,
+                disk_iops: 0,
+                network_bandwidth_mbps: 0,
+            });
+
+        let base_price_per_gpu = r
+            .get::<Option<rust_decimal::Decimal>, _>("base_price_per_gpu")
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+
+        let gpu_count = r.get::<Option<i32>, _>("gpu_count").unwrap_or(1) as u32;
+
+        SecureCloudRental {
+            id: RentalId::from_uuid(r.get("rental_id")),
+            user_id: UserId::new(r.get("user_id")),
+            provider: r.get("provider"),
+            provider_instance_id: r.get("provider_instance_id"),
+            offering_id: r.get("offering_id"),
+            state,
+            resource_spec,
+            usage_metrics: UsageMetrics::zero(),
+            cost_breakdown: {
+                let hourly_rate = r.get::<rust_decimal::Decimal, _>("hourly_rate");
+                let total_cost = r
+                    .get::<Option<rust_decimal::Decimal>, _>("total_cost")
+                    .unwrap_or(rust_decimal::Decimal::ZERO);
+                CostBreakdown {
+                    base_cost: CreditBalance::from_decimal(hourly_rate),
+                    usage_cost: CreditBalance::zero(),
+                    volume_discount: CreditBalance::zero(),
+                    discounts: CreditBalance::zero(),
+                    overage_charges: CreditBalance::zero(),
+                    total_cost: CreditBalance::from_decimal(total_cost),
+                }
+            },
+            started_at: r.get("start_time"),
+            updated_at: r.get("updated_at"),
+            ended_at: r.get("end_time"),
+            metadata: serde_json::from_value(r.get("metadata")).unwrap_or_default(),
+            created_at: r.get("created_at"),
+            last_updated: r.get("updated_at"),
+            actual_start_time: Some(r.get("start_time")),
+            actual_end_time: r.get("end_time"),
+            actual_cost: r
+                .get::<Option<rust_decimal::Decimal>, _>("total_cost")
+                .map(CreditBalance::from_decimal)
+                .unwrap_or_else(CreditBalance::zero),
+            base_price_per_gpu,
+            gpu_count,
+        }
+    }
+
     fn rental_from_row(r: &sqlx::postgres::PgRow) -> Rental {
         let status_str: String = r.get("status");
         let state = Self::parse_rental_state(&status_str);
@@ -61,27 +126,15 @@ impl SqlRentalRepository {
                 network_bandwidth_mbps: 0,
             });
 
-        let package_id = match r.get::<Option<String>, _>("package_id") {
-            Some(pkg_id) => PackageId::new(pkg_id),
-            None => {
-                let rental_id: uuid::Uuid = r.get("rental_id");
-                if !resource_spec.gpu_specs.is_empty() {
-                    let gpu_model = &resource_spec.gpu_specs[0].model;
-                    let inferred_pkg = PackageId::from_gpu_model(gpu_model);
-                    warn!(
-                        "Rental {} has NULL package_id, inferring '{}' from GPU model '{}'",
-                        rental_id, inferred_pkg, gpu_model
-                    );
-                    inferred_pkg
-                } else {
-                    warn!(
-                        "Rental {} has NULL package_id and no GPU specs, defaulting to 'h100'",
-                        rental_id
-                    );
-                    PackageId::h100()
-                }
-            }
-        };
+        // Package ID is now optional (legacy field)
+        let package_id = r.get::<Option<String>, _>("package_id").map(PackageId::new);
+
+        // Read marketplace pricing fields (with defaults for legacy rentals)
+        let base_price_per_gpu = r
+            .get::<Option<rust_decimal::Decimal>, _>("base_price_per_gpu")
+            .unwrap_or(rust_decimal::Decimal::ZERO);
+
+        let gpu_count = r.get::<Option<i32>, _>("gpu_count").unwrap_or(1) as u32;
 
         Rental {
             id: RentalId::from_uuid(r.get("rental_id")),
@@ -120,6 +173,9 @@ impl SqlRentalRepository {
                 .get::<Option<rust_decimal::Decimal>, _>("total_cost")
                 .map(CreditBalance::from_decimal)
                 .unwrap_or_else(CreditBalance::zero),
+            // Marketplace-2-compute fields
+            base_price_per_gpu,
+            gpu_count,
         }
     }
 }
@@ -135,8 +191,9 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             INSERT INTO billing.rentals
             (rental_id, user_id, node_id, validator_id, package_id, status,
-             resource_spec, hourly_rate, start_time, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             resource_spec, hourly_rate, start_time, metadata,
+             base_price_per_gpu, gpu_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -147,12 +204,15 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             Some(&rental.validator_id)
         })
-        .bind(Some(rental.package_id.as_str()))
+        .bind(rental.package_id.as_ref().map(|p| p.as_str())) // Now optional
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
         .bind(hourly_rate)
         .bind(rental.started_at)
         .bind(metadata_json)
+        // Marketplace-2-compute pricing fields
+        .bind(rental.base_price_per_gpu)
+        .bind(rental.gpu_count as i32)
         .execute(self.connection.pool())
         .await
         .map_err(|e| BillingError::DatabaseError {
@@ -168,7 +228,8 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at
+                   metadata, created_at, updated_at,
+                   base_price_per_gpu, gpu_count
             FROM billing.rentals
             WHERE rental_id = $1
             "#,
@@ -232,7 +293,8 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at
+                       metadata, created_at, updated_at,
+                       base_price_per_gpu, gpu_count
                 FROM billing.rentals
                 WHERE user_id = $1 AND status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -244,7 +306,8 @@ impl RentalRepository for SqlRentalRepository {
                 r#"
                 SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
-                       metadata, created_at, updated_at
+                       metadata, created_at, updated_at,
+                       base_price_per_gpu, gpu_count
                 FROM billing.rentals
                 WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
@@ -267,7 +330,8 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             SELECT rental_id, user_id, node_id, validator_id, package_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
-                   metadata, created_at, updated_at
+                   metadata, created_at, updated_at,
+                   base_price_per_gpu, gpu_count
             FROM billing.rentals
             WHERE status = $1
             ORDER BY start_time DESC
@@ -336,6 +400,106 @@ impl RentalRepository for SqlRentalRepository {
             ),
             average_duration_hours: row.get::<f64, _>("avg_duration_hours"),
         })
+    }
+
+    async fn create_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()> {
+        let resource_spec_json = serde_json::to_value(&rental.resource_spec)?;
+        let metadata_json = serde_json::to_value(&rental.metadata)?;
+        let hourly_rate = rental.cost_breakdown.base_cost.as_decimal();
+
+        sqlx::query(
+            r#"
+            INSERT INTO billing.secure_cloud_rentals
+            (rental_id, user_id, provider, provider_instance_id, offering_id, status,
+             resource_spec, hourly_rate, start_time, metadata,
+             base_price_per_gpu, gpu_count)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            "#,
+        )
+        .bind(rental.id.as_uuid())
+        .bind(rental.user_id.as_str())
+        .bind(&rental.provider)
+        .bind(&rental.provider_instance_id)
+        .bind(&rental.offering_id)
+        .bind(rental.state.to_string())
+        .bind(resource_spec_json)
+        .bind(hourly_rate)
+        .bind(rental.started_at)
+        .bind(metadata_json)
+        .bind(rental.base_price_per_gpu)
+        .bind(rental.gpu_count as i32)
+        .execute(self.connection.pool())
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "create_secure_cloud_rental".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(())
+    }
+
+    async fn get_secure_cloud_rental(&self, id: &RentalId) -> Result<Option<SecureCloudRental>> {
+        let row = sqlx::query(
+            r#"
+            SELECT rental_id, user_id, provider, provider_instance_id, offering_id, status,
+                   resource_spec, hourly_rate, start_time, end_time, total_cost,
+                   metadata, created_at, updated_at,
+                   base_price_per_gpu, gpu_count
+            FROM billing.secure_cloud_rentals
+            WHERE rental_id = $1
+            "#,
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(self.connection.pool())
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "get_secure_cloud_rental".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(row.map(|r| Self::secure_cloud_rental_from_row(&r)))
+    }
+
+    async fn update_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()> {
+        let resource_spec_json = serde_json::to_value(&rental.resource_spec)?;
+        let metadata_json = serde_json::to_value(&rental.metadata)?;
+        let hourly_rate = rental.cost_breakdown.base_cost.as_decimal();
+        let total_cost = rental.actual_cost.as_decimal();
+
+        let result = sqlx::query(
+            r#"
+            UPDATE billing.secure_cloud_rentals
+            SET status = $2, resource_spec = $3, hourly_rate = $4,
+                updated_at = $5, end_time = $6, metadata = $7, total_cost = $8
+            WHERE rental_id = $1
+            "#,
+        )
+        .bind(rental.id.as_uuid())
+        .bind(rental.state.to_string())
+        .bind(resource_spec_json)
+        .bind(hourly_rate)
+        .bind(chrono::Utc::now())
+        .bind(rental.ended_at)
+        .bind(metadata_json)
+        .bind(if total_cost == rust_decimal::Decimal::ZERO {
+            None
+        } else {
+            Some(total_cost)
+        })
+        .execute(self.connection.pool())
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "update_secure_cloud_rental".to_string(),
+            source: Box::new(e),
+        })?;
+
+        if result.rows_affected() == 0 {
+            return Err(BillingError::RentalNotFound {
+                id: rental.id.to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 

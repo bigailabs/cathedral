@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod extractors;
 pub mod middleware;
+pub mod query;
 pub mod routes;
 
 use crate::config::RentalBackend;
@@ -74,6 +75,13 @@ pub fn routes(state: AppState) -> Router<AppState> {
             post(routes::api_keys::create_key).get(routes::api_keys::list_keys),
         )
         .route("/api-keys/:name", delete(routes::api_keys::revoke_key))
+        // SSH key management endpoints (JWT auth only)
+        .route(
+            "/ssh-keys",
+            post(routes::ssh_keys::register_ssh_key)
+                .get(routes::ssh_keys::get_ssh_key)
+                .delete(routes::ssh_keys::delete_ssh_key),
+        )
         // User deployment management endpoints
         .route(
             "/deployments",
@@ -140,6 +148,23 @@ pub fn routes(state: AppState) -> Router<AppState> {
     let protected_routes = protected_routes
         .nest("/payments", routes::payments::routes())
         .nest("/billing", routes::billing::routes())
+        // Secure Cloud endpoints (GPU aggregator) - proxied through API
+        .route(
+            "/secure-cloud/gpu-prices",
+            get(routes::secure_cloud::list_gpu_prices),
+        )
+        .route(
+            "/secure-cloud/rentals",
+            get(routes::secure_cloud::list_secure_cloud_rentals),
+        )
+        .route(
+            "/secure-cloud/rentals/start",
+            post(routes::secure_cloud::start_secure_cloud_rental),
+        )
+        .route(
+            "/secure-cloud/rentals/:rental_id/stop",
+            post(routes::secure_cloud::stop_secure_cloud_rental),
+        )
         // Apply middleware layers
         // Apply scope validation AFTER auth middleware
         .layer(axum::middleware::from_fn(

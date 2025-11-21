@@ -53,6 +53,7 @@ message NodeConnectionDetails {
   string additional_opts = 5;
   basilca.common.v1.GpuSpec gpu_spec = 6;
   string status = 7;
+  uint32 hourly_rate_cents = 8;  // Price in cents per GPU per hour (e.g., 250 = $2.50/hour)
 }
 
 // Response containing list of available nodes

@@ -147,20 +147,31 @@ impl Args {
             }
 
             // GPU rental operations
-            Commands::Ls { gpu_type, filters } => {
+            Commands::Ls {
+                gpu_type,
+                filters,
+                compute,
+            } => {
                 handlers::gpu_rental::handle_ls(
                     gpu_type.clone(),
                     filters.clone(),
+                    *compute,
                     self.json,
                     config,
                 )
                 .await?;
             }
-            Commands::Up { target, options } => {
-                handlers::gpu_rental::handle_up(target.clone(), options.clone(), config).await?;
+            Commands::Up {
+                target,
+                options,
+                compute,
+            } => {
+                handlers::gpu_rental::handle_up(target.clone(), options.clone(), *compute, config)
+                    .await?;
             }
-            Commands::Ps { filters } => {
-                handlers::gpu_rental::handle_ps(filters.clone(), self.json, config).await?;
+            Commands::Ps { compute, filters } => {
+                handlers::gpu_rental::handle_ps(filters.clone(), *compute, self.json, config)
+                    .await?;
             }
             Commands::Status { target } => {
                 handlers::gpu_rental::handle_status(target.clone(), self.json, config).await?;
@@ -168,8 +179,12 @@ impl Args {
             Commands::Logs { target, options } => {
                 handlers::gpu_rental::handle_logs(target.clone(), options.clone(), config).await?;
             }
-            Commands::Down { target, all } => {
-                handlers::gpu_rental::handle_down(target.clone(), *all, config).await?;
+            Commands::Down {
+                target,
+                compute,
+                all,
+            } => {
+                handlers::gpu_rental::handle_down(target.clone(), *compute, *all, config).await?;
             }
             Commands::Exec { command, target } => {
                 handlers::gpu_rental::handle_exec(target.clone(), command.clone(), config).await?;
@@ -205,6 +220,28 @@ impl Args {
                     }
                     TokenAction::Revoke { name, yes } => {
                         handlers::tokens::handle_revoke_token(&client, name.clone(), *yes).await?;
+                    }
+                }
+            }
+
+            // SSH key management
+            Commands::SshKeys { action } => {
+                use crate::cli::commands::SshKeyAction;
+                use crate::client::create_client;
+
+                // Create client with file-based auth (JWT required for SSH key management)
+                let client = create_client(config).await?;
+
+                match action {
+                    SshKeyAction::Add { name, file } => {
+                        handlers::ssh_keys::handle_add_ssh_key(&client, name.clone(), file.clone())
+                            .await?;
+                    }
+                    SshKeyAction::List => {
+                        handlers::ssh_keys::handle_list_ssh_keys(&client).await?;
+                    }
+                    SshKeyAction::Delete { yes } => {
+                        handlers::ssh_keys::handle_delete_ssh_key(&client, *yes).await?;
                     }
                 }
             }

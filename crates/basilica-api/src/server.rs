@@ -8,6 +8,7 @@ use crate::{
     error::{ApiError, Result},
 };
 use axum::Router;
+use basilica_aggregator::{AggregatorService, Database as AggregatorDatabase};
 use basilica_billing::BillingClient;
 use basilica_payments::client::PaymentsClient;
 use basilica_validator::{api::types::RentalStatus, ValidatorClient};
@@ -69,6 +70,12 @@ pub struct AppState {
     /// Metrics system
     pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
 
+    /// GPU Aggregator service (Secure Cloud)
+    pub aggregator_service: Arc<AggregatorService>,
+
+    /// Pricing configuration (marketplace markups)
+    pub pricing_config: crate::config::PricingConfig,
+
     /// SSH client for K3s token generation
     pub ssh_client: Arc<crate::ssh::K3sSshClient>,
 }
@@ -109,6 +116,80 @@ async fn process_rental_health_check(
             // The validator is the source of truth and will report actual status when available
             tracing::warn!(
                 "Health check failed for rental {} (validator may be unavailable): {}",
+                rental_id,
+                e
+            );
+        }
+    }
+}
+
+/// Process health check for a single secure cloud rental
+async fn process_secure_cloud_health_check(
+    rental_id: &str,
+    aggregator_service: &basilica_aggregator::service::AggregatorService,
+    db: &PgPool,
+) {
+    match aggregator_service.get_deployment(rental_id).await {
+        Ok(deployment) => {
+            use basilica_aggregator::models::DeploymentStatus;
+
+            // Check if deployment is in a terminal state
+            if matches!(
+                deployment.status,
+                DeploymentStatus::Deleted | DeploymentStatus::Error
+            ) {
+                // Archive the rental to terminated_secure_cloud_rentals table
+                if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+                    db,
+                    rental_id,
+                    Some("Health check: deployment no longer accessible"),
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to archive stopped secure cloud rental {}: {}",
+                        rental_id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Health check: Archived {:?} secure cloud rental {}",
+                        deployment.status,
+                        rental_id
+                    );
+                }
+            }
+        }
+        Err(basilica_aggregator::error::AggregatorError::NotFound(_)) => {
+            // VM was deleted externally (404 from provider)
+            tracing::info!(
+                "VM {} not found at provider (deleted externally), archiving rental",
+                rental_id
+            );
+            if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+                db,
+                rental_id,
+                Some("Health check: VM not found at provider (deleted externally)"),
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to archive rental {} after detecting external deletion: {}",
+                    rental_id,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Successfully archived rental {} after detecting external deletion",
+                    rental_id
+                );
+            }
+        }
+        Err(e) => {
+            // Provider unavailable or having issues - don't change rental state
+            // The provider is the source of truth and will report actual status when available
+            tracing::warn!(
+                "Health check failed for secure cloud rental {} (temporary error): {}",
                 rental_id,
                 e
             );
@@ -298,6 +379,40 @@ impl Server {
             None
         };
 
+        // Initialize GPU Aggregator service (Secure Cloud)
+        info!("Initializing GPU Aggregator service (Secure Cloud)");
+
+        // Debug: Show provider configuration
+        tracing::debug!(
+            "DataCrunch config: client_id={:?}, has_secret={}",
+            config.aggregator.providers.datacrunch.client_id,
+            config
+                .aggregator
+                .providers
+                .datacrunch
+                .client_secret
+                .is_some()
+        );
+
+        let aggregator_db = Arc::new(
+            AggregatorDatabase::new(&config.database.url)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to initialize aggregator database: {}", e),
+                })?,
+        );
+
+        let aggregator_config = config.to_aggregator_config();
+        let aggregator_service = Arc::new(
+            AggregatorService::new(aggregator_db, aggregator_config).map_err(|e| {
+                ApiError::Internal {
+                    message: format!("Failed to initialize aggregator service: {}", e),
+                }
+            })?,
+        );
+        info!("GPU Aggregator service initialized successfully");
+
+        // Initialize DNS provider for public deployments
         let dns_provider: Option<Arc<dyn crate::dns::DnsProvider>> = if config.dns.enabled {
             let dns_config = config.dns.from_env();
             if let Err(e) = dns_config.validate() {
@@ -391,6 +506,8 @@ impl Server {
             billing_client,
             dns_provider,
             metrics,
+            aggregator_service,
+            pricing_config: config.pricing.clone(),
             ssh_client,
         };
 
@@ -469,6 +586,97 @@ impl Server {
         tracing::info!(
             "Started rental health check task (interval: {} seconds)",
             rental_health_interval.as_secs()
+        );
+
+        // Start GPU offerings refresh task (Secure Cloud)
+        let refresh_aggregator_service = state.aggregator_service.clone();
+        let refresh_interval = std::time::Duration::from_secs(60); // Refresh every 60 seconds
+
+        tokio::spawn(async move {
+            // Do initial refresh immediately on startup
+            tracing::info!("Starting initial GPU offerings refresh...");
+            match refresh_aggregator_service.refresh_all_providers().await {
+                Ok(count) => {
+                    tracing::info!("Initial GPU offerings refresh: fetched {} offerings", count);
+                }
+                Err(e) => {
+                    tracing::error!("Failed initial GPU offerings refresh: {}", e);
+                }
+            }
+
+            // Then start periodic refresh
+            let mut interval = tokio::time::interval(refresh_interval);
+            loop {
+                interval.tick().await;
+
+                tracing::debug!("Running periodic GPU offerings refresh...");
+                match refresh_aggregator_service.refresh_all_providers().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            tracing::info!("GPU offerings refresh: fetched {} offerings", count);
+                        } else {
+                            tracing::debug!("GPU offerings refresh: no new offerings (cooldown or no providers enabled)");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to refresh GPU offerings: {}", e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started GPU offerings refresh task (interval: {} seconds)",
+            refresh_interval.as_secs()
+        );
+
+        // Start Secure Cloud health check task
+        let health_check_aggregator_service = state.aggregator_service.clone();
+        let health_check_db = state.db.clone();
+        let health_check_interval = config.rental_health_check_interval();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(health_check_interval);
+            loop {
+                interval.tick().await;
+
+                // Query all active secure cloud rentals from the database
+                match sqlx::query_as::<_, (String,)>("SELECT id FROM secure_cloud_rentals")
+                    .fetch_all(&health_check_db)
+                    .await
+                {
+                    Ok(rental_records) => {
+                        // Process rentals sequentially to avoid overwhelming provider APIs
+                        for record in &rental_records {
+                            let rental_id = &record.0;
+                            process_secure_cloud_health_check(
+                                rental_id,
+                                &health_check_aggregator_service,
+                                &health_check_db,
+                            )
+                            .await;
+                        }
+
+                        if !rental_records.is_empty() {
+                            tracing::debug!(
+                                "Secure Cloud health check completed for {} rentals",
+                                rental_records.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to query secure cloud rentals for health check: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started Secure Cloud health check task (interval: {} seconds)",
+            health_check_interval.as_secs()
         );
 
         // Start node token cleanup task

@@ -121,6 +121,9 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),
 
+        // Secure cloud endpoints - require "secure_cloud" scope for all methods
+        (_, p) if p.starts_with("/secure-cloud/") => Some("secure_cloud".to_string()),
+
         // Job endpoints (v1)
         (&Method::POST, "/jobs") => Some("jobs:create".to_string()),
         (&Method::GET, p) if p.starts_with("/jobs/") && p.ends_with("/logs") => {
@@ -134,6 +137,12 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/api-keys") => Some("keys:list".to_string()),
         (&Method::DELETE, p) if p.starts_with("/api-keys/") => Some("keys:revoke".to_string()),
 
+        // SSH Key management endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own SSH keys
+        (&Method::POST, "/ssh-keys") => Some(String::new()),
+        (&Method::GET, "/ssh-keys") => Some(String::new()),
+        (&Method::DELETE, "/ssh-keys") => Some(String::new()),
+
         // Payment endpoints - require authentication but no specific scope
         // All authenticated users should be able to manage their own payment accounts
         (&Method::GET, "/payments/deposit-account") => Some(String::new()),
@@ -143,7 +152,6 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Billing endpoints - require authentication but no specific scope
         // All authenticated users should be able to access their own billing information
         (&Method::GET, "/billing/balance") => Some(String::new()),
-        (&Method::GET, "/billing/packages") => Some(String::new()),
         (&Method::GET, "/billing/usage") => Some(String::new()),
         (&Method::GET, p) if p.starts_with("/billing/usage/") => Some(String::new()),
 
@@ -219,6 +227,28 @@ mod tests {
             .unwrap();
         assert_eq!(get_required_scope(&req), Some("nodes:list".to_string()));
 
+        // Test secure cloud endpoints (require "secure_cloud" scope for all methods)
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/secure-cloud/gpu-prices")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/secure-cloud/rentals/start")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/secure-cloud/rentals/some-id/stop")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
         // Test health endpoint (requires authentication but no specific scope)
         let req = Request::builder()
             .method(Method::GET)
@@ -259,13 +289,6 @@ mod tests {
 
         let req = Request::builder()
             .method(Method::GET)
-            .uri("/billing/packages")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(get_required_scope(&req), Some(String::new()));
-
-        let req = Request::builder()
-            .method(Method::GET)
             .uri("/billing/usage")
             .body(Body::empty())
             .unwrap();
@@ -274,6 +297,28 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/billing/usage/rental-123")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test SSH key endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/ssh-keys")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));

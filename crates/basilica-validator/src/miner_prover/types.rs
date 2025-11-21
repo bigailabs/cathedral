@@ -91,6 +91,7 @@ pub struct NodeVerificationResult {
     pub validation_details: ValidationDetails,
     pub gpu_count: u64,
     pub validation_type: ValidationType,
+    pub hourly_rate_cents: u32,
 }
 
 /// Detailed validation timing and scoring information
@@ -204,6 +205,7 @@ pub struct NodeInfoDetailed {
     pub status: String,
     pub capabilities: Vec<String>,
     pub node_ssh_endpoint: String,
+    pub hourly_rate_cents: u32,
 }
 
 /// Output from validator binary execution

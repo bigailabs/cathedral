@@ -2,8 +2,7 @@ use anyhow::{Context, Result};
 use basilica_protocol::billing::{
     billing_service_client::BillingServiceClient, get_active_rentals_request,
     GetActiveRentalsRequest, GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse,
-    GetBillingPackagesRequest, GetBillingPackagesResponse, UsageAggregation, UsageReportRequest,
-    UsageReportResponse,
+    UsageAggregation, UsageReportRequest, UsageReportResponse,
 };
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -120,26 +119,6 @@ impl BillingClient {
             .get_balance(request)
             .await
             .with_context(|| format!("Failed to get balance for user: {}", user_id))?;
-
-        Ok(response.into_inner())
-    }
-
-    pub async fn get_billing_packages(
-        &self,
-        user_id: impl Into<String>,
-    ) -> Result<GetBillingPackagesResponse> {
-        let user_id = user_id.into();
-        let request = GetBillingPackagesRequest {
-            user_id: user_id.clone(),
-        };
-
-        debug!("Fetching billing packages for user: {}", user_id);
-
-        let mut client = self.client.clone();
-        let response = client
-            .get_billing_packages(request)
-            .await
-            .with_context(|| format!("Failed to get billing packages for user: {}", user_id))?;
 
         Ok(response.into_inner())
     }
