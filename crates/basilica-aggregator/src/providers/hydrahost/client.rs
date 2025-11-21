@@ -125,13 +125,15 @@ impl Provider for HydraHostProvider {
             // Normalize region to "global"
             let region = normalize_region(listing.location.as_deref().unwrap_or("unknown"));
 
-            // Convert pricing from cents to dollars - skip if total is null/zero
+            // Convert pricing from cents to dollars and normalize to per-GPU rate
             let hourly_total = listing.price.hourly.total.unwrap_or(0.0);
             if hourly_total == 0.0 {
                 continue; // Skip offerings with no pricing
             }
-            let hourly_rate = Decimal::from_str(&hourly_total.to_string()).unwrap_or(Decimal::ZERO)
-                / Decimal::from(100); // Convert cents to dollars
+            // HydraHost provides total instance price in cents, convert to dollars per GPU
+            let hourly_rate_per_gpu = Decimal::from_str(&hourly_total.to_string()).unwrap_or(Decimal::ZERO)
+                    / Decimal::from(100) // Convert cents to dollars
+                    / Decimal::from(gpu_count.max(1)); // Normalize to per-GPU
 
             // Check availability based on status
             // "on demand" means available, other statuses might indicate unavailable
@@ -161,7 +163,7 @@ impl Provider for HydraHostProvider {
                 system_memory_gb: listing.specs.memory,
                 vcpu_count,
                 region,
-                hourly_rate,
+                hourly_rate_per_gpu,
                 availability,
                 fetched_at,
                 raw_metadata: serde_json::to_value(&listing).unwrap_or_default(),

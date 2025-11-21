@@ -17,6 +17,7 @@ use basilica_sdk::types::{
     StartSecureCloudRentalRequest, StopSecureCloudRentalResponse,
 };
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use serde_json::json;
 
 /// Type alias for secure cloud rental query result from database
@@ -76,11 +77,11 @@ pub async fn list_gpu_prices(
             }
 
             if let Some(min_price) = query.min_price() {
-                offerings.retain(|o| o.hourly_rate >= min_price);
+                offerings.retain(|o| o.hourly_rate_per_gpu >= min_price);
             }
 
             if let Some(max_price) = query.max_price() {
-                offerings.retain(|o| o.hourly_rate <= max_price);
+                offerings.retain(|o| o.hourly_rate_per_gpu <= max_price);
             }
 
             if query.available_only.unwrap_or(false) {
@@ -89,7 +90,7 @@ pub async fn list_gpu_prices(
 
             // Sort results
             match query.sort_by.as_deref() {
-                Some("price") => offerings.sort_by_key(|o| o.hourly_rate),
+                Some("price") => offerings.sort_by_key(|o| o.hourly_rate_per_gpu),
                 Some("gpu_type") => offerings.sort_by_key(|o| o.gpu_type.as_str().to_string()),
                 Some("region") => offerings.sort_by(|a, b| a.region.cmp(&b.region)),
                 _ => {}
@@ -101,7 +102,7 @@ pub async fn list_gpu_prices(
             )
             .unwrap_or(rust_decimal::Decimal::ONE);
             for offering in &mut offerings {
-                offering.hourly_rate *= markup_multiplier;
+                offering.hourly_rate_per_gpu *= markup_multiplier;
             }
 
             // raw_metadata is automatically excluded via #[serde(skip)]
@@ -207,14 +208,15 @@ pub async fn list_secure_cloud_rentals(
                 db_system_memory_gb,
                 db_region,
             )| {
+                let markup_multiplier =
+                    1.0 + (state.pricing_config.secure_cloud_markup_percent / 100.0);
+
                 // Try to find the offering to get GPU details and pricing
                 let (gpu_type, gpu_count, hourly_cost) =
                     if let Some(offering) = offerings_map.get(offering_id.as_str()) {
-                        let base_rate = offering.hourly_rate.to_f64().unwrap_or(0.0);
+                        let base_rate = offering.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
                         let gpu_count = offering.gpu_count;
-                        let hourly_cost = base_rate
-                            * gpu_count as f64
-                            * (1.0 + state.pricing_config.secure_cloud_markup_percent / 100.0);
+                        let hourly_cost = base_rate * markup_multiplier;
 
                         (offering.gpu_type.to_string(), gpu_count, hourly_cost)
                     } else {
@@ -346,10 +348,14 @@ pub async fn start_secure_cloud_rental(
 
     let timestamp = prost_types::Timestamp::from(std::time::SystemTime::now());
 
-    // Apply markup to the base price before sending to billing
-    // Billing service will use this as the final price
-    let markup_multiplier = 1.0 + (state.pricing_config.secure_cloud_markup_percent / 100.0);
-    let marked_up_price = offering.hourly_rate.to_f64().unwrap_or(0.0) * markup_multiplier;
+    // Apply markup to the per-GPU price before sending to billing
+    // Note: offering.hourly_rate_per_gpu is already normalized to per-GPU rate by the aggregator
+    let markup_multiplier =
+        Decimal::from_f64(1.0 + (state.pricing_config.secure_cloud_markup_percent / 100.0))
+            .unwrap_or(Decimal::ONE);
+    let base_price_per_gpu = (offering.hourly_rate_per_gpu * markup_multiplier)
+        .to_f64()
+        .unwrap_or(0.0);
 
     let track_request = TrackRentalRequest {
         rental_id: rental_id.clone(),
@@ -361,7 +367,7 @@ pub async fn start_secure_cloud_rental(
             provider_instance_id,
             provider: offering.provider.to_string(),
             offering_id: request.offering_id.clone(),
-            base_price_per_gpu: marked_up_price,
+            base_price_per_gpu,
             gpu_count: offering.gpu_count,
         })),
     };
@@ -378,8 +384,9 @@ pub async fn start_secure_cloud_rental(
             })?;
     }
 
-    // 5. Calculate hourly cost (using already marked-up price)
-    let hourly_cost = marked_up_price * offering.gpu_count as f64;
+    // 5. Calculate hourly cost (total per-instance price with markup)
+    // hourly_cost = base_price_per_gpu * gpu_count
+    let hourly_cost = base_price_per_gpu * f64::from(offering.gpu_count.max(1));
 
     // 6. Return response
     Ok((

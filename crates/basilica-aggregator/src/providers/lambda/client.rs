@@ -89,9 +89,11 @@ impl Provider for LambdaProvider {
             // Normalize GPU type
             let gpu_type = normalize_gpu_type(&gpu_info.model);
 
-            // Convert price from cents to dollars
-            let hourly_rate =
-                Decimal::from(instance_type.price_cents_per_hour) / Decimal::from(100);
+            // Convert price from cents to dollars and normalize to per-GPU rate
+            // Lambda provides total instance price, so divide by gpu_count
+            let hourly_rate_per_gpu = Decimal::from(instance_type.price_cents_per_hour)
+                / Decimal::from(100)
+                / Decimal::from(gpu_info.count.max(1));
 
             // Extract storage information (in GiB)
             let storage = Some(instance_type.specs.storage_gib.to_string());
@@ -111,7 +113,7 @@ impl Provider for LambdaProvider {
                     system_memory_gb: instance_type.specs.memory_gib,
                     vcpu_count: instance_type.specs.vcpus,
                     region: "global".to_string(),
-                    hourly_rate,
+                    hourly_rate_per_gpu,
                     availability: false,
                     fetched_at,
                     raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),
@@ -135,7 +137,7 @@ impl Provider for LambdaProvider {
                         system_memory_gb: instance_type.specs.memory_gib,
                         vcpu_count: instance_type.specs.vcpus,
                         region,
-                        hourly_rate,
+                        hourly_rate_per_gpu,
                         availability: true, // True since this region has capacity
                         fetched_at,
                         raw_metadata: serde_json::to_value(&instance_type).unwrap_or_default(),

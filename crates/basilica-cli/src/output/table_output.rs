@@ -1102,10 +1102,10 @@ pub fn display_secure_cloud_offerings_compact(offerings: &[GpuOffering]) -> Resu
                 format!("{}, +{} more", regions[0], regions.len() - 1)
             };
 
-            // Get minimum price from the group
+            // Get minimum total price from the group (per-GPU rate × gpu_count)
             let min_price = offerings_in_group
                 .iter()
-                .map(|o| o.hourly_rate)
+                .map(|o| o.hourly_rate_per_gpu * Decimal::from(o.gpu_count))
                 .min()
                 .unwrap();
 
@@ -1173,6 +1173,9 @@ pub fn display_secure_cloud_offerings_detailed(
                     format!("{}x {}", offering.gpu_count, offering.gpu_type)
                 };
 
+                // Calculate total hourly cost (per-GPU rate × gpu_count)
+                let total_hourly_cost =
+                    offering.hourly_rate_per_gpu * Decimal::from(offering.gpu_count);
                 DetailedOfferingRowWithId {
                     offering_id: offering.id.clone(),
                     provider: offering.provider.to_string(),
@@ -1185,7 +1188,7 @@ pub fn display_secure_cloud_offerings_detailed(
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
                     region: offering.region.clone(),
-                    price: format!("${:.2}/hr", offering.hourly_rate),
+                    price: format!("${:.2}/hr", total_hourly_cost),
                 }
             })
             .collect();
@@ -1223,6 +1226,9 @@ pub fn display_secure_cloud_offerings_detailed(
                     format!("{}x {}", offering.gpu_count, offering.gpu_type)
                 };
 
+                // Calculate total hourly cost (per-GPU rate × gpu_count)
+                let total_hourly_cost =
+                    offering.hourly_rate_per_gpu * Decimal::from(offering.gpu_count);
                 DetailedOfferingRow {
                     provider: offering.provider.to_string(),
                     gpu_info,
@@ -1234,7 +1240,7 @@ pub fn display_secure_cloud_offerings_detailed(
                         .clone()
                         .unwrap_or_else(|| "-".to_string()),
                     region: offering.region.clone(),
-                    price: format!("${:.2}/hr", offering.hourly_rate),
+                    price: format!("${:.2}/hr", total_hourly_cost),
                 }
             })
             .collect();

@@ -64,7 +64,7 @@ pub struct GpuOffering {
     pub vcpu_count: u32,
     pub region: String,
     #[serde(with = "rust_decimal::serde::str")]
-    pub hourly_rate: Decimal,
+    pub hourly_rate_per_gpu: Decimal, // Price per GPU per hour (multiply by gpu_count for total instance cost)
     pub availability: bool,
     pub fetched_at: DateTime<Utc>,
     #[serde(skip)] // Never expose in API, skip both serializing and deserializing

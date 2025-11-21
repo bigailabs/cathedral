@@ -68,12 +68,15 @@ impl From<AvailableNode> for UnifiedGpu {
 
 impl From<GpuOffering> for UnifiedGpu {
     fn from(gpu: GpuOffering) -> Self {
+        // Calculate total hourly cost (per-GPU rate × gpu_count)
+        let total_hourly_cost =
+            gpu.hourly_rate_per_gpu * rust_decimal::Decimal::from(gpu.gpu_count);
         UnifiedGpu {
             compute_category: ComputeCategory::SecureCloud,
             provider: gpu.provider.to_string(),
             gpu_type: gpu.gpu_type.to_string(),
             gpu_count: gpu.gpu_count,
-            price_per_hour: format!("${}/hr", gpu.hourly_rate),
+            price_per_hour: format!("${}/hr", total_hourly_cost),
             region: gpu.region,
             availability: gpu.availability,
             id: gpu.id,

@@ -177,6 +177,20 @@ pub async fn start_rental(
         }
     };
 
+    // Validate pricing is available before creating rental (fail fast before side effects)
+    if node_hourly_rate_cents.is_none() {
+        error!(
+            "No pricing configured for node {}. Cannot proceed with rental.",
+            node_id
+        );
+        return Err(crate::error::ApiError::BadRequest {
+            message: format!(
+                "Node {} does not have pricing configured. Please select a different node or contact support.",
+                node_id
+            ),
+        });
+    }
+
     // Convert to validator's StartRentalRequest format
     let validator_request = StartRentalRequest {
         node_id: node_id.clone(),
@@ -281,22 +295,10 @@ pub async fn start_rental(
             network_bandwidth_mbps: 0,
         });
 
-        // Use pricing from node selection - no fallback
-        let base_price_per_gpu = match node_hourly_rate_cents {
-            Some(rate_cents) => rate_cents as f64 / 100.0,
-            None => {
-                error!(
-                    "No pricing configured for node {}. Cannot proceed with rental billing.",
-                    node_id
-                );
-                return Err(crate::error::ApiError::Internal {
-                    message: format!(
-                        "Node pricing not configured for node {}. Please contact support.",
-                        node_id
-                    ),
-                });
-            }
-        };
+        // Use pricing from node selection (validated earlier before rental creation)
+        let base_price_per_gpu =
+            node_hourly_rate_cents.expect("pricing validated before rental creation") as f64
+                / 100.0;
 
         // Apply markup to the base price before sending to billing
         // Billing service will use this as the final price

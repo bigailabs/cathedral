@@ -421,8 +421,11 @@ pub fn parse_ssh_credentials(credentials: &str) -> Result<(String, u16, String)>
         }
     }
 
+    // Strip "ssh " prefix if present for remaining formats
+    let credentials_without_prefix = credentials.trim_start_matches("ssh ");
+
     // Try to parse "user@host:port" or "host:port" format
-    if let Some((left_part, port_str)) = credentials.rsplit_once(':') {
+    if let Some((left_part, port_str)) = credentials_without_prefix.rsplit_once(':') {
         let port = port_str
             .parse::<u16>()
             .map_err(|_| eyre!("Invalid port in SSH credentials"))?;
@@ -437,13 +440,6 @@ pub fn parse_ssh_credentials(credentials: &str) -> Result<(String, u16, String)>
     }
 
     // Try to parse "user@host" or just "host" format (default port 22)
-    // Strip "ssh " prefix if present
-    let credentials_without_prefix = if credentials.starts_with("ssh ") {
-        credentials.trim_start_matches("ssh ")
-    } else {
-        credentials
-    };
-
     let (user, host) = if let Some((user, host)) = credentials_without_prefix.split_once('@') {
         (user.to_string(), host.to_string())
     } else {

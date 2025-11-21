@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS gpu_offerings (
     system_memory_gb INTEGER NOT NULL, -- System RAM
     vcpu_count INTEGER NOT NULL,
     region TEXT NOT NULL,
-    hourly_rate DECIMAL(10, 4) NOT NULL,
+    hourly_rate_per_gpu DECIMAL(10, 4) NOT NULL, -- Price per GPU per hour
     availability BOOLEAN NOT NULL,
     raw_metadata JSONB NOT NULL, -- Full provider response as JSONB
     fetched_at TIMESTAMPTZ NOT NULL,

@@ -560,8 +560,9 @@ impl Provider for DataCrunchProvider {
                 .as_ref()
                 .unwrap_or(&instance_type.gpu.description);
             let gpu_type = normalize_gpu_type(gpu_model);
-            let hourly_rate = match instance_type.price_per_hour.parse::<Decimal>() {
-                Ok(rate) => rate,
+            // DataCrunch provides total instance price, normalize to per-GPU rate
+            let hourly_rate_per_gpu = match instance_type.price_per_hour.parse::<Decimal>() {
+                Ok(rate) => rate / Decimal::from(instance_type.gpu.number_of_gpus.max(1)),
                 Err(e) => {
                     tracing::warn!(
                         "Failed to parse price_per_hour '{}' for instance_type {} ({}): {}",
@@ -603,7 +604,7 @@ impl Provider for DataCrunchProvider {
                     system_memory_gb: instance_type.memory.size_in_gigabytes,
                     vcpu_count: instance_type.cpu.number_of_cores,
                     region: location.code.clone(),
-                    hourly_rate,
+                    hourly_rate_per_gpu,
                     availability: is_available,
                     fetched_at,
                     raw_metadata: serde_json::to_value(instance_type).unwrap_or_default(),

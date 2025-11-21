@@ -441,17 +441,16 @@ impl Provider for HyperstackProvider {
                 // Convert RAM from float GB to u32
                 let system_memory_gb = flavor.ram.round() as u32;
 
-                // Calculate hourly rate from pricebook
-                // For GPU flavors: hourly_rate = gpu_price * gpu_count
+                // Get per-GPU hourly rate from pricebook
                 // (vCPU, RAM, and storage are free for GPU flavors)
-                let gpu_price_per_unit = pricebook.get(&group.gpu).copied().unwrap_or_else(|| {
+                // Note: This is the per-GPU price, billing multiplies by gpu_count
+                let hourly_rate_per_gpu = pricebook.get(&group.gpu).copied().unwrap_or_else(|| {
                     tracing::warn!(
                         "No pricing found in pricebook for GPU model '{}', using $0",
                         group.gpu
                     );
                     Decimal::ZERO
                 });
-                let hourly_rate = gpu_price_per_unit * Decimal::from(flavor.gpu_count);
 
                 // Use stock_available from flavor
                 let availability = flavor.stock_available;
@@ -476,7 +475,7 @@ impl Provider for HyperstackProvider {
                     system_memory_gb,
                     vcpu_count: flavor.cpu,
                     region: region.clone(),
-                    hourly_rate,
+                    hourly_rate_per_gpu,
                     availability,
                     fetched_at,
                     raw_metadata: serde_json::to_value(&flavor).unwrap_or_default(),

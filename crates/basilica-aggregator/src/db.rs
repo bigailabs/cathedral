@@ -36,13 +36,13 @@ impl Database {
                 r#"
                 INSERT INTO gpu_offerings
                 (id, provider, gpu_type, gpu_memory_gb_per_gpu, gpu_count, interconnect, storage, deployment_type,
-                 system_memory_gb, vcpu_count, region, hourly_rate, availability, raw_metadata, fetched_at)
+                 system_memory_gb, vcpu_count, region, hourly_rate_per_gpu, availability, raw_metadata, fetched_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 ON CONFLICT(id) DO UPDATE SET
                     interconnect = EXCLUDED.interconnect,
                     storage = EXCLUDED.storage,
                     deployment_type = EXCLUDED.deployment_type,
-                    hourly_rate = EXCLUDED.hourly_rate,
+                    hourly_rate_per_gpu = EXCLUDED.hourly_rate_per_gpu,
                     availability = EXCLUDED.availability,
                     raw_metadata = EXCLUDED.raw_metadata,
                     fetched_at = EXCLUDED.fetched_at
@@ -59,7 +59,7 @@ impl Database {
             .bind(offering.system_memory_gb as i32)
             .bind(offering.vcpu_count as i32)
             .bind(&offering.region)
-            .bind(offering.hourly_rate)  // Bind as Decimal, not string
+            .bind(offering.hourly_rate_per_gpu)  // Bind as Decimal, not string
             .bind(offering.availability)
             .bind(&offering.raw_metadata)
             .bind(offering.fetched_at)
@@ -76,14 +76,14 @@ impl Database {
         let query = if let Some(p) = provider {
             sqlx::query(
                 "SELECT id, provider, gpu_type, gpu_memory_gb_per_gpu, gpu_count, interconnect, storage, deployment_type,
-                        system_memory_gb, vcpu_count, region, hourly_rate, availability, raw_metadata, fetched_at
+                        system_memory_gb, vcpu_count, region, hourly_rate_per_gpu, availability, raw_metadata, fetched_at
                  FROM gpu_offerings WHERE provider = $1 ORDER BY fetched_at DESC",
             )
             .bind(p.as_str())
         } else {
             sqlx::query(
                 "SELECT id, provider, gpu_type, gpu_memory_gb_per_gpu, gpu_count, interconnect, storage, deployment_type,
-                        system_memory_gb, vcpu_count, region, hourly_rate, availability, raw_metadata, fetched_at
+                        system_memory_gb, vcpu_count, region, hourly_rate_per_gpu, availability, raw_metadata, fetched_at
                  FROM gpu_offerings ORDER BY fetched_at DESC",
             )
         };
@@ -111,7 +111,7 @@ impl Database {
                     system_memory_gb: row.get::<i32, _>("system_memory_gb") as u32,
                     vcpu_count: row.get::<i32, _>("vcpu_count") as u32,
                     region: row.get("region"),
-                    hourly_rate: row.get("hourly_rate"), // Get as Decimal directly
+                    hourly_rate_per_gpu: row.get("hourly_rate_per_gpu"), // Get as Decimal directly
                     availability: row.get("availability"),
                     raw_metadata,
                     fetched_at: row.get("fetched_at"),

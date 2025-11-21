@@ -136,8 +136,12 @@ async fn fetch_and_filter_secure_cloud(
         })
         .collect();
 
-    // Sort by price (ascending)
-    filtered_gpus.sort_by(|a, b| a.hourly_rate.partial_cmp(&b.hourly_rate).unwrap());
+    // Sort by total price (ascending) - per-GPU rate × gpu_count
+    filtered_gpus.sort_by(|a, b| {
+        let a_total = a.hourly_rate_per_gpu * rust_decimal::Decimal::from(a.gpu_count);
+        let b_total = b.hourly_rate_per_gpu * rust_decimal::Decimal::from(b.gpu_count);
+        a_total.partial_cmp(&b_total).unwrap()
+    });
 
     Ok(filtered_gpus)
 }
@@ -440,8 +444,10 @@ fn interactive_offering_selector(
     let options: Vec<String> = offerings
         .iter()
         .map(|o| {
-            let base_price = o.hourly_rate.to_f64().unwrap_or(0.0);
-            let total_price = base_price * (1.0 + markup_percent / 100.0);
+            // Calculate total instance price (per-GPU rate × gpu_count) with markup
+            let base_price_per_gpu = o.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
+            let total_price =
+                base_price_per_gpu * (o.gpu_count as f64) * (1.0 + markup_percent / 100.0);
 
             let memory_str = if let Some(mem_per_gpu) = o.gpu_memory_gb_per_gpu {
                 format!("{}GB", mem_per_gpu * o.gpu_count)
