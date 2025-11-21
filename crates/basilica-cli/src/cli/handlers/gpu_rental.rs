@@ -182,19 +182,20 @@ async fn fetch_and_filter_community_cloud(
     complete_spinner_and_clear(spinner);
 
     // Build pricing map from nodes' hourly_rate_cents field
-    // Map GPU type -> hourly rate string (e.g., "h100" -> "$2.50/hr")
+    // Map GPU type -> hourly rate string (e.g., "h100" -> "2.50")
     let pricing_map: HashMap<String, String> = response
         .available_nodes
         .iter()
         .filter_map(|node| {
             // Get the first GPU spec to determine GPU type
             let gpu_spec = node.node.gpu_specs.first()?;
-            let gpu_type = gpu_spec.name.split_whitespace().next()?.to_lowercase();
+            let category = GpuCategory::from_str(&gpu_spec.name).ok()?;
+            let gpu_type = category.to_string().to_lowercase();
 
             // Get pricing from the node's hourly_rate_cents field
             let cents = node.node.hourly_rate_cents? as f64;
             let dollars = cents / 100.0;
-            let rate_string = format!("${:.2}/hr", dollars);
+            let rate_string = format!("{:.2}", dollars);
 
             Some((gpu_type, rate_string))
         })
