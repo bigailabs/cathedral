@@ -35,7 +35,7 @@ max_connections = 5
 # Community cloud: markup applied to community-provided GPU rentals
 community_markup_percent = 10.0
 # Secure cloud: markup applied to datacenter provider GPU rentals
-secure_cloud_markup_percent = 15.0
+secure_cloud_markup_percent = 10.0
 
 # GPU Aggregator configuration (Secure Cloud)
 # Uncomment to enable secure cloud GPU offerings from external providers

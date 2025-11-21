@@ -640,10 +640,19 @@ pub async fn list_available_nodes(
 
     info!("Listing nodes with filters: {:?}", query);
 
-    let response = state
+    let mut response = state
         .validator_client
         .list_available_nodes(Some(query))
         .await?;
+
+    // Apply community cloud markup to prices
+    let markup_multiplier = 1.0 + (state.pricing_config.community_markup_percent / 100.0);
+    for available_node in &mut response.available_nodes {
+        if let Some(hourly_rate_cents) = available_node.node.hourly_rate_cents {
+            let marked_up_rate = (hourly_rate_cents as f64 * markup_multiplier).round() as i32;
+            available_node.node.hourly_rate_cents = Some(marked_up_rate);
+        }
+    }
 
     Ok(Json(response))
 }

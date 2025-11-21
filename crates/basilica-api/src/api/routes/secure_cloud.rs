@@ -16,7 +16,7 @@ use basilica_sdk::types::{
     ListSecureCloudRentalsResponse, SecureCloudRentalListItem, SecureCloudRentalResponse,
     StartSecureCloudRentalRequest, StopSecureCloudRentalResponse,
 };
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use serde_json::json;
 
 /// Type alias for secure cloud rental query result from database
@@ -93,6 +93,15 @@ pub async fn list_gpu_prices(
                 Some("gpu_type") => offerings.sort_by_key(|o| o.gpu_type.as_str().to_string()),
                 Some("region") => offerings.sort_by(|a, b| a.region.cmp(&b.region)),
                 _ => {}
+            }
+
+            // Apply secure cloud markup to prices
+            let markup_multiplier = rust_decimal::Decimal::from_f64(
+                1.0 + (state.pricing_config.secure_cloud_markup_percent / 100.0),
+            )
+            .unwrap_or(rust_decimal::Decimal::ONE);
+            for offering in &mut offerings {
+                offering.hourly_rate *= markup_multiplier;
             }
 
             // raw_metadata is automatically excluded via #[serde(skip)]
