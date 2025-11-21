@@ -2558,6 +2558,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "shlex",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
