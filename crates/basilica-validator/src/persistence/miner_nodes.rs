@@ -134,19 +134,6 @@ impl SimplePersistence {
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to insert miner-node relationship: {}", e))?;
 
-            // Update pricing for existing nodes (INSERT OR IGNORE may skip if already exists)
-            sqlx::query(
-                "UPDATE miner_nodes
-                 SET hourly_rate_cents = ?, updated_at = datetime('now')
-                 WHERE miner_id = ? AND node_id = ?",
-            )
-            .bind(hourly_rate_cents as i64)
-            .bind(&miner_id)
-            .bind(node_id)
-            .execute(self.pool())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to update node pricing: {}", e))?;
-
             info!(
                 miner_uid = miner_uid,
                 node_id = node_id,
@@ -158,12 +145,14 @@ impl SimplePersistence {
                 hourly_rate_cents
             );
         } else {
-            debug!(
+            info!(
                 miner_uid = miner_uid,
                 node_id = node_id,
-                "Miner-node relationship already exists: {} -> {}",
+                hourly_rate_cents = hourly_rate_cents,
+                "Miner-node relationship already exists: {} -> {}, will update pricing to {}¢/hour",
                 miner_id,
-                node_id
+                node_id,
+                hourly_rate_cents
             );
 
             let duplicate_check_query: &'static str =
@@ -223,6 +212,37 @@ impl SimplePersistence {
                     node_ssh_endpoint
                 );
             }
+        }
+
+        // Update pricing for all nodes (new and existing) on every discovery
+        let result = sqlx::query(
+            "UPDATE miner_nodes
+             SET hourly_rate_cents = ?, updated_at = datetime('now')
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(hourly_rate_cents as i64)
+        .bind(&miner_id)
+        .bind(node_id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update node pricing: {}", e))?;
+
+        let rows_affected = result.rows_affected();
+        if rows_affected > 0 {
+            info!(
+                miner_uid = miner_uid,
+                node_id = node_id,
+                hourly_rate_cents = hourly_rate_cents,
+                "Updated pricing for node {} to {}¢/hour",
+                node_id,
+                hourly_rate_cents
+            );
+        } else {
+            warn!(
+                miner_uid = miner_uid,
+                node_id = node_id,
+                "Pricing UPDATE affected 0 rows - node may not exist"
+            );
         }
 
         Ok(())
