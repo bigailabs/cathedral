@@ -1,5 +1,5 @@
 -- Secure Cloud GPU Aggregator Tables
--- Migrated from basilica-aggregator SQLite to PostgreSQL
+-- Tables for basilica-aggregator service (uses shared API PostgreSQL database)
 
 -- GPU offerings table - cached provider pricing data
 CREATE TABLE IF NOT EXISTS gpu_offerings (
@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_gpu_offerings_fetched_at ON gpu_offerings(fetched
 CREATE INDEX IF NOT EXISTS idx_gpu_offerings_region ON gpu_offerings(region);
 CREATE INDEX IF NOT EXISTS idx_gpu_offerings_availability ON gpu_offerings(availability);
 
--- Note: Deployments are tracked in the secure_cloud_rentals table (see migration 007)
+-- Note: Deployments are tracked in the secure_cloud_rentals table (see migration 013)
 -- This consolidates rental tracking and deployment tracking into a single table
 
 -- User SSH keys (one per user for secure cloud deployments)

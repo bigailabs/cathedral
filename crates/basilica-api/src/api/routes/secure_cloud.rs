@@ -68,7 +68,7 @@ pub async fn list_gpu_prices(
 
             if let Some(region) = &query.region {
                 let region_lower = region.to_lowercase();
-                offerings.retain(|o| o.region.contains(&region_lower));
+                offerings.retain(|o| o.region.to_lowercase().contains(&region_lower));
             }
 
             if let Some(provider) = query.provider() {
@@ -285,7 +285,7 @@ pub async fn start_secure_cloud_rental(
         .map_err(|e| {
             tracing::error!("SSH key lookup failed: {}", e);
             ApiError::BadRequest {
-                message: format!("Invalid SSH key: {}", e),
+                message: "Invalid SSH key".to_string(),
             }
         })?;
 
@@ -320,7 +320,7 @@ pub async fn start_secure_cloud_rental(
         .map_err(|e| {
             tracing::error!("Deployment failed: {}", e);
             ApiError::Internal {
-                message: format!("Failed to deploy instance: {}", e),
+                message: "Failed to deploy instance".to_string(),
             }
         })?;
 

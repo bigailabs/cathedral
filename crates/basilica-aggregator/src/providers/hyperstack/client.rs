@@ -156,9 +156,10 @@ impl HyperstackProvider {
         );
 
         tracing::debug!(
-            "Hyperstack keypair request: url='{}', body={:?}",
+            "Hyperstack keypair request: url='{}', name='{}', environment='{}', public_key=<REDACTED>",
             url,
-            serde_json::to_value(&request_body).unwrap_or_default()
+            name,
+            environment_name
         );
 
         let response = self

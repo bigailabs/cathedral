@@ -5,7 +5,7 @@ use crate::models::{
     Deployment, DeploymentStatus, GpuOffering, Provider as ProviderEnum, ProviderHealth,
     ProviderSshKey, SshKey,
 };
-use crate::providers::datacrunch::{DataCrunchProvider, Instance, OsImage};
+use crate::providers::datacrunch::{DataCrunchProvider, OsImage};
 use crate::providers::hyperstack::HyperstackProvider;
 use crate::providers::{DeployRequest, Provider, ProviderClient};
 use basilica_common::types::GpuCategory;
@@ -629,30 +629,6 @@ impl AggregatorService {
         }
 
         Ok(deployment)
-    }
-
-    /// Get raw instance details from DataCrunch
-    pub async fn get_instance_details(&self, deployment_id: &str) -> Result<Instance> {
-        let provider = self.get_datacrunch_provider()?;
-
-        // Get deployment from database
-        let deployment = self
-            .db
-            .get_deployment(deployment_id)
-            .await?
-            .ok_or_else(|| {
-                AggregatorError::NotFound(format!("Deployment not found: {}", deployment_id))
-            })?;
-
-        let provider_instance_id =
-            deployment
-                .provider_instance_id
-                .ok_or_else(|| AggregatorError::Provider {
-                    provider: "datacrunch".to_string(),
-                    message: "Instance not yet provisioned".to_string(),
-                })?;
-
-        provider.get_instance(&provider_instance_id).await
     }
 
     /// Delete a deployment and terminate the instance

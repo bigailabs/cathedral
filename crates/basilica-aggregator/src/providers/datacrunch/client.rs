@@ -560,10 +560,19 @@ impl Provider for DataCrunchProvider {
                 .as_ref()
                 .unwrap_or(&instance_type.gpu.description);
             let gpu_type = normalize_gpu_type(gpu_model);
-            let hourly_rate = instance_type
-                .price_per_hour
-                .parse::<Decimal>()
-                .unwrap_or_default();
+            let hourly_rate = match instance_type.price_per_hour.parse::<Decimal>() {
+                Ok(rate) => rate,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse price_per_hour '{}' for instance_type {} ({}): {}",
+                        instance_type.price_per_hour,
+                        instance_type.id,
+                        instance_type.instance_type,
+                        e
+                    );
+                    continue;
+                }
+            };
             let interconnect = parse_interconnect(&instance_type.gpu.description);
             let storage = Some(instance_type.storage.description.clone());
 

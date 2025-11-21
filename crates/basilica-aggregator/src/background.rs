@@ -1,3 +1,4 @@
+use crate::error::Result;
 use crate::service::AggregatorService;
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
@@ -9,11 +10,17 @@ pub struct BackgroundRefreshTask {
 }
 
 impl BackgroundRefreshTask {
-    pub fn new(service: Arc<AggregatorService>, refresh_interval_seconds: u64) -> Self {
-        Self {
+    pub fn new(service: Arc<AggregatorService>, refresh_interval_seconds: u64) -> Result<Self> {
+        if refresh_interval_seconds == 0 {
+            return Err(crate::error::AggregatorError::Config(
+                "Refresh interval must be greater than 0 seconds".to_string(),
+            ));
+        }
+
+        Ok(Self {
             service,
             refresh_interval: Duration::from_secs(refresh_interval_seconds),
-        }
+        })
     }
 
     /// Start the background refresh task
@@ -33,9 +40,6 @@ impl BackgroundRefreshTask {
             "Background refresh task started with interval: {:?}",
             self.refresh_interval
         );
-
-        // Initial fetch immediately on startup
-        self.refresh_all_providers().await;
 
         loop {
             // Wait for next tick

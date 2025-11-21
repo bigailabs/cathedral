@@ -60,10 +60,6 @@ impl HydraHostProvider {
         let listings_response: ListingsResponse =
             serde_json::from_str(&response_text).map_err(|e| {
                 tracing::error!("Serde error details: {}", e);
-                tracing::debug!(
-                    "Response text (first 2000 chars): {}",
-                    &response_text[..response_text.len().min(2000)]
-                );
                 AggregatorError::Provider {
                     provider: "hydrahost".to_string(),
                     message: format!(
