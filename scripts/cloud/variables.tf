@@ -156,3 +156,10 @@ variable "deployments_alb_dns_name" {
   type        = string
   description = "DNS name of the ALB for deployments.basilica.ai"
 }
+
+variable "hyperstack_api_key" {
+  type        = string
+  description = "API key for Hyperstack GPU provider"
+  sensitive   = true
+  default     = ""
+}

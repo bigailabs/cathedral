@@ -414,6 +414,10 @@ module "basilica_api_service" {
     {
       name      = "SSH_PRIVATE_KEY"
       valueFrom = aws_secretsmanager_secret.k3s_ssh_key.arn
+    },
+    {
+      name      = "BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__API_KEY"
+      valueFrom = aws_secretsmanager_secret.hyperstack_api_key.arn
     }
   ]
 
