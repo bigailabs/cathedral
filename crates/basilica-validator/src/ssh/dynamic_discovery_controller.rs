@@ -660,7 +660,6 @@ mod tests {
             min_score_threshold: 0.5,
             max_miners_per_round: 10,
             min_verification_interval: Duration::from_secs(300),
-            netuid: 387,
             use_dynamic_discovery: true,
             discovery_timeout: Duration::from_secs(30),
             fallback_to_static: true,

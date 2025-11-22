@@ -57,8 +57,9 @@ impl MinerProver {
         bittensor_service: Arc<BittensorService>,
         persistence: Arc<SimplePersistence>,
         metrics: Option<Arc<ValidatorMetrics>>,
+        netuid: u16,
     ) -> Result<Self> {
-        let mut discovery = MinerDiscovery::new(bittensor_service.clone(), config.clone());
+        let mut discovery = MinerDiscovery::new(bittensor_service.clone(), netuid);
 
         // Add metrics if available
         if let Some(metrics_ref) = &metrics {

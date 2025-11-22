@@ -30,7 +30,6 @@ verification_interval = { secs = 600 }
 challenge_timeout = { secs = 120 }
 retry_attempts = 3
 retry_delay = { secs = 5 }
-netuid = 39  # Should match bittensor.netuid
 use_dynamic_discovery = true
 discovery_timeout = { secs = 30 }
 fallback_to_static = true
