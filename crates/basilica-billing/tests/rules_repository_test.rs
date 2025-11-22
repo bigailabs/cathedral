@@ -1,3 +1,5 @@
+#![cfg(feature = "with-billing-db-tests")]
+
 use basilica_billing::domain::rules_engine::{BillingRule, RuleAction, RuleCondition};
 use basilica_billing::storage::rules::{RulesRepository, SqlRulesRepository};
 use rust_decimal::Decimal;

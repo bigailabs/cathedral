@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use sqlx::Row;
 use std::sync::Arc;
+use tracing::error;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -45,6 +46,7 @@ pub struct UsageEvent {
     pub processed: bool,
     pub processed_at: Option<DateTime<Utc>>,
     pub batch_id: Option<Uuid>,
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +83,8 @@ pub trait EventRepository: Send + Sync {
         start_time: Option<DateTime<Utc>>,
         end_time: Option<DateTime<Utc>>,
     ) -> Result<Vec<UsageEvent>>;
+
+    async fn is_event_processed(&self, idempotency_key: &str) -> Result<bool>;
 
     async fn append_billing_event(&self, event: &BillingEvent) -> Result<Uuid>;
     async fn get_events_by_entity(
@@ -234,6 +238,75 @@ impl SqlEventRepository {
             _ => EventType::Telemetry,
         }
     }
+
+    fn classify_database_error(error: &sqlx::Error, event: &UsageEvent) -> DatabaseErrorDetails {
+        match error {
+            sqlx::Error::Database(db_err) => {
+                let code = db_err.code().map(|c| c.to_string()).unwrap_or_default();
+                let constraint = db_err.constraint().unwrap_or("unknown");
+
+                match code.as_str() {
+                    "23505" => DatabaseErrorDetails {
+                        error_type: "unique_violation".to_string(),
+                        message: format!(
+                            "Duplicate idempotency_key: {}. Event already exists in database (constraint: {})",
+                            event.idempotency_key.as_deref().unwrap_or("None"),
+                            constraint
+                        ),
+                    },
+                    "23502" => DatabaseErrorDetails {
+                        error_type: "not_null_violation".to_string(),
+                        message: format!(
+                            "Required field is NULL (constraint: {})",
+                            constraint
+                        ),
+                    },
+                    "23514" => DatabaseErrorDetails {
+                        error_type: "check_violation".to_string(),
+                        message: format!(
+                            "CHECK constraint failed. Likely empty user_id/validator_id (user_id='{}', validator_id='{}', constraint: {})",
+                            event.user_id,
+                            event.validator_id,
+                            constraint
+                        ),
+                    },
+                    "23503" => DatabaseErrorDetails {
+                        error_type: "foreign_key_violation".to_string(),
+                        message: format!(
+                            "Foreign key constraint failed (constraint: {})",
+                            constraint
+                        ),
+                    },
+                    _ => DatabaseErrorDetails {
+                        error_type: "database_error".to_string(),
+                        message: format!("Database error code {}: {}", code, db_err.message()),
+                    },
+                }
+            }
+            sqlx::Error::PoolTimedOut => DatabaseErrorDetails {
+                error_type: "pool_timeout".to_string(),
+                message: "Connection pool timed out - database overloaded or connection leak"
+                    .to_string(),
+            },
+            sqlx::Error::PoolClosed => DatabaseErrorDetails {
+                error_type: "pool_closed".to_string(),
+                message: "Connection pool closed - service shutting down".to_string(),
+            },
+            sqlx::Error::Io(_) => DatabaseErrorDetails {
+                error_type: "io_error".to_string(),
+                message: "Network I/O error communicating with database".to_string(),
+            },
+            _ => DatabaseErrorDetails {
+                error_type: "unknown".to_string(),
+                message: format!("Unexpected database error: {}", error),
+            },
+        }
+    }
+}
+
+struct DatabaseErrorDetails {
+    error_type: String,
+    message: String,
 }
 
 #[async_trait]
@@ -245,8 +318,8 @@ impl EventRepository for SqlEventRepository {
             r#"
             INSERT INTO billing.usage_events (
                 event_id, rental_id, user_id, node_id, validator_id, event_type,
-                event_data, timestamp, processed
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                event_data, timestamp, processed, idempotency_key
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(event.event_id)
@@ -258,11 +331,24 @@ impl EventRepository for SqlEventRepository {
         .bind(&event.event_data)
         .bind(event.timestamp)
         .bind(false)
+        .bind(&event.idempotency_key)
         .execute(self.connection.pool())
         .await
-        .map_err(|e| BillingError::EventStoreError {
-            message: "Failed to append usage event".to_string(),
-            source: Box::new(e),
+        .map_err(|e| {
+            let error_details = Self::classify_database_error(&e, event);
+            error!(
+                "Failed to append usage event: {} | event_id={} rental_id={} idempotency_key={:?} error_type={} db_error={}",
+                error_details.message,
+                event.event_id,
+                event.rental_id,
+                event.idempotency_key,
+                error_details.error_type,
+                e
+            );
+            BillingError::EventStoreError {
+                message: error_details.message,
+                source: Box::new(e),
+            }
         })?;
 
         Ok(event.event_id)
@@ -292,8 +378,8 @@ impl EventRepository for SqlEventRepository {
                 r#"
                 INSERT INTO billing.usage_events (
                     event_id, rental_id, user_id, node_id, validator_id, event_type,
-                    event_data, timestamp, processed
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    event_data, timestamp, processed, idempotency_key
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 "#,
             )
             .bind(event.event_id)
@@ -305,6 +391,7 @@ impl EventRepository for SqlEventRepository {
             .bind(&event.event_data)
             .bind(event.timestamp)
             .bind(false)
+            .bind(&event.idempotency_key)
             .execute(&mut *tx)
             .await
             .map_err(|e| BillingError::EventStoreError {
@@ -332,7 +419,7 @@ impl EventRepository for SqlEventRepository {
             r#"
             SELECT
                 event_id, rental_id, user_id, node_id, validator_id, event_type,
-                event_data, timestamp, processed, processed_at, batch_id
+                event_data, timestamp, processed, processed_at, batch_id, idempotency_key
             FROM billing.usage_events
             WHERE processed = false
             ORDER BY timestamp ASC
@@ -364,6 +451,7 @@ impl EventRepository for SqlEventRepository {
                     processed: row.get("processed"),
                     processed_at: row.get("processed_at"),
                     batch_id: row.get("batch_id"),
+                    idempotency_key: row.get("idempotency_key"),
                 }
             })
             .collect();
@@ -399,6 +487,28 @@ impl EventRepository for SqlEventRepository {
         Ok(())
     }
 
+    async fn is_event_processed(&self, idempotency_key: &str) -> Result<bool> {
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM billing.usage_events
+                WHERE idempotency_key = $1
+                  AND processed = true
+            )
+            "#,
+        )
+        .bind(idempotency_key)
+        .fetch_one(self.connection.pool())
+        .await
+        .map_err(|e| BillingError::EventStoreError {
+            message: "Failed to check idempotency key".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(exists)
+    }
+
     async fn get_rental_events(
         &self,
         rental_id: Uuid,
@@ -412,7 +522,7 @@ impl EventRepository for SqlEventRepository {
             r#"
             SELECT
                 event_id, rental_id, user_id, node_id, validator_id, event_type,
-                event_data, timestamp, processed, processed_at, batch_id
+                event_data, timestamp, processed, processed_at, batch_id, idempotency_key
             FROM billing.usage_events
             WHERE rental_id = $1
                 AND timestamp >= $2
@@ -446,6 +556,7 @@ impl EventRepository for SqlEventRepository {
                     processed: row.get("processed"),
                     processed_at: row.get("processed_at"),
                     batch_id: row.get("batch_id"),
+                    idempotency_key: row.get("idempotency_key"),
                 }
             })
             .collect();

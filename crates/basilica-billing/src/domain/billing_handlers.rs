@@ -7,8 +7,8 @@ use crate::domain::types::{
 };
 use crate::error::{BillingError, Result};
 use crate::storage::{
-    rentals::RentalRepository, BillingEvent, EventRepository, PackageRepository,
-    SqlCreditRepository, SqlRentalRepository, UsageEvent,
+    rentals::RentalRepository, BillingEvent, EventRepository, SqlCreditRepository,
+    SqlRentalRepository, UsageEvent,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -22,7 +22,6 @@ use uuid::Uuid;
 pub struct BillingEventHandlers {
     rental_repository: Arc<SqlRentalRepository>,
     credit_repository: Arc<SqlCreditRepository>,
-    package_repository: Arc<dyn PackageRepository + Send + Sync>,
     event_repository: Arc<dyn EventRepository + Send + Sync>,
 }
 
@@ -30,13 +29,11 @@ impl BillingEventHandlers {
     pub fn new(
         rental_repository: Arc<SqlRentalRepository>,
         credit_repository: Arc<SqlCreditRepository>,
-        package_repository: Arc<dyn PackageRepository + Send + Sync>,
         event_repository: Arc<dyn EventRepository + Send + Sync>,
     ) -> Self {
         Self {
             rental_repository,
             credit_repository,
-            package_repository,
             event_repository,
         }
     }
@@ -130,10 +127,10 @@ impl EventHandlers for BillingEventHandlers {
             event.event_id, event.rental_id
         );
 
+        let rental_id = RentalId::from_uuid(event.rental_id);
+
         let telemetry = Self::parse_telemetry_data(&event.event_data)?;
         let usage_metrics = Self::telemetry_to_usage_metrics(&telemetry);
-
-        let rental_id = RentalId::from_uuid(event.rental_id);
         let mut rental = self
             .rental_repository
             .get_rental(&rental_id)
@@ -169,13 +166,14 @@ impl EventHandlers for BillingEventHandlers {
             return Ok(());
         }
 
-        let package = self
-            .package_repository
-            .get_package(&rental.package_id)
-            .await?;
+        // Use marketplace-2-compute pricing formula
+        use crate::domain::cost_calculator::calculate_marketplace_cost;
 
-        let cost_breakdown =
-            package.calculate_cost_with_gpu_count(&usage_metrics, usage_metrics.gpu_count);
+        let cost_breakdown = calculate_marketplace_cost(
+            usage_metrics.gpu_hours,
+            rental.base_price_per_gpu,
+            rental.gpu_count,
+        );
 
         let incremental_cost = cost_breakdown.total_cost;
 
@@ -186,9 +184,17 @@ impl EventHandlers for BillingEventHandlers {
             }
         })?;
 
+        let rental_id_str = rental.id.as_uuid().to_string();
         match self
             .credit_repository
-            .deduct_credits_tx(&mut tx, &rental.user_id, incremental_cost)
+            .deduct_credits_tx(
+                &mut tx,
+                &rental.user_id,
+                incremental_cost,
+                Some(&rental_id_str),
+                Some("rental"),
+                Some("Incremental rental usage charge"),
+            )
             .await
         {
             Ok(()) => {
@@ -388,6 +394,7 @@ impl EventHandlers for BillingEventHandlers {
         Ok(())
     }
 
+    #[allow(deprecated)]
     async fn process_rental_start(&self, event: &UsageEvent) -> Result<()> {
         info!(
             "Processing rental start event {} for rental {}",
@@ -438,18 +445,20 @@ impl EventHandlers for BillingEventHandlers {
             &rental_id.to_string(),
             user_id.as_uuid().ok(),
             serde_json::json!({
-                "package_id": rental.package_id.to_string(),
+                "package_id": rental.package_id.as_ref().map(|p| p.to_string()).unwrap_or_else(|| "marketplace".to_string()),
                 "node_id": event.node_id,
                 "validator_id": event.validator_id,
                 "billing_model": "pay_as_you_go",
+                "base_price_per_gpu": rental.base_price_per_gpu.to_string(),
+                "gpu_count": rental.gpu_count,
                 "timestamp": event.timestamp,
             }),
         )
         .await?;
 
         info!(
-            "Started rental {} for user {} with package {}",
-            rental_id, user_id, rental.package_id
+            "Started rental {} for user {} at ${}/GPU × {} GPUs",
+            rental_id, user_id, rental.base_price_per_gpu, rental.gpu_count
         );
 
         Ok(())
@@ -536,7 +545,7 @@ impl EventHandlers for BillingEventHandlers {
 
         let rental_id = RentalId::from_uuid(event.rental_id);
 
-        let mut rental = self
+        let rental = self
             .rental_repository
             .get_rental(&rental_id)
             .await?
@@ -547,20 +556,12 @@ impl EventHandlers for BillingEventHandlers {
         let new_resources = event.event_data.get("resources").cloned();
 
         if let Some(resources) = new_resources {
-            if let Some(gpu_model) = resources.get("gpu_model").and_then(|v| v.as_str()) {
-                let new_package = self
-                    .package_repository
-                    .find_package_for_gpu_model(gpu_model)
-                    .await?;
-
-                if new_package.id != rental.package_id {
-                    info!(
-                        "Updating rental {} package from {} to {} due to GPU change",
-                        rental_id, rental.package_id, new_package.id
-                    );
-                    rental.package_id = new_package.id;
-                }
-            }
+            // In marketplace-2-compute, pricing is fixed at rental creation
+            // Resource changes don't affect the pricing model
+            info!(
+                "Resource update event for rental {} (marketplace pricing unchanged)",
+                rental_id
+            );
 
             self.rental_repository.update_rental(&rental).await?;
 
@@ -570,7 +571,8 @@ impl EventHandlers for BillingEventHandlers {
                 rental.user_id.as_uuid().ok(),
                 serde_json::json!({
                     "resources": resources,
-                    "package_id": rental.package_id.to_string(),
+                    "base_price_per_gpu": rental.base_price_per_gpu.to_string(),
+                    "gpu_count": rental.gpu_count,
                     "timestamp": event.timestamp,
                 }),
             )

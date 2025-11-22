@@ -59,6 +59,8 @@ collateral-contract = { path = "../collateral-contract" }
 
 # HTTP client for external communications
 reqwest = { workspace = true }
+kube = { version = "0.88", features = ["rustls-tls"] }
+k8s-openapi = { version = "0.21", features = ["v1_29"] }
 
 # Temporary file handling
 tempfile = { workspace = true }

@@ -100,3 +100,59 @@ variable "payments_blockchain_websocket_url" {
   description = "WebSocket URL for blockchain connectivity (payments service)"
   default     = "wss://entrypoint-finney.opentensor.ai:443"
 }
+
+variable "kubeconfig_path" {
+  type        = string
+  description = "Path to kubeconfig file for K3s cluster connection (e.g., ~/.kube/k3s-basilica-config). Leave empty to manually upload kubeconfig to AWS Secrets Manager."
+  default     = ""
+}
+
+variable "k3s_server_url" {
+  type        = string
+  description = "K3S server URL for interacting with the cluster"
+}
+
+variable "k3s_ssh_enabled" {
+  type        = string
+  description = "Enable SSH-based K3s token generation"
+  default     = "true"
+}
+
+variable "k3s_ssh_servers" {
+  type        = string
+  description = "Comma-separated list of K3s server IPs with optional ports (e.g., 10.101.0.10:22,10.101.0.11:22)"
+  default     = ""
+}
+
+variable "k3s_ssh_username" {
+  type        = string
+  description = "SSH username for K3s servers"
+  default     = ""
+}
+
+variable "k3s_ssh_key_path" {
+  type        = string
+  description = "Path to SSH private key for K3s servers"
+  default     = ""
+}
+
+variable "cloudflare_api_token" {
+  type        = string
+  description = "API token for Cloudflare"
+  sensitive   = true
+}
+
+variable "cloudflare_zone_id" {
+  type        = string
+  description = "Cloudflare zone ID for deployments.basilica.ai"
+}
+
+variable "cloudflare_domain" {
+  type        = string
+  description = "Cloudflare domain for deployments.basilica.ai"
+}
+
+variable "deployments_alb_dns_name" {
+  type        = string
+  description = "DNS name of the ALB for deployments.basilica.ai"
+}

@@ -1,12 +1,9 @@
-use crate::domain::packages::BillingPackage;
 use crate::domain::types::{
     CostBreakdown, CreditBalance, DiscountType, PackageId, UsageMetrics, UserId,
 };
 use crate::error::Result;
 use crate::metrics::BillingMetrics;
-use crate::storage::{
-    PackageRepository, PromoCodeRepository, RulesRepository, UserMetadataRepository,
-};
+use crate::storage::{PromoCodeRepository, RulesRepository, UserMetadataRepository};
 use async_trait::async_trait;
 use chrono::Timelike;
 use rust_decimal::prelude::ToPrimitive;
@@ -105,23 +102,6 @@ pub enum RuleAction {
 /// Rules evaluation engine
 #[async_trait]
 pub trait RulesEvaluator: Send + Sync {
-    async fn evaluate_package(
-        &self,
-        user_id: &UserId,
-        package_id: &PackageId,
-        usage: &UsageMetrics,
-        promo_code: Option<&str>,
-        metadata: &HashMap<String, String>,
-    ) -> Result<CostBreakdown>;
-
-    async fn get_package(&self, package_id: &PackageId) -> Result<BillingPackage>;
-
-    async fn list_packages(&self) -> Result<Vec<BillingPackage>>;
-
-    async fn create_package(&self, package: BillingPackage) -> Result<()>;
-
-    async fn update_package(&self, package: BillingPackage) -> Result<()>;
-
     async fn create_rule(&self, rule: BillingRule) -> Result<()>;
 
     async fn list_rules(&self) -> Result<Vec<BillingRule>>;
@@ -133,8 +113,8 @@ pub trait RulesEvaluator: Send + Sync {
     ) -> Result<Vec<BillingRule>>;
 }
 
+#[allow(dead_code)]
 pub struct RulesEngine {
-    package_repository: Arc<dyn PackageRepository>,
     rules_repository: Arc<dyn RulesRepository>,
     user_metadata_repository: Arc<dyn UserMetadataRepository>,
     promo_code_repository: Arc<dyn PromoCodeRepository>,
@@ -143,13 +123,11 @@ pub struct RulesEngine {
 
 impl RulesEngine {
     pub fn new(
-        package_repository: Arc<dyn PackageRepository>,
         rules_repository: Arc<dyn RulesRepository>,
         user_metadata_repository: Arc<dyn UserMetadataRepository>,
         promo_code_repository: Arc<dyn PromoCodeRepository>,
     ) -> Self {
         Self {
-            package_repository,
             rules_repository,
             user_metadata_repository,
             promo_code_repository,
@@ -162,6 +140,7 @@ impl RulesEngine {
         self
     }
 
+    #[allow(dead_code)]
     async fn apply_automatic_discounts(
         &self,
         user_id: &UserId,
@@ -284,6 +263,7 @@ impl RulesEngine {
         Ok(cost)
     }
 
+    #[allow(dead_code)]
     fn apply_rule_actions(&self, mut cost: CostBreakdown, rules: &[BillingRule]) -> CostBreakdown {
         for rule in rules {
             match &rule.action {
@@ -315,44 +295,6 @@ impl RulesEngine {
 
 #[async_trait]
 impl RulesEvaluator for RulesEngine {
-    async fn evaluate_package(
-        &self,
-        user_id: &UserId,
-        package_id: &PackageId,
-        usage: &UsageMetrics,
-        promo_code: Option<&str>,
-        metadata: &HashMap<String, String>,
-    ) -> Result<CostBreakdown> {
-        let package = self.package_repository.get_package(package_id).await?;
-
-        let mut cost_breakdown = package.calculate_cost_with_gpu_count(usage, usage.gpu_count);
-
-        cost_breakdown = self
-            .apply_automatic_discounts(user_id, package_id, promo_code, cost_breakdown)
-            .await?;
-
-        let rules = self.evaluate_rules(usage, metadata).await?;
-        cost_breakdown = self.apply_rule_actions(cost_breakdown, &rules);
-
-        Ok(cost_breakdown)
-    }
-
-    async fn get_package(&self, package_id: &PackageId) -> Result<BillingPackage> {
-        self.package_repository.get_package(package_id).await
-    }
-
-    async fn list_packages(&self) -> Result<Vec<BillingPackage>> {
-        self.package_repository.list_packages().await
-    }
-
-    async fn create_package(&self, package: BillingPackage) -> Result<()> {
-        self.package_repository.create_package(package).await
-    }
-
-    async fn update_package(&self, package: BillingPackage) -> Result<()> {
-        self.package_repository.update_package(package).await
-    }
-
     async fn create_rule(&self, rule: BillingRule) -> Result<()> {
         self.rules_repository.create_rule(&rule).await
     }

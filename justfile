@@ -5,16 +5,6 @@
 install-dev-tools:
     cargo install cargo-audit cargo-deny cargo-license
 
-# Generate key for gpu-attestor (required for builds)
-gen-key:
-    #!/usr/bin/env bash
-    if [ ! -f "public_key.hex" ]; then
-        echo "Generating key for gpu-attestor..."
-        chmod +x scripts/gen-key.sh
-        ./scripts/gen-key.sh
-    else
-        echo "Key already exists"
-    fi
 
 # =============================================================================
 # FORMATTING & LINTING
@@ -28,8 +18,17 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Fix linting issues and format code
+# Fix linting issues and format code (excludes basilica-storage which requires system FUSE libs)
 fix:
+    #!/usr/bin/env bash
+    # First run with --fix to auto-fix what we can
+    cargo clippy --fix --allow-dirty --workspace --exclude basilica-storage --all-targets
+    # Then run without --fix to catch remaining issues (like CI does)
+    cargo clippy --workspace --exclude basilica-storage --all-targets -- -D warnings
+    cargo fmt --all
+
+# Fix linting issues including basilica-storage (requires libfuse3-dev system package)
+fix-all:
     #!/usr/bin/env bash
     # First run with --fix to auto-fix what we can
     cargo clippy --fix --allow-dirty --workspace --all-targets --all-features
@@ -130,6 +129,68 @@ docker-build-gpu-attestor:
 # Build all Docker images
 docker-build: docker-build-executor docker-build-gpu-attestor
 
+# Build operator Docker image locally
+docker-build-operator TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/operator/build.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    echo "Building operator image with tag: $CLEAN_TAG"
+    ./scripts/operator/build.sh --image-name ghcr.io/one-covenant/basilica-operator --image-tag "$CLEAN_TAG"
+    echo "✅ Operator image built: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
+    echo ""
+    echo "To push to registry, run:"
+    echo "  docker push ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
+
+# Build and push operator Docker image
+docker-push-operator TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    # Build first
+    just docker-build-operator "$CLEAN_TAG"
+    # Push
+    echo "Pushing operator image to registry..."
+    docker push ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG
+    echo "✅ Operator image pushed: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
+
+# Build storage daemon Docker image locally
+docker-build-storage TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/storage-daemon/build.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    echo "Building storage daemon image with tag: $CLEAN_TAG"
+    ./scripts/storage-daemon/build.sh --image-name ghcr.io/one-covenant/basilica/storage-daemon --image-tag "$CLEAN_TAG"
+    echo "✅ Storage daemon image built: ghcr.io/one-covenant/basilica/storage-daemon:$CLEAN_TAG"
+    echo ""
+    echo "To push to registry, run:"
+    echo "  just docker-push-storage $CLEAN_TAG"
+
+# Build and push storage daemon Docker image
+docker-push-storage TAG="latest":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x scripts/storage-daemon/push.sh
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    # Build first
+    just docker-build-storage "$CLEAN_TAG"
+    # Push
+    echo "Pushing storage daemon image to registry..."
+    ./scripts/storage-daemon/push.sh \
+      --source-image ghcr.io/one-covenant/basilica/storage-daemon \
+      --target-image ghcr.io/one-covenant/basilica/storage-daemon \
+      --tag "$CLEAN_TAG"
+    echo "✅ Storage daemon image pushed: ghcr.io/one-covenant/basilica/storage-daemon:$CLEAN_TAG"
+
 # =============================================================================
 # DEPLOYMENT COMMANDS
 # =============================================================================
@@ -218,6 +279,51 @@ docker-dev-down:
 docker-dev-postgres-down:
     docker compose -f docker/docker-compose.dev.yml down
 
+# =============================================================================
+# CI SHORTCUTS
+# =============================================================================
+
+# Trigger the manual workflow to build and push all images with a tag,
+# then print the Ansible one-liner to deploy Operator + API using that tag.
+ci-build-images TAG="k3_test":
+    #!/usr/bin/env bash
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "GitHub CLI (gh) is not installed. Install from https://cli.github.com/" >&2
+        exit 1
+    fi
+    REF=$(git rev-parse --abbrev-ref HEAD)
+    echo "Triggering CI on ref $REF to build and push images with tag={{TAG}}"
+    if gh workflow run ci.yml -r "$REF" -f build_images=true -f image_tag={{TAG}}; then
+        echo "Dispatched workflow_dispatch successfully."
+    else
+        echo "workflow_dispatch not available on default branch; falling back to push-triggered build workflow..."
+        # Touch the trigger file and commit with TAG=<value> to pass tag to the workflow
+        mkdir -p .github/triggers
+        date +%s > .github/triggers/build-k3-test-images
+        git add .github/triggers/build-k3-test-images
+        git commit -m "trigger build-k3-test-images TAG={{TAG}}" --allow-empty
+        git push origin "$REF"
+        echo "Pushed trigger commit. The build-k3-test-images workflow will run on branch $REF."
+    fi
+    echo
+    echo "When the workflow finishes, deploy with Ansible:"
+    echo "  cd orchestrator/ansible && ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \"-e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}}\" \"-e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}\""
+
+# Manually run CI on the current branch (or a given ref)
+ci-run REF="":
+    #!/usr/bin/env bash
+    if ! command -v gh >/dev/null 2>&1; then
+        echo "GitHub CLI (gh) is not installed. Install from https://cli.github.com/" >&2
+        exit 1
+    fi
+    if [[ -z "{{REF}}" ]]; then
+        REF=$(git rev-parse --abbrev-ref HEAD)
+    else
+        REF={{REF}}
+    fi
+    echo "Triggering CI workflow on ref $REF"
+    gh workflow run ci.yml -r "$REF"
+
 # View logs for all services
 docker-logs:
     docker compose -f docker/docker-compose.yml logs -f
@@ -252,6 +358,574 @@ docs:
 # Open documentation
 docs-open:
     cargo doc --workspace --no-deps --document-private-items --open
+
+# =============================================================================
+# E2E APPLY HELPERS
+# =============================================================================
+
+# Configure R2 storage credentials securely using Ansible Vault
+r2-setup:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🔐 Secure R2 Storage Credentials Setup"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will:"
+    echo "  1. Prompt for vault password (min 12 chars)"
+    echo "  2. Collect R2 credentials interactively"
+    echo "  3. Encrypt credentials with AES-256"
+    echo "  4. Save to orchestrator/ansible/group_vars/all/vault.yml"
+    echo ""
+    cd orchestrator/ansible
+    chmod +x scripts/05-secure-r2-setup.sh
+    ./scripts/05-secure-r2-setup.sh
+    cd ../..
+    echo ""
+    echo "✅ R2 credentials configured!"
+    echo ""
+    echo "To deploy credentials to your cluster:"
+    echo "  just e2e-apply TAG=k3_test"
+
+# Upload R2 credentials directly to cluster (for already-configured credentials)
+r2-upload:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📤 Upload R2 Credentials to Cluster"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "This will upload your R2 credentials directly to the cluster."
+    echo "Provide credentials via environment variables or interactively."
+    echo ""
+    cd orchestrator/ansible
+    chmod +x scripts/06-upload-r2-credentials.sh
+    ./scripts/06-upload-r2-credentials.sh
+    cd ../..
+    echo ""
+    echo "✅ Credentials uploaded!"
+
+# Apply the full stack on the remote K3s server with images by tag, and a test Postgres URL.
+# Defaults match config/deploy/postgres.yaml (user=basilica, db=basilica, password=devpassword).
+# Optional: Set SETUP_R2=true to configure R2 storage credentials first
+e2e-apply TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica" SETUP_R2="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Check if R2 setup is requested
+    if [ "{{SETUP_R2}}" = "true" ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🔐 R2 Storage Credentials Setup"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "Running secure R2 setup before deployment..."
+        echo ""
+        cd orchestrator/ansible
+        chmod +x scripts/05-secure-r2-setup.sh
+        ./scripts/05-secure-r2-setup.sh
+        cd ../..
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+    fi
+
+    DB_HOST="basilica-postgres.basilica-system.svc.cluster.local"
+    DB_URL="postgres://{{DB_USER}}:{{DB_PASS}}@${DB_HOST}:5432/{{DB_NAME}}"
+    echo "Using DB_URL=${DB_URL}"
+    cd orchestrator/ansible
+
+    # Check if vault file exists and use it
+    VAULT_ARGS=""
+    if [ -f group_vars/all/vault.yml ]; then
+        echo "✅ Found encrypted R2 credentials (group_vars/all/vault.yml)"
+        if [ -f .vault_password ]; then
+            echo "✅ Using vault password file (.vault_password)"
+            VAULT_ARGS="--vault-password-file=.vault_password"
+        else
+            echo "🔑 Enter vault password to decrypt R2 credentials:"
+            VAULT_ARGS="--ask-vault-pass"
+        fi
+    else
+        echo "ℹ️  No R2 credentials found (group_vars/all/vault.yml)"
+        echo "   To set up R2 storage, run: just e2e-apply SETUP_R2=true"
+        echo "   Or run manually: cd orchestrator/ansible && ./scripts/05-secure-r2-setup.sh"
+    fi
+
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e install_local_subtensor_k8s=true \
+      -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
+      -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
+      -e api_database_url="${DB_URL}" \
+      $VAULT_ARGS
+    echo
+    echo "Look for 'Generated API token' in the output above."
+
+# Fresh reinstall helper: deletes namespaces + CRDs locally, then runs e2e-apply.
+e2e-reinstall TAG="k3_test" DB_USER="basilica" DB_PASS="devpassword" DB_NAME="basilica" TENANT_NS="u-test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Teardown remote cluster resources via Ansible..."
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml -e tenant_namespace={{TENANT_NS}} || true
+    cd - >/dev/null
+    just e2e-apply TAG={{TAG}} DB_USER={{DB_USER}} DB_PASS={{DB_PASS}} DB_NAME={{DB_NAME}}
+
+# =============================================================================
+# SUBTENSOR (LOCALNET) HELPERS
+# =============================================================================
+
+# Spin up Subtensor local devnet (Alice + Bob) in Kubernetes and run init script
+subtensor-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-up.yml
+
+# Tear down Subtensor local devnet (delete Alice/Bob/ConfigMap/Job)
+subtensor-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-down.yml || true
+
+# Show Subtensor resources and recent events
+subtensor-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-status.yml
+
+# Tail Subtensor init job logs
+subtensor-logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KUBECONFIG=../build/k3s.yaml
+    POD=$(kubectl -n basilica-system get pod -l job-name=subtensor-init -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -z "$POD" ]; then
+        echo "No subtensor-init pod found; have you run 'just subtensor-up' or e2e-apply with install_local_subtensor_k8s=true?" >&2
+        exit 1
+    fi
+    echo "Streaming logs from $POD... (Ctrl-C to stop)"
+    kubectl -n basilica-system logs -f "$POD" || kubectl -n basilica-system logs job/subtensor-init --tail=-1 || true
+
+# API logs and describe (runs on server)
+api-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/api-status.yml
+
+# API logs locally using KUBECONFIG=build/k3s.yaml
+api-logs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KUBECONFIG=build/k3s.yaml
+    kubectl -n basilica-system logs deploy/basilica-api --tail=200 -f
+
+# Start local Subtensor (Alice/Bob) + Envoy WSS
+local-subtensor-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/subtensor-local/start.sh
+
+# Stop local Subtensor
+local-subtensor-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/subtensor-local/docker-compose.yml down -v
+
+# Setup remote K3s cluster via Ansible (run ONCE to provision the cluster)
+k3s-provision TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🚀 Provisioning remote K3s cluster via Ansible..."
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/k3s-setup.yml
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
+      -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}}
+    cd ../..
+    echo "✅ Remote K3s cluster provisioned"
+    echo "   Kubeconfig: build/k3s.yaml"
+    echo ""
+    export KUBECONFIG="$(pwd)/build/k3s.yaml"
+    kubectl get nodes -o wide
+
+# Setup k3d cluster for local development (alternative to remote K3s)
+local-k3d-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Install k3d if needed
+    if ! command -v k3d &> /dev/null; then
+        echo "Installing k3d..."
+        curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash
+    fi
+
+    # Create cluster if it doesn't exist
+    if ! k3d cluster list | grep -q basilica-local; then
+        echo "Creating k3d cluster..."
+        k3d cluster create basilica-local \
+            --api-port 6443 \
+            --port "8000:80@loadbalancer" \
+            --port "8443:443@loadbalancer" \
+            --k3s-arg "--disable=traefik@server:0"
+    fi
+
+    # Export kubeconfig
+    mkdir -p build
+    k3d kubeconfig get basilica-local > build/k3s.yaml
+    echo "✅ k3d cluster ready, kubeconfig at: build/k3s.yaml"
+    echo "   export KUBECONFIG=\$(pwd)/build/k3s.yaml"
+
+# Teardown k3d cluster
+local-k3d-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if k3d cluster list | grep -q basilica-local; then
+        k3d cluster delete basilica-local
+        rm -f build/k3s.yaml
+        echo "✅ k3d cluster deleted"
+    else
+        echo "No k3d cluster found"
+    fi
+
+# Start local API (uses scripts/api/.env.local if present)
+local-api-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Check if kubeconfig already exists (from Ansible or previous k3d setup)
+    if [ -f build/k3s.yaml ]; then
+        echo "✅ Using existing kubeconfig from build/k3s.yaml"
+        # Check if it's from k3d or remote K3s
+        if grep -q "k3d-basilica-local" build/k3s.yaml; then
+            echo "   (k3d cluster detected)"
+            # Ensure k3d cluster is running
+            if ! k3d cluster list 2>/dev/null | grep -q basilica-local; then
+                echo "⚠️  k3d cluster not running, starting it..."
+                just local-k3d-up
+            fi
+        else
+            echo "   (Remote K3s cluster detected - from Ansible setup)"
+        fi
+    else
+        echo "⚠️  No kubeconfig found. Setting up local k3d cluster..."
+        just local-k3d-up
+    fi
+
+    echo "Creating scripts/api/.env.local for local API..."
+    {
+        printf 'RUST_LOG=basilica_api=debug\n'
+        printf 'RUST_BACKTRACE=1\n'
+        printf 'BASILICA_API_BITTENSOR__NETWORK=local\n'
+        printf 'BASILICA_API_BITTENSOR__NETUID=2\n'
+        printf 'BASILICA_API_BITTENSOR__CHAIN_ENDPOINT=wss://host.docker.internal:9944\n'
+        printf 'BASILICA_API_BITTENSOR__VALIDATOR_HOTKEY=5DJBmrfyRqe6eUUHLaWSho3Wgr5i8gDTWKxxWEmXvFhHvWTM\n'
+        printf 'SSL_CERT_FILE=/etc/ssl/certs/subtensor-ca.crt\n'
+    } > scripts/api/.env.local
+
+    docker compose -f scripts/api/compose.dev.yml up -d
+    echo "✅ API started with k8s backend enabled"
+
+# Stop local API
+local-api-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/api/compose.dev.yml down
+
+# Start local Validator against local Subtensor
+local-validator-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Detect external IP
+    EXTERNAL_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "127.0.0.1")
+    echo "Detected external IP: $EXTERNAL_IP"
+
+    # Ensure build directory exists
+    mkdir -p build
+
+    # Check for K3s configuration and set environment variables
+    if [ -f build/k3s.yaml ] && [ -f build/k3s-node-token.txt ]; then
+        echo "✅ K3s configuration found - enabling node onboarding"
+        export BASILICA_ENABLE_K3S_JOIN=true
+        # Extract K3s server URL from kubeconfig
+        export BASILICA_K3S_URL=$(grep -oP 'server:\s*\K[^\s]+' build/k3s.yaml | head -1)
+        export BASILICA_K3S_TOKEN=$(cat build/k3s-node-token.txt)
+        export BASILICA_K3S_CHANNEL=stable
+        export BASILICA_TAINT_EXCLUSIVE=false
+        export BASILICA_NAMESPACE=default
+        echo "   K3s URL: $BASILICA_K3S_URL"
+        echo "   Token length: ${#BASILICA_K3S_TOKEN} chars"
+    else
+        echo "ℹ️  No K3s configuration found - node onboarding disabled"
+        echo "   To enable: run 'just e2e-apply' to fetch K3s token"
+        export BASILICA_ENABLE_K3S_JOIN=false
+        export BASILICA_K3S_URL=""
+        export BASILICA_K3S_TOKEN=""
+        # Create placeholder kubeconfig if it doesn't exist (for docker volume mount)
+        if [ ! -f build/k3s.yaml ]; then
+            echo "# Placeholder kubeconfig - run 'just e2e-apply' to fetch real config" > build/k3s.yaml
+        fi
+    fi
+
+    # Always regenerate validator.local.toml with current external IP
+    echo "Creating config/validator.local.toml for local validator..."
+    {
+        printf '[database]\n'
+        printf 'url = "sqlite:/app/data/validator.db?mode=rwc"\n'
+        printf 'max_connections = 10\n'
+        printf 'run_migrations = true\n\n'
+        printf '[server]\n'
+        printf 'host = "0.0.0.0"\n'
+        printf 'port = 8080\n'
+        printf 'advertised_host = "%s"\n' "$EXTERNAL_IP"
+        printf 'advertised_port = 8080\n'
+        printf 'advertised_tls = false\n'
+        printf 'max_connections = 1000\n'
+        printf 'request_timeout = { secs = 30 }\n\n'
+        printf '[bittensor]\n'
+        printf 'wallet_name = "Alice"\n'
+        printf 'hotkey_name = "default"\n'
+        printf 'network = "local"\n'
+        printf 'netuid = 2\n'
+        printf 'chain_endpoint = "wss://host.docker.internal:9944"\n'
+        printf 'weight_interval_secs = 300\n'
+        printf 'axon_port = 8080\n'
+        printf 'external_ip = "%s"\n\n' "$EXTERNAL_IP"
+        printf '[metrics]\n'
+        printf 'enabled = true\n\n'
+        printf '[logging]\n'
+        printf 'level = "debug"\n'
+        printf 'format = "json"\n'
+        printf 'output = "./validator.log"\n'
+        printf '\n[emission]\n'
+        printf 'burn_percentage = 0.0\n'
+        printf 'burn_uid = 0\n'
+        printf 'weight_set_interval_blocks = 360\n'
+        printf '\n[emission.gpu_allocations]\n'
+        printf 'A100 = { weight = 50.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+        printf 'H100 = { weight = 30.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+        printf 'B200 = { weight = 20.0, min_gpu_count = 1, min_gpu_vram = 1 }\n'
+
+        # Add verification section with K8s profile publishing if K3s is configured
+        if [ "${BASILICA_ENABLE_K3S_JOIN:-false}" = "true" ]; then
+            printf '\n[verification]\n'
+            printf 'max_concurrent_verifications = 10\n'
+            printf 'verification_interval = { secs = 60 }  # Verify every 60 seconds\n'
+            printf 'min_score_threshold = 0.1\n'
+            printf 'challenge_timeout = { secs = 120 }\n'
+            printf 'retry_attempts = 3\n'
+            printf 'retry_delay = { secs = 5 }\n'
+            printf 'enable_k8s_profile_publishing = true\n'
+            printf 'k8s_profile_namespace = "default"\n'
+            printf '\n[verification.node_groups]\n'
+            printf 'strategy = "all-jobs"  # Options: round-robin, all-jobs, all-rentals\n'
+            printf '# jobs_percentage = 30  # For round-robin: 30%% jobs, 70%% rentals\n'
+            printf '# force_group = "jobs" # Optional: override all assignments\n'
+        fi
+    } > config/validator.local.toml
+    # Run validator container
+    docker compose -f scripts/validator/compose.local.yml up -d
+
+local-validator-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/validator/compose.local.yml down -v
+
+# Start local Miner against local Subtensor (uses Alice/M1 hotkey)
+local-miner-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Detect external IP
+    EXTERNAL_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me || echo "127.0.0.1")
+    echo "Detected external IP: $EXTERNAL_IP"
+
+    # Always regenerate miner.local.toml with current external IP
+    echo "Creating config/miner.local.toml for local miner..."
+    {
+        printf '[database]\n'
+        printf 'url = "sqlite:/app/data/miner.db?mode=rwc"\n'
+        printf 'max_connections = 10\n'
+        printf 'run_migrations = true\n\n'
+        printf '[bittensor]\n'
+        printf 'wallet_name = "Alice"\n'
+        printf 'hotkey_name = "M1"\n'
+        printf 'network = "local"\n'
+        printf 'netuid = 2\n'
+        printf 'chain_endpoint = "wss://host.docker.internal:9944"\n'
+        printf 'weight_interval_secs = 300\n'
+        printf 'axon_port = 8091\n'
+        printf 'external_ip = "%s"\n' "$EXTERNAL_IP"
+        printf 'skip_registration = false\n\n'
+        printf '[validator_comms]\n'
+        printf 'host = "0.0.0.0"\n'
+        printf 'port = 8080\n\n'
+        printf '[node_management]\n'
+        printf 'nodes = [\n'
+        printf '  { host = "69.19.137.104", port = 22, username = "shadeform" },\n'
+        printf ']\n\n'
+        printf '[ssh_session]\n'
+        printf 'miner_node_key_path = "/root/.ssh/tplr"\n'
+        printf 'default_node_username = "shadeform"\n\n'
+        printf '[security]\n'
+        printf 'verify_signatures = false\n\n'
+        printf '[metrics]\n'
+        printf 'enabled = true\n\n'
+        printf '[metrics.prometheus]\n'
+        printf 'host = "0.0.0.0"\n'
+        printf 'port = 9090\n\n'
+        printf '[validator_assignment]\n'
+        printf 'strategy = "fixed_assignment"\n'
+        printf 'validator_hotkey = "5DJBmrfyRqe6eUUHLaWSho3Wgr5i8gDTWKxxWEmXvFhHvWTM"\n'
+    } > config/miner.local.toml
+    # Run miner container
+    docker compose -f scripts/miner/compose.local.yml up -d
+
+local-miner-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker compose -f scripts/miner/compose.local.yml down -v
+
+# Start local Subtensor + API together
+local-dev-up TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🔧 Starting local Subtensor (Alice/Bob + Envoy WSS)..."
+    just local-subtensor-up
+    echo "⏳ Waiting a few seconds for WS/WSS to settle..."
+    sleep 5
+    echo "🧠 Starting local Validator (Alice/default)..."
+    just local-validator-up
+    echo "⏳ Waiting a few seconds for Validator to initialize..."
+    sleep 5
+    echo "🚀 Deploying operator to the cluster (TAG={{TAG}})..."
+    just deploy-operator-api TAG={{TAG}}
+    echo "🌐 Starting local API (compose.dev)..."
+    just local-api-up
+    echo "✅ Local dev is up: API on http://localhost:8000, WSS ws(s)://localhost:9944"
+
+local-dev-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🛑 Stopping local API..."
+    just local-api-down
+    echo "🛑 Stopping local Subtensor (Alice/Bob + Envoy)..."
+    docker compose -f scripts/subtensor-local/docker-compose.yml down -v
+    echo "🛑 Stopping local Validator..."
+    just local-validator-down
+    echo "🧹 Removing operator from cluster..."
+    just operator-down
+    echo "✅ Local dev is down and operator removed."
+
+# Optional: remove the operator from the cluster as well
+operator-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export KUBECONFIG=build/k3s.yaml
+    echo "🧹 Deleting operator deployment/service (if present)..."
+    kubectl -n basilica-system delete deploy/basilica-operator svc/basilica-operator --ignore-not-found
+    echo "✅ Operator removed."
+
+# Redeploy operator with new image (updates image and restarts)
+operator-redeploy TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Sanitize accidental "TAG=..." input
+    CLEAN_TAG="{{TAG}}"
+    if [[ "$CLEAN_TAG" == TAG=* ]]; then CLEAN_TAG="${CLEAN_TAG#TAG=}"; fi
+    export KUBECONFIG=build/k3s.yaml
+
+    echo "🔄 Redeploying operator with image: ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG"
+
+    # Check if deployment exists
+    if ! kubectl get deployment/basilica-operator -n basilica-system &>/dev/null; then
+        echo "❌ Operator deployment not found in basilica-system namespace"
+        echo "Run 'just deploy-operator-api $CLEAN_TAG' to deploy it first"
+        exit 1
+    fi
+
+    # Get the container name from the deployment
+    CONTAINER_NAME=$(kubectl get deployment/basilica-operator -n basilica-system -o jsonpath='{.spec.template.spec.containers[0].name}')
+    echo "📦 Container name: $CONTAINER_NAME"
+
+    # Update the image
+    kubectl set image deployment/basilica-operator \
+      "$CONTAINER_NAME=ghcr.io/one-covenant/basilica-operator:$CLEAN_TAG" \
+      -n basilica-system
+
+    echo "⏳ Waiting for rollout to complete..."
+    kubectl rollout status deployment/basilica-operator -n basilica-system --timeout=120s
+    echo ""
+    echo "✅ Operator redeployed successfully"
+    echo ""
+    echo "📋 Operator pods:"
+    kubectl get pods -n basilica-system -l app=basilica-operator
+    echo ""
+    echo "📝 Recent logs:"
+    kubectl logs -n basilica-system -l app=basilica-operator --tail=20 --prefix=true || echo "  (No logs yet)"
+
+# Deploy only Operator and API (templates + rollout)
+deploy-operator-api TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml \
+      -e operator_image=ghcr.io/one-covenant/basilica-operator:{{TAG}} \
+      -e api_image=ghcr.io/one-covenant/basilica-api:{{TAG}} \
+      --tags deploy_api_operator
+
+# Resume only the Subtensor WSS setup inside e2e-apply
+wss-enable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags subtensor_wss
+
+# Resume only the public WSS (Ingress + cert-manager) setup
+wss-public-enable:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags subtensor_public_wss
+
+# Bootstrap only the cluster networking (ingress-nginx + cert-manager + ClusterIssuer)
+networking-bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags networking
+
+# Run only WSS setup via subtensor-up playbook
+subtensor-wss:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/subtensor-up.yml --tags subtensor_wss
+
+# Regenerate local kubeconfig (and install kubectl if missing)
+k3s-kubeconfig:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f build/k3s.yaml || true
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags kubeconfig
+
+# Regenerate local kubeconfig for SSH tunnel (server=127.0.0.1)
+k3s-kubeconfig-local:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f build/k3s.yaml || true
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-apply.yml --tags kubeconfig -e kubeconfig_server=127.0.0.1
+
+# # Open an SSH tunnel to the K3s API (local 6443 -> remote 127.0.0.1:6443)
+# # Usage: just k3s-tunnel HOST KEY=~/.ssh/sam.pem USER=ubuntu
+# k3s-tunnel HOST KEY=~/.ssh/sam.pem USER=ubuntu:
+#     #!/usr/bin/env bash
+#     set -euo pipefail
+#     echo "Opening SSH tunnel on localhost:6443 to {{HOST}} (Ctrl-C to close)"
+#     ssh -i {{KEY}} -N -L 6443:127.0.0.1:6443 {{USER}}@{{HOST}}
 
 # =============================================================================
 # PYTHON SDK
@@ -735,6 +1409,213 @@ localnet:
 localnet-restart:
     #!/usr/bin/env bash
     cd scripts/localnet && ./restart.sh
+
+# =============================================================================
+# E2E LOCAL DEVELOPMENT ENVIRONMENT
+# =============================================================================
+
+# Setup complete E2E environment (local subtensor + remote K3s + operator + local validator + local API)
+# Prerequisites: Run 'just ci-build-images' first to build and push images with k3_test tag
+# R2 storage: Automatically deployed if vault credentials exist at orchestrator/ansible/group_vars/all/vault.yml
+e2e-up TAG="k3_test":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🚀 Setting up complete E2E environment..."
+    echo "Using image tag: {{TAG}}"
+    echo ""
+
+    # 1. Start local Subtensor
+    echo "📡 Starting local Subtensor..."
+    just local-subtensor-up
+
+    # 1.5 Verify subnet has neurons registered (sometimes needs re-run)
+    echo "🔍 Verifying subnet initialization..."
+    NEURON_COUNT=$(python3 scripts/subtensor-local/check_neurons.py 2>/dev/null || echo "0")
+
+    if [ "$NEURON_COUNT" -lt 3 ]; then
+        echo "⚠️  Subnet has only $NEURON_COUNT neurons, re-running initialization..."
+        cd scripts/subtensor-local
+        CHAIN_ENDPOINT="wss://localhost:9944" NETUID=2 WALLET_PATH="$HOME/.bittensor/wallets" python3 init.py
+        cd ../..
+    else
+        echo "✅ Subnet has $NEURON_COUNT neurons registered"
+    fi
+
+    # 2. Provision remote K3s cluster and deploy operator via Ansible
+    echo "☸️  Provisioning remote K3s cluster and deploying operator..."
+    just k3s-provision {{TAG}}
+
+    # 3. Start local validator
+    echo "🔍 Starting local validator (Alice/default)..."
+    just local-validator-up
+
+    # 3.5. Start local miner
+    echo "⛏️  Starting local miner (Alice/M1)..."
+    just local-miner-up
+
+    # 4. Start local API (connects to remote K3s and local Subtensor)
+    echo "🌐 Starting local API..."
+    just local-api-up
+
+    echo "✅ E2E environment is ready!"
+    echo ""
+    echo "📊 Environment status:"
+    echo "  - Local Subtensor: wss://localhost:9944"
+    echo "  - Remote K3s cluster: see build/k3s.yaml"
+    echo "  - Operator image: ghcr.io/one-covenant/basilica-operator:{{TAG}}"
+    echo "  - API image: ghcr.io/one-covenant/basilica-api:{{TAG}}"
+    echo "  - Local Validator (Alice/default): running on port 8080"
+    echo "  - Local Miner (Alice/M1): running on port 8081"
+    echo "  - Local API: http://localhost:8000"
+    echo ""
+    echo "Run 'just e2e-status' to check all components"
+
+# Tear down E2E environment (remote K3s deployments + local services)
+e2e-down:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "🔄 Tearing down E2E environment..."
+
+    # 1. Teardown remote K3s deployments via Ansible
+    echo "🧹 Cleaning up remote K3s deployments..."
+    cd orchestrator/ansible
+    ansible-playbook -i inventories/example.ini playbooks/e2e-teardown.yml || true
+    cd ../..
+
+    # 2. Stop local API
+    echo "🛑 Stopping local API..."
+    just local-api-down || true
+
+    # 3. Stop local miner
+    echo "🛑 Stopping local miner..."
+    just local-miner-down || true
+
+    # 4. Stop local validator
+    echo "🛑 Stopping local validator..."
+    just local-validator-down || true
+
+    # 5. Stop local Subtensor
+    echo "🛑 Stopping local Subtensor..."
+    cd scripts/subtensor-local && docker compose down -v || true
+    cd ../..
+
+    echo "✅ E2E environment torn down"
+    echo ""
+    echo "Note: Remote K3s cluster is still running (use 'just k3s-teardown' to remove it completely)"
+
+# Show which K3s cluster is configured
+k3s-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ ! -f build/k3s.yaml ]; then
+        echo "❌ No kubeconfig found at build/k3s.yaml"
+        echo ""
+        echo "To set up a cluster, run ONE of:"
+        echo "  just k3s-provision      # Remote K3s via Ansible"
+        echo "  just local-k3d-up       # Local k3d cluster"
+        exit 1
+    fi
+
+    export KUBECONFIG=build/k3s.yaml
+    SERVER=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}')
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "☸️  K3s Cluster Status"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "Server: $SERVER"
+
+    if echo "$SERVER" | grep -q "k3d"; then
+        echo "Type: k3d (local)"
+    else
+        echo "Type: Remote K3s (Ansible-managed)"
+    fi
+    echo ""
+    echo "Nodes:"
+    kubectl get nodes -o wide || echo "  ❌ Cannot reach cluster"
+    echo ""
+    echo "Basilica Pods:"
+    kubectl get pods -n basilica-system 2>/dev/null || echo "  No basilica-system namespace found"
+
+# Show status of E2E environment
+e2e-status:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📊 E2E Environment Status"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+
+    # Local Subtensor
+    echo "📡 Local Subtensor:"
+    if docker ps --filter "name=subtensor" --format "{{{{.Names}}}}" | grep -q subtensor; then
+        docker ps --filter "name=subtensor" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+    else
+        echo "  ❌ Not running"
+    fi
+    echo ""
+
+    # Remote K3s cluster
+    echo "☸️  Remote K3s Cluster:"
+    if [ -f build/k3s.yaml ]; then
+        export KUBECONFIG=build/k3s.yaml
+        SERVER=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "")
+        if [ -n "$SERVER" ]; then
+            echo "  ✅ Configured: $SERVER"
+            kubectl get nodes -o wide 2>/dev/null || echo "  ⚠️  Cannot reach cluster"
+        else
+            echo "  ❌ Invalid kubeconfig"
+        fi
+    else
+        echo "  ❌ No kubeconfig (run 'just k3s-provision')"
+    fi
+    echo ""
+
+    # K8s deployments
+    if command -v kubectl &> /dev/null && [ -f build/k3s.yaml ]; then
+        export KUBECONFIG=build/k3s.yaml
+        echo "🎯 Remote Basilica Services:"
+        kubectl get pods -n basilica-system 2>/dev/null || echo "  ❌ No pods found"
+        echo ""
+    fi
+
+    # Local Validator
+    echo "🔍 Local Validator (Alice/default):"
+    if docker ps --filter "name=basilica-validator" --format "{{{{.Names}}}}" | grep -q validator; then
+        docker ps --filter "name=basilica-validator" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+        echo "  Port: 8080"
+    else
+        echo "  ❌ Not running"
+    fi
+    echo ""
+
+    # Local Miner
+    echo "⛏️  Local Miner (Alice/M1):"
+    if docker ps --filter "name=basilica-miner" --format "{{{{.Names}}}}" | grep -q miner; then
+        docker ps --filter "name=basilica-miner" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+        echo "  Port: 8081"
+    else
+        echo "  ❌ Not running"
+    fi
+    echo ""
+
+    # Local API
+    echo "🌐 Local API:"
+    if docker ps --filter "name=basilica-api" --format "{{{{.Names}}}}" | grep -q api; then
+        docker ps --filter "name=basilica-api" --format "table {{{{.Names}}}}\t{{{{.Status}}}}"
+        echo "  URL: http://localhost:8000"
+    else
+        echo "  ❌ Not running"
+    fi
+
+# Run complete E2E validation test suite (RBAC + API key + smoke tests)
+e2e-validate:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chmod +x orchestrator/scripts/e2e/run-validation.sh
+    ./orchestrator/scripts/e2e/run-validation.sh
 
 # =============================================================================
 # SHOW HELP

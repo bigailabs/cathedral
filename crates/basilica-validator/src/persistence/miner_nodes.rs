@@ -31,6 +31,7 @@ impl SimplePersistence {
         node_id: &str,
         node_ssh_endpoint: &str,
         miner_info: &MinerInfo,
+        hourly_rate_cents: u32,
     ) -> Result<()> {
         info!(
             miner_uid = miner_uid,
@@ -115,8 +116,8 @@ impl SimplePersistence {
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, gpu_count,
-                    status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    hourly_rate_cents, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
             "#;
 
             let relationship_id = format!("{miner_id}_{node_id}");
@@ -127,6 +128,7 @@ impl SimplePersistence {
                 .bind(node_id)
                 .bind(node_ssh_endpoint)
                 .bind(0)
+                .bind(hourly_rate_cents as i64)
                 .bind("online")
                 .execute(self.pool())
                 .await
@@ -135,18 +137,22 @@ impl SimplePersistence {
             info!(
                 miner_uid = miner_uid,
                 node_id = node_id,
-                "Created miner-node relationship: {} -> {} with endpoint {}",
+                hourly_rate_cents = hourly_rate_cents,
+                "Created miner-node relationship: {} -> {} with endpoint {} and pricing {}¢/hour",
                 miner_id,
                 node_id,
-                node_ssh_endpoint
+                node_ssh_endpoint,
+                hourly_rate_cents
             );
         } else {
-            debug!(
+            info!(
                 miner_uid = miner_uid,
                 node_id = node_id,
-                "Miner-node relationship already exists: {} -> {}",
+                hourly_rate_cents = hourly_rate_cents,
+                "Miner-node relationship already exists: {} -> {}, will update pricing to {}¢/hour",
                 miner_id,
-                node_id
+                node_id,
+                hourly_rate_cents
             );
 
             let duplicate_check_query: &'static str =
@@ -206,6 +212,37 @@ impl SimplePersistence {
                     node_ssh_endpoint
                 );
             }
+        }
+
+        // Update pricing for all nodes (new and existing) on every discovery
+        let result = sqlx::query(
+            "UPDATE miner_nodes
+             SET hourly_rate_cents = ?, updated_at = datetime('now')
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(hourly_rate_cents as i64)
+        .bind(&miner_id)
+        .bind(node_id)
+        .execute(self.pool())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update node pricing: {}", e))?;
+
+        let rows_affected = result.rows_affected();
+        if rows_affected > 0 {
+            info!(
+                miner_uid = miner_uid,
+                node_id = node_id,
+                hourly_rate_cents = hourly_rate_cents,
+                "Updated pricing for node {} to {}¢/hour",
+                node_id,
+                hourly_rate_cents
+            );
+        } else {
+            warn!(
+                miner_uid = miner_uid,
+                node_id = node_id,
+                "Pricing UPDATE affected 0 rows - node may not exist"
+            );
         }
 
         Ok(())
@@ -620,6 +657,7 @@ impl SimplePersistence {
                 me.miner_id,
                 me.status,
                 me.gpu_count,
+                me.hourly_rate_cents,
                 m.verification_score,
                 m.uptime_percentage,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
@@ -730,6 +768,8 @@ impl SimplePersistence {
                     .map(|dt| dt.with_timezone(&chrono::Utc))
             });
 
+            let hourly_rate_cents: Option<i64> = row.get("hourly_rate_cents");
+
             nodes.push(AvailableNodeData {
                 node_id: row.get("node_id"),
                 miner_id: row.get("miner_id"),
@@ -742,6 +782,7 @@ impl SimplePersistence {
                 download_mbps,
                 upload_mbps,
                 speed_test_timestamp,
+                hourly_rate_cents: hourly_rate_cents.map(|v| v as u32),
             });
         }
 
@@ -864,6 +905,7 @@ impl SimplePersistence {
         let row = sqlx::query(
             "SELECT
                 me.node_id,
+                me.hourly_rate_cents,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
@@ -881,6 +923,7 @@ impl SimplePersistence {
              LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
              WHERE me.node_id = ? AND me.miner_id = ?
              GROUP BY me.node_id,
+                      me.hourly_rate_cents,
                       ehp.cpu_model, ehp.cpu_cores, ehp.ram_gb,
                       enp.city, enp.region, enp.country,
                       esp.download_mbps, esp.upload_mbps, esp.test_timestamp
@@ -956,12 +999,15 @@ impl SimplePersistence {
                 None
             };
 
+            let hourly_rate_cents: Option<i64> = row.get("hourly_rate_cents");
+
             Ok(Some(crate::api::types::NodeDetails {
                 id: node_id,
                 gpu_specs,
                 cpu_specs,
                 location: final_location,
                 network_speed,
+                hourly_rate_cents: hourly_rate_cents.map(|v| v as i32),
             }))
         } else {
             Ok(None)
@@ -1121,11 +1167,11 @@ impl SimplePersistence {
     pub async fn get_known_nodes_for_miner(
         &self,
         miner_uid: u16,
-    ) -> Result<Vec<(String, String, i32, String)>, anyhow::Error> {
+    ) -> Result<Vec<(String, String, i32, String, u32)>, anyhow::Error> {
         let miner_id = format!("miner_{}", miner_uid);
 
         let query = r#"
-            SELECT node_id, ssh_endpoint, gpu_count, status
+            SELECT node_id, ssh_endpoint, gpu_count, status, hourly_rate_cents
             FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
@@ -1143,9 +1189,28 @@ impl SimplePersistence {
             let ssh_endpoint: String = row.get("ssh_endpoint");
             let gpu_count: i32 = row.get("gpu_count");
             let status: String = row.get("status");
-            known_nodes.push((node_id, ssh_endpoint, gpu_count, status));
+            let hourly_rate_cents: i64 = row.try_get("hourly_rate_cents").unwrap_or(0);
+            known_nodes.push((
+                node_id,
+                ssh_endpoint,
+                gpu_count,
+                status,
+                hourly_rate_cents as u32,
+            ));
         }
 
         Ok(known_nodes)
+    }
+
+    /// Get hourly rate for a specific node
+    pub async fn get_node_hourly_rate(&self, node_id: &str) -> Result<Option<u32>> {
+        let rate_cents: Option<i64> = sqlx::query_scalar(
+            "SELECT hourly_rate_cents FROM miner_nodes WHERE node_id = ? LIMIT 1",
+        )
+        .bind(node_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(rate_cents.map(|v| v as u32))
     }
 }

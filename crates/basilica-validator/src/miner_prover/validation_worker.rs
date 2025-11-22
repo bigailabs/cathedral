@@ -390,6 +390,7 @@ impl ValidationWorkerQueue {
             },
             gpu_count: 0,
             validation_type,
+            hourly_rate_cents: item.node_info.hourly_rate_cents,
         };
 
         // Attempt to store the failed result
@@ -1229,6 +1230,7 @@ mod tests {
             status: "online".to_string(),
             capabilities: vec!["gpu".to_string()],
             node_ssh_endpoint: format!("http://node-{}.test:8080", id),
+            hourly_rate_cents: 250, // Test default: $2.50/hour
         }
     }
 

@@ -1,19 +1,17 @@
+pub mod audit;
 pub mod credits;
 pub mod events;
 pub mod miner_revenue;
-pub mod packages;
-pub mod price_cache;
 pub mod promo_codes;
 pub mod rds;
 pub mod rentals;
 pub mod rules;
 pub mod usage;
 pub mod user_metadata;
-pub mod user_preferences;
+
+pub use audit::{AuditRepository, SqlAuditRepository};
 
 pub use credits::{CreditRepository, SqlCreditRepository};
-
-pub use packages::{PackageRepository, SqlPackageRepository};
 
 pub use promo_codes::{PromoCode, PromoCodeRepository, SqlPromoCodeRepository};
 
@@ -30,15 +28,7 @@ pub use events::{
     EventType, ProcessingBatch, SqlBatchRepository, SqlEventRepository, UsageEvent,
 };
 
-pub use user_preferences::{
-    SqlUserPreferencesRepository, UserPreference, UserPreferencesRepository,
-};
-
 pub use rules::{RulesRepository, SqlRulesRepository};
-
-pub use price_cache::{
-    PriceCacheRepository, PriceHistoryEntry, PriceHistoryFilter, SqlPriceCacheRepository,
-};
 
 pub use miner_revenue::{
     MinerRevenueRepository, MinerRevenueSummary, MinerRevenueSummaryFilter,

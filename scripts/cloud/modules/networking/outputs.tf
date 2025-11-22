@@ -73,3 +73,18 @@ output "ecr_api_vpc_endpoint_id" {
   description = "ECR API VPC endpoint ID"
   value       = aws_vpc_endpoint.ecr_api.id
 }
+
+output "private_route_table_id" {
+  description = "Private route table ID (for VPC peering with K3s cluster)"
+  value       = aws_route_table.private.id
+}
+
+output "public_route_table_id" {
+  description = "Public route table ID"
+  value       = aws_route_table.public.id
+}
+
+output "database_route_table_id" {
+  description = "Database route table ID"
+  value       = aws_route_table.database.id
+}

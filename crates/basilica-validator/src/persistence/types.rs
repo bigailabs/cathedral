@@ -86,6 +86,7 @@ pub struct AvailableNodeData {
     pub download_mbps: Option<f64>,
     pub upload_mbps: Option<f64>,
     pub speed_test_timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub hourly_rate_cents: Option<u32>,
 }
 
 /// Node metric data for initializing metrics

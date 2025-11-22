@@ -178,16 +178,25 @@ impl DeploymentManager {
         }
 
         // Force stop if needed
-        client
-            .stop_container(container_id, true)
-            .await
-            .context("Failed to force stop container")?;
+        match client.stop_container(container_id, true).await {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("No such container") => {
+                info!(
+                    "Container {} already removed by --rm flag during stop",
+                    container_id
+                );
+            }
+            Err(e) => return Err(e).context("Failed to force stop container"),
+        }
 
         // Remove the container
-        client
-            .remove_container(container_id)
-            .await
-            .context("Failed to remove container")?;
+        match client.remove_container(container_id).await {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("No such container") => {
+                info!("Container {} already removed by --rm flag", container_id);
+            }
+            Err(e) => return Err(e).context("Failed to remove container"),
+        }
 
         info!("Container {} stopped and removed", container_id);
         Ok(())

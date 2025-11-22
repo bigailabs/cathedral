@@ -4,7 +4,6 @@ pub mod domain;
 pub mod error;
 pub mod grpc;
 pub mod metrics;
-pub mod pricing;
 pub mod server;
 pub mod storage;
 pub mod telemetry;

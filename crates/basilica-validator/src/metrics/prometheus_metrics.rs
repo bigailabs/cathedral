@@ -1,6 +1,7 @@
 //! Core Prometheus metrics implementation for Validator
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use metrics::{counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -174,6 +175,10 @@ impl ValidatorPrometheusMetrics {
         describe_counter!(
             "basilica_validator_rentals_created_total",
             "Total number of rentals created"
+        );
+        describe_gauge!(
+            "validator_node_ban_till",
+            "Unix timestamp (seconds) when a node ban expires; 0 indicates no active ban"
         );
 
         // RPC failure metrics
@@ -449,6 +454,22 @@ impl ValidatorPrometheusMetrics {
             "gpu_type" => gpu_type.to_string()
         )
         .increment(1);
+    }
+
+    /// Record node ban expiry timestamp (seconds since epoch, 0 if not banned)
+    pub fn record_node_ban_till(
+        &self,
+        node_id: &str,
+        miner_uid: u16,
+        ban_expiry: Option<DateTime<Utc>>,
+    ) {
+        let expiry_ts = ban_expiry.map(|ts| ts.timestamp() as f64).unwrap_or(0.0);
+
+        gauge!("validator_node_ban_till",
+            "node_id" => node_id.to_string(),
+            "miner_uid" => miner_uid.to_string()
+        )
+        .set(expiry_ts);
     }
 
     /// Collect system metrics periodically

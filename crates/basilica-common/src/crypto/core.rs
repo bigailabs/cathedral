@@ -240,6 +240,7 @@ pub fn generate_random_key(size: usize) -> Vec<u8> {
 /// - Never reuse nonce with the same key
 /// - Verify authentication tag during decryption
 /// - Key should be derived from secure source (e.g., PBKDF2, Argon2)
+#[allow(deprecated)]
 pub fn encrypt_aes_gcm(data: &[u8], key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), CryptoError> {
     if key.len() != AES_KEY_SIZE {
         return Err(CryptoError::EncryptionFailed {
@@ -251,7 +252,7 @@ pub fn encrypt_aes_gcm(data: &[u8], key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Cr
         });
     }
 
-    let key = Key::<Aes256Gcm>::from_slice(key);
+    let key: &Key<Aes256Gcm> = key.into();
     let cipher = Aes256Gcm::new(key);
 
     // Generate random nonce
@@ -283,6 +284,7 @@ pub fn encrypt_aes_gcm(data: &[u8], key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Cr
 /// - Authentication verification is automatic with GCM mode
 /// - Fails if ciphertext has been tampered with
 /// - Fails if wrong key or nonce is used
+#[allow(deprecated)]
 pub fn decrypt_aes_gcm(
     ciphertext: &[u8],
     key: &[u8],
@@ -308,7 +310,7 @@ pub fn decrypt_aes_gcm(
         });
     }
 
-    let key = Key::<Aes256Gcm>::from_slice(key);
+    let key: &Key<Aes256Gcm> = key.into();
     let cipher = Aes256Gcm::new(key);
     let nonce = Nonce::from_slice(nonce);
 

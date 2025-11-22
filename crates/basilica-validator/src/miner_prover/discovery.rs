@@ -4,7 +4,6 @@
 //! Implements Single Responsibility Principle by focusing only on miner discovery.
 
 use super::types::MinerInfo;
-use crate::config::VerificationConfig;
 use crate::metrics::ValidatorMetrics;
 use anyhow::Result;
 use basilica_common::identity::{Hotkey, MinerUid};
@@ -15,15 +14,15 @@ use tracing::{debug, info, warn};
 #[derive(Clone)]
 pub struct MinerDiscovery {
     bittensor_service: Arc<BittensorService>,
-    config: VerificationConfig,
+    netuid: u16,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
 
 impl MinerDiscovery {
-    pub fn new(bittensor_service: Arc<BittensorService>, config: VerificationConfig) -> Self {
+    pub fn new(bittensor_service: Arc<BittensorService>, netuid: u16) -> Self {
         Self {
             bittensor_service,
-            config,
+            netuid,
             metrics: None,
         }
     }
@@ -37,10 +36,7 @@ impl MinerDiscovery {
     pub async fn get_miners_for_verification(&self) -> Result<Vec<MinerInfo>> {
         info!("Fetching ALL miners from metagraph for verification (no filtering)");
 
-        let metagraph = self
-            .bittensor_service
-            .get_metagraph(self.config.netuid)
-            .await?;
+        let metagraph = self.bittensor_service.get_metagraph(self.netuid).await?;
 
         if metagraph.hotkeys.is_empty() {
             // Update metrics for zero discovered miners
@@ -48,10 +44,7 @@ impl MinerDiscovery {
                 metrics.prometheus().set_discovered_miners_total(0);
             }
 
-            info!(
-                "No miners found in metagraph for netuid {}",
-                self.config.netuid
-            );
+            info!("No miners found in metagraph for netuid {}", self.netuid);
             return Ok(Vec::new());
         }
 

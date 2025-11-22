@@ -32,6 +32,16 @@ from basilica._basilica import (
     VolumeMountRequest,
     ListAvailableNodesQuery,
     ListRentalsQuery,
+    # Deployment types
+    EnvVar,
+    ResourceRequirements,
+    ReplicaStatus,
+    PodInfo,
+    CreateDeploymentRequest,
+    DeploymentResponse,
+    DeploymentSummary,
+    DeploymentListResponse,
+    DeleteDeploymentResponse,
     # Constants from Rust
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT_SECS,
@@ -71,6 +81,16 @@ __all__ = [
     "PortMappingRequest",
     "ListAvailableNodesQuery",
     "ListRentalsQuery",
+    # Deployment types
+    "EnvVar",
+    "ResourceRequirements",
+    "ReplicaStatus",
+    "PodInfo",
+    "CreateDeploymentRequest",
+    "DeploymentResponse",
+    "DeploymentSummary",
+    "DeploymentListResponse",
+    "DeleteDeploymentResponse",
 ]
 
 
@@ -315,3 +335,140 @@ class BasilicaClient:
             return self._client.list_rentals(query)
         else:
             return self._client.list_rentals(None)
+
+    def create_deployment(
+        self,
+        instance_name: str,
+        image: str,
+        replicas: int = 1,
+        port: int = 80,
+        command: Optional[List[str]] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        cpu: str = "500m",
+        memory: str = "512Mi",
+        ttl_seconds: Optional[int] = None,
+        public: bool = True
+    ) -> DeploymentResponse:
+        """
+        Create a new deployment.
+
+        Args:
+            instance_name: Name for the deployment (DNS-safe: lowercase, numbers, hyphens)
+            image: Container image to deploy
+            replicas: Number of replicas (default: 1)
+            port: Container port to expose (default: 80)
+            command: Optional command override
+            args: Optional command arguments
+            env: Environment variables as dict
+            cpu: CPU resource request (default: "500m")
+            memory: Memory resource request (default: "512Mi")
+            ttl_seconds: Optional time-to-live in seconds
+            public: Create public URL (default: True)
+
+        Returns:
+            DeploymentResponse: Typed response with deployment details
+        """
+        resources = ResourceRequirements(cpu=cpu, memory=memory) if cpu or memory else None
+
+        request = CreateDeploymentRequest(
+            instance_name=instance_name,
+            image=image,
+            replicas=replicas,
+            port=port,
+            command=command,
+            args=args,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds,
+            public=public
+        )
+
+        return self._client.create_deployment(request)
+
+    def get_deployment(self, instance_name: str) -> DeploymentResponse:
+        """
+        Get deployment status by instance name.
+
+        Args:
+            instance_name: The deployment instance name
+
+        Returns:
+            DeploymentResponse: Typed response with deployment details
+        """
+        return self._client.get_deployment(instance_name)
+
+    def delete_deployment(self, instance_name: str) -> DeleteDeploymentResponse:
+        """
+        Delete a deployment.
+
+        Args:
+            instance_name: The deployment instance name
+
+        Returns:
+            DeleteDeploymentResponse: Typed response with deletion status
+        """
+        return self._client.delete_deployment(instance_name)
+
+    def list_deployments(self) -> DeploymentListResponse:
+        """
+        List all deployments for the authenticated user.
+
+        Returns:
+            DeploymentListResponse: Typed response with list of deployments
+        """
+        return self._client.list_deployments()
+
+    def get_deployment_logs(
+        self,
+        instance_name: str,
+        follow: bool = False,
+        tail: Optional[int] = None
+    ) -> str:
+        """
+        Get logs from a deployment.
+
+        Args:
+            instance_name: The deployment instance name
+            follow: Whether to follow logs (stream continuously)
+            tail: Optional number of lines to return from the end
+
+        Returns:
+            str: Log contents
+
+        Example:
+            >>> logs = client.get_deployment_logs("my-app", tail=100)
+            >>> print(logs)
+        """
+        return self._client.get_deployment_logs(instance_name, follow, tail)
+
+    def get_balance(self):
+        """
+        Get account balance.
+
+        Returns:
+            Balance information with available and total amounts
+
+        Example:
+            >>> balance = client.get_balance()
+            >>> print(f"Available: ${balance['available']}")
+        """
+        return self._client.get_balance()
+
+    def list_usage_history(self, limit: int = 50, offset: int = 0):
+        """
+        List usage history for cost tracking.
+
+        Args:
+            limit: Maximum number of records to return (default: 50)
+            offset: Number of records to skip (default: 0)
+
+        Returns:
+            Usage history with rental records and costs
+
+        Example:
+            >>> usage = client.list_usage_history(limit=30)
+            >>> for rental in usage['rentals']:
+            ...     print(f"{rental['rental_id']}: ${rental['current_cost']}")
+        """
+        return self._client.list_usage_history(limit, offset)

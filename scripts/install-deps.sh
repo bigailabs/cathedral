@@ -23,6 +23,8 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
             pkg-config \
             libssl-dev \
             protobuf-compiler \
+            libfuse3-dev \
+            fuse3 \
             curl \
             git \
             xxd
@@ -60,6 +62,8 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
             pkgconfig \
             openssl-devel \
             protobuf-compiler \
+            fuse3-devel \
+            fuse3 \
             curl \
             git
             
@@ -71,6 +75,7 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
             pkg-config \
             openssl \
             protobuf \
+            fuse3 \
             curl \
             git
     else
@@ -92,9 +97,11 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then
         pkg-config \
         openssl \
         protobuf \
+        macfuse \
         xxd
-        
+
     echo -e "${YELLOW}Note: GPU attestation is not supported on macOS${NC}"
+    echo -e "${YELLOW}Note: macFUSE requires a kernel extension. Follow the prompts to enable it.${NC}"
     
 else
     echo -e "${RED}Unsupported operating system: $OSTYPE${NC}"

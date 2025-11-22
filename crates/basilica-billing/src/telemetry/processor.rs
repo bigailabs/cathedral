@@ -1,3 +1,4 @@
+use crate::domain::idempotency::generate_idempotency_key;
 use crate::domain::types::{RentalId, UsageMetrics};
 use crate::error::{BillingError, Result};
 use crate::storage::events::{EventType, UsageEvent};
@@ -141,6 +142,43 @@ impl TelemetryProcessor {
             UsageMetrics::zero()
         };
 
+        let (cpu_percent, memory_mb, rx_bytes, tx_bytes, read_bytes, write_bytes) =
+            if let Some(u) = data.resource_usage.as_ref() {
+                (
+                    u.cpu_percent,
+                    u.memory_mb,
+                    u.network_rx_bytes,
+                    u.network_tx_bytes,
+                    u.disk_read_bytes,
+                    u.disk_write_bytes,
+                )
+            } else {
+                (0.0, 0u64, 0u64, 0u64, 0u64, 0u64)
+            };
+
+        let event_data = json!({
+            "gpu_hours": usage_metrics.gpu_hours.to_f64(),
+            "cpu_percent": cpu_percent,
+            "memory_mb": memory_mb,
+            "memory_gb": (memory_mb as f64) / 1024.0,
+            "network_rx_bytes": rx_bytes,
+            "network_tx_bytes": tx_bytes,
+            "network_gb": ((rx_bytes + tx_bytes) as f64) / 1_073_741_824.0,
+            "disk_read_bytes": read_bytes,
+            "disk_write_bytes": write_bytes,
+            "disk_io_gb": ((read_bytes + write_bytes) as f64) / 1_073_741_824.0,
+            "gpu_metrics": data.resource_usage.as_ref()
+                .map(|u| json!({
+                    "gpu_count": u.gpu_usage.len(),
+                    "utilization": u.gpu_usage.iter().map(|g| g.utilization_percent).collect::<Vec<_>>(),
+                    "memory_used": u.gpu_usage.iter().map(|g| g.memory_used_mb).collect::<Vec<_>>(),
+                })),
+            "custom_metrics": data.custom_metrics,
+            "timestamp": telemetry_timestamp.timestamp_millis().to_string(),
+        });
+
+        let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
+
         let telemetry_event = UsageEvent {
             event_id: Uuid::new_v4(),
             rental_id: rental_id.as_uuid(),
@@ -148,33 +186,27 @@ impl TelemetryProcessor {
             node_id: data.node_id.clone(),
             validator_id: rental.validator_id.clone(),
             event_type: EventType::Telemetry,
-            event_data: json!({
-                "gpu_hours": usage_metrics.gpu_hours.to_f64(),
-                "cpu_percent": usage_metrics.cpu_hours.to_f64(),
-                "memory_mb": data.resource_usage.as_ref().map(|u| u.memory_mb).unwrap_or(0),
-                "network_rx_bytes": data.resource_usage.as_ref().map(|u| u.network_rx_bytes).unwrap_or(0),
-                "network_tx_bytes": data.resource_usage.as_ref().map(|u| u.network_tx_bytes).unwrap_or(0),
-                "disk_read_bytes": data.resource_usage.as_ref().map(|u| u.disk_read_bytes).unwrap_or(0),
-                "disk_write_bytes": data.resource_usage.as_ref().map(|u| u.disk_write_bytes).unwrap_or(0),
-                "gpu_metrics": data.resource_usage.as_ref()
-                    .map(|u| json!({
-                        "gpu_count": u.gpu_usage.len(),
-                        "utilization": u.gpu_usage.iter().map(|g| g.utilization_percent).collect::<Vec<_>>(),
-                        "memory_used": u.gpu_usage.iter().map(|g| g.memory_used_mb).collect::<Vec<_>>(),
-                    })),
-                "custom_metrics": data.custom_metrics,
-            }),
+            event_data,
             timestamp: telemetry_timestamp,
             processed: false,
             processed_at: None,
             batch_id: None,
+            idempotency_key: Some(idempotency_key),
         };
 
         self.event_store
             .append_usage_event(&telemetry_event)
             .await
             .map_err(|e| {
-                error!("Failed to store telemetry event: {}", e);
+                error!(
+                    "Failed to store telemetry event: {} | rental_id={} node_id={} validator_id={} event_type={:?} idempotency_key={:?}",
+                    e,
+                    rental_id,
+                    data.node_id,
+                    rental.validator_id,
+                    telemetry_event.event_type,
+                    telemetry_event.idempotency_key
+                );
                 BillingError::TelemetryError {
                     source: Box::new(e),
                 }

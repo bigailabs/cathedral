@@ -167,10 +167,18 @@ impl Service {
                 message: "Failed to find home directory".to_string(),
             })?;
 
-        info!(
-            "Loading hotkey from path: {:?} (wallet: {}, hotkey: {})",
-            hotkey_path, config.wallet_name, config.hotkey_name
-        );
+        if config.read_only {
+            info!(
+                "Loading hotkey from path: {:?} in READ-ONLY mode (wallet: {}, hotkey: {})",
+                hotkey_path, config.wallet_name, config.hotkey_name
+            );
+            info!("Read-only mode: wallet is used for metagraph queries only, not for signing transactions");
+        } else {
+            info!(
+                "Loading hotkey from path: {:?} (wallet: {}, hotkey: {})",
+                hotkey_path, config.wallet_name, config.hotkey_name
+            );
+        }
 
         let seed = load_key_seed(&hotkey_path).map_err(|e| BittensorError::WalletError {
             message: format!("Failed to load hotkey from {hotkey_path:?}: {e}"),

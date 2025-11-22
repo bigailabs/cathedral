@@ -84,7 +84,7 @@ fn get_required_scope(req: &Request) -> Option<String> {
     let method = req.method();
 
     match (method, path) {
-        // Rental endpoints
+        // Rental endpoints (v1)
         (&Method::GET, "/rentals") => Some("rentals:list".to_string()),
         (&Method::POST, "/rentals") => Some("rentals:create".to_string()),
         (&Method::DELETE, p) if p.starts_with("/rentals/") && !p.contains("/logs") => {
@@ -95,13 +95,53 @@ fn get_required_scope(req: &Request) -> Option<String> {
         }
         (&Method::GET, p) if p.starts_with("/rentals/") => Some("rentals:view".to_string()),
 
+        // Rental endpoints (v2)
+        (&Method::GET, "/v2/rentals") => Some("rentals:list".to_string()),
+        (&Method::POST, "/v2/rentals") => Some("rentals:create".to_string()),
+        (&Method::POST, "/v2/rentals-compat") => Some("rentals:create".to_string()),
+        (&Method::DELETE, p)
+            if p.starts_with("/v2/rentals/")
+                && !p.contains("/logs")
+                && !p.contains("/exec")
+                && !p.contains("/extend") =>
+        {
+            Some("rentals:stop".to_string())
+        }
+        (&Method::GET, p) if p.starts_with("/v2/rentals/") && p.ends_with("/logs") => {
+            Some("rentals:logs".to_string())
+        }
+        (&Method::POST, p) if p.starts_with("/v2/rentals/") && p.ends_with("/exec") => {
+            Some("rentals:exec".to_string())
+        }
+        (&Method::POST, p) if p.starts_with("/v2/rentals/") && p.ends_with("/extend") => {
+            Some("rentals:extend".to_string())
+        }
+        (&Method::GET, p) if p.starts_with("/v2/rentals/") => Some("rentals:view".to_string()),
+
         // Node endpoints
         (&Method::GET, "/nodes") => Some("nodes:list".to_string()),
+
+        // Secure cloud endpoints - require "secure_cloud" scope for all methods
+        (_, p) if p.starts_with("/secure-cloud/") => Some("secure_cloud".to_string()),
+
+        // Job endpoints (v1)
+        (&Method::POST, "/jobs") => Some("jobs:create".to_string()),
+        (&Method::GET, p) if p.starts_with("/jobs/") && p.ends_with("/logs") => {
+            Some("jobs:logs".to_string())
+        }
+        (&Method::DELETE, p) if p.starts_with("/jobs/") => Some("jobs:delete".to_string()),
+        (&Method::GET, p) if p.starts_with("/jobs/") => Some("jobs:view".to_string()),
 
         // API Key management endpoints
         (&Method::POST, "/api-keys") => Some("keys:create".to_string()),
         (&Method::GET, "/api-keys") => Some("keys:list".to_string()),
         (&Method::DELETE, p) if p.starts_with("/api-keys/") => Some("keys:revoke".to_string()),
+
+        // SSH Key management endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own SSH keys
+        (&Method::POST, "/ssh-keys") => Some(String::new()),
+        (&Method::GET, "/ssh-keys") => Some(String::new()),
+        (&Method::DELETE, "/ssh-keys") => Some(String::new()),
 
         // Payment endpoints - require authentication but no specific scope
         // All authenticated users should be able to manage their own payment accounts
@@ -112,9 +152,20 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // Billing endpoints - require authentication but no specific scope
         // All authenticated users should be able to access their own billing information
         (&Method::GET, "/billing/balance") => Some(String::new()),
-        (&Method::GET, "/billing/packages") => Some(String::new()),
         (&Method::GET, "/billing/usage") => Some(String::new()),
         (&Method::GET, p) if p.starts_with("/billing/usage/") => Some(String::new()),
+
+        // Deployment endpoints - require authentication but no specific scope
+        // All authenticated users should be able to manage their own deployments
+        (&Method::POST, "/deployments") => Some(String::new()),
+        (&Method::GET, "/deployments") => Some(String::new()),
+        (&Method::GET, p) if p.starts_with("/deployments/") => Some(String::new()),
+        (&Method::DELETE, p) if p.starts_with("/deployments/") => Some(String::new()),
+
+        // GPU node registration endpoints - require authentication but no specific scope
+        // All authenticated users should be able to register their own GPU nodes
+        (&Method::POST, "/v1/gpu-nodes/register") => Some(String::new()),
+        (&Method::POST, "/v1/gpu-nodes/revoke") => Some(String::new()),
 
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"
@@ -176,6 +227,28 @@ mod tests {
             .unwrap();
         assert_eq!(get_required_scope(&req), Some("nodes:list".to_string()));
 
+        // Test secure cloud endpoints (require "secure_cloud" scope for all methods)
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/secure-cloud/gpu-prices")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/secure-cloud/rentals/start")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/secure-cloud/rentals/some-id/stop")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some("secure_cloud".to_string()));
+
         // Test health endpoint (requires authentication but no specific scope)
         let req = Request::builder()
             .method(Method::GET)
@@ -216,13 +289,6 @@ mod tests {
 
         let req = Request::builder()
             .method(Method::GET)
-            .uri("/billing/packages")
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(get_required_scope(&req), Some(String::new()));
-
-        let req = Request::builder()
-            .method(Method::GET)
             .uri("/billing/usage")
             .body(Body::empty())
             .unwrap();
@@ -231,6 +297,43 @@ mod tests {
         let req = Request::builder()
             .method(Method::GET)
             .uri("/billing/usage/rental-123")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test SSH key endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri("/ssh-keys")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test GPU node registration endpoints (require authentication but no specific scope)
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/gpu-nodes/register")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/gpu-nodes/revoke")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));

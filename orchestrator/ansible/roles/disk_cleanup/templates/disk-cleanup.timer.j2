@@ -1,0 +1,11 @@
+[Unit]
+Description=K3s Disk Cleanup Timer
+Requires=disk-cleanup.service
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+Unit=disk-cleanup.service
+
+[Install]
+WantedBy=timers.target
