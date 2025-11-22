@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Find all SSH public keys in ~/.ssh directory
-fn find_ssh_public_keys() -> Vec<PathBuf> {
+pub fn find_ssh_public_keys() -> Vec<PathBuf> {
     let strategy = match choose_base_strategy() {
         Ok(s) => s,
         Err(_) => return vec![],
@@ -65,7 +65,7 @@ fn find_ssh_public_keys() -> Vec<PathBuf> {
 }
 
 /// Validate SSH public key format
-fn validate_ssh_public_key(content: &str) -> Result<(), String> {
+pub fn validate_ssh_public_key(content: &str) -> Result<(), String> {
     let trimmed = content.trim();
 
     if trimmed.is_empty() {
@@ -100,6 +100,82 @@ fn validate_ssh_public_key(content: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Result of SSH key selection containing path and content
+pub struct SelectedSshKey {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+/// Discover SSH public keys in ~/.ssh and let user select one interactively
+///
+/// Returns the selected key's path and validated content.
+/// If only one key exists, it's auto-selected without prompting.
+pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
+    use dialoguer::Select;
+
+    // Find all SSH public keys in ~/.ssh
+    let keys = find_ssh_public_keys();
+
+    if keys.is_empty() {
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "No SSH public keys found in ~/.ssh/\n\
+             Please generate one with: ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519"
+        )));
+    }
+
+    let key_path = if keys.len() == 1 {
+        // Only one key found, use it automatically
+        keys[0].clone()
+    } else {
+        // Multiple keys found, show interactive selection
+        let options: Vec<String> = keys
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string()
+            })
+            .collect();
+
+        // Run interactive selection in a blocking context
+        let keys_clone = keys.clone();
+        let selection = tokio::task::spawn_blocking(move || {
+            let theme = ColorfulTheme::default();
+            Select::with_theme(&theme)
+                .with_prompt("Select a key to register")
+                .items(&options)
+                .default(0)
+                .interact()
+        })
+        .await
+        .map_err(|e| CliError::Internal(color_eyre::eyre::eyre!("Task join error: {}", e)))?
+        .map_err(|e| CliError::Internal(e.into()))?;
+
+        keys_clone[selection].clone()
+    };
+
+    // Read and validate SSH public key
+    let content = fs::read_to_string(&key_path).map_err(|e| {
+        CliError::Internal(color_eyre::eyre::eyre!(
+            "Failed to read SSH key file: {}",
+            e
+        ))
+    })?;
+
+    if let Err(e) = validate_ssh_public_key(&content) {
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "Invalid SSH public key: {}",
+            e
+        )));
+    }
+
+    Ok(SelectedSshKey {
+        path: key_path,
+        content,
+    })
 }
 
 /// Handle adding a new SSH key

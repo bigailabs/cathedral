@@ -132,9 +132,6 @@ pub struct StartRentalApiRequest {
     /// Container image to run
     pub container_image: String,
 
-    /// SSH public key for authentication
-    pub ssh_public_key: String,
-
     /// Environment variables
     #[serde(default)]
     pub environment: std::collections::HashMap<String, String>,
