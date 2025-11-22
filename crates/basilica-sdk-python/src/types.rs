@@ -485,8 +485,6 @@ pub struct StartRentalApiRequest {
     #[pyo3(get, set)]
     pub container_image: String,
     #[pyo3(get, set)]
-    pub ssh_public_key: String,
-    #[pyo3(get, set)]
     pub environment: HashMap<String, String>,
     #[pyo3(get, set)]
     pub ports: Vec<PortMappingRequest>,
@@ -504,12 +502,11 @@ pub struct StartRentalApiRequest {
 #[pymethods]
 impl StartRentalApiRequest {
     #[new]
-    #[pyo3(signature = (node_selection, container_image, ssh_public_key, environment=None, ports=None, resources=None, command=None, volumes=None, no_ssh=false))]
+    #[pyo3(signature = (node_selection, container_image, environment=None, ports=None, resources=None, command=None, volumes=None, no_ssh=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         node_selection: NodeSelection,
         container_image: String,
-        ssh_public_key: String,
         environment: Option<HashMap<String, String>>,
         ports: Option<Vec<PortMappingRequest>>,
         resources: Option<ResourceRequirementsRequest>,
@@ -520,7 +517,6 @@ impl StartRentalApiRequest {
         Self {
             node_selection,
             container_image,
-            ssh_public_key,
             environment: environment.unwrap_or_default(),
             ports: ports.unwrap_or_default(),
             resources: resources.unwrap_or_default(),
@@ -536,7 +532,6 @@ impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
         Self {
             node_selection: req.node_selection.into(),
             container_image: req.container_image,
-            ssh_public_key: req.ssh_public_key,
             environment: req.environment,
             ports: req.ports.into_iter().map(Into::into).collect(),
             resources: req.resources.into(),

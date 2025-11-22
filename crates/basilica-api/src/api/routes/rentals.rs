@@ -32,6 +32,7 @@ use basilica_validator::{
 };
 use futures::stream::Stream;
 use rand::seq::SliceRandom;
+use sqlx::Row;
 use tracing::{debug, error, info};
 
 /// Get detailed rental status (with ownership validation)
@@ -70,13 +71,28 @@ pub async fn start_rental(
     // Get user ID from auth context (already extracted via Extension)
     let user_id = &auth_context.user_id;
 
-    // Validate SSH public key
-    if !is_valid_ssh_public_key(&request.ssh_public_key) {
-        error!("Invalid SSH public key provided");
-        return Err(crate::error::ApiError::BadRequest {
-            message: "Invalid SSH public key".into(),
-        });
-    }
+    // Look up user's registered SSH key from database (only if SSH is enabled)
+    let ssh_public_key: String = if request.no_ssh {
+        String::new() // Empty string for no-SSH rentals
+    } else {
+        let ssh_key_row = sqlx::query("SELECT public_key FROM ssh_keys WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| crate::error::ApiError::Internal {
+                message: format!("Failed to lookup SSH key: {}", e),
+            })?;
+
+        match ssh_key_row {
+            Some(row) => row.get("public_key"),
+            None => {
+                error!("User {} has no SSH key registered", user_id);
+                return Err(crate::error::ApiError::BadRequest {
+                    message: "No SSH key registered. Please register an SSH key first using 'basilica ssh-keys add' or by starting a rental through the CLI.".into(),
+                });
+            }
+        }
+    };
 
     // Validate container image using OCI specification
     if let Err(e) = validate_docker_image(&request.container_image) {
@@ -195,7 +211,7 @@ pub async fn start_rental(
     let validator_request = StartRentalRequest {
         node_id: node_id.clone(),
         container_image: request.container_image,
-        ssh_public_key: request.ssh_public_key,
+        ssh_public_key,
         environment: request.environment,
         ports: request.ports,
         resources: request.resources,
@@ -605,26 +621,6 @@ pub async fn list_rentals_validator(
     );
 
     Ok(Json(user_rentals))
-}
-
-// Validation helpers
-fn is_valid_ssh_public_key(key: &str) -> bool {
-    if key.trim().is_empty() {
-        return false;
-    }
-
-    // Must start with ssh- prefix
-    if !key.starts_with("ssh-") {
-        return false;
-    }
-
-    // Must have at least 2 parts (algorithm and key data)
-    let parts: Vec<&str> = key.split_whitespace().collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    true
 }
 
 /// List available nodes for rentals

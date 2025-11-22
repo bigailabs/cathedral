@@ -5,6 +5,7 @@ use axum::{
 };
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use sqlx::Row;
 
 use crate::api::middleware::AuthContext;
 use crate::apimetrics;
@@ -178,6 +179,29 @@ pub async fn create_rental_compat(
     };
     let ns = user_namespace(&auth.user_id);
 
+    // Look up user's registered SSH key from database (only if SSH is enabled)
+    let ssh_public_key: Option<String> = if req.no_ssh {
+        None
+    } else {
+        let ssh_key_row = sqlx::query("SELECT public_key FROM ssh_keys WHERE user_id = $1")
+            .bind(&auth.user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to lookup SSH key: {}", e),
+            })?;
+
+        match ssh_key_row {
+            Some(row) => Some(row.get("public_key")),
+            None => {
+                apimetrics::record_request("rentals_v2.create_compat", "POST", start, false);
+                return Err(ApiError::BadRequest {
+                    message: "No SSH key registered. Please register an SSH key first using 'basilica ssh-keys add' or by starting a rental through the CLI.".into(),
+                });
+            }
+        }
+    };
+
     // Map legacy resource requirements to K8s Resources DTO
     let cpu = if req.resources.cpu_cores > 0.0 {
         if (req.resources.cpu_cores - req.resources.cpu_cores.trunc()).abs() < f64::EPSILON {
@@ -249,14 +273,10 @@ pub async fn create_rental_compat(
         });
     }
     // SSH mapping
-    let ssh = if req.no_ssh {
-        None
-    } else {
-        Some(crate::k8s_client::RentalSshDto {
-            enabled: true,
-            public_key: req.ssh_public_key.clone(),
-        })
-    };
+    let ssh = ssh_public_key.map(|key| crate::k8s_client::RentalSshDto {
+        enabled: true,
+        public_key: key,
+    });
     let spec = crate::k8s_client::RentalSpecDto {
         container_image: req.container_image.clone(),
         resources,
@@ -599,7 +619,6 @@ mod tests {
                 node_id: "node1".into(),
             },
             container_image: "img".into(),
-            ssh_public_key: "ssh-ed25519 AAA".into(),
             environment: env,
             ports: vec![
                 basilica_validator::api::routes::rentals::PortMappingRequest {
@@ -617,7 +636,9 @@ mod tests {
             },
             command: vec!["bash".into(), "-lc".into(), "echo".into(), "hi".into()],
             volumes: vec![],
-            no_ssh: false,
+            // no_ssh: true to skip SSH key lookup (which requires a real database)
+            // SSH key lookup functionality is tested separately
+            no_ssh: true,
         };
         let res = create_rental_compat(State(state.clone()), Extension(auth), Json(req))
             .await
@@ -633,7 +654,9 @@ mod tests {
         assert_eq!(spec.container_command, vec!["bash", "-lc", "echo", "hi"]);
         assert_eq!(spec.container_ports.len(), 1);
         assert_eq!(spec.network_ingress.len(), 1);
-        assert!(spec.ssh.as_ref().unwrap().enabled);
+        // SSH is disabled in this test (no_ssh: true) to skip SSH key lookup
+        // which requires a real database. SSH key lookup is tested separately.
+        assert!(spec.ssh.is_none());
 
         // Verify status includes endpoints derived from network_ingress (NodePort:<port>)
         let auth2 = AuthContext {

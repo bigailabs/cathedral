@@ -2,6 +2,7 @@
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
 use crate::cli::handlers::gpu_rental_helpers::resolve_target_rental_unified;
+use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
 use crate::output::{
@@ -345,68 +346,50 @@ pub async fn handle_ls(
     Ok(())
 }
 
-/// Ensure user has SSH key registered for secure cloud
+/// Ensure user has SSH key registered with Basilica API
 ///
-/// Auto-registers default SSH key (~/.ssh/id_rsa.pub) with user confirmation.
+/// Checks if user already has a key registered. If not, discovers SSH keys
+/// in ~/.ssh, lets user select one interactively, and registers it.
 /// Returns the SSH key ID if successful.
-async fn ensure_ssh_key_registered(
+pub async fn ensure_ssh_key_registered(
     api_client: &basilica_sdk::BasilicaClient,
 ) -> Result<String, CliError> {
-    // Check if user already has SSH key
+    // Check if user already has SSH key registered
     if let Some(key) = api_client.get_user_ssh_key().await? {
         return Ok(key.id);
     }
 
-    // Find default SSH public key
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .map_err(|_| CliError::Internal(eyre!("Could not determine home directory")))?;
+    // No key registered - run interactive selection flow
+    print_info("No SSH key registered.");
 
-    let ssh_key_path = std::path::PathBuf::from(home)
-        .join(".ssh")
-        .join("id_rsa.pub");
-
-    if !ssh_key_path.exists() {
-        return Err(CliError::Internal(eyre!(
-            "No SSH public key found at {}\n\
-                 Please generate one with: ssh-keygen -t rsa -b 4096",
-            ssh_key_path.display()
-        )));
-    }
-
-    // Read public key
-    let public_key = std::fs::read_to_string(&ssh_key_path)
-        .map_err(|e| CliError::Internal(eyre!(e).wrap_err("Failed to read SSH public key")))?;
+    // Use shared key discovery and selection logic
+    let selected_key = select_and_read_ssh_key().await?;
 
     // Prompt user for confirmation
     use dialoguer::Confirm;
 
-    println!("\n🔑 SSH Key Registration Required");
-    println!("─────────────────────────────────");
-    println!("Secure cloud deployments require SSH key registration.");
-    println!("Key path: {}", ssh_key_path.display());
-    println!(
-        "Key type: {}",
-        public_key.split_whitespace().next().unwrap_or("unknown")
-    );
-    println!();
+    let filename = selected_key
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("key");
 
     let confirmed = Confirm::new()
-        .with_prompt("Register this SSH key for secure cloud?")
+        .with_prompt(format!("Register {}?", filename))
         .default(true)
         .interact()
         .map_err(|e| CliError::Internal(eyre!(e).wrap_err("Failed to show confirmation prompt")))?;
 
     if !confirmed {
         return Err(CliError::Internal(eyre!(
-            "SSH key registration required for secure cloud rentals"
+            "SSH key required for GPU rentals"
         )));
     }
 
     // Register key
     let spinner = create_spinner("Registering SSH key...");
     let result = api_client
-        .register_ssh_key("default", public_key.trim())
+        .register_ssh_key("default", selected_key.content.trim())
         .await;
 
     match result {
@@ -723,6 +706,9 @@ pub async fn handle_up(
         }
     }
 
+    // Ensure SSH key is registered before proceeding
+    ensure_ssh_key_registered(&api_client).await?;
+
     // Parse the target to determine node selection strategy
     let node_selection = if let Some(target_type) = target {
         match target_type {
@@ -786,11 +772,6 @@ pub async fn handle_up(
     let spinner = create_spinner("Preparing rental request...");
 
     // Build rental request
-    spinner.set_message("Validating SSH key...");
-    let ssh_public_key = load_ssh_public_key(&options.ssh_key, config).inspect_err(|_e| {
-        complete_spinner_error(spinner.clone(), "SSH key validation failed");
-    })?;
-
     let container_image = options.image.unwrap_or_else(|| config.image.name.clone());
 
     let env_vars = parse_env_vars(&options.env)
@@ -822,7 +803,6 @@ pub async fn handle_up(
     let request = StartRentalApiRequest {
         node_selection,
         container_image,
-        ssh_public_key,
         environment: env_vars,
         ports: port_mappings,
         resources: ResourceRequirementsRequest {
@@ -2853,18 +2833,6 @@ fn display_secure_cloud_reconnection_instructions(
     );
 
     Ok(())
-}
-
-fn load_ssh_public_key(key_path: &Option<PathBuf>, config: &CliConfig) -> Result<String, CliError> {
-    let path = key_path.as_ref().unwrap_or(&config.ssh.key_path);
-
-    std::fs::read_to_string(path).map_err(|_| {
-        eyre!(
-            "SSH key not found at: {}. Run \'basilica login\' to generate keys",
-            path.display().to_string()
-        )
-        .into()
-    })
 }
 
 fn split_remote_path(path: &str) -> (Option<String>, String) {
