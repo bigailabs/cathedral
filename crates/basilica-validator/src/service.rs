@@ -101,6 +101,7 @@ impl ValidatorService {
             bittensor_service.clone(),
             persistence_arc.clone(),
             validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
+            self.config.bittensor.common.netuid,
         )?;
 
         // Initialize weight setter with block-based timing from emission config

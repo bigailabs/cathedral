@@ -97,8 +97,6 @@ pub struct VerificationConfig {
     pub max_miners_per_round: usize,
     /// Minimum interval between verifications of the same miner
     pub min_verification_interval: Duration,
-    /// Network ID for the subnet
-    pub netuid: u16,
     /// Enable dynamic discovery of node SSH details from miners
     #[serde(default = "default_use_dynamic_discovery")]
     pub use_dynamic_discovery: bool,
@@ -219,7 +217,6 @@ impl VerificationConfig {
             min_score_threshold: 0.1,
             max_miners_per_round: 10,
             min_verification_interval: Duration::from_secs(300),
-            netuid: 39,
             use_dynamic_discovery: true,
             discovery_timeout: Duration::from_secs(30),
             fallback_to_static: true,
@@ -814,7 +811,6 @@ impl Default for ValidatorConfig {
                 min_score_threshold: 0.1,
                 max_miners_per_round: 20,
                 min_verification_interval: Duration::from_secs(1800), // 30 minutes
-                netuid: 39,                                           // Default subnet
                 use_dynamic_discovery: default_use_dynamic_discovery(),
                 discovery_timeout: default_discovery_timeout(),
                 fallback_to_static: default_fallback_to_static(),
