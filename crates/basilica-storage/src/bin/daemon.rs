@@ -40,7 +40,7 @@ struct Args {
 
     /// S3/R2 bucket name
     #[arg(long, env = "STORAGE_BUCKET")]
-    bucket: String,
+    bucket: Option<String>,
 
     /// S3/R2 region
     #[arg(long, env = "STORAGE_REGION")]
@@ -95,13 +95,15 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    let bucket = args.bucket.context("Bucket must be specified via --bucket arg or STORAGE_BUCKET env var")?;
+
     info!(
         "Starting Basilica Storage Daemon for experiment: {}",
         args.experiment_id
     );
     info!("Mount point: {}", args.mount_point.display());
     info!("Storage backend: {}", args.backend);
-    info!("Bucket: {}", args.bucket);
+    info!("Bucket: {}", bucket);
     info!("Sync interval: {}ms", args.sync_interval_ms);
     info!("Cache size: {}MB", args.cache_size_mb);
 
@@ -129,7 +131,7 @@ async fn main() -> Result<()> {
                 .secret_access_key
                 .context("R2 requires secret_access_key")?;
 
-            StorageConfig::r2(account_id, &access_key, &secret_key, &args.bucket)
+            StorageConfig::r2(account_id, &access_key, &secret_key, &bucket)
         }
         "s3" => {
             let region = args.region.as_deref().unwrap_or("us-east-1");
@@ -138,7 +140,7 @@ async fn main() -> Result<()> {
                 .secret_access_key
                 .context("S3 requires secret_access_key")?;
 
-            StorageConfig::s3(region, &access_key, &secret_key, &args.bucket)
+            StorageConfig::s3(region, &access_key, &secret_key, &bucket)
         }
         _ => {
             anyhow::bail!("Unsupported storage backend: {}", args.backend);
