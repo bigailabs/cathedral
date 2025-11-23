@@ -786,15 +786,18 @@ impl ApiK8sClient for K8sClient {
                 };
 
                 let is_custom_storage = persistent.credentials_secret.is_some()
-                    && persistent.credentials_secret.as_ref().is_some_and(|s| !s.is_empty());
+                    && persistent
+                        .credentials_secret
+                        .as_ref()
+                        .is_some_and(|s| !s.is_empty());
 
                 let (bucket, credentials_secret) = if is_custom_storage {
-                    (persistent.bucket.clone(), persistent.credentials_secret.clone())
-                } else {
                     (
-                        String::new(),
-                        Some("basilica-r2-credentials".to_string())
+                        persistent.bucket.clone(),
+                        persistent.credentials_secret.clone(),
                     )
+                } else {
+                    (String::new(), Some("basilica-r2-credentials".to_string()))
                 };
 
                 let mut persistent_obj = json!({

@@ -95,7 +95,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let bucket = args.bucket.context("Bucket must be specified via --bucket arg or STORAGE_BUCKET env var")?;
+    let bucket = args
+        .bucket
+        .context("Bucket must be specified via --bucket arg or STORAGE_BUCKET env var")?;
 
     info!(
         "Starting Basilica Storage Daemon for experiment: {}",
