@@ -331,11 +331,6 @@ fn build_fuse_sidecar(
             ..Default::default()
         },
         EnvVar {
-            name: "STORAGE_BUCKET".to_string(),
-            value: Some(storage.bucket.clone()),
-            ..Default::default()
-        },
-        EnvVar {
             name: "MOUNT_PATH".to_string(),
             value: Some(storage.mount_path.clone()),
             ..Default::default()
@@ -351,6 +346,14 @@ fn build_fuse_sidecar(
             ..Default::default()
         },
     ];
+
+    if !storage.bucket.is_empty() {
+        env.push(EnvVar {
+            name: "STORAGE_BUCKET".to_string(),
+            value: Some(storage.bucket.clone()),
+            ..Default::default()
+        });
+    }
 
     if let Some(ref region) = storage.region {
         env.push(EnvVar {
@@ -393,19 +396,47 @@ fn build_fuse_sidecar(
             }),
             ..Default::default()
         });
+
+        if storage.endpoint.is_none() {
+            env.push(EnvVar {
+                name: "STORAGE_ENDPOINT".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: Some(secret_name.clone()),
+                        key: "STORAGE_ENDPOINT".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
+        if storage.bucket.is_empty() {
+            env.push(EnvVar {
+                name: "STORAGE_BUCKET".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: Some(secret_name.clone()),
+                        key: "STORAGE_BUCKET".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
     }
 
     let cache_size_mb = storage.cache_size_mb as u32;
     let (startup_probe, liveness_probe, readiness_probe) =
         storage_utils::build_fuse_health_probes();
 
-    let args = vec![
+    let mut args = vec![
         "--namespace".to_string(),
         namespace.to_string(),
         "--experiment-id".to_string(),
         instance_name.to_string(),
-        "--bucket".to_string(),
-        storage.bucket.clone(),
         "--backend".to_string(),
         format!("{:?}", storage.backend).to_lowercase(),
         "--sync-interval-ms".to_string(),
@@ -415,6 +446,11 @@ fn build_fuse_sidecar(
         "--mount-point".to_string(),
         storage.mount_path.clone(),
     ];
+
+    if !storage.bucket.is_empty() {
+        args.push("--bucket".to_string());
+        args.push(storage.bucket.clone());
+    }
 
     Container {
         name: "fuse-storage".to_string(),
