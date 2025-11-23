@@ -647,8 +647,9 @@ use basilica_sdk::types::{
     DeleteDeploymentResponse as SdkDeleteDeploymentResponse,
     DeploymentListResponse as SdkDeploymentListResponse,
     DeploymentResponse as SdkDeploymentResponse, DeploymentSummary as SdkDeploymentSummary,
-    EnvVar as SdkEnvVar, PodInfo as SdkPodInfo, ReplicaStatus as SdkReplicaStatus,
-    ResourceRequirements as SdkResourceRequirements,
+    EnvVar as SdkEnvVar, PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
+    ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
+    StorageBackend as SdkStorageBackend, StorageSpec as SdkStorageSpec,
 };
 
 /// Environment variable for container deployments
@@ -771,6 +772,126 @@ impl From<SdkPodInfo> for PodInfo {
     }
 }
 
+/// Storage backend type
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum StorageBackend {
+    R2,
+    S3,
+    GCS,
+}
+
+impl From<StorageBackend> for SdkStorageBackend {
+    fn from(backend: StorageBackend) -> Self {
+        match backend {
+            StorageBackend::R2 => SdkStorageBackend::R2,
+            StorageBackend::S3 => SdkStorageBackend::S3,
+            StorageBackend::GCS => SdkStorageBackend::GCS,
+        }
+    }
+}
+
+/// Persistent storage specification
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct PersistentStorageSpec {
+    #[pyo3(get, set)]
+    pub enabled: bool,
+    #[pyo3(get, set)]
+    pub backend: StorageBackend,
+    #[pyo3(get, set)]
+    pub bucket: String,
+    #[pyo3(get, set)]
+    pub region: Option<String>,
+    #[pyo3(get, set)]
+    pub endpoint: Option<String>,
+    #[pyo3(get, set)]
+    pub credentials_secret: Option<String>,
+    #[pyo3(get, set)]
+    pub sync_interval_ms: u64,
+    #[pyo3(get, set)]
+    pub cache_size_mb: usize,
+    #[pyo3(get, set)]
+    pub mount_path: String,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl PersistentStorageSpec {
+    #[new]
+    #[pyo3(signature = (enabled, backend, bucket, region=None, endpoint=None, credentials_secret=None, sync_interval_ms=1000, cache_size_mb=1024, mount_path="/data".to_string()))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        enabled: bool,
+        backend: StorageBackend,
+        bucket: String,
+        region: Option<String>,
+        endpoint: Option<String>,
+        credentials_secret: Option<String>,
+        sync_interval_ms: u64,
+        cache_size_mb: usize,
+        mount_path: String,
+    ) -> Self {
+        Self {
+            enabled,
+            backend,
+            bucket,
+            region,
+            endpoint,
+            credentials_secret,
+            sync_interval_ms,
+            cache_size_mb,
+            mount_path,
+        }
+    }
+}
+
+impl From<PersistentStorageSpec> for SdkPersistentStorageSpec {
+    fn from(spec: PersistentStorageSpec) -> Self {
+        Self {
+            enabled: spec.enabled,
+            backend: spec.backend.into(),
+            bucket: spec.bucket,
+            region: spec.region,
+            endpoint: spec.endpoint,
+            credentials_secret: spec.credentials_secret,
+            sync_interval_ms: spec.sync_interval_ms,
+            cache_size_mb: spec.cache_size_mb,
+            mount_path: spec.mount_path,
+        }
+    }
+}
+
+/// Storage specification
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StorageSpec {
+    #[pyo3(get, set)]
+    pub persistent: Option<PersistentStorageSpec>,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl StorageSpec {
+    #[new]
+    #[pyo3(signature = (persistent=None))]
+    fn new(persistent: Option<PersistentStorageSpec>) -> Self {
+        Self { persistent }
+    }
+}
+
+impl From<StorageSpec> for SdkStorageSpec {
+    fn from(spec: StorageSpec) -> Self {
+        Self {
+            persistent: spec.persistent.map(Into::into),
+        }
+    }
+}
+
 /// Create deployment request
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass]
@@ -796,13 +917,15 @@ pub struct CreateDeploymentRequest {
     pub ttl_seconds: Option<u32>,
     #[pyo3(get, set)]
     pub public: bool,
+    #[pyo3(get, set)]
+    pub storage: Option<StorageSpec>,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl CreateDeploymentRequest {
     #[new]
-    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true))]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         instance_name: String,
@@ -815,6 +938,7 @@ impl CreateDeploymentRequest {
         resources: Option<ResourceRequirements>,
         ttl_seconds: Option<u32>,
         public: bool,
+        storage: Option<StorageSpec>,
     ) -> Self {
         Self {
             instance_name,
@@ -827,6 +951,7 @@ impl CreateDeploymentRequest {
             resources,
             ttl_seconds,
             public,
+            storage,
         }
     }
 }
@@ -844,7 +969,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             resources: req.resources.map(Into::into),
             ttl_seconds: req.ttl_seconds,
             public: req.public,
-            storage: None,
+            storage: req.storage.map(Into::into),
             enable_billing: true,
             queue_name: None,
             suspended: false,

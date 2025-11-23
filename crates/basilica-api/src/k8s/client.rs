@@ -784,10 +784,23 @@ impl ApiK8sClient for K8sClient {
                     crate::api::routes::deployments::types::StorageBackend::S3 => "s3",
                     crate::api::routes::deployments::types::StorageBackend::GCS => "gcs",
                 };
+
+                let is_custom_storage = persistent.credentials_secret.is_some()
+                    && persistent.credentials_secret.as_ref().is_some_and(|s| !s.is_empty());
+
+                let (bucket, credentials_secret) = if is_custom_storage {
+                    (persistent.bucket.clone(), persistent.credentials_secret.clone())
+                } else {
+                    (
+                        String::new(),
+                        Some("basilica-r2-credentials".to_string())
+                    )
+                };
+
                 let mut persistent_obj = json!({
                     "enabled": persistent.enabled,
                     "backend": backend_str,
-                    "bucket": persistent.bucket,
+                    "bucket": bucket,
                     "syncIntervalMs": persistent.sync_interval_ms,
                     "cacheSizeMb": persistent.cache_size_mb,
                     "mountPath": persistent.mount_path,
@@ -798,8 +811,8 @@ impl ApiK8sClient for K8sClient {
                 if let Some(ref endpoint) = persistent.endpoint {
                     persistent_obj["endpoint"] = json!(endpoint);
                 }
-                if let Some(ref credentials_secret) = persistent.credentials_secret {
-                    persistent_obj["credentialsSecret"] = json!(credentials_secret);
+                if let Some(ref creds) = credentials_secret {
+                    persistent_obj["credentialsSecret"] = json!(creds);
                 }
                 spec["storage"] = json!({
                     "persistent": persistent_obj
