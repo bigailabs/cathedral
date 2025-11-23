@@ -1867,7 +1867,8 @@ pub async fn handle_restart(target: Option<String>, config: &CliConfig) -> Resul
     let api_client = create_authenticated_client(config).await?;
 
     // Single rental restart (no --all flag as per requirements)
-    let rental_id = resolve_target_rental(target, &api_client, false).await?;
+    let (rental_id, _compute_type) =
+        resolve_target_rental_unified(target, None, &api_client).await?;
     let spinner = create_spinner(&format!("Restarting rental: {}", rental_id));
 
     api_client
