@@ -126,6 +126,53 @@ impl SshClient {
         .into())
     }
 
+    /// Test SSH connectivity without starting an interactive session.
+    /// Returns Ok(()) if connection succeeds, Err with the error message if it fails.
+    /// This method captures stderr to avoid printing raw SSH error messages.
+    pub async fn test_connection(
+        &self,
+        ssh_access: &SshAccess,
+        private_key_override: Option<std::path::PathBuf>,
+    ) -> Result<()> {
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_override)?;
+
+        debug!(
+            "Testing SSH connectivity to {}@{}:{}",
+            details.username, details.host, details.port
+        );
+
+        // Use SSH in batch mode with a simple exit command to test connectivity
+        let output = std::process::Command::new("ssh")
+            .arg("-i")
+            .arg(details.private_key_path.display().to_string())
+            .arg("-p")
+            .arg(details.port.to_string())
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("LogLevel=error")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", details.timeout.as_secs()))
+            .arg(format!("{}@{}", details.username, details.host))
+            .arg("exit")
+            .arg("0")
+            .output()
+            .map_err(|e| -> CliError {
+                eyre!("Failed to run SSH command: {}", e).into()
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(eyre!("SSH connection test failed: {}", stderr.trim()).into())
+        }
+    }
+
     /// Open interactive SSH session
     pub async fn interactive_session(
         &self,

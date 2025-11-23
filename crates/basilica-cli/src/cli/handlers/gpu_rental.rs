@@ -637,7 +637,7 @@ async fn handle_secure_cloud_rental(
                 &ssh_client,
                 &ssh_access,
                 Some(private_key_path),
-                Duration::from_secs(60),
+                Duration::from_secs(120),
             )
             .await
             {
@@ -2476,7 +2476,7 @@ async fn poll_rental_status(
     rental_id: &str,
     api_client: &basilica_sdk::BasilicaClient,
 ) -> Result<bool, CliError> {
-    const MAX_WAIT_TIME: Duration = Duration::from_secs(60);
+    const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
     const INITIAL_INTERVAL: Duration = Duration::from_secs(2);
     const MAX_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -2520,10 +2520,7 @@ async fn poll_rental_status(
                     }
                     RentalStatus::Pending => {
                         // Still pending, continue polling
-                        spinner.set_message(format!(
-                            "Rental is pending... ({}s elapsed)",
-                            start_time.elapsed().as_secs()
-                        ));
+                        spinner.set_message("Rental is pending...");
                     }
                 }
             }
@@ -2690,22 +2687,32 @@ async fn retry_ssh_connection(
     let mut interval = INITIAL_INTERVAL;
     let mut attempt = 0;
 
+    // Use a spinner to show progress and avoid cluttering the terminal
+    let spinner = create_spinner("Waiting for SSH to become available...");
+
     loop {
         attempt += 1;
+        spinner.set_message("SSH not ready yet, retrying...");
 
-        // Try to connect
+        // First test connectivity without starting an interactive session
+        // This captures stderr so we don't print raw SSH errors
         match ssh_client
-            .interactive_session(ssh_access, private_key_override.clone())
+            .test_connection(ssh_access, private_key_override.clone())
             .await
         {
             Ok(_) => {
-                // Connection succeeded
-                return Ok(());
+                // Connection test succeeded, now start the actual interactive session
+                complete_spinner_and_clear(spinner);
+                return ssh_client
+                    .interactive_session(ssh_access, private_key_override)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
             }
             Err(e) => {
                 // Check if we've exceeded the maximum wait time
                 if start_time.elapsed() >= max_wait {
                     // Final attempt failed, return error
+                    complete_spinner_error(spinner, "SSH connection failed");
                     return Err(CliError::Internal(
                         eyre!(
                             "SSH connection failed after {} attempts over {}s: {}",
@@ -2726,14 +2733,6 @@ async fn retry_ssh_connection(
                     e,
                     interval.as_secs()
                 );
-
-                // Print user-friendly message on first few retries
-                if attempt <= 3 {
-                    print_info(&format!(
-                        "SSH not ready yet, retrying... (attempt {})",
-                        attempt
-                    ));
-                }
 
                 // Wait before next attempt
                 tokio::time::sleep(interval).await;
