@@ -124,6 +124,15 @@ impl BasilicaClient {
         }
     }
 
+    /// Restart a rental's container
+    pub async fn restart_rental(
+        &self,
+        rental_id: &str,
+    ) -> Result<basilica_validator::rental::RentalRestartResponse> {
+        let path = format!("/rentals/{rental_id}/restart");
+        self.post(&path, &serde_json::json!({})).await
+    }
+
     /// Get rental logs
     pub async fn get_rental_logs(
         &self,

@@ -376,6 +376,7 @@ pub async fn get_rental_status(
         status: match status.state {
             RentalState::Provisioning => ApiRentalStatus::Pending,
             RentalState::Active => ApiRentalStatus::Active,
+            RentalState::Restarting => ApiRentalStatus::Active, // Treat restarting as active
             RentalState::Stopping | RentalState::Stopped => ApiRentalStatus::Terminated,
             RentalState::Failed => ApiRentalStatus::Failed,
         },

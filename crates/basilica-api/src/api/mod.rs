@@ -139,6 +139,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             .route("/rentals/:id", get(routes::rentals::get_rental_status))
             .route("/rentals/:id", delete(routes::rentals::stop_rental))
             .route(
+                "/rentals/:id/restart",
+                post(routes::rentals::restart_rental),
+            )
+            .route(
                 "/rentals/:id/logs",
                 get(routes::rentals::stream_rental_logs),
             );

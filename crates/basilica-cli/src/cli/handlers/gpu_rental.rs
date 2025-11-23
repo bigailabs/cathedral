@@ -1862,6 +1862,39 @@ pub async fn handle_down(
     Ok(())
 }
 
+/// Handle the `restart` command - restart rental container
+pub async fn handle_restart(target: Option<String>, config: &CliConfig) -> Result<(), CliError> {
+    let api_client = create_authenticated_client(config).await?;
+
+    // Single rental restart (no --all flag as per requirements)
+    let (rental_id, _compute_type) =
+        resolve_target_rental_unified(target, None, &api_client).await?;
+    let spinner = create_spinner(&format!("Restarting rental: {}", rental_id));
+
+    api_client
+        .restart_rental(&rental_id)
+        .await
+        .map_err(|e| -> CliError {
+            complete_spinner_error(spinner.clone(), "Failed to restart rental");
+            let report = match e {
+                ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
+                    .suggestion("Try 'basilica ps' to see your active rentals"),
+                ApiError::Conflict { message } => {
+                    eyre!("Cannot restart rental: {}", message).suggestion(
+                        "Only Active rentals can be restarted. Check rental status with 'basilica status'",
+                    )
+                }
+                _ => eyre!(e).suggestion("Check your internet connection and try again"),
+            };
+            CliError::Internal(report)
+        })?;
+
+    complete_spinner_and_clear(spinner);
+    print_success(&format!("Successfully restarted rental: {}", rental_id));
+
+    Ok(())
+}
+
 /// Handle the `exec` command - execute commands via SSH
 pub async fn handle_exec(
     target: Option<String>,

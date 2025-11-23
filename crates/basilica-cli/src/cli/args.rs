@@ -186,6 +186,9 @@ impl Args {
             } => {
                 handlers::gpu_rental::handle_down(target.clone(), *compute, *all, config).await?;
             }
+            Commands::Restart { target } => {
+                handlers::gpu_rental::handle_restart(target.clone(), config).await?;
+            }
             Commands::Exec { command, target } => {
                 handlers::gpu_rental::handle_exec(target.clone(), command.clone(), config).await?;
             }

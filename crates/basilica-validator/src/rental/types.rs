@@ -93,6 +93,7 @@ pub struct ContainerInfo {
 pub enum RentalState {
     Provisioning,
     Active,
+    Restarting,
     Stopping,
     Stopped,
     Failed,
@@ -171,4 +172,13 @@ pub struct LogEntry {
     pub stream: String,
     pub message: String,
     pub container_id: String,
+}
+
+/// Rental restart response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RentalRestartResponse {
+    pub rental_id: String,
+    pub status: RentalState,
+    pub message: String,
+    pub operation_duration_ms: u64,
 }
