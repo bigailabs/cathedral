@@ -541,7 +541,6 @@ mod tests {
             min_score_threshold: 0.1,
             max_miners_per_round: 20,
             min_verification_interval: Duration::from_secs(1800),
-            netuid: 39,
             use_dynamic_discovery: true,
             discovery_timeout: Duration::from_secs(30),
             fallback_to_static: true,
@@ -554,6 +553,7 @@ mod tests {
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(120 * 60)),
             enable_worker_queue: false,
             storage_validation: crate::config::StorageValidationConfig::default(),
+            node_groups: crate::config::NodeGroupConfig::default(),
         }
     }
 
@@ -573,6 +573,9 @@ mod tests {
         let scheduler = VerificationScheduler::new(config.clone());
 
         // Verify scheduler initializes properly
-        assert_eq!(scheduler.config.netuid, config.netuid);
+        assert_eq!(
+            scheduler.config.max_concurrent_verifications,
+            config.max_concurrent_verifications
+        );
     }
 }

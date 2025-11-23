@@ -6,6 +6,7 @@
 use super::miner_client::MinerClientConfig;
 use super::verification::VerificationEngine;
 use crate::config::{AutomaticVerificationConfig, SshSessionConfig, VerificationConfig};
+use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::SimplePersistence;
 use crate::ssh::{SshAutomationComponents, ValidatorSshClient};
@@ -24,6 +25,7 @@ pub struct VerificationEngineBuilder {
     bittensor_service: Option<Arc<bittensor::Service>>,
     ssh_client: Option<Arc<ValidatorSshClient>>,
     metrics: Option<Arc<ValidatorMetrics>>,
+    node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
 }
 
 impl VerificationEngineBuilder {
@@ -45,6 +47,7 @@ impl VerificationEngineBuilder {
             bittensor_service: None,
             ssh_client: None,
             metrics,
+            node_profile_publisher: None,
         }
     }
 
@@ -77,6 +80,7 @@ impl VerificationEngineBuilder {
             None,
             self.bittensor_service,
             self.metrics,
+            self.node_profile_publisher.clone(),
         )?;
 
         Ok(verification_engine)
@@ -126,6 +130,7 @@ impl VerificationEngineBuilder {
             Some(ssh_automation.ssh_key_manager.clone()),
             self.bittensor_service,
             self.metrics,
+            self.node_profile_publisher.clone(),
         )?;
 
         info!(
@@ -136,6 +141,15 @@ impl VerificationEngineBuilder {
         );
 
         Ok(verification_engine)
+    }
+
+    /// Inject a NodeProfilePublisher for K8s publishing and node labeling
+    pub fn with_node_profile_publisher(
+        mut self,
+        publisher: Arc<dyn NodeProfilePublisher + Send + Sync>,
+    ) -> Self {
+        self.node_profile_publisher = Some(publisher);
+        self
     }
 
     /// Build SSH automation components with validation
@@ -213,7 +227,6 @@ mod tests {
             min_score_threshold: 0.5,
             max_miners_per_round: 10,
             min_verification_interval: Duration::from_secs(300),
-            netuid: 387,
             use_dynamic_discovery: true,
             discovery_timeout: Duration::from_secs(30),
             fallback_to_static: true,
@@ -226,6 +239,7 @@ mod tests {
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
             enable_worker_queue: false,
             storage_validation: crate::config::StorageValidationConfig::default(),
+            node_groups: crate::config::NodeGroupConfig::default(),
         };
 
         let automatic_verification_config = AutomaticVerificationConfig {
@@ -370,7 +384,6 @@ mod tests {
             min_score_threshold: 0.5,
             max_miners_per_round: 10,
             min_verification_interval: Duration::from_secs(300),
-            netuid: 387,
             use_dynamic_discovery: true,
             discovery_timeout: Duration::from_secs(30),
             fallback_to_static: true,
@@ -383,6 +396,7 @@ mod tests {
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
             enable_worker_queue: false,
             storage_validation: crate::config::StorageValidationConfig::default(),
+            node_groups: crate::config::NodeGroupConfig::default(),
         };
 
         let miner_client_config = MinerClientConfig::default();
@@ -407,6 +421,7 @@ mod tests {
             None, // no SSH key manager
             None, // no bittensor service
             None, // no metrics
+            None, // no node_profile_publisher
         );
         assert!(result.is_err());
 
@@ -421,6 +436,7 @@ mod tests {
             None,  // no SSH key manager
             None,  // no bittensor service
             None,  // no metrics
+            None,  // no node_profile_publisher
         );
         assert!(result.is_ok());
 

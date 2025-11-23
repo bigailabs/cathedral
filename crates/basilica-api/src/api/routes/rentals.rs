@@ -32,6 +32,7 @@ use basilica_validator::{
 };
 use futures::stream::Stream;
 use rand::seq::SliceRandom;
+use sqlx::Row;
 use tracing::{debug, error, info};
 
 /// Get detailed rental status (with ownership validation)
@@ -70,13 +71,28 @@ pub async fn start_rental(
     // Get user ID from auth context (already extracted via Extension)
     let user_id = &auth_context.user_id;
 
-    // Validate SSH public key
-    if !is_valid_ssh_public_key(&request.ssh_public_key) {
-        error!("Invalid SSH public key provided");
-        return Err(crate::error::ApiError::BadRequest {
-            message: "Invalid SSH public key".into(),
-        });
-    }
+    // Look up user's registered SSH key from database (only if SSH is enabled)
+    let ssh_public_key: String = if request.no_ssh {
+        String::new() // Empty string for no-SSH rentals
+    } else {
+        let ssh_key_row = sqlx::query("SELECT public_key FROM ssh_keys WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| crate::error::ApiError::Internal {
+                message: format!("Failed to lookup SSH key: {}", e),
+            })?;
+
+        match ssh_key_row {
+            Some(row) => row.get("public_key"),
+            None => {
+                error!("User {} has no SSH key registered", user_id);
+                return Err(crate::error::ApiError::BadRequest {
+                    message: "No SSH key registered. Please register an SSH key first using 'basilica ssh-keys add' or by starting a rental through the CLI.".into(),
+                });
+            }
+        }
+    };
 
     // Validate container image using OCI specification
     if let Err(e) = validate_docker_image(&request.container_image) {
@@ -91,11 +107,34 @@ pub async fn start_rental(
     let memory_mb = request.resources.memory_mb;
     let storage_mb = request.resources.storage_mb;
 
-    // Determine node_id based on the selection strategy
-    let node_id = match &request.node_selection {
+    // Determine node_id and pricing based on the selection strategy
+    let (node_id, node_hourly_rate_cents) = match &request.node_selection {
         NodeSelection::NodeId { node_id } => {
             info!("Starting rental with specified node: {}", node_id);
-            node_id.clone()
+
+            // Fetch the specific node's pricing from validator
+            let query = ListAvailableNodesQuery {
+                available: Some(true),
+                min_gpu_memory: None,
+                gpu_type: None,
+                min_gpu_count: None,
+                location: None,
+            };
+            let nodes_response = state
+                .validator_client
+                .list_available_nodes(Some(query))
+                .await
+                .map_err(|e| crate::error::ApiError::Internal {
+                    message: format!("Failed to query node pricing: {}", e),
+                })?;
+
+            let pricing = nodes_response
+                .available_nodes
+                .iter()
+                .find(|n| n.node.id == *node_id)
+                .and_then(|n| n.node.hourly_rate_cents);
+
+            (node_id.clone(), pricing)
         }
         NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
             info!(
@@ -138,25 +177,41 @@ pub async fn start_rental(
                 });
             }
 
-            // Randomly select an node from the filtered list
-            let selected_id =
+            // Randomly select a node from the filtered list
+            let selected_node =
                 select_best_node(nodes).ok_or_else(|| crate::error::ApiError::Internal {
                     message: "Failed to select node".into(),
                 })?;
 
             info!(
                 "Selected node {} with exactly {} GPU(s)",
-                selected_id, exact_count
+                selected_node.node.id, exact_count
             );
-            selected_id
+
+            // Capture both node_id and pricing from the selected node (no second fetch needed!)
+            (selected_node.node.id, selected_node.node.hourly_rate_cents)
         }
     };
+
+    // Validate pricing is available before creating rental (fail fast before side effects)
+    if node_hourly_rate_cents.is_none() {
+        error!(
+            "No pricing configured for node {}. Cannot proceed with rental.",
+            node_id
+        );
+        return Err(crate::error::ApiError::BadRequest {
+            message: format!(
+                "Node {} does not have pricing configured. Please select a different node or contact support.",
+                node_id
+            ),
+        });
+    }
 
     // Convert to validator's StartRentalRequest format
     let validator_request = StartRentalRequest {
         node_id: node_id.clone(),
         container_image: request.container_image,
-        ssh_public_key: request.ssh_public_key,
+        ssh_public_key,
         environment: request.environment,
         ports: request.ports,
         resources: request.resources,
@@ -227,7 +282,10 @@ pub async fn start_rental(
 
     // Notify billing service to start tracking this rental
     if let Some(billing_client) = &state.billing_client {
-        use basilica_protocol::billing::{GpuSpec, ResourceSpec, TrackRentalRequest};
+        use basilica_protocol::billing::{
+            track_rental_request::CloudType, CommunityCloudData, GpuSpec, ResourceSpec,
+            TrackRentalRequest,
+        };
 
         let now = chrono::Utc::now();
         let timestamp = prost_types::Timestamp {
@@ -253,15 +311,34 @@ pub async fn start_rental(
             network_bandwidth_mbps: 0,
         });
 
+        // Use pricing from node selection (validated earlier before rental creation)
+        let base_price_per_gpu =
+            node_hourly_rate_cents.expect("pricing validated before rental creation") as f64
+                / 100.0;
+
+        // Apply markup to the base price before sending to billing
+        // Billing service will use this as the final price
+        let markup_multiplier = 1.0 + (state.pricing_config.community_markup_percent / 100.0);
+        let marked_up_price = base_price_per_gpu * markup_multiplier;
+
+        let gpu_count = resource_spec
+            .as_ref()
+            .and_then(|spec| spec.gpus.first())
+            .map(|gpu| gpu.count)
+            .unwrap_or(1);
+
         let track_request = TrackRentalRequest {
             rental_id: validator_response.rental_id.clone(),
             user_id: user_id.clone(),
-            node_id,
-            validator_id: state.validator_hotkey.clone(),
             resource_spec,
-            hourly_rate: "0.00".to_string(),
             start_time: Some(timestamp.clone()),
             metadata: Default::default(),
+            cloud_type: Some(CloudType::Community(CommunityCloudData {
+                node_id,
+                validator_id: state.validator_hotkey.clone(),
+                base_price_per_gpu: marked_up_price,
+                gpu_count,
+            })),
         };
 
         match billing_client.track_rental(track_request).await {
@@ -573,26 +650,6 @@ pub async fn list_rentals_validator(
     Ok(Json(user_rentals))
 }
 
-// Validation helpers
-fn is_valid_ssh_public_key(key: &str) -> bool {
-    if key.trim().is_empty() {
-        return false;
-    }
-
-    // Must start with ssh- prefix
-    if !key.starts_with("ssh-") {
-        return false;
-    }
-
-    // Must have at least 2 parts (algorithm and key data)
-    let parts: Vec<&str> = key.split_whitespace().collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    true
-}
-
 /// List available nodes for rentals
 pub async fn list_available_nodes(
     State(state): State<AppState>,
@@ -613,22 +670,31 @@ pub async fn list_available_nodes(
 
     info!("Listing nodes with filters: {:?}", query);
 
-    let response = state
+    let mut response = state
         .validator_client
         .list_available_nodes(Some(query))
         .await?;
+
+    // Apply community cloud markup to prices
+    let markup_multiplier = 1.0 + (state.pricing_config.community_markup_percent / 100.0);
+    for available_node in &mut response.available_nodes {
+        if let Some(hourly_rate_cents) = available_node.node.hourly_rate_cents {
+            let marked_up_rate = (hourly_rate_cents as f64 * markup_multiplier).round() as i32;
+            available_node.node.hourly_rate_cents = Some(marked_up_rate);
+        }
+    }
 
     Ok(Json(response))
 }
 
 /// Select a random node from a list of available nodes to distribute
 /// load and allow users to retry with different nodes if issues occur
-fn select_best_node(nodes: Vec<AvailableNode>) -> Option<String> {
+fn select_best_node(nodes: Vec<AvailableNode>) -> Option<AvailableNode> {
     if nodes.is_empty() {
         return None;
     }
 
-    // Randomly select an node from the available list
+    // Randomly select a node from the available list
     let mut rng = rand::thread_rng();
-    nodes.choose(&mut rng).map(|e| e.node.id.clone())
+    nodes.choose(&mut rng).cloned()
 }

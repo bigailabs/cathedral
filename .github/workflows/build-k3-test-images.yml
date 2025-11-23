@@ -1,0 +1,165 @@
+name: Build k3_test Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to apply to images"
+        required: true
+        default: "k3_test"
+  push:
+    paths:
+      - ".github/triggers/build-k3-test-images"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          # Sanitize accidental "TAG=..." input
+          if [[ "$TAG" == TAG=* ]]; then TAG="${TAG#TAG=}"; fi
+          if [[ -z "$TAG" ]]; then
+            MSG=$(git log -1 --pretty=%B)
+            TAG=$(echo "$MSG" | sed -n 's/.*TAG=\([^[:space:]]*\).*/\1/p')
+            if [[ -z "$TAG" ]]; then TAG="k3_test"; fi
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build operator image
+        run: |
+          ./scripts/operator/build.sh \
+            --image-name ghcr.io/one-covenant/basilica-operator \
+            --image-tag "$TAG"
+
+      - name: Push operator image
+        run: |
+          ./scripts/operator/push.sh \
+            --source-image ghcr.io/one-covenant/basilica-operator \
+            --target-image ghcr.io/one-covenant/basilica-operator \
+            --tag "$TAG"
+
+      - name: Build validator image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/validator/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/validator \
+            --image-tag "$TAG" \
+            --no-extract
+
+      - name: Push validator image
+        run: |
+          ./scripts/validator/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/validator \
+            --target-image ghcr.io/one-covenant/basilica/validator \
+            --tag "$TAG"
+
+      - name: Build miner image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/miner/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/miner \
+            --image-tag "$TAG" \
+            --no-extract
+
+      - name: Push miner image
+        run: |
+          ./scripts/miner/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/miner \
+            --target-image ghcr.io/one-covenant/basilica/miner \
+            --tag "$TAG"
+
+      - name: Build API image
+        env:
+          BITTENSOR_NETWORK: finney
+        run: |
+          ./scripts/api/build.sh \
+            --image-name ghcr.io/one-covenant/basilica-api \
+            --image-tag "$TAG" \
+            --no-extract
+
+      - name: Push API image
+        run: |
+          ./scripts/api/push.sh \
+            --source-image ghcr.io/one-covenant/basilica-api \
+            --target-image ghcr.io/one-covenant/basilica-api \
+            --tag "$TAG"
+
+      - name: Build billing image
+        run: |
+          ./scripts/billing/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/billing \
+            --image-tag "$TAG" \
+            --no-extract
+
+      - name: Push billing image
+        run: |
+          ./scripts/billing/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/billing \
+            --target-image ghcr.io/one-covenant/basilica/billing \
+            --tag "$TAG"
+
+      - name: Build payments image
+        run: |
+          ./scripts/payments/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/payments \
+            --image-tag "$TAG" \
+            --no-extract
+
+      - name: Push payments image
+        run: |
+          ./scripts/payments/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/payments \
+            --target-image ghcr.io/one-covenant/basilica/payments \
+            --tag "$TAG"
+
+      - name: Build CLI image (single-arch)
+        run: |
+          ./scripts/cli/build.sh \
+            --single-arch \
+            --image-name ghcr.io/one-covenant/basilica/cli \
+            --image-tag "$TAG" \
+            --no-extract
+
+      - name: Push CLI image
+        run: |
+          docker push ghcr.io/one-covenant/basilica/cli:"$TAG"
+
+      - name: Build storage daemon image
+        run: |
+          ./scripts/storage-daemon/build.sh \
+            --image-name ghcr.io/one-covenant/basilica/storage-daemon \
+            --image-tag "$TAG"
+
+      - name: Push storage daemon image
+        run: |
+          ./scripts/storage-daemon/push.sh \
+            --source-image ghcr.io/one-covenant/basilica/storage-daemon \
+            --target-image ghcr.io/one-covenant/basilica/storage-daemon \
+            --tag "$TAG"
+
+

@@ -258,6 +258,7 @@ impl SimplePersistence {
                     },
                     location: None,
                     network_speed: None,
+                    hourly_rate_cents: None,
                 },
             };
 

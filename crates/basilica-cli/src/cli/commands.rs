@@ -1,9 +1,33 @@
 use basilica_common::types::GpuCategory;
 use basilica_sdk::types::RentalState;
-use clap::{Subcommand, ValueHint};
+use clap::{Subcommand, ValueEnum, ValueHint};
 use std::path::PathBuf;
 
 use crate::handlers::gpu_rental::TargetType;
+
+/// CLI wrapper for ComputeCategory to implement ValueEnum
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ComputeCategoryArg {
+    #[value(name = "secure-cloud", alias = "secure", alias = "secure_cloud")]
+    SecureCloud,
+    #[value(
+        name = "community-cloud",
+        alias = "community",
+        alias = "community_cloud"
+    )]
+    CommunityCloud,
+}
+
+impl From<ComputeCategoryArg> for basilica_common::types::ComputeCategory {
+    fn from(arg: ComputeCategoryArg) -> Self {
+        match arg {
+            ComputeCategoryArg::SecureCloud => basilica_common::types::ComputeCategory::SecureCloud,
+            ComputeCategoryArg::CommunityCloud => {
+                basilica_common::types::ComputeCategory::CommunityCloud
+            }
+        }
+    }
+}
 
 /// Main CLI commands
 #[derive(Subcommand, Debug, Clone)]
@@ -13,6 +37,11 @@ pub enum Commands {
     Ls {
         /// Filter by GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         gpu_type: Option<GpuCategory>,
+
+        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
+        /// Defaults to secure-cloud if not specified
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
 
         #[command(flatten)]
         filters: ListFilters,
@@ -24,12 +53,22 @@ pub enum Commands {
         /// Target node ID (UUID) or GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         target: Option<TargetType>,
 
+        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
+        /// Defaults to secure-cloud if not specified
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
+
         #[command(flatten)]
         options: UpOptions,
     },
 
     /// List active rentals and their status
     Ps {
+        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
+        /// Defaults to secure-cloud if not specified
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
+
         #[command(flatten)]
         filters: PsFilters,
     },
@@ -54,6 +93,11 @@ pub enum Commands {
     Down {
         /// Rental UUID to terminate (optional)
         target: Option<String>,
+
+        /// Compute source filter: 'secure-cloud' or 'community-cloud'
+        /// When not specified, interactive mode shows all rental types
+        #[arg(long, value_name = "TYPE")]
+        compute: Option<ComputeCategoryArg>,
 
         /// Stop all active rentals
         #[arg(long, conflicts_with = "target")]
@@ -137,6 +181,12 @@ pub enum Commands {
         action: TokenAction,
     },
 
+    /// SSH keys management commands
+    SshKeys {
+        #[command(subcommand)]
+        action: SshKeyAction,
+    },
+
     /// Fund your account with Bittensor TAO
     Fund {
         #[command(subcommand)]
@@ -212,6 +262,31 @@ pub enum TokenAction {
     },
 }
 
+/// SSH key management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum SshKeyAction {
+    /// Add a new SSH key
+    Add {
+        /// Name for the SSH key (will prompt if not provided)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Path to SSH public key file (default: auto-detect from ~/.ssh/)
+        #[arg(short, long, value_hint = ValueHint::FilePath)]
+        file: Option<PathBuf>,
+    },
+
+    /// List registered SSH keys
+    List,
+
+    /// Delete the registered SSH key
+    Delete {
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
 impl Commands {
     /// Check if this command requires authentication
     pub fn requires_auth(&self) -> bool {
@@ -228,6 +303,7 @@ impl Commands {
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
             | Commands::Tokens { .. }
+            | Commands::SshKeys { .. }
             | Commands::Fund { .. }
             | Commands::Balance { .. } => true,
 

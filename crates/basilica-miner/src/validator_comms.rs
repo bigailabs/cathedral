@@ -344,6 +344,10 @@ impl MinerDiscovery for MinerDiscoveryService {
         let node_details: Vec<basilica_protocol::miner_discovery::NodeConnectionDetails> = nodes
             .into_iter()
             .map(|registered_node| {
+                // Convert hourly rate from dollars to cents for network transmission
+                let hourly_rate_cents =
+                    (registered_node.config.hourly_rate_dollars * 100.0).round() as u32;
+
                 basilica_protocol::miner_discovery::NodeConnectionDetails {
                     node_id: registered_node.node_id,
                     host: registered_node.config.host,
@@ -352,6 +356,7 @@ impl MinerDiscovery for MinerDiscoveryService {
                     additional_opts: registered_node.config.additional_opts.unwrap_or_default(),
                     gpu_spec: None, // Validators discover GPU specs via SSH
                     status: "available".to_string(),
+                    hourly_rate_cents,
                 }
             })
             .collect();

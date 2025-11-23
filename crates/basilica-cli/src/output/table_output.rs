@@ -4,6 +4,7 @@ use crate::{
     error::{CliError, Result},
     output::format_credits,
 };
+use basilica_aggregator::GpuOffering;
 use basilica_api::country_mapping::get_country_name_from_code;
 use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
@@ -1018,6 +1019,242 @@ pub fn display_available_nodes_detailed(
     Ok(())
 }
 
+/// Display secure cloud GPU offerings in compact format (grouped by provider and GPU type)
+pub fn display_secure_cloud_offerings_compact(offerings: &[GpuOffering]) -> Result<()> {
+    if offerings.is_empty() {
+        println!("No GPUs available matching your criteria.");
+        return Ok(());
+    }
+
+    // Group offerings by provider and GPU configuration
+    let mut provider_groups: HashMap<String, HashMap<String, Vec<&GpuOffering>>> = HashMap::new();
+
+    for offering in offerings {
+        let provider = offering.provider.to_string();
+
+        // Format GPU configuration (e.g., "2x H100")
+        let gpu_key = if offering.gpu_count == 1 {
+            offering.gpu_type.to_string()
+        } else {
+            format!("{}x {}", offering.gpu_count, offering.gpu_type)
+        };
+
+        provider_groups
+            .entry(provider)
+            .or_default()
+            .entry(gpu_key)
+            .or_default()
+            .push(offering);
+    }
+
+    // Sort providers for consistent display
+    let mut sorted_providers: Vec<_> = provider_groups.keys().cloned().collect();
+    sorted_providers.sort();
+
+    println!("Available Secure Cloud GPUs by Provider\n");
+
+    for provider in sorted_providers {
+        // Print provider header
+        println!("{}", provider);
+
+        #[derive(Tabled)]
+        struct CompactRow {
+            #[tabled(rename = "GPU TYPE")]
+            gpu_type: String,
+            #[tabled(rename = "AVAILABLE")]
+            available: String,
+            #[tabled(rename = "vCPU")]
+            vcpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
+            #[tabled(rename = "REGION(S)")]
+            regions: String,
+            #[tabled(rename = "PRICE/HR")]
+            price_per_hour: String,
+        }
+
+        let gpu_groups = provider_groups.get(&provider).unwrap();
+        let mut rows: Vec<CompactRow> = Vec::new();
+
+        // Sort GPU configurations for consistent display
+        let mut sorted_gpu_configs: Vec<_> = gpu_groups.keys().cloned().collect();
+        sorted_gpu_configs.sort();
+
+        for gpu_config in sorted_gpu_configs {
+            let offerings_in_group = gpu_groups.get(&gpu_config).unwrap();
+            let count = offerings_in_group.len();
+
+            // Get representative values from first offering
+            let first = offerings_in_group.first().unwrap();
+            let vcpu = first.vcpu_count.to_string();
+            let ram = format!("{}GB", first.system_memory_gb);
+
+            // Collect unique regions
+            let mut regions: Vec<_> = offerings_in_group
+                .iter()
+                .map(|o| o.region.as_str())
+                .collect();
+            regions.sort();
+            regions.dedup();
+            let regions_display = if regions.len() <= 2 {
+                regions.join(", ")
+            } else {
+                format!("{}, +{} more", regions[0], regions.len() - 1)
+            };
+
+            // Get minimum total price from the group (per-GPU rate × gpu_count)
+            let min_price = offerings_in_group
+                .iter()
+                .map(|o| o.hourly_rate_per_gpu * Decimal::from(o.gpu_count))
+                .min()
+                .unwrap();
+
+            rows.push(CompactRow {
+                gpu_type: gpu_config.clone(),
+                available: count.to_string(),
+                vcpu,
+                ram,
+                regions: regions_display,
+                price_per_hour: format!("${:.2}/hr", min_price),
+            });
+        }
+
+        let mut table = Table::new(rows);
+        table.with(Style::modern());
+        println!("{}", table);
+        println!();
+    }
+
+    println!("Total offerings: {}", offerings.len());
+
+    Ok(())
+}
+
+/// Display secure cloud GPU offerings in detailed format (individual offerings)
+pub fn display_secure_cloud_offerings_detailed(
+    offerings: &[GpuOffering],
+    show_ids: bool,
+) -> Result<()> {
+    if offerings.is_empty() {
+        println!("No GPUs available matching your criteria.");
+        return Ok(());
+    }
+
+    // Different structs based on whether we show IDs
+    if show_ids {
+        #[derive(Tabled)]
+        struct DetailedOfferingRowWithId {
+            #[tabled(rename = "OFFERING ID")]
+            offering_id: String,
+            #[tabled(rename = "PROVIDER")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu_info: String,
+            #[tabled(rename = "vCPU")]
+            vcpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
+            #[tabled(rename = "STORAGE")]
+            storage: String,
+            #[tabled(rename = "INTERCONNECT")]
+            interconnect: String,
+            #[tabled(rename = "REGION")]
+            region: String,
+            #[tabled(rename = "PRICE/HR")]
+            price: String,
+        }
+
+        let rows: Vec<DetailedOfferingRowWithId> = offerings
+            .iter()
+            .map(|offering| {
+                let gpu_info = if offering.gpu_count == 1 {
+                    offering.gpu_type.to_string()
+                } else {
+                    format!("{}x {}", offering.gpu_count, offering.gpu_type)
+                };
+
+                // Calculate total hourly cost (per-GPU rate × gpu_count)
+                let total_hourly_cost =
+                    offering.hourly_rate_per_gpu * Decimal::from(offering.gpu_count);
+                DetailedOfferingRowWithId {
+                    offering_id: offering.id.clone(),
+                    provider: offering.provider.to_string(),
+                    gpu_info,
+                    vcpu: offering.vcpu_count.to_string(),
+                    ram: format!("{}GB", offering.system_memory_gb),
+                    storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
+                    interconnect: offering
+                        .interconnect
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    region: offering.region.clone(),
+                    price: format!("${:.2}/hr", total_hourly_cost),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    } else {
+        #[derive(Tabled)]
+        struct DetailedOfferingRow {
+            #[tabled(rename = "PROVIDER")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu_info: String,
+            #[tabled(rename = "vCPU")]
+            vcpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
+            #[tabled(rename = "STORAGE")]
+            storage: String,
+            #[tabled(rename = "INTERCONNECT")]
+            interconnect: String,
+            #[tabled(rename = "REGION")]
+            region: String,
+            #[tabled(rename = "PRICE/HR")]
+            price: String,
+        }
+
+        let rows: Vec<DetailedOfferingRow> = offerings
+            .iter()
+            .map(|offering| {
+                let gpu_info = if offering.gpu_count == 1 {
+                    offering.gpu_type.to_string()
+                } else {
+                    format!("{}x {}", offering.gpu_count, offering.gpu_type)
+                };
+
+                // Calculate total hourly cost (per-GPU rate × gpu_count)
+                let total_hourly_cost =
+                    offering.hourly_rate_per_gpu * Decimal::from(offering.gpu_count);
+                DetailedOfferingRow {
+                    provider: offering.provider.to_string(),
+                    gpu_info,
+                    vcpu: offering.vcpu_count.to_string(),
+                    ram: format!("{}GB", offering.system_memory_gb),
+                    storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
+                    interconnect: offering
+                        .interconnect
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    region: offering.region.clone(),
+                    price: format!("${:.2}/hr", total_hourly_cost),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    }
+
+    println!("\nTotal offerings: {}", offerings.len());
+
+    Ok(())
+}
+
 /// Display deposits history in table format
 pub fn display_deposits(response: &ListDepositsResponse) -> Result<()> {
     println!();
@@ -1620,6 +1857,268 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
         style("basilica balance").yellow().bold(),
         style("- Show your current credit balance").dim()
     );
+
+    Ok(())
+}
+
+/// Display secure cloud rentals in table format
+pub fn display_secure_cloud_rentals(
+    rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
+    standard_view: bool,
+    detailed: bool,
+) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No secure cloud rentals found").yellow());
+        return Ok(());
+    }
+
+    if detailed {
+        // Detailed view with rental ID and instance type
+        #[derive(Tabled)]
+        struct DetailedRow {
+            #[tabled(rename = "RENTAL ID")]
+            rental_id: String,
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "State")]
+            status: String,
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "SSH")]
+            ssh: String,
+            #[tabled(rename = "Instance")]
+            instance_type: String,
+            #[tabled(rename = "CPU")]
+            cpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
+            #[tabled(rename = "Region")]
+            region: String,
+            #[tabled(rename = "Rate/hr")]
+            hourly_cost: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Created")]
+            created: String,
+        }
+
+        let rows: Vec<DetailedRow> = rentals
+            .iter()
+            .map(|rental| {
+                let gpu_str = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+
+                let ssh = if rental.ssh_command.is_some() {
+                    "✓"
+                } else {
+                    "✗"
+                };
+
+                // Format CPU
+                let cpu = rental
+                    .vcpu_count
+                    .map(|cores| format!("{} cores", cores))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Format RAM
+                let ram = rental
+                    .system_memory_gb
+                    .map(|gb| format!("{}GB", gb))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Use accumulated cost from billing service, or fallback to time-based estimate
+                let total_cost = if let Some(accumulated) = &rental.accumulated_cost {
+                    // Use actual cost from billing service (no ~ prefix)
+                    accumulated
+                        .parse::<f64>()
+                        .map(|cost| format!("${:.2}", cost))
+                        .unwrap_or_else(|_| accumulated.clone())
+                } else {
+                    // Fallback to time-based estimate (with ~ prefix)
+                    let duration = if let Some(stopped) = &rental.stopped_at {
+                        stopped.signed_duration_since(rental.created_at)
+                    } else {
+                        chrono::Utc::now().signed_duration_since(rental.created_at)
+                    };
+                    let hours = duration.num_seconds() as f64 / 3600.0;
+                    format!("~${:.2}", rental.hourly_cost * hours)
+                };
+
+                DetailedRow {
+                    rental_id: rental.rental_id.clone(),
+                    provider: rental.provider.clone(),
+                    gpu: gpu_str,
+                    status: rental.status.clone(),
+                    ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    ssh: ssh.to_string(),
+                    instance_type: rental.instance_type.clone(),
+                    cpu,
+                    ram,
+                    region: rental
+                        .location_code
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
+                    total_cost,
+                    created: format_timestamp(&rental.created_at.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    } else if standard_view {
+        // Standard view
+        #[derive(Tabled)]
+        struct StandardRow {
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "State")]
+            status: String,
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "SSH")]
+            ssh: String,
+            #[tabled(rename = "CPU")]
+            cpu: String,
+            #[tabled(rename = "RAM")]
+            ram: String,
+            #[tabled(rename = "Region")]
+            region: String,
+            #[tabled(rename = "Rate/hr")]
+            hourly_cost: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Created")]
+            created: String,
+        }
+
+        let rows: Vec<StandardRow> = rentals
+            .iter()
+            .map(|rental| {
+                let gpu_str = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+
+                let ssh = if rental.ssh_command.is_some() {
+                    "✓"
+                } else {
+                    "✗"
+                };
+
+                // Format CPU
+                let cpu = rental
+                    .vcpu_count
+                    .map(|cores| format!("{} cores", cores))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Format RAM
+                let ram = rental
+                    .system_memory_gb
+                    .map(|gb| format!("{}GB", gb))
+                    .unwrap_or_else(|| "-".to_string());
+
+                // Use accumulated cost from billing service, or fallback to time-based estimate
+                let total_cost = if let Some(accumulated) = &rental.accumulated_cost {
+                    // Use actual cost from billing service (no ~ prefix)
+                    accumulated
+                        .parse::<f64>()
+                        .map(|cost| format!("${:.2}", cost))
+                        .unwrap_or_else(|_| accumulated.clone())
+                } else {
+                    // Fallback to time-based estimate (with ~ prefix)
+                    let duration = if let Some(stopped) = &rental.stopped_at {
+                        stopped.signed_duration_since(rental.created_at)
+                    } else {
+                        chrono::Utc::now().signed_duration_since(rental.created_at)
+                    };
+                    let hours = duration.num_seconds() as f64 / 3600.0;
+                    format!("~${:.2}", rental.hourly_cost * hours)
+                };
+
+                StandardRow {
+                    provider: rental.provider.clone(),
+                    gpu: gpu_str,
+                    status: rental.status.clone(),
+                    ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    ssh: ssh.to_string(),
+                    cpu,
+                    ram,
+                    region: rental
+                        .location_code
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string()),
+                    hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
+                    total_cost,
+                    created: format_timestamp(&rental.created_at.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    } else {
+        // Compact view
+        #[derive(Tabled)]
+        struct CompactRow {
+            #[tabled(rename = "Provider")]
+            provider: String,
+            #[tabled(rename = "GPU")]
+            gpu: String,
+            #[tabled(rename = "State")]
+            status: String,
+            #[tabled(rename = "IP")]
+            ip: String,
+            #[tabled(rename = "SSH")]
+            ssh: String,
+            #[tabled(rename = "Rate/hr")]
+            hourly_cost: String,
+            #[tabled(rename = "Created")]
+            created: String,
+        }
+
+        let rows: Vec<CompactRow> = rentals
+            .iter()
+            .map(|rental| {
+                let gpu_str = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+
+                let ssh = if rental.ssh_command.is_some() {
+                    "✓"
+                } else {
+                    "✗"
+                };
+
+                CompactRow {
+                    provider: rental.provider.clone(),
+                    gpu: gpu_str,
+                    status: rental.status.clone(),
+                    ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                    ssh: ssh.to_string(),
+                    hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
+                    created: format_timestamp(&rental.created_at.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{}", table);
+    }
 
     Ok(())
 }

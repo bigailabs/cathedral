@@ -409,7 +409,7 @@ mod tests {
         match result {
             Err(BittensorError::RpcTimeoutError { .. })
             | Err(BittensorError::RpcConnectionError { .. }) => {
-                // Expected - either timeout or connection error is acceptable
+                // Expected - either timeout or connection error is acceptable in CI environments
             }
             Err(e) => {
                 panic!(

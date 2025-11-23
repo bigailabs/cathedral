@@ -485,8 +485,6 @@ pub struct StartRentalApiRequest {
     #[pyo3(get, set)]
     pub container_image: String,
     #[pyo3(get, set)]
-    pub ssh_public_key: String,
-    #[pyo3(get, set)]
     pub environment: HashMap<String, String>,
     #[pyo3(get, set)]
     pub ports: Vec<PortMappingRequest>,
@@ -504,12 +502,11 @@ pub struct StartRentalApiRequest {
 #[pymethods]
 impl StartRentalApiRequest {
     #[new]
-    #[pyo3(signature = (node_selection, container_image, ssh_public_key, environment=None, ports=None, resources=None, command=None, volumes=None, no_ssh=false))]
+    #[pyo3(signature = (node_selection, container_image, environment=None, ports=None, resources=None, command=None, volumes=None, no_ssh=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         node_selection: NodeSelection,
         container_image: String,
-        ssh_public_key: String,
         environment: Option<HashMap<String, String>>,
         ports: Option<Vec<PortMappingRequest>>,
         resources: Option<ResourceRequirementsRequest>,
@@ -520,7 +517,6 @@ impl StartRentalApiRequest {
         Self {
             node_selection,
             container_image,
-            ssh_public_key,
             environment: environment.unwrap_or_default(),
             ports: ports.unwrap_or_default(),
             resources: resources.unwrap_or_default(),
@@ -536,7 +532,6 @@ impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
         Self {
             node_selection: req.node_selection.into(),
             container_image: req.container_image,
-            ssh_public_key: req.ssh_public_key,
             environment: req.environment,
             ports: req.ports.into_iter().map(Into::into).collect(),
             resources: req.resources.into(),
@@ -636,6 +631,328 @@ impl From<ListRentalsQuery> for SdkListRentalsQuery {
             status,
             gpu_type: query.gpu_type,
             min_gpu_count: query.min_gpu_count,
+        }
+    }
+}
+
+// Deployment types
+
+use basilica_sdk::types::{
+    CreateDeploymentRequest as SdkCreateDeploymentRequest,
+    DeleteDeploymentResponse as SdkDeleteDeploymentResponse,
+    DeploymentListResponse as SdkDeploymentListResponse,
+    DeploymentResponse as SdkDeploymentResponse, DeploymentSummary as SdkDeploymentSummary,
+    EnvVar as SdkEnvVar, PodInfo as SdkPodInfo, ReplicaStatus as SdkReplicaStatus,
+    ResourceRequirements as SdkResourceRequirements,
+};
+
+/// Environment variable for container deployments
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct EnvVar {
+    #[pyo3(get, set)]
+    pub name: String,
+    #[pyo3(get, set)]
+    pub value: String,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl EnvVar {
+    #[new]
+    fn new(name: String, value: String) -> Self {
+        Self { name, value }
+    }
+}
+
+impl From<EnvVar> for SdkEnvVar {
+    fn from(env: EnvVar) -> Self {
+        Self {
+            name: env.name,
+            value: env.value,
+        }
+    }
+}
+
+impl From<SdkEnvVar> for EnvVar {
+    fn from(env: SdkEnvVar) -> Self {
+        Self {
+            name: env.name,
+            value: env.value,
+        }
+    }
+}
+
+/// Resource requirements for container deployments
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ResourceRequirements {
+    #[pyo3(get, set)]
+    pub cpu: String,
+    #[pyo3(get, set)]
+    pub memory: String,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl ResourceRequirements {
+    #[new]
+    fn new(cpu: String, memory: String) -> Self {
+        Self { cpu, memory }
+    }
+}
+
+impl From<ResourceRequirements> for SdkResourceRequirements {
+    fn from(res: ResourceRequirements) -> Self {
+        Self {
+            cpu: res.cpu,
+            memory: res.memory,
+        }
+    }
+}
+
+impl From<SdkResourceRequirements> for ResourceRequirements {
+    fn from(res: SdkResourceRequirements) -> Self {
+        Self {
+            cpu: res.cpu,
+            memory: res.memory,
+        }
+    }
+}
+
+/// Replica status for deployments
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ReplicaStatus {
+    #[pyo3(get)]
+    pub desired: u32,
+    #[pyo3(get)]
+    pub ready: u32,
+}
+
+impl From<SdkReplicaStatus> for ReplicaStatus {
+    fn from(status: SdkReplicaStatus) -> Self {
+        Self {
+            desired: status.desired,
+            ready: status.ready,
+        }
+    }
+}
+
+/// Pod information
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct PodInfo {
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub node: Option<String>,
+}
+
+impl From<SdkPodInfo> for PodInfo {
+    fn from(pod: SdkPodInfo) -> Self {
+        Self {
+            name: pod.name,
+            status: pod.status,
+            node: pod.node,
+        }
+    }
+}
+
+/// Create deployment request
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct CreateDeploymentRequest {
+    #[pyo3(get, set)]
+    pub instance_name: String,
+    #[pyo3(get, set)]
+    pub image: String,
+    #[pyo3(get, set)]
+    pub replicas: u32,
+    #[pyo3(get, set)]
+    pub port: u32,
+    #[pyo3(get, set)]
+    pub command: Option<Vec<String>>,
+    #[pyo3(get, set)]
+    pub args: Option<Vec<String>>,
+    #[pyo3(get, set)]
+    pub env: Option<HashMap<String, String>>,
+    #[pyo3(get, set)]
+    pub resources: Option<ResourceRequirements>,
+    #[pyo3(get, set)]
+    pub ttl_seconds: Option<u32>,
+    #[pyo3(get, set)]
+    pub public: bool,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl CreateDeploymentRequest {
+    #[new]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        instance_name: String,
+        image: String,
+        replicas: u32,
+        port: u32,
+        command: Option<Vec<String>>,
+        args: Option<Vec<String>>,
+        env: Option<HashMap<String, String>>,
+        resources: Option<ResourceRequirements>,
+        ttl_seconds: Option<u32>,
+        public: bool,
+    ) -> Self {
+        Self {
+            instance_name,
+            image,
+            replicas,
+            port,
+            command,
+            args,
+            env,
+            resources,
+            ttl_seconds,
+            public,
+        }
+    }
+}
+
+impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
+    fn from(req: CreateDeploymentRequest) -> Self {
+        Self {
+            instance_name: req.instance_name,
+            image: req.image,
+            replicas: req.replicas,
+            port: req.port,
+            command: req.command,
+            args: req.args,
+            env: req.env,
+            resources: req.resources.map(Into::into),
+            ttl_seconds: req.ttl_seconds,
+            public: req.public,
+        }
+    }
+}
+
+/// Deployment response
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct DeploymentResponse {
+    #[pyo3(get)]
+    pub instance_name: String,
+    #[pyo3(get)]
+    pub user_id: String,
+    #[pyo3(get)]
+    pub namespace: String,
+    #[pyo3(get)]
+    pub state: String,
+    #[pyo3(get)]
+    pub url: String,
+    #[pyo3(get)]
+    pub replicas: ReplicaStatus,
+    #[pyo3(get)]
+    pub created_at: String,
+    #[pyo3(get)]
+    pub updated_at: Option<String>,
+    #[pyo3(get)]
+    pub pods: Option<Vec<PodInfo>>,
+}
+
+impl From<SdkDeploymentResponse> for DeploymentResponse {
+    fn from(response: SdkDeploymentResponse) -> Self {
+        Self {
+            instance_name: response.instance_name,
+            user_id: response.user_id,
+            namespace: response.namespace,
+            state: response.state,
+            url: response.url,
+            replicas: response.replicas.into(),
+            created_at: response.created_at,
+            updated_at: response.updated_at,
+            pods: response
+                .pods
+                .map(|pods| pods.into_iter().map(Into::into).collect()),
+        }
+    }
+}
+
+/// Deployment summary for list responses
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct DeploymentSummary {
+    #[pyo3(get)]
+    pub instance_name: String,
+    #[pyo3(get)]
+    pub state: String,
+    #[pyo3(get)]
+    pub url: String,
+    #[pyo3(get)]
+    pub replicas: ReplicaStatus,
+    #[pyo3(get)]
+    pub created_at: String,
+}
+
+impl From<SdkDeploymentSummary> for DeploymentSummary {
+    fn from(summary: SdkDeploymentSummary) -> Self {
+        Self {
+            instance_name: summary.instance_name,
+            state: summary.state,
+            url: summary.url,
+            replicas: summary.replicas.into(),
+            created_at: summary.created_at,
+        }
+    }
+}
+
+/// List deployments response
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct DeploymentListResponse {
+    #[pyo3(get)]
+    pub deployments: Vec<DeploymentSummary>,
+    #[pyo3(get)]
+    pub total: usize,
+}
+
+impl From<SdkDeploymentListResponse> for DeploymentListResponse {
+    fn from(response: SdkDeploymentListResponse) -> Self {
+        Self {
+            deployments: response.deployments.into_iter().map(Into::into).collect(),
+            total: response.total,
+        }
+    }
+}
+
+/// Delete deployment response
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct DeleteDeploymentResponse {
+    #[pyo3(get)]
+    pub instance_name: String,
+    #[pyo3(get)]
+    pub state: String,
+    #[pyo3(get)]
+    pub message: String,
+}
+
+impl From<SdkDeleteDeploymentResponse> for DeleteDeploymentResponse {
+    fn from(response: SdkDeleteDeploymentResponse) -> Self {
+        Self {
+            instance_name: response.instance_name,
+            state: response.state,
+            message: response.message,
         }
     }
 }

@@ -71,10 +71,10 @@ pub fn generate_sr25519_wallet(ss58_prefix: u16) -> Result<Sr25519Wallet, Crypto
 /// * `Err(CryptoError)` - If mnemonic is invalid or derivation fails
 ///
 /// # Example
-/// ```rust
+/// ```rust,no_run
 /// use basilica_common::crypto::wallet::generate_sr25519_wallet_from_mnemonic;
 ///
-/// let mnemonic = "..."
+/// let mnemonic = "...";
 /// let wallet = generate_sr25519_wallet_from_mnemonic(mnemonic, 42).unwrap();
 /// assert!(wallet.address.len() > 0);
 /// ```

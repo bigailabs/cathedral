@@ -102,7 +102,6 @@ async fn test_dynamic_discovery_config() {
         min_score_threshold: 0.0,
         max_miners_per_round: 10,
         min_verification_interval: Duration::from_secs(3600),
-        netuid: 39,
         use_dynamic_discovery: true,
         discovery_timeout: Duration::from_secs(30),
         fallback_to_static: true,
@@ -115,6 +114,7 @@ async fn test_dynamic_discovery_config() {
         gpu_assignment_cleanup_ttl: Some(Duration::from_secs(30 * 60)),
         enable_worker_queue: false,
         storage_validation: crate::config::StorageValidationConfig::default(),
+        node_groups: crate::config::NodeGroupConfig::default(),
     };
 
     // Verify configuration

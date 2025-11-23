@@ -10,6 +10,7 @@ use super::types::{
 use super::validation_binary::BinaryValidator;
 use super::validation_docker::DockerCollector;
 use super::validation_hardware::HardwareCollector;
+use super::validation_misbehaviour::Misbehaviour;
 use super::validation_nat::NatCollector;
 use super::validation_network::NetworkProfileCollector;
 use super::validation_speedtest::NetworkSpeedCollector;
@@ -58,6 +59,7 @@ pub struct ValidationNode {
     docker_collector: DockerCollector,
     nat_collector: NatCollector,
     storage_collector: StorageCollector,
+    misbehaviour_collector: Misbehaviour,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
 
@@ -349,9 +351,11 @@ impl ValidationNode {
         let nat_collector = NatCollector::new(ssh_client.clone(), persistence.clone());
         let storage_collector = StorageCollector::new(
             ssh_client.clone(),
-            persistence,
+            persistence.clone(),
             config.storage_validation.min_required_storage_bytes,
         );
+        let prometheus_metrics = metrics.as_ref().map(|m| m.prometheus());
+        let misbehaviour_collector = Misbehaviour::new(persistence.clone(), prometheus_metrics);
 
         Self {
             ssh_client,
@@ -362,6 +366,7 @@ impl ValidationNode {
             docker_collector,
             nat_collector,
             storage_collector,
+            misbehaviour_collector,
             metrics,
         }
     }
@@ -505,7 +510,40 @@ impl ValidationNode {
             }
         };
 
-        let nat_validation_successful = if !connectivity_successful {
+        // Check if node is banned
+        let misbehaviour_check_passed = match self
+            .misbehaviour_collector
+            .collect_with_fallback(&node_id, miner_uid)
+            .await
+        {
+            Some(profile) if !profile.is_banned => {
+                debug!(
+                    miner_uid = miner_uid,
+                    node_id = %node_info.id,
+                    "[EVAL_FLOW] Misbehaviour: node is legit"
+                );
+                true
+            }
+            Some(profile) if profile.is_banned => {
+                warn!(
+                    miner_uid = miner_uid,
+                    node_id = %node_info.id,
+                    ban_expiry = ?profile.ban_expiry,
+                    "[EVAL_FLOW] Misbehaviour: node is banned"
+                );
+                false
+            }
+            _ => {
+                debug!(
+                    miner_uid = miner_uid,
+                    node_id = %node_info.id,
+                    "[EVAL_FLOW] Misbehaviour check defaulted to pass"
+                );
+                true
+            }
+        };
+
+        let nat_validation_successful = if !connectivity_successful || !misbehaviour_check_passed {
             false
         } else {
             // Move to NatValidating state
@@ -556,7 +594,8 @@ impl ValidationNode {
             }
         };
 
-        let validation_successful = connectivity_successful && nat_validation_successful;
+        let validation_successful =
+            connectivity_successful && misbehaviour_check_passed && nat_validation_successful;
         if !validation_successful {
             error!(
                 miner_uid = miner_uid,
@@ -642,6 +681,7 @@ impl ValidationNode {
             validation_details: details,
             gpu_count,
             validation_type: ValidationType::Lightweight,
+            hourly_rate_cents: node_info.hourly_rate_cents,
         })
     }
 
@@ -762,6 +802,7 @@ impl ValidationNode {
             let docker_collector = self.docker_collector.clone();
             let nat_collector = self.nat_collector.clone();
             let storage_collector = self.storage_collector.clone();
+            let misbehaviour_collector = self.misbehaviour_collector.clone();
 
             let hardware_future =
                 hardware_collector.collect_with_fallback(&node_id, miner_uid, ssh_details);
@@ -774,14 +815,25 @@ impl ValidationNode {
             let nat_future = nat_collector.collect_with_fallback(&node_id, miner_uid, ssh_details);
             let storage_future =
                 storage_collector.collect_with_fallback(&node_id, miner_uid, ssh_details);
+            let misbehaviour_future =
+                misbehaviour_collector.collect_with_fallback(&node_id, miner_uid);
 
-            let (_hardware, _network, _speedtest, docker_result, nat_result, storage_result) = tokio::join!(
+            let (
+                _hardware,
+                _network,
+                _speedtest,
+                docker_result,
+                nat_result,
+                storage_result,
+                misbehaviour_result,
+            ) = tokio::join!(
                 hardware_future,
                 network_future,
                 speedtest_future,
                 docker_future,
                 nat_future,
-                storage_future
+                storage_future,
+                misbehaviour_future
             );
 
             // For now, I'm disabling storage validation from affecting the overall quality validation result
@@ -792,7 +844,12 @@ impl ValidationNode {
                 .as_ref()
                 .map(|n| n.is_accessible)
                 .unwrap_or(false);
-            quality_validations_successful = docker_result.is_some() && nat_successful;
+            let not_banned = misbehaviour_result
+                .as_ref()
+                .map(|m| !m.is_banned)
+                .unwrap_or(true);
+            quality_validations_successful =
+                docker_result.is_some() && nat_successful && not_banned;
 
             // Track state transitions based on validation results
             if docker_result.is_none() {
@@ -817,8 +874,19 @@ impl ValidationNode {
                         StateResult::Failed,
                     );
                 }
+            } else if !not_banned {
+                // Docker and NAT passed but node is banned
+                if let Some(ref metrics) = self.metrics {
+                    metrics.prometheus().set_node_validation_state(
+                        &node_id,
+                        miner_uid,
+                        ValidationType::Full,
+                        ValidationState::NatValidating,
+                        StateResult::Failed,
+                    );
+                }
             } else {
-                // Both Docker and NAT passed, move to NatValidating as current
+                // All validations passed (Docker, NAT, and not banned)
                 if let Some(ref metrics) = self.metrics {
                     metrics.prometheus().set_node_validation_state(
                         &node_id,
@@ -829,7 +897,6 @@ impl ValidationNode {
                     );
                 }
             }
-
             if !quality_validations_successful {
                 error!(
                     miner_uid = miner_uid,
@@ -976,6 +1043,7 @@ impl ValidationNode {
             validation_details,
             gpu_count,
             validation_type: ValidationType::Full,
+            hourly_rate_cents: node_info.hourly_rate_cents,
         })
     }
 

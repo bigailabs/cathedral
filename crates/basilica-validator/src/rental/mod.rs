@@ -20,8 +20,10 @@ pub use deployment::DeploymentManager;
 pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
+use crate::ban_system::BanManager;
 use crate::billing::BillingClient;
 use crate::metrics::ValidatorPrometheusMetrics;
+use crate::persistence::entities::MisbehaviourType;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 
@@ -41,6 +43,8 @@ pub struct RentalManager {
     ssh_key_manager: Option<Arc<ValidatorSshKeyManager>>,
     /// Metrics for tracking rental status (required)
     metrics: Arc<ValidatorPrometheusMetrics>,
+    /// Ban manager for logging misbehaviours
+    ban_manager: Arc<BanManager>,
 }
 
 // /// Parse SSH host from credentials string format "user@host:port"
@@ -144,11 +148,15 @@ impl RentalManager {
         let deployment_manager = Arc::new(DeploymentManager::new());
         let log_streamer = Arc::new(LogStreamer::new());
 
-        // Create health monitor with SSH key manager and metrics
+        // Create ban manager
+        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
+
+        // Create health monitor with SSH key manager, metrics, and ban manager
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
             persistence.clone(),
             ssh_key_manager.clone(),
             metrics.clone(),
+            ban_manager.clone(),
         ));
 
         Self {
@@ -159,6 +167,7 @@ impl RentalManager {
             billing: None,
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
+            ban_manager,
         }
     }
 
@@ -177,11 +186,15 @@ impl RentalManager {
             .await?;
         let ssh_key_manager = Arc::new(ssh_key_manager);
 
+        // Create ban manager
+        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
+
         // Create health monitor
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
             persistence.clone(),
             ssh_key_manager.clone(),
             metrics.clone(),
+            ban_manager.clone(),
         ));
 
         // Create billing monitor if enabled
@@ -210,6 +223,7 @@ impl RentalManager {
             billing,
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
+            ban_manager,
         })
     }
 
@@ -286,6 +300,11 @@ impl RentalManager {
                 metric_data.has_active_rental,
             );
 
+            let _ = self
+                .ban_manager
+                .get_ban_expiry(metric_data.miner_uid, &metric_data.node_id)
+                .await?;
+
             tracing::debug!(
                 "Initialized node metric: node={}, miner_uid={}, gpu_type={}, is_rented={}",
                 metric_data.node_id,
@@ -303,6 +322,27 @@ impl RentalManager {
     pub async fn start_rental(&self, request: RentalRequest) -> Result<RentalResponse> {
         let node_id = request.node_id.clone();
         let miner_id = request.miner_id.clone();
+
+        // Check if node is banned before attempting rental
+        let miner_uid = extract_miner_uid(&miner_id);
+        if let Some(miner_uid) = miner_uid {
+            if let Some(ban_expiry) = self.ban_manager.get_ban_expiry(miner_uid, &node_id).await? {
+                tracing::warn!(
+                    node_id = %node_id,
+                    miner_id = %miner_id,
+                    miner_uid = miner_uid,
+                    ban_expiry = %ban_expiry,
+                    "Attempted rental on a banned node; rejecting request"
+                );
+                return Err(anyhow::anyhow!(
+                    "Node {} is currently banned. Ban expires at: {:?}",
+                    node_id,
+                    ban_expiry
+                ));
+            }
+        }
+
+        // Generate rental ID
         let rental_id = format!("rental-{}", Uuid::new_v4());
         let miner_uid = extract_miner_uid(&miner_id);
         let ssh_endpoint = self
@@ -375,6 +415,36 @@ impl RentalManager {
                     node_id,
                     e
                 );
+
+                // Log misbehaviour for deployment failure
+                if let Some(miner_uid) = miner_uid {
+                    let details = BanManager::create_rental_failure_details(
+                        &rental_id,
+                        &node_id,
+                        &e.to_string(),
+                        Some(&ssh_credentials),
+                    );
+
+                    if let Err(log_err) = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            self.ban_manager
+                                .log_misbehaviour(
+                                    miner_uid,
+                                    &node_id,
+                                    MisbehaviourType::BadRental,
+                                    &details,
+                                )
+                                .await
+                        })
+                    }) {
+                        tracing::warn!(
+                            "Failed to log misbehaviour for node {}: {}",
+                            node_id,
+                            log_err
+                        );
+                    }
+                }
+
                 e
             })?;
 
@@ -690,9 +760,39 @@ impl RentalManager {
     }
 
     pub async fn list_rentals(&self, validator_hotkey: &str) -> Result<Vec<RentalInfo>> {
-        self.persistence
+        let all_rentals = self
+            .persistence
             .list_validator_rentals(validator_hotkey)
-            .await
+            .await?;
+
+        // Filter out rentals from banned executors
+        let mut available_rentals = Vec::new();
+        for rental in all_rentals {
+            // Extract miner_uid from miner_id
+            let miner_uid = extract_miner_uid(&rental.miner_id);
+
+            if let Some(miner_uid) = miner_uid {
+                // Check if node is banned
+                if self
+                    .ban_manager
+                    .is_executor_banned(miner_uid, &rental.node_id)
+                    .await
+                    .unwrap_or(false)
+                {
+                    tracing::debug!(
+                        "Filtering out rental {} from banned node {} (miner_uid: {})",
+                        rental.rental_id,
+                        rental.node_id,
+                        miner_uid
+                    );
+                    continue;
+                }
+            }
+
+            available_rentals.push(rental);
+        }
+
+        Ok(available_rentals)
     }
 }
 

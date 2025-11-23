@@ -97,8 +97,6 @@ pub struct VerificationConfig {
     pub max_miners_per_round: usize,
     /// Minimum interval between verifications of the same miner
     pub min_verification_interval: Duration,
-    /// Network ID for the subnet
-    pub netuid: u16,
     /// Enable dynamic discovery of node SSH details from miners
     #[serde(default = "default_use_dynamic_discovery")]
     pub use_dynamic_discovery: bool,
@@ -135,6 +133,41 @@ pub struct VerificationConfig {
     /// Enable worker queue for decoupled validation execution
     #[serde(default = "default_enable_worker_queue")]
     pub enable_worker_queue: bool,
+    /// Node group assignment configuration
+    #[serde(default)]
+    pub node_groups: NodeGroupConfig,
+}
+
+/// Configuration for node group assignment strategy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeGroupConfig {
+    /// Strategy for assigning nodes to groups: "round-robin", "all-jobs", "all-rentals"
+    #[serde(default = "default_node_group_strategy")]
+    pub strategy: String,
+    /// Percentage of nodes to assign to jobs group (0-100) when using round-robin
+    #[serde(default = "default_jobs_percentage")]
+    pub jobs_percentage: u64,
+    /// Force all nodes to specific group (overrides strategy): "jobs", "rentals", or None
+    #[serde(default)]
+    pub force_group: Option<String>,
+}
+
+impl Default for NodeGroupConfig {
+    fn default() -> Self {
+        Self {
+            strategy: default_node_group_strategy(),
+            jobs_percentage: default_jobs_percentage(),
+            force_group: None,
+        }
+    }
+}
+
+fn default_node_group_strategy() -> String {
+    "round-robin".to_string()
+}
+
+fn default_jobs_percentage() -> u64 {
+    50 // Default 50/50 split
 }
 
 fn default_use_dynamic_discovery() -> bool {
@@ -184,7 +217,6 @@ impl VerificationConfig {
             min_score_threshold: 0.1,
             max_miners_per_round: 10,
             min_verification_interval: Duration::from_secs(300),
-            netuid: 39,
             use_dynamic_discovery: true,
             discovery_timeout: Duration::from_secs(30),
             fallback_to_static: true,
@@ -197,6 +229,7 @@ impl VerificationConfig {
             gpu_assignment_cleanup_ttl: Some(Duration::from_secs(7200)),
             enable_worker_queue: false,
             storage_validation: StorageValidationConfig::default(),
+            node_groups: NodeGroupConfig::default(),
         }
     }
 }
@@ -778,7 +811,6 @@ impl Default for ValidatorConfig {
                 min_score_threshold: 0.1,
                 max_miners_per_round: 20,
                 min_verification_interval: Duration::from_secs(1800), // 30 minutes
-                netuid: 39,                                           // Default subnet
                 use_dynamic_discovery: default_use_dynamic_discovery(),
                 discovery_timeout: default_discovery_timeout(),
                 fallback_to_static: default_fallback_to_static(),
@@ -791,6 +823,7 @@ impl Default for ValidatorConfig {
                 node_validation_interval: default_node_validation_interval(),
                 gpu_assignment_cleanup_ttl: default_gpu_assignment_cleanup_ttl(),
                 enable_worker_queue: default_enable_worker_queue(),
+                node_groups: NodeGroupConfig::default(),
             },
             automatic_verification: AutomaticVerificationConfig::default(),
             storage: StorageConfig {

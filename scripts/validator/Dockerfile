@@ -1,4 +1,4 @@
-FROM rust:1.87.0-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -6,6 +6,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     build-essential \
     protobuf-compiler \
+    libfuse3-dev \
+    fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install rustfmt for code formatting
@@ -76,6 +78,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     libsqlite3-0 \
     openssh-client \
+    libfuse3-3 \
+    fuse3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built binary
@@ -86,8 +90,8 @@ COPY --from=builder /tmp/target/${BUILD_MODE}/basilica-validator /usr/local/bin/
 RUN mkdir -p /opt/basilica/bin
 
 # Copy veritas binaries if they exist in build context
-COPY executor-binary /opt/basilica/bin/executor-binary
-COPY validator-binary /opt/basilica/bin/validator-binary
+COPY bin/executor-binary /opt/basilica/bin/executor-binary
+COPY bin/validator-binary /opt/basilica/bin/validator-binary
 
 # Make binaries executable
 RUN chmod +x /usr/local/bin/basilica-validator && \

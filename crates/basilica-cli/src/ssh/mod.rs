@@ -1,5 +1,9 @@
 //! SSH operations module
 
+mod key_matcher;
+
+pub use key_matcher::find_private_key_for_public_key;
+
 use crate::config::SshConfig;
 use crate::error::{CliError, Result};
 use basilica_common::ssh::{
@@ -49,9 +53,11 @@ impl SshClient {
     fn ssh_access_to_connection_details(
         &self,
         ssh_access: &SshAccess,
+        private_key_override: Option<std::path::PathBuf>,
     ) -> Result<SshConnectionDetails> {
-        // Use the configured private key path
-        let private_key_path = self.config.private_key_path.clone();
+        // Use override if provided, otherwise fall back to configured key
+        let private_key_path =
+            private_key_override.unwrap_or_else(|| self.config.private_key_path.clone());
 
         if !private_key_path.exists() {
             return Err(eyre!(
@@ -77,8 +83,22 @@ impl SshClient {
     }
 
     /// Execute a command via SSH
-    pub async fn execute_command(&self, ssh_access: &SshAccess, command: &str) -> Result<()> {
-        let details = self.ssh_access_to_connection_details(ssh_access)?;
+    pub async fn execute_command(
+        &self,
+        ssh_access: &SshAccess,
+        command: &str,
+        private_key_override: Option<std::path::PathBuf>,
+    ) -> Result<()> {
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_override)?;
+
+        debug!(
+            "Executing command via SSH: ssh -i {} -p {} {}@{} '{}'",
+            details.private_key_path.display(),
+            details.port,
+            details.username,
+            details.host,
+            command
+        );
 
         let output = self
             .client
@@ -107,8 +127,12 @@ impl SshClient {
     }
 
     /// Open interactive SSH session
-    pub async fn interactive_session(&self, ssh_access: &SshAccess) -> Result<()> {
-        let details = self.ssh_access_to_connection_details(ssh_access)?;
+    pub async fn interactive_session(
+        &self,
+        ssh_access: &SshAccess,
+        private_key_override: Option<std::path::PathBuf>,
+    ) -> Result<()> {
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_override)?;
 
         info!(
             "Opening SSH session to {}@{}",
@@ -133,6 +157,14 @@ impl SshClient {
             .arg("-o")
             .arg("LogLevel=error")
             .arg(format!("{}@{}", details.username, details.host));
+
+        debug!(
+            "Executing SSH command: ssh -i {} -p {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=error {}@{}",
+            details.private_key_path.display(),
+            details.port,
+            details.username,
+            details.host
+        );
 
         let status = cmd.status().map_err(|e| -> CliError {
             eyre!("Failed to start SSH session: {}", e)
@@ -221,8 +253,9 @@ impl SshClient {
         &self,
         ssh_access: &SshAccess,
         options: &crate::cli::commands::SshOptions,
+        private_key_override: Option<std::path::PathBuf>,
     ) -> Result<()> {
-        let details = self.ssh_access_to_connection_details(ssh_access)?;
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_override)?;
 
         info!(
             "Opening SSH session to {}@{}",
@@ -277,6 +310,21 @@ impl SshClient {
         // Add the target host
         cmd.arg(format!("{}@{}", details.username, details.host));
 
+        // Log the complete command
+        let mut cmd_str = format!(
+            "ssh -i {} -p {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=error",
+            details.private_key_path.display(),
+            details.port
+        );
+        for forward_spec in &options.local_forward {
+            cmd_str.push_str(&format!(" -L {}", forward_spec));
+        }
+        for forward_spec in &options.remote_forward {
+            cmd_str.push_str(&format!(" -R {}", forward_spec));
+        }
+        cmd_str.push_str(&format!(" {}@{}", details.username, details.host));
+        debug!("Executing SSH command with options: {}", cmd_str);
+
         let status = cmd.status().map_err(|e| -> CliError {
             eyre!("Failed to start SSH session: {}", e)
                 .suggestion("Check your SSH key permissions and network connectivity")
@@ -302,8 +350,9 @@ impl SshClient {
         ssh_access: &SshAccess,
         local_path: &str,
         remote_path: &str,
+        private_key_override: Option<std::path::PathBuf>,
     ) -> Result<()> {
-        let details = self.ssh_access_to_connection_details(ssh_access)?;
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_override)?;
         let local = Path::new(local_path);
 
         info!("Uploading {} to {}", local_path, ssh_access.host);
@@ -327,8 +376,9 @@ impl SshClient {
         ssh_access: &SshAccess,
         remote_path: &str,
         local_path: &str,
+        private_key_override: Option<std::path::PathBuf>,
     ) -> Result<()> {
-        let details = self.ssh_access_to_connection_details(ssh_access)?;
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_override)?;
         let local = Path::new(local_path);
 
         info!("Downloading {} from {}", remote_path, ssh_access.host);
@@ -371,8 +421,11 @@ pub fn parse_ssh_credentials(credentials: &str) -> Result<(String, u16, String)>
         }
     }
 
+    // Strip "ssh " prefix if present for remaining formats
+    let credentials_without_prefix = credentials.trim_start_matches("ssh ");
+
     // Try to parse "user@host:port" or "host:port" format
-    if let Some((left_part, port_str)) = credentials.rsplit_once(':') {
+    if let Some((left_part, port_str)) = credentials_without_prefix.rsplit_once(':') {
         let port = port_str
             .parse::<u16>()
             .map_err(|_| eyre!("Invalid port in SSH credentials"))?;
@@ -387,10 +440,10 @@ pub fn parse_ssh_credentials(credentials: &str) -> Result<(String, u16, String)>
     }
 
     // Try to parse "user@host" or just "host" format (default port 22)
-    let (user, host) = if let Some((user, host)) = credentials.split_once('@') {
+    let (user, host) = if let Some((user, host)) = credentials_without_prefix.split_once('@') {
         (user.to_string(), host.to_string())
     } else {
-        ("root".to_string(), credentials.to_string())
+        ("root".to_string(), credentials_without_prefix.to_string())
     };
 
     Ok((host, 22, user))

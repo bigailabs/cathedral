@@ -19,7 +19,9 @@
 //! - Trait-based abstractions for dependency injection
 
 pub mod auth_constants;
+pub mod compute;
 pub mod config;
+pub mod convert;
 pub mod crypto;
 pub mod distributed;
 pub mod error;
@@ -30,6 +32,7 @@ pub mod metrics;
 pub mod network;
 pub mod node_identity;
 pub mod persistence;
+pub mod rental;
 pub mod ssh;
 pub mod storage;
 pub mod types;
@@ -51,8 +54,10 @@ pub use ssh::traits as ssh_traits;
 pub use storage::{KeyValueStorage, MemoryStorage};
 
 // Re-export the main types directly
+pub use compute::*;
 pub use metrics::traits::*;
 pub use persistence::traits::*;
+pub use rental::*;
 
 /// Version of the common crate
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

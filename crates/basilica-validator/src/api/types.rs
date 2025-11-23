@@ -56,6 +56,8 @@ pub struct NodeDetails {
     pub location: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_speed: Option<NetworkSpeedInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hourly_rate_cents: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -111,13 +113,13 @@ pub struct ListAvailableNodesResponse {
     pub total_count: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailableNode {
     pub node: NodeDetails,
     pub availability: AvailabilityInfo,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvailabilityInfo {
     pub available_until: Option<chrono::DateTime<chrono::Utc>>,
     pub verification_score: f64,

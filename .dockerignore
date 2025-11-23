@@ -25,8 +25,8 @@ docs/
 # Config files (will be mounted, but keep Cargo.toml)
 config/
 *.toml
-!Cargo.toml
-!Cargo.lock
+!**/Cargo.toml
+!**/Cargo.lock
 
 # Logs and temporary files
 *.log

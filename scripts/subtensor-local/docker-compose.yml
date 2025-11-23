@@ -1,0 +1,78 @@
+services:
+  alice:
+    image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
+    container_name: subtensor-alice
+    restart: unless-stopped
+    # Expose WS RPC on a non-standard host port for local init/tools
+    ports:
+      - "19944:9944"   # WS (host:19944 -> container:9944)
+    environment:
+      - RUST_LOG=info
+    volumes:
+      # Mount volumes where localnet.sh actually writes data
+      - alice-data:/tmp/alice
+      - bob-data:/tmp/bob
+    command:
+      - --dev
+      - --alice
+      - --unsafe-ws-external
+      - --ws-external
+      - --rpc-cors=all
+      - --rpc-methods=unsafe
+      - --port=30333
+      - --ws-port=9944
+      - --base-path=/tmp/blockchain
+      - --validator
+      - --allow-private-ipv4
+      - --discover-local
+  bob:
+    image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
+    container_name: subtensor-bob
+    depends_on:
+      - alice
+    restart: unless-stopped
+    # Expose no host ports
+    # Note: This container also runs both alice and bob nodes via localnet.sh
+    # We keep it for redundancy but alice container is the primary one
+    environment:
+      - RUST_LOG=info
+    volumes:
+      # Mount volumes where localnet.sh actually writes data
+      - alice-data-bob:/tmp/alice
+      - bob-data-bob:/tmp/bob
+    command:
+      - --dev
+      - --bob
+      - --unsafe-ws-external
+      - --ws-external
+      - --rpc-cors=all
+      - --rpc-methods=unsafe
+      - --port=30334
+      - --ws-port=9945
+      - --base-path=/tmp/blockchain
+      - --validator
+      - --bootnodes=/dns4/alice/tcp/30333/p2p/12D3KooWEyoppNCUx8Yx66oV9fJnriXwCcXwDDUA2kj6vnc6iDEp
+      - --allow-private-ipv4
+      - --discover-local
+
+  envoy:
+    image: envoyproxy/envoy:v1.29-latest
+    container_name: subtensor-wss-local
+    depends_on:
+      - alice
+    restart: unless-stopped
+    ports:
+      - "9944:9944"  # WSS
+      - "9901:9901"  # Admin
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./tls/tls.crt:/etc/tls/tls.crt:ro
+      - ./tls/tls.key:/etc/tls/tls.key:ro
+
+volumes:
+  # Volumes for alice container (runs both alice and bob nodes)
+  alice-data: {}
+  bob-data: {}
+  # Volumes for bob container (also runs both nodes, for redundancy)
+  alice-data-bob: {}
+  bob-data-bob: {}

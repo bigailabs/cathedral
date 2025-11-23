@@ -7,7 +7,9 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod agent_installer;
 mod api;
+mod ban_system;
 mod billing;
 mod bittensor_core;
 mod cli;
@@ -15,8 +17,10 @@ mod collateral;
 mod config;
 mod gpu;
 mod journal;
+mod k8s_profile_publisher;
 mod metrics;
 mod miner_prover;
+mod node_profile;
 mod os_process;
 mod persistence;
 mod rental;

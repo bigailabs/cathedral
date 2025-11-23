@@ -29,3 +29,25 @@ discovery_interval = 30
 # For local development with docker-compose: "postgres://basilica:dev@localhost:5432/basilica"
 url = "postgres://basilica:dev@localhost:5432/basilica"
 max_connections = 5
+
+[pricing]
+# Marketplace pricing markup percentages
+# Community cloud: markup applied to community-provided GPU rentals
+community_markup_percent = 10.0
+# Secure cloud: markup applied to datacenter provider GPU rentals
+secure_cloud_markup_percent = 10.0
+
+# GPU Aggregator configuration (Secure Cloud)
+# Uncomment to enable secure cloud GPU offerings from external providers
+# [aggregator]
+# ttl_seconds = 45
+#
+# [aggregator.providers]
+# # DataCrunch (OAuth authentication)
+# datacrunch = { client_id = "your_client_id", client_secret = "your_client_secret" }
+# # Hyperstack (API key authentication)
+# hyperstack = { api_key = "your_api_key" }
+# # Lambda (API key authentication)
+# lambda = { api_key = "your_api_key" }
+# # HydraHost (API key authentication)
+# hydrahost = { api_key = "your_api_key" }

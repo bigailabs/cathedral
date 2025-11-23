@@ -6,6 +6,7 @@
 use anyhow::Result;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -16,6 +17,7 @@ pub struct SimpleSshKeys;
 
 impl SimpleSshKeys {
     /// Add SSH public key to user's authorized_keys (idempotent - only adds if not exists)
+    #[cfg(unix)]
     pub async fn add_key_if_missing(
         username: &str,
         public_key: &str,
@@ -81,7 +83,21 @@ impl SimpleSshKeys {
         Ok(key_added)
     }
 
+    /// Add SSH public key to user's authorized_keys (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub async fn add_key_if_missing(
+        username: &str,
+        _public_key: &str,
+        _restrictions: &[&str],
+    ) -> Result<bool> {
+        Err(anyhow::anyhow!(
+            "SSH key management is not supported on this platform (user: {})",
+            username
+        ))
+    }
+
     /// Add SSH public key to user's authorized_keys
+    #[cfg(unix)]
     pub async fn add_key(username: &str, public_key: &str, restrictions: &[&str]) -> Result<()> {
         info!("Adding SSH key for user: {}", username);
 
@@ -138,7 +154,17 @@ impl SimpleSshKeys {
         Ok(())
     }
 
+    /// Add SSH public key to user's authorized_keys (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub async fn add_key(username: &str, _public_key: &str, _restrictions: &[&str]) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "SSH key management is not supported on this platform (user: {})",
+            username
+        ))
+    }
+
     /// Atomically check for duplicates and append SSH key with file locking
+    #[cfg(unix)]
     fn append_key_safely_atomic(
         auth_keys_path: &str,
         key_entry: &str,
@@ -301,6 +327,7 @@ impl SimpleSshKeys {
     }
 
     /// Safely append SSH key to authorized_keys file with deduplication
+    #[cfg(unix)]
     fn append_key_safely(auth_keys_path: &str, key_entry: &str, public_key: &str) -> Result<()> {
         // Use the atomic version and ignore the return value for backward compatibility
         Self::append_key_safely_atomic(auth_keys_path, key_entry, public_key)?;
@@ -308,6 +335,7 @@ impl SimpleSshKeys {
     }
 
     /// Remove SSH key from user's authorized_keys
+    #[cfg(unix)]
     pub async fn remove_key(username: &str) -> Result<()> {
         info!("Removing SSH key for user: {}", username);
 
@@ -323,10 +351,26 @@ impl SimpleSshKeys {
         Ok(())
     }
 
+    /// Remove SSH key from user's authorized_keys (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub async fn remove_key(username: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "SSH key management is not supported on this platform (user: {})",
+            username
+        ))
+    }
+
     /// Check if user has SSH key
+    #[cfg(unix)]
     pub async fn has_key(username: &str) -> bool {
         let auth_keys_path = format!("/home/{username}/.ssh/authorized_keys");
         Path::new(&auth_keys_path).exists()
+    }
+
+    /// Check if user has SSH key (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub async fn has_key(_username: &str) -> bool {
+        false
     }
 
     /// Get default SSH key restrictions
@@ -348,6 +392,7 @@ impl SimpleSshKeys {
         ]
     }
 
+    #[cfg(unix)]
     fn set_permissions(path: &str, mode: u32) -> Result<()> {
         info!("Setting permissions of {} to {:o}", path, mode);
 
@@ -370,6 +415,7 @@ impl SimpleSshKeys {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn set_ownership(path: &str, username: &str) -> Result<()> {
         info!("Setting ownership of {} to {}", path, username);
 
@@ -404,6 +450,7 @@ pub struct SimpleSshUsers;
 
 impl SimpleSshUsers {
     /// Create system user for SSH access
+    #[cfg(unix)]
     pub async fn create_user(username: &str) -> Result<()> {
         info!("Creating system user: {}", username);
 
@@ -466,7 +513,17 @@ impl SimpleSshUsers {
         Ok(())
     }
 
+    /// Create system user for SSH access (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub async fn create_user(username: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "SSH user management is not supported on this platform (user: {})",
+            username
+        ))
+    }
+
     /// Remove system user
+    #[cfg(unix)]
     pub async fn remove_user(username: &str) -> Result<()> {
         info!("Removing system user: {}", username);
 
@@ -490,10 +547,26 @@ impl SimpleSshUsers {
         Ok(())
     }
 
+    /// Remove system user (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub async fn remove_user(username: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "SSH user management is not supported on this platform (user: {})",
+            username
+        ))
+    }
+
     /// Check if system user exists
+    #[cfg(unix)]
     pub fn user_exists(username: &str) -> Result<bool> {
         let output = Command::new("id").arg(username).output()?;
         Ok(output.status.success())
+    }
+
+    /// Check if system user exists (Windows: unsupported)
+    #[cfg(not(unix))]
+    pub fn user_exists(_username: &str) -> Result<bool> {
+        Ok(false)
     }
 
     /// Generate username for validator

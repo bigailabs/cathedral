@@ -1,5 +1,6 @@
 //! Main server implementation for the Basilica API Gateway
 
+use crate::k8s_client::{ApiK8sClient, K8sClient};
 use crate::{
     api,
     api::extractors::ownership::archive_rental_ownership,
@@ -7,6 +8,7 @@ use crate::{
     error::{ApiError, Result},
 };
 use axum::Router;
+use basilica_aggregator::{AggregatorService, Database as AggregatorDatabase};
 use basilica_billing::BillingClient;
 use basilica_payments::client::PaymentsClient;
 use basilica_validator::{api::types::RentalStatus, ValidatorClient};
@@ -25,6 +27,8 @@ use tracing::{info, warn};
 pub struct Server {
     config: Arc<Config>,
     app: Router,
+    cancel_token: tokio_util::sync::CancellationToken,
+    background_tasks: Option<tokio::task::JoinSet<()>>,
 }
 
 /// Shared application state
@@ -51,14 +55,29 @@ pub struct AppState {
     /// Database pool for user rental tracking
     pub db: PgPool,
 
+    /// Optional K8s client seam for Jobs/Rentals backed by K3s
+    pub k8s: Option<Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>>,
+
     /// Payments service client
     pub payments_client: Option<Arc<PaymentsClient>>,
 
     /// Billing service client
     pub billing_client: Option<Arc<BillingClient>>,
 
+    /// DNS provider for public deployments
+    pub dns_provider: Option<Arc<dyn crate::dns::DnsProvider>>,
+
     /// Metrics system
     pub metrics: Option<Arc<crate::metrics::ApiMetricsSystem>>,
+
+    /// GPU Aggregator service (Secure Cloud)
+    pub aggregator_service: Arc<AggregatorService>,
+
+    /// Pricing configuration (marketplace markups)
+    pub pricing_config: crate::config::PricingConfig,
+
+    /// SSH client for K3s token generation
+    pub ssh_client: Arc<crate::ssh::K3sSshClient>,
 }
 
 /// Process health check for a single rental
@@ -97,6 +116,80 @@ async fn process_rental_health_check(
             // The validator is the source of truth and will report actual status when available
             tracing::warn!(
                 "Health check failed for rental {} (validator may be unavailable): {}",
+                rental_id,
+                e
+            );
+        }
+    }
+}
+
+/// Process health check for a single secure cloud rental
+async fn process_secure_cloud_health_check(
+    rental_id: &str,
+    aggregator_service: &basilica_aggregator::service::AggregatorService,
+    db: &PgPool,
+) {
+    match aggregator_service.get_deployment(rental_id).await {
+        Ok(deployment) => {
+            use basilica_aggregator::models::DeploymentStatus;
+
+            // Check if deployment is in a terminal state
+            if matches!(
+                deployment.status,
+                DeploymentStatus::Deleted | DeploymentStatus::Error
+            ) {
+                // Archive the rental to terminated_secure_cloud_rentals table
+                if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+                    db,
+                    rental_id,
+                    Some("Health check: deployment no longer accessible"),
+                )
+                .await
+                {
+                    tracing::error!(
+                        "Failed to archive stopped secure cloud rental {}: {}",
+                        rental_id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Health check: Archived {:?} secure cloud rental {}",
+                        deployment.status,
+                        rental_id
+                    );
+                }
+            }
+        }
+        Err(basilica_aggregator::error::AggregatorError::NotFound(_)) => {
+            // VM was deleted externally (404 from provider)
+            tracing::info!(
+                "VM {} not found at provider (deleted externally), archiving rental",
+                rental_id
+            );
+            if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+                db,
+                rental_id,
+                Some("Health check: VM not found at provider (deleted externally)"),
+            )
+            .await
+            {
+                tracing::error!(
+                    "Failed to archive rental {} after detecting external deletion: {}",
+                    rental_id,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Successfully archived rental {} after detecting external deletion",
+                    rental_id
+                );
+            }
+        }
+        Err(e) => {
+            // Provider unavailable or having issues - don't change rental state
+            // The provider is the source of truth and will report actual status when available
+            tracing::warn!(
+                "Health check failed for secure cloud rental {} (temporary error): {}",
                 rental_id,
                 e
             );
@@ -201,6 +294,22 @@ impl Server {
                 message: format!("Failed to run migrations: {}", e),
             })?;
 
+        // Initialize Kubernetes client (optional)
+        let k8s: Option<Arc<dyn ApiK8sClient + Send + Sync>> = match K8sClient::try_default().await
+        {
+            Ok(c) => {
+                info!("Initialized Kubernetes client for API integration");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                warn!(
+                    "K8s client unavailable: {} (continuing without K8s integration)",
+                    e
+                );
+                None
+            }
+        };
+
         // Initialize payments service client if enabled
         let payments_client = if config.payments.enabled {
             info!(
@@ -270,6 +379,119 @@ impl Server {
             None
         };
 
+        // Initialize GPU Aggregator service (Secure Cloud)
+        info!("Initializing GPU Aggregator service (Secure Cloud)");
+
+        // Debug: Show provider configuration
+        tracing::debug!(
+            "DataCrunch config: client_id={:?}, has_secret={}",
+            config.aggregator.providers.datacrunch.client_id,
+            config
+                .aggregator
+                .providers
+                .datacrunch
+                .client_secret
+                .is_some()
+        );
+
+        let aggregator_db = Arc::new(
+            AggregatorDatabase::new(&config.database.url)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to initialize aggregator database: {}", e),
+                })?,
+        );
+
+        let aggregator_config = config.to_aggregator_config();
+        let aggregator_service = Arc::new(
+            AggregatorService::new(aggregator_db, aggregator_config).map_err(|e| {
+                ApiError::Internal {
+                    message: format!("Failed to initialize aggregator service: {}", e),
+                }
+            })?,
+        );
+        info!("GPU Aggregator service initialized successfully");
+
+        // Initialize DNS provider for public deployments
+        let dns_provider: Option<Arc<dyn crate::dns::DnsProvider>> = if config.dns.enabled {
+            let dns_config = config.dns.from_env();
+            if let Err(e) = dns_config.validate() {
+                warn!(
+                    "DNS configuration invalid: {}. Public deployments will be disabled.",
+                    e
+                );
+                None
+            } else {
+                match crate::dns::cloudflare::CloudflareDnsManager::new(
+                    crate::dns::cloudflare::CloudflareConfig {
+                        api_token: dns_config.api_token.unwrap(),
+                        zone_id: dns_config.zone_id.unwrap(),
+                        domain: dns_config.domain.clone(),
+                        proxy: dns_config.proxy,
+                    },
+                ) {
+                    Ok(manager) => {
+                        info!(
+                            "DNS provider initialized successfully for domain: {}",
+                            dns_config.domain
+                        );
+                        Some(Arc::new(manager) as Arc<dyn crate::dns::DnsProvider>)
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize DNS provider: {}. Public deployments will be disabled.", e);
+                        None
+                    }
+                }
+            }
+        } else {
+            info!("DNS management is disabled");
+            None
+        };
+
+        // Write SSH private key to disk if provided via environment variable
+        if let Ok(ssh_key_content) = std::env::var("SSH_PRIVATE_KEY") {
+            let key_dir = std::path::PathBuf::from("/tmp/.ssh");
+            let key_path = key_dir.join("k3s_key");
+
+            std::fs::create_dir_all(&key_dir).map_err(|e| ApiError::Internal {
+                message: format!("Failed to create SSH key directory: {}", e),
+            })?;
+
+            std::fs::write(&key_path, ssh_key_content).map_err(|e| ApiError::Internal {
+                message: format!("Failed to write SSH key: {}", e),
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| ApiError::Internal {
+                        message: format!("Failed to set SSH key permissions: {}", e),
+                    })?;
+            }
+
+            info!("SSH private key written to {}", key_path.display());
+        }
+
+        // Initialize SSH client for K3s token generation
+        let ssh_client = Arc::new(
+            crate::ssh::K3sSshClient::new(&config.k3s_ssh)
+                .map_err(|e| {
+                    warn!(
+                        "Failed to initialize SSH client: {}. SSH token creation will be disabled.",
+                        e
+                    );
+                    e
+                })
+                .unwrap_or_else(|_| crate::ssh::K3sSshClient::disabled()),
+        );
+
+        if ssh_client.is_enabled() {
+            info!("SSH client initialized for K3s token generation");
+        } else {
+            info!("SSH token generation is disabled");
+        }
+
         // Create application state
         let state = AppState {
             config: config.clone(),
@@ -279,9 +501,14 @@ impl Server {
             validator_hotkey: config.bittensor.validator_hotkey.clone(),
             http_client: http_client.clone(),
             db,
+            k8s,
             payments_client,
             billing_client,
+            dns_provider,
             metrics,
+            aggregator_service,
+            pricing_config: config.pricing.clone(),
+            ssh_client,
         };
 
         // Start optional health check task using HTTP client
@@ -361,10 +588,137 @@ impl Server {
             rental_health_interval.as_secs()
         );
 
-        // Build the application router
-        let app = Self::build_router(state)?;
+        // Start GPU offerings refresh task (Secure Cloud)
+        let refresh_aggregator_service = state.aggregator_service.clone();
+        let refresh_interval = std::time::Duration::from_secs(60); // Refresh every 60 seconds
 
-        Ok(Self { config, app })
+        tokio::spawn(async move {
+            // Do initial refresh immediately on startup
+            tracing::info!("Starting initial GPU offerings refresh...");
+            match refresh_aggregator_service.refresh_all_providers().await {
+                Ok(count) => {
+                    tracing::info!("Initial GPU offerings refresh: fetched {} offerings", count);
+                }
+                Err(e) => {
+                    tracing::error!("Failed initial GPU offerings refresh: {}", e);
+                }
+            }
+
+            // Then start periodic refresh
+            let mut interval = tokio::time::interval(refresh_interval);
+            loop {
+                interval.tick().await;
+
+                tracing::debug!("Running periodic GPU offerings refresh...");
+                match refresh_aggregator_service.refresh_all_providers().await {
+                    Ok(count) => {
+                        if count > 0 {
+                            tracing::info!("GPU offerings refresh: fetched {} offerings", count);
+                        } else {
+                            tracing::debug!("GPU offerings refresh: no new offerings (cooldown or no providers enabled)");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to refresh GPU offerings: {}", e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started GPU offerings refresh task (interval: {} seconds)",
+            refresh_interval.as_secs()
+        );
+
+        // Start Secure Cloud health check task
+        let health_check_aggregator_service = state.aggregator_service.clone();
+        let health_check_db = state.db.clone();
+        let health_check_interval = config.rental_health_check_interval();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(health_check_interval);
+            loop {
+                interval.tick().await;
+
+                // Query all active secure cloud rentals from the database
+                match sqlx::query_as::<_, (String,)>("SELECT id FROM secure_cloud_rentals")
+                    .fetch_all(&health_check_db)
+                    .await
+                {
+                    Ok(rental_records) => {
+                        // Process rentals sequentially to avoid overwhelming provider APIs
+                        for record in &rental_records {
+                            let rental_id = &record.0;
+                            process_secure_cloud_health_check(
+                                rental_id,
+                                &health_check_aggregator_service,
+                                &health_check_db,
+                            )
+                            .await;
+                        }
+
+                        if !rental_records.is_empty() {
+                            tracing::debug!(
+                                "Secure Cloud health check completed for {} rentals",
+                                rental_records.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to query secure cloud rentals for health check: {}",
+                            e
+                        );
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started Secure Cloud health check task (interval: {} seconds)",
+            health_check_interval.as_secs()
+        );
+
+        // Start node token cleanup task
+        let cleanup_db = state.db.clone();
+        let cleanup_interval = config.node_token_cleanup_interval();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(cleanup_interval);
+            loop {
+                interval.tick().await;
+
+                match crate::k8s::cleanup_expired_cluster_tokens(&cleanup_db).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("Node token cleanup: removed {} expired tokens", count);
+                    }
+                    Ok(_) => {
+                        tracing::debug!("Node token cleanup: no expired tokens found");
+                    }
+                    Err(e) => {
+                        tracing::error!("Node token cleanup failed: {}", e);
+                    }
+                }
+            }
+        });
+
+        tracing::info!(
+            "Started node token cleanup task (interval: {} seconds)",
+            cleanup_interval.as_secs()
+        );
+
+        // Build the application router
+        let app = Self::build_router(state.clone())?;
+
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let background_tasks = tokio::task::JoinSet::new();
+
+        Ok(Self {
+            config,
+            app,
+            cancel_token,
+            background_tasks: Some(background_tasks),
+        })
     }
 
     /// Build the application router with all routes and middleware
@@ -388,7 +742,7 @@ impl Server {
     }
 
     /// Run the server until shutdown signal
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(mut self) -> Result<()> {
         let addr = self.config.server.bind_address;
 
         info!("Starting HTTP server on {}", addr);
@@ -402,12 +756,28 @@ impl Server {
 
         info!("Basilica API Gateway listening on {}", addr);
 
+        let cancel_token = self.cancel_token.clone();
+        let shutdown_signal = async move {
+            shutdown_signal().await;
+            cancel_token.cancel();
+        };
+
         axum::serve(listener, self.app)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal)
             .await
             .map_err(|e| ApiError::Internal {
                 message: format!("Server error: {e}"),
             })?;
+
+        if let Some(mut tasks) = self.background_tasks.take() {
+            info!("Waiting for background tasks to complete");
+            while let Some(result) = tasks.join_next().await {
+                if let Err(e) = result {
+                    tracing::error!("Background task error: {}", e);
+                }
+            }
+            info!("All background tasks completed");
+        }
 
         Ok(())
     }

@@ -11,13 +11,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Community cloud rental (validator-based)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rental {
     pub id: RentalId,
     pub user_id: UserId,
     pub node_id: String,
     pub validator_id: String,
-    pub package_id: PackageId,
+    /// Legacy package ID (deprecated, kept for backward compatibility)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<PackageId>,
     pub state: RentalState,
     pub resource_spec: ResourceSpec,
     pub usage_metrics: UsageMetrics,
@@ -33,15 +36,54 @@ pub struct Rental {
     pub actual_start_time: Option<DateTime<Utc>>,
     pub actual_end_time: Option<DateTime<Utc>>,
     pub actual_cost: CreditBalance,
+
+    // Marketplace-2-compute pricing fields
+    /// Final price per GPU per hour (already includes any markup applied by API layer)
+    pub base_price_per_gpu: Decimal,
+    /// Number of GPUs in this rental
+    pub gpu_count: u32,
+}
+
+/// Secure cloud rental (direct provider API)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecureCloudRental {
+    pub id: RentalId,
+    pub user_id: UserId,
+    pub provider: String,
+    pub provider_instance_id: String,
+    pub offering_id: String,
+    pub state: RentalState,
+    pub resource_spec: ResourceSpec,
+    pub usage_metrics: UsageMetrics,
+    pub cost_breakdown: CostBreakdown,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub metadata: HashMap<String, String>,
+    // Aliases for compatibility
+    pub created_at: DateTime<Utc>,
+    pub last_updated: DateTime<Utc>,
+    // Additional fields for billing handlers
+    pub actual_start_time: Option<DateTime<Utc>>,
+    pub actual_end_time: Option<DateTime<Utc>>,
+    pub actual_cost: CreditBalance,
+
+    // Marketplace-2-compute pricing fields
+    /// Final price per GPU per hour (already includes any markup applied by API layer)
+    pub base_price_per_gpu: Decimal,
+    /// Number of GPUs in this rental
+    pub gpu_count: u32,
 }
 
 impl Rental {
-    pub fn new(
+    /// Create a new rental with marketplace-2-compute pricing
+    pub fn new_marketplace(
         user_id: UserId,
         node_id: String,
         validator_id: String,
-        package_id: PackageId,
         resource_spec: ResourceSpec,
+        base_price_per_gpu: Decimal,
+        gpu_count: u32,
     ) -> Self {
         let now = Utc::now();
         Self {
@@ -49,7 +91,7 @@ impl Rental {
             user_id,
             node_id,
             validator_id,
-            package_id,
+            package_id: None, // No package in marketplace model
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -70,6 +112,145 @@ impl Rental {
             actual_start_time: None,
             actual_end_time: None,
             actual_cost: CreditBalance::zero(),
+            base_price_per_gpu,
+            gpu_count,
+        }
+    }
+
+    /// Legacy constructor with package-based pricing (DEPRECATED)
+    #[deprecated(
+        since = "1.0.0",
+        note = "Use new_marketplace for marketplace-2-compute"
+    )]
+    pub fn new(
+        user_id: UserId,
+        node_id: String,
+        validator_id: String,
+        package_id: PackageId,
+        resource_spec: ResourceSpec,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: RentalId::new(),
+            user_id,
+            node_id,
+            validator_id,
+            package_id: Some(package_id),
+            state: RentalState::Pending,
+            resource_spec,
+            usage_metrics: UsageMetrics::zero(),
+            cost_breakdown: CostBreakdown {
+                base_cost: CreditBalance::zero(),
+                usage_cost: CreditBalance::zero(),
+                volume_discount: CreditBalance::zero(),
+                discounts: CreditBalance::zero(),
+                overage_charges: CreditBalance::zero(),
+                total_cost: CreditBalance::zero(),
+            },
+            started_at: now,
+            updated_at: now,
+            ended_at: None,
+            metadata: HashMap::new(),
+            created_at: now,
+            last_updated: now,
+            actual_start_time: None,
+            actual_end_time: None,
+            actual_cost: CreditBalance::zero(),
+            // Default marketplace pricing (for legacy compatibility)
+            base_price_per_gpu: Decimal::ZERO,
+            gpu_count: 1,
+        }
+    }
+
+    pub fn duration(&self) -> chrono::Duration {
+        let end = self.ended_at.unwrap_or_else(Utc::now);
+        end - self.started_at
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.state.is_active()
+    }
+
+    pub fn transition_to(&mut self, new_state: RentalState) -> Result<()> {
+        if !self.state.can_transition_to(new_state) {
+            return Err(BillingError::InvalidStateTransition {
+                from: self.state.to_string(),
+                to: new_state.to_string(),
+            });
+        }
+
+        self.state = new_state;
+        let now = Utc::now();
+        self.updated_at = now;
+        self.last_updated = now;
+
+        if new_state.is_terminal() && self.ended_at.is_none() {
+            self.ended_at = Some(now);
+        }
+
+        Ok(())
+    }
+
+    pub fn update_usage(&mut self, metrics: UsageMetrics) {
+        self.usage_metrics = self.usage_metrics.add(&metrics);
+        self.updated_at = Utc::now();
+        self.last_updated = self.updated_at;
+    }
+
+    pub fn update_cost(&mut self, cost_breakdown: CostBreakdown) {
+        self.cost_breakdown = cost_breakdown;
+        self.updated_at = Utc::now();
+        self.last_updated = self.updated_at;
+    }
+
+    pub fn calculate_current_cost(&self, rate_per_hour: CreditBalance) -> CreditBalance {
+        let hours = self.duration().num_seconds() as f64 / 3600.0;
+        let hours_decimal = Decimal::from_f64(hours).unwrap_or(Decimal::ZERO);
+        rate_per_hour.multiply(hours_decimal)
+    }
+}
+
+impl SecureCloudRental {
+    /// Create a new secure cloud rental with marketplace-2-compute pricing
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_marketplace(
+        user_id: UserId,
+        provider: String,
+        provider_instance_id: String,
+        offering_id: String,
+        resource_spec: ResourceSpec,
+        base_price_per_gpu: Decimal,
+        gpu_count: u32,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: RentalId::new(),
+            user_id,
+            provider,
+            provider_instance_id,
+            offering_id,
+            state: RentalState::Pending,
+            resource_spec,
+            usage_metrics: UsageMetrics::zero(),
+            cost_breakdown: CostBreakdown {
+                base_cost: CreditBalance::zero(),
+                usage_cost: CreditBalance::zero(),
+                volume_discount: CreditBalance::zero(),
+                discounts: CreditBalance::zero(),
+                overage_charges: CreditBalance::zero(),
+                total_cost: CreditBalance::zero(),
+            },
+            started_at: now,
+            updated_at: now,
+            ended_at: None,
+            metadata: HashMap::new(),
+            created_at: now,
+            last_updated: now,
+            actual_start_time: None,
+            actual_end_time: None,
+            actual_cost: CreditBalance::zero(),
+            base_price_per_gpu,
+            gpu_count,
         }
     }
 
@@ -183,6 +364,7 @@ impl RentalManager {
 
 #[async_trait]
 impl RentalOperations for RentalManager {
+    #[allow(deprecated)]
     async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
         let rental = Rental::new(
             params.user_id,

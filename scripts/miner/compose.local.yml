@@ -1,0 +1,39 @@
+services:
+  miner:
+    build:
+      context: ../..
+      dockerfile: scripts/miner/Dockerfile
+    container_name: basilica-miner-local
+    restart: unless-stopped
+
+    environment:
+      - RUST_LOG=debug
+      - RUST_BACKTRACE=1
+      - SSL_CERT_FILE=/etc/ssl/certs/subtensor-ca.crt
+
+    volumes:
+      - ../../config/miner.local.toml:/var/lib/basilica/miner/miner.toml:ro
+      - miner-data-local:/var/lib/basilica/miner/data:rw
+      - ~/.bittensor:/var/lib/basilica/miner/.bittensor:rw
+      - ../subtensor-local/tls/ca.crt:/etc/ssl/certs/subtensor-ca.crt:ro
+      - ~/.ssh/tplr:/root/.ssh/tplr:ro
+      - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+
+    ports:
+      - "8081:8080"     # gRPC/HTTP server port (offset to not conflict with validator)
+      - "8091:8091"     # Bittensor axon port
+      - "9091:9090"     # Metrics port (offset to not conflict with validator)
+
+    networks:
+      - basilica_network_local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    command: ["--config", "/var/lib/basilica/miner/miner.toml"]
+
+networks:
+  basilica_network_local:
+    driver: bridge
+
+volumes:
+  miner-data-local:

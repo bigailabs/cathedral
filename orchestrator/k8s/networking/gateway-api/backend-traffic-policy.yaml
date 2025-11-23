@@ -1,0 +1,20 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: default-backend-policy
+  namespace: basilica-system
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: basilica-gateway
+  circuitBreaker:
+    maxPendingRequests: 1024
+    maxParallelRequests: 1024
+  timeout:
+    tcp:
+      connectTimeout: 10s
+    http:
+      requestTimeout: 300s
+  loadBalancer:
+    type: RoundRobin
