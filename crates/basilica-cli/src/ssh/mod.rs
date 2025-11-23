@@ -161,9 +161,7 @@ impl SshClient {
             .arg("exit")
             .arg("0")
             .output()
-            .map_err(|e| -> CliError {
-                eyre!("Failed to run SSH command: {}", e).into()
-            })?;
+            .map_err(|e| -> CliError { eyre!("Failed to run SSH command: {}", e).into() })?;
 
         if output.status.success() {
             Ok(())
