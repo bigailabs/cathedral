@@ -166,14 +166,23 @@ impl PageCache {
             let page_end = (page_start + remaining).min(PAGE_SIZE);
             let chunk_size = page_end - page_start;
 
+            // Check if page already exists to track size correctly
+            let page_exists = file.pages.contains_key(&page_offset);
+
             // Get or create page
-            let page = file.pages.entry(page_offset).or_insert_with(|| Page {
-                data: Bytes::from(vec![0u8; PAGE_SIZE]),
-                dirty: false,
-                last_access: std::time::Instant::now(),
+            let page = file.pages.entry(page_offset).or_insert_with(|| {
+                let new_page = Page {
+                    data: Bytes::from(vec![0u8; PAGE_SIZE]),
+                    dirty: false,
+                    last_access: std::time::Instant::now(),
+                };
+                if !page_exists {
+                    self.current_size += PAGE_SIZE;
+                }
+                new_page
             });
 
-            // Copy data into page
+            // Pages are guaranteed to be PAGE_SIZE by insert_page() and or_insert_with()
             let mut page_data = page.data.to_vec();
             page_data[page_start..page_end]
                 .copy_from_slice(&data[data_offset..data_offset + chunk_size]);
@@ -183,7 +192,6 @@ impl PageCache {
             page.last_access = std::time::Instant::now();
 
             data_offset += chunk_size;
-            self.current_size += chunk_size;
         }
 
         // Update file size
@@ -194,20 +202,32 @@ impl PageCache {
     }
 
     /// Insert a page from object storage (for lazy loading)
+    /// Always pads to PAGE_SIZE to ensure write() can safely index
     pub async fn insert_page(&mut self, path: &str, offset: u64, data: Bytes) {
         let file = self.get_or_create_file(path);
         let mut file = file.write().await;
 
         let page_offset = (offset / PAGE_SIZE as u64) * PAGE_SIZE as u64;
 
-        file.pages.insert(
+        // Always pad to PAGE_SIZE so write() can safely assume page.data.len() >= PAGE_SIZE
+        let page_data = if data.len() < PAGE_SIZE {
+            let mut buf = data.to_vec();
+            buf.resize(PAGE_SIZE, 0);
+            Bytes::from(buf)
+        } else {
+            data
+        };
+
+        if let Some(old_page) = file.pages.insert(
             page_offset,
             Page {
-                data,
+                data: page_data,
                 dirty: false,
                 last_access: std::time::Instant::now(),
             },
-        );
+        ) {
+            self.current_size = self.current_size.saturating_sub(old_page.data.len());
+        }
 
         self.current_size += PAGE_SIZE;
     }
@@ -229,6 +249,73 @@ impl PageCache {
     /// List all files in cache
     pub fn list_files(&self) -> Vec<String> {
         self.files.keys().cloned().collect()
+    }
+
+    /// Truncate a file to the specified size
+    pub async fn truncate(&mut self, path: &str, new_size: u64) -> Result<(), String> {
+        let file = self.files.get(path).ok_or("File not found")?;
+        let mut file = file.write().await;
+
+        let old_size = file.size;
+        file.size = new_size;
+        file.metadata.mtime = std::time::SystemTime::now();
+
+        if new_size < old_size {
+            let new_last_page = new_size / PAGE_SIZE as u64;
+            let pages_to_remove: Vec<u64> = file
+                .pages
+                .keys()
+                .filter(|&&offset| offset / PAGE_SIZE as u64 > new_last_page)
+                .copied()
+                .collect();
+
+            for offset in pages_to_remove {
+                if let Some(page) = file.pages.remove(&offset) {
+                    self.current_size = self.current_size.saturating_sub(page.data.len());
+                }
+            }
+
+            if new_size % PAGE_SIZE as u64 != 0 {
+                let last_page_offset = new_last_page * PAGE_SIZE as u64;
+                if let Some(page) = file.pages.get_mut(&last_page_offset) {
+                    let new_page_size = (new_size % PAGE_SIZE as u64) as usize;
+                    let mut page_data = page.data.to_vec();
+                    page_data.truncate(new_page_size);
+                    page_data.resize(PAGE_SIZE, 0);
+                    page.data = Bytes::from(page_data);
+                    page.dirty = true;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove a file from cache
+    pub async fn remove_file(&mut self, path: &str) -> Option<()> {
+        if let Some(file_lock) = self.files.remove(path) {
+            let file = file_lock.read().await;
+            for page in file.pages.values() {
+                self.current_size = self.current_size.saturating_sub(page.data.len());
+            }
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    /// Rename a file in cache (updates internal path references)
+    pub async fn rename(&mut self, old_path: &str, new_path: &str) -> Option<()> {
+        let file_lock = self.files.remove(old_path)?;
+
+        {
+            let mut file = file_lock.write().await;
+            file.path = new_path.to_string();
+            file.metadata.mtime = std::time::SystemTime::now();
+        }
+
+        self.files.insert(new_path.to_string(), file_lock);
+        Some(())
     }
 
     /// Evict least recently used pages to make room
@@ -259,7 +346,7 @@ impl PageCache {
                 let mut file = file_lock.write().await;
                 if let Some(page) = file.pages.remove(&offset) {
                     freed += page.data.len();
-                    self.current_size -= page.data.len();
+                    self.current_size = self.current_size.saturating_sub(page.data.len());
                 }
             }
         }
@@ -310,5 +397,27 @@ mod tests {
         let result = cache.read("/test.txt", 0, 11).await.unwrap();
         assert_eq!(&result[..5], b"Hello");
         assert_eq!(&result[6..11], b"World");
+    }
+
+    #[tokio::test]
+    async fn test_write_to_short_page() {
+        let mut cache = PageCache::new(10);
+
+        // Insert a short page (simulating what happens when loading from object storage)
+        let short_data = Bytes::from(vec![1u8; 1024]); // 1KB page, much less than PAGE_SIZE
+        cache.insert_page("/test.txt", 0, short_data.clone()).await;
+
+        // Now try to write at an offset within this page but beyond the short data
+        let write_data = b"test";
+        cache.write("/test.txt", 1020, write_data).await.unwrap(); // Write near the end
+
+        // Verify the write succeeded and data is correct
+        let result = cache.read("/test.txt", 1020, 4).await.unwrap();
+        assert_eq!(&result[..], write_data);
+
+        // Also verify writing past the original short page size
+        cache.write("/test.txt", 2000, write_data).await.unwrap();
+        let result = cache.read("/test.txt", 2000, 4).await.unwrap();
+        assert_eq!(&result[..], write_data);
     }
 }

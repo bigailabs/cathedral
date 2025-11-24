@@ -608,10 +608,17 @@ impl ApiK8sClient for K8sClient {
             Ok(_) => {
                 if name.starts_with("u-") {
                     helpers::create_reference_grant_for_namespace(&self.client, name).await?;
+                    helpers::copy_default_storage_secret(&self.client, name).await?;
                 }
                 Ok(())
             }
-            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                if name.starts_with("u-") {
+                    helpers::create_reference_grant_for_namespace(&self.client, name).await?;
+                    helpers::copy_default_storage_secret(&self.client, name).await?;
+                }
+                Ok(())
+            }
             Err(e) => Err(ApiError::Internal {
                 message: format!("create namespace failed: {e}"),
             }),
@@ -769,6 +776,73 @@ impl ApiK8sClient for K8sClient {
             }
 
             spec["healthCheck"] = health_check_obj;
+        }
+
+        if let Some(ref storage) = req.storage {
+            if let Some(ref persistent) = storage.persistent {
+                let backend_str = match persistent.backend {
+                    crate::api::routes::deployments::types::StorageBackend::R2 => "r2",
+                    crate::api::routes::deployments::types::StorageBackend::S3 => "s3",
+                    crate::api::routes::deployments::types::StorageBackend::GCS => "gcs",
+                };
+
+                let is_custom_storage = persistent
+                    .credentials_secret
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty());
+
+                let default_secret_name = match persistent.backend {
+                    crate::api::routes::deployments::types::StorageBackend::R2 => {
+                        "basilica-r2-credentials"
+                    }
+                    crate::api::routes::deployments::types::StorageBackend::S3 => {
+                        "basilica-s3-credentials"
+                    }
+                    crate::api::routes::deployments::types::StorageBackend::GCS => {
+                        "basilica-gcs-credentials"
+                    }
+                };
+
+                let (bucket, credentials_secret) = if is_custom_storage {
+                    (
+                        persistent.bucket.clone(),
+                        persistent.credentials_secret.clone(),
+                    )
+                } else {
+                    if persistent.bucket.is_empty() {
+                        return Err(ApiError::BadRequest {
+                            message:
+                                "bucket name is required when using default storage credentials"
+                                    .to_string(),
+                        });
+                    }
+                    (
+                        persistent.bucket.clone(),
+                        Some(default_secret_name.to_string()),
+                    )
+                };
+
+                let mut persistent_obj = json!({
+                    "enabled": persistent.enabled,
+                    "backend": backend_str,
+                    "bucket": bucket,
+                    "syncIntervalMs": persistent.sync_interval_ms,
+                    "cacheSizeMb": persistent.cache_size_mb,
+                    "mountPath": persistent.mount_path,
+                });
+                if let Some(ref region) = persistent.region {
+                    persistent_obj["region"] = json!(region);
+                }
+                if let Some(ref endpoint) = persistent.endpoint {
+                    persistent_obj["endpoint"] = json!(endpoint);
+                }
+                if let Some(ref creds) = credentials_secret {
+                    persistent_obj["credentialsSecret"] = json!(creds);
+                }
+                spec["storage"] = json!({
+                    "persistent": persistent_obj
+                });
+            }
         }
 
         let obj = json!({

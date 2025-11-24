@@ -1,8 +1,12 @@
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, HTTPGetAction, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
-    ResourceRequirements, SecurityContext, Service, ServicePort, ServiceSpec, TCPSocketAction,
-    Toleration,
+    Affinity, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
+};
+use k8s_openapi::api::core::v1::{
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HTTPGetAction,
+    HostPathVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
+    ResourceRequirements, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceSpec,
+    TCPSocketAction, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
     NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
@@ -14,9 +18,83 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::controllers::storage_utils;
 use crate::crd::user_deployment::{EnvVar as CrdEnvVar, UserDeployment, UserDeploymentStatus};
 use crate::k8s_client::K8sClient;
 use anyhow::Result;
+use tracing::debug;
+
+fn deployment_needs_update(current: &Deployment, desired: &Deployment) -> bool {
+    let current_spec = match &current.spec {
+        Some(s) => s,
+        None => return true,
+    };
+    let desired_spec = match &desired.spec {
+        Some(s) => s,
+        None => return false,
+    };
+
+    if current_spec.replicas != desired_spec.replicas {
+        return true;
+    }
+
+    let current_template = &current_spec.template;
+    let desired_template = &desired_spec.template;
+
+    let current_pod_spec = match &current_template.spec {
+        Some(s) => s,
+        None => return true,
+    };
+    let desired_pod_spec = match &desired_template.spec {
+        Some(s) => s,
+        None => return false,
+    };
+
+    if current_pod_spec.containers.len() != desired_pod_spec.containers.len() {
+        return true;
+    }
+
+    for (current_c, desired_c) in current_pod_spec
+        .containers
+        .iter()
+        .zip(desired_pod_spec.containers.iter())
+    {
+        if current_c.image != desired_c.image
+            || current_c.command != desired_c.command
+            || current_c.args != desired_c.args
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn service_needs_update(current: &Service, desired: &Service) -> bool {
+    let current_spec = match &current.spec {
+        Some(s) => s,
+        None => return true,
+    };
+    let desired_spec = match &desired.spec {
+        Some(s) => s,
+        None => return false,
+    };
+
+    current_spec.ports != desired_spec.ports || current_spec.selector != desired_spec.selector
+}
+
+fn network_policy_needs_update(current: &NetworkPolicy, desired: &NetworkPolicy) -> bool {
+    let current_spec = match &current.spec {
+        Some(s) => s,
+        None => return true,
+    };
+    let desired_spec = match &desired.spec {
+        Some(s) => s,
+        None => return false,
+    };
+
+    current_spec.ingress != desired_spec.ingress || current_spec.egress != desired_spec.egress
+}
 
 fn to_quantity(s: &str) -> Quantity {
     Quantity(s.to_string())
@@ -46,13 +124,38 @@ fn make_service_name(instance_name: &str) -> String {
     format!("s-{}", instance_name)
 }
 
-fn build_resources(cpu: &str, memory: &str) -> ResourceRequirements {
+fn build_resources(
+    cpu: &str,
+    memory: &str,
+    gpu: Option<&crate::crd::user_deployment::GpuSpec>,
+) -> ResourceRequirements {
+    build_resources_with_storage(cpu, memory, gpu, None)
+}
+
+fn build_resources_with_storage(
+    cpu: &str,
+    memory: &str,
+    gpu: Option<&crate::crd::user_deployment::GpuSpec>,
+    ephemeral_storage: Option<&str>,
+) -> ResourceRequirements {
     let mut limits = BTreeMap::new();
     let mut requests = BTreeMap::new();
     limits.insert("cpu".to_string(), to_quantity(cpu));
     limits.insert("memory".to_string(), to_quantity(memory));
     requests.insert("cpu".to_string(), to_quantity(cpu));
     requests.insert("memory".to_string(), to_quantity(memory));
+
+    if let Some(storage) = ephemeral_storage {
+        limits.insert("ephemeral-storage".to_string(), to_quantity(storage));
+        requests.insert("ephemeral-storage".to_string(), to_quantity(storage));
+    }
+
+    if let Some(gpu_spec) = gpu {
+        let gpu_count = to_quantity(&gpu_spec.count.to_string());
+        limits.insert("nvidia.com/gpu".to_string(), gpu_count.clone());
+        requests.insert("nvidia.com/gpu".to_string(), gpu_count);
+    }
+
     ResourceRequirements {
         limits: Some(limits),
         requests: Some(requests),
@@ -181,14 +284,307 @@ fn build_health_probes(
     }
 }
 
+fn build_storage_volumes(
+    instance_name: &str,
+    _storage: &crate::crd::user_deployment::PersistentStorageSpec,
+) -> Vec<Volume> {
+    vec![
+        Volume {
+            name: "fuse-device".to_string(),
+            host_path: Some(HostPathVolumeSource {
+                path: "/dev/fuse".to_string(),
+                type_: Some("CharDevice".to_string()),
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: "basilica-storage".to_string(),
+            host_path: Some(HostPathVolumeSource {
+                path: format!("/var/lib/basilica/fuse/{}", instance_name),
+                type_: Some("DirectoryOrCreate".to_string()),
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: "tmp".to_string(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        },
+    ]
+}
+
+fn build_fuse_sidecar(
+    namespace: &str,
+    instance_name: &str,
+    storage: &crate::crd::user_deployment::PersistentStorageSpec,
+) -> anyhow::Result<Container> {
+    let backend_str = match storage.backend {
+        crate::crd::user_deployment::StorageBackend::R2 => "r2",
+        crate::crd::user_deployment::StorageBackend::S3 => "s3",
+        crate::crd::user_deployment::StorageBackend::GCS => "gcs",
+    };
+
+    let mut env = vec![
+        EnvVar {
+            name: "STORAGE_BACKEND".to_string(),
+            value: Some(backend_str.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "MOUNT_PATH".to_string(),
+            value: Some(storage.mount_path.clone()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "SYNC_INTERVAL_MS".to_string(),
+            value: Some(storage.sync_interval_ms.to_string()),
+            ..Default::default()
+        },
+        EnvVar {
+            name: "CACHE_SIZE_MB".to_string(),
+            value: Some(storage.cache_size_mb.to_string()),
+            ..Default::default()
+        },
+    ];
+
+    if !storage.bucket.is_empty() {
+        env.push(EnvVar {
+            name: "STORAGE_BUCKET".to_string(),
+            value: Some(storage.bucket.clone()),
+            ..Default::default()
+        });
+    }
+
+    if let Some(ref region) = storage.region {
+        env.push(EnvVar {
+            name: "STORAGE_REGION".to_string(),
+            value: Some(region.clone()),
+            ..Default::default()
+        });
+    }
+
+    if let Some(ref endpoint) = storage.endpoint {
+        env.push(EnvVar {
+            name: "STORAGE_ENDPOINT".to_string(),
+            value: Some(endpoint.clone()),
+            ..Default::default()
+        });
+    }
+
+    if let Some(ref secret_name) = storage.credentials_secret {
+        env.push(EnvVar {
+            name: "STORAGE_ACCESS_KEY_ID".to_string(),
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: Some(secret_name.clone()),
+                    key: "STORAGE_ACCESS_KEY_ID".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: "STORAGE_SECRET_ACCESS_KEY".to_string(),
+            value_from: Some(EnvVarSource {
+                secret_key_ref: Some(SecretKeySelector {
+                    name: Some(secret_name.clone()),
+                    key: "STORAGE_SECRET_ACCESS_KEY".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+
+        if storage.endpoint.is_none() {
+            env.push(EnvVar {
+                name: "STORAGE_ENDPOINT".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: Some(secret_name.clone()),
+                        key: "STORAGE_ENDPOINT".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+
+        if storage.bucket.is_empty() {
+            env.push(EnvVar {
+                name: "STORAGE_BUCKET".to_string(),
+                value_from: Some(EnvVarSource {
+                    secret_key_ref: Some(SecretKeySelector {
+                        name: Some(secret_name.clone()),
+                        key: "STORAGE_BUCKET".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        }
+    }
+
+    let cache_size_mb = storage.cache_size_mb as u32;
+    let (startup_probe, liveness_probe, readiness_probe) =
+        storage_utils::build_fuse_health_probes();
+
+    let mut args = vec![
+        "--namespace".to_string(),
+        namespace.to_string(),
+        "--experiment-id".to_string(),
+        instance_name.to_string(),
+        "--backend".to_string(),
+        format!("{:?}", storage.backend).to_lowercase(),
+        "--sync-interval-ms".to_string(),
+        storage.sync_interval_ms.to_string(),
+        "--cache-size-mb".to_string(),
+        storage.cache_size_mb.to_string(),
+        "--mount-point".to_string(),
+        storage.mount_path.clone(),
+    ];
+
+    if !storage.bucket.is_empty() {
+        args.push("--bucket".to_string());
+        args.push(storage.bucket.clone());
+    }
+
+    Ok(Container {
+        name: "fuse-storage".to_string(),
+        image: Some("ghcr.io/one-covenant/basilica-storage-daemon:latest".to_string()),
+        command: Some(vec!["/usr/local/bin/basilica-storage-daemon".to_string()]),
+        args: Some(args),
+        env: Some(env),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                name: "fuse-device".to_string(),
+                mount_path: "/dev/fuse".to_string(),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: "basilica-storage".to_string(),
+                mount_path: storage.mount_path.clone(),
+                mount_propagation: Some("Bidirectional".to_string()),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: "tmp".to_string(),
+                mount_path: "/tmp".to_string(),
+                ..Default::default()
+            },
+        ]),
+        security_context: Some(storage_utils::build_fuse_security_context()),
+        resources: Some(
+            storage_utils::build_fuse_sidecar_resources(cache_size_mb, false).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid cache size {} for deployment {}: {}",
+                    cache_size_mb,
+                    instance_name,
+                    e
+                )
+            })?,
+        ),
+        lifecycle: Some(storage_utils::build_fuse_lifecycle_hook(120)),
+        startup_probe,
+        liveness_probe,
+        readiness_probe,
+        ..Default::default()
+    })
+}
+
+fn build_node_affinity(gpu: &crate::crd::user_deployment::GpuSpec) -> Option<Affinity> {
+    let mut match_expressions = vec![
+        NodeSelectorRequirement {
+            key: "basilica.ai/node-role".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["miner".to_string()]),
+        },
+        NodeSelectorRequirement {
+            key: "basilica.ai/validated".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["true".to_string()]),
+        },
+        NodeSelectorRequirement {
+            key: "basilica.ai/node-group".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["user-deployments".to_string()]),
+        },
+        NodeSelectorRequirement {
+            key: "basilica.ai/gpu-model".to_string(),
+            operator: "In".to_string(),
+            values: Some(gpu.model.clone()),
+        },
+    ];
+
+    if let Some(_cuda_version) = &gpu.min_cuda_version {
+        match_expressions.push(NodeSelectorRequirement {
+            key: "basilica.ai/cuda-version".to_string(),
+            operator: "Exists".to_string(),
+            values: None,
+        });
+    }
+
+    if let Some(min_vram) = gpu.min_gpu_memory_gb {
+        let acceptable_memory: Vec<String> = (min_vram..=256).map(|n| n.to_string()).collect();
+        match_expressions.push(NodeSelectorRequirement {
+            key: "basilica.ai/gpu-memory-gb".to_string(),
+            operator: "In".to_string(),
+            values: Some(acceptable_memory),
+        });
+    }
+
+    let acceptable_counts: Vec<String> = (gpu.count..=8).map(|n| n.to_string()).collect();
+    match_expressions.push(NodeSelectorRequirement {
+        key: "basilica.ai/gpu-count".to_string(),
+        operator: "In".to_string(),
+        values: Some(acceptable_counts),
+    });
+
+    Some(Affinity {
+        node_affinity: Some(NodeAffinity {
+            required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                node_selector_terms: vec![NodeSelectorTerm {
+                    match_expressions: Some(match_expressions),
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
 pub fn render_deployment(
     instance_name: &str,
     namespace: &str,
     spec: &crate::crd::user_deployment::UserDeploymentSpec,
-) -> Deployment {
+) -> anyhow::Result<Deployment> {
     let (pod_sc, container_sc) = build_security_contexts();
-    let (volumes, volume_mounts) = build_writable_volumes();
+    let (mut volumes, mut volume_mounts) = build_writable_volumes();
     let (liveness_probe, readiness_probe) = build_health_probes(spec.port, &spec.health_check);
+
+    let storage_config = spec
+        .storage
+        .as_ref()
+        .and_then(|s| s.persistent.as_ref())
+        .filter(|p| p.enabled);
+
+    if let Some(storage) = storage_config {
+        volumes.extend(build_storage_volumes(instance_name, storage));
+        volume_mounts.push(VolumeMount {
+            name: "basilica-storage".to_string(),
+            mount_path: storage.mount_path.clone(),
+            mount_propagation: Some("HostToContainer".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let gpu_config = spec.resources.as_ref().and_then(|r| r.gpus.as_ref());
+
+    let node_affinity = gpu_config.and_then(build_node_affinity);
 
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), instance_name.to_string());
@@ -206,24 +602,46 @@ pub fn render_deployment(
     );
 
     let resources = if let Some(ref res) = spec.resources {
-        build_resources(&res.cpu, &res.memory)
+        build_resources(&res.cpu, &res.memory, res.gpus.as_ref())
     } else {
-        build_resources("100m", "128Mi")
+        build_resources("100m", "128Mi", None)
+    };
+
+    let (container_command, container_args) = if let Some(storage) = storage_config {
+        storage_utils::wrap_command_with_fuse_wait(
+            if spec.command.is_empty() {
+                None
+            } else {
+                Some(spec.command.clone())
+            },
+            if spec.args.is_empty() {
+                None
+            } else {
+                Some(spec.args.clone())
+            },
+            &storage.mount_path,
+        )
+        .expect("shell escape should not fail for valid UTF-8 strings")
+    } else {
+        (
+            if spec.command.is_empty() {
+                None
+            } else {
+                Some(spec.command.clone())
+            },
+            if spec.args.is_empty() {
+                None
+            } else {
+                Some(spec.args.clone())
+            },
+        )
     };
 
     let container = Container {
         name: instance_name.to_string(),
         image: Some(spec.image.clone()),
-        command: if spec.command.is_empty() {
-            None
-        } else {
-            Some(spec.command.clone())
-        },
-        args: if spec.args.is_empty() {
-            None
-        } else {
-            Some(spec.args.clone())
-        },
+        command: container_command,
+        args: container_args,
         env: Some(build_env(&spec.env)),
         ports: Some(vec![k8s_openapi::api::core::v1::ContainerPort {
             container_port: spec.port as i32,
@@ -238,16 +656,34 @@ pub fn render_deployment(
         ..Default::default()
     };
 
+    let mut containers = vec![container];
+    let mut pod_annotations = BTreeMap::new();
+
+    if let Some(storage) = storage_config {
+        containers.push(build_fuse_sidecar(namespace, instance_name, storage)?);
+        pod_annotations.insert(
+            "container.apparmor.security.beta.kubernetes.io/fuse-storage".to_string(),
+            "unconfined".to_string(),
+        );
+    }
+
     let pod_template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
             labels: Some(labels.clone()),
+            annotations: if pod_annotations.is_empty() {
+                None
+            } else {
+                Some(pod_annotations)
+            },
             ..Default::default()
         }),
         spec: Some(PodSpec {
-            containers: vec![container],
+            containers,
             security_context: pod_sc,
+            termination_grace_period_seconds: Some(120),
             node_selector: Some(build_node_selector()),
             tolerations: Some(build_tolerations()),
+            affinity: node_affinity,
             restart_policy: Some("Always".into()),
             automount_service_account_token: Some(false),
             volumes: Some(volumes),
@@ -255,7 +691,13 @@ pub fn render_deployment(
         }),
     };
 
-    Deployment {
+    let replicas = if spec.suspended {
+        0
+    } else {
+        spec.replicas as i32
+    };
+
+    Ok(Deployment {
         metadata: ObjectMeta {
             name: Some(format!("{}-deployment", instance_name)),
             namespace: Some(namespace.to_string()),
@@ -263,7 +705,7 @@ pub fn render_deployment(
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
-            replicas: Some(spec.replicas as i32),
+            replicas: Some(replicas),
             selector: LabelSelector {
                 match_labels: Some({
                     let mut sel = BTreeMap::new();
@@ -276,7 +718,7 @@ pub fn render_deployment(
             ..Default::default()
         }),
         ..Default::default()
-    }
+    })
 }
 
 pub fn render_service(instance_name: &str, namespace: &str, port: u32) -> Service {
@@ -400,25 +842,46 @@ impl UserDeploymentController {
 
         let deployment_name = format!("{}-deployment", instance_name);
         let service_name = make_service_name(instance_name);
+        let netpol_name = format!("{}-netpol", instance_name);
 
-        let deployment_exists = self
-            .client
-            .get_deployment(ns, &deployment_name)
-            .await
-            .is_ok();
-        if !deployment_exists {
-            let deployment = render_deployment(instance_name, ns, spec);
-            self.client.create_deployment(ns, &deployment).await?;
+        let desired_deployment = render_deployment(instance_name, ns, spec)?;
+        let current_deployment = self.client.get_deployment(ns, &deployment_name).await.ok();
+        if current_deployment
+            .as_ref()
+            .map(|c| deployment_needs_update(c, &desired_deployment))
+            .unwrap_or(true)
+        {
+            debug!("Deployment {} needs update, patching", deployment_name);
+            self.client
+                .patch_deployment(ns, &deployment_name, &desired_deployment)
+                .await?;
         }
 
-        let service_exists = self.client.get_service(ns, &service_name).await.is_ok();
-        if !service_exists {
-            let service = render_service(instance_name, ns, spec.port);
-            self.client.create_service(ns, &service).await?;
+        let desired_service = render_service(instance_name, ns, spec.port);
+        let current_service = self.client.get_service(ns, &service_name).await.ok();
+        if current_service
+            .as_ref()
+            .map(|c| service_needs_update(c, &desired_service))
+            .unwrap_or(true)
+        {
+            debug!("Service {} needs update, patching", service_name);
+            self.client
+                .patch_service(ns, &service_name, &desired_service)
+                .await?;
         }
 
-        let netpol = render_network_policy(instance_name, ns, spec.port);
-        let _ = self.client.create_network_policy(ns, &netpol).await;
+        let desired_netpol = render_network_policy(instance_name, ns, spec.port);
+        let current_netpol = self.client.get_network_policy(ns, &netpol_name).await.ok();
+        if current_netpol
+            .as_ref()
+            .map(|c| network_policy_needs_update(c, &desired_netpol))
+            .unwrap_or(true)
+        {
+            debug!("NetworkPolicy {} needs update, patching", netpol_name);
+            self.client
+                .patch_network_policy(ns, &netpol_name, &desired_netpol)
+                .await?;
+        }
 
         let pods = self
             .client
@@ -526,9 +989,10 @@ mod tests {
         .with_resources(ResourceRequirements {
             cpu: "500m".to_string(),
             memory: "512Mi".to_string(),
+            gpus: None,
         });
 
-        let deployment = render_deployment("my-app", "u-user123", &spec);
+        let deployment = render_deployment("my-app", "u-user123", &spec).unwrap();
 
         assert_eq!(
             deployment.metadata.name,
@@ -772,5 +1236,411 @@ mod tests {
 
         let first_char = name.chars().next().unwrap();
         assert!(first_char.is_ascii_alphabetic());
+    }
+
+    #[test]
+    fn test_render_deployment_with_gpu_node_affinity() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "gpu-app".to_string(),
+            "pytorch:latest".to_string(),
+            1,
+            8080,
+            "/deployments/gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "4000m".to_string(),
+            memory: "16Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 2,
+                model: vec!["A100".to_string(), "H100".to_string()],
+                min_cuda_version: Some("12.2".to_string()),
+                min_gpu_memory_gb: Some(40),
+            }),
+        });
+
+        let deployment = render_deployment("gpu-app", "u-user123", &spec).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        assert!(pod_spec.affinity.is_some());
+        let affinity = pod_spec.affinity.unwrap();
+        assert!(affinity.node_affinity.is_some());
+
+        let node_affinity = affinity.node_affinity.unwrap();
+        assert!(node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .is_some());
+
+        let node_selector = node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .unwrap();
+        let terms = node_selector.node_selector_terms;
+        assert_eq!(terms.len(), 1);
+
+        let expressions = &terms[0].match_expressions;
+        assert!(expressions.is_some());
+        let exprs = expressions.as_ref().unwrap();
+
+        let gpu_model_expr = exprs
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-model")
+            .unwrap();
+        assert_eq!(gpu_model_expr.operator, "In");
+        assert_eq!(
+            gpu_model_expr.values.as_ref().unwrap(),
+            &vec!["A100".to_string(), "H100".to_string()]
+        );
+
+        let cuda_expr = exprs
+            .iter()
+            .find(|e| e.key == "basilica.ai/cuda-version")
+            .unwrap();
+        assert_eq!(cuda_expr.operator, "Exists");
+        assert!(cuda_expr.values.is_none());
+
+        let gpu_memory_expr = exprs
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-memory-gb")
+            .unwrap();
+        assert_eq!(gpu_memory_expr.operator, "In");
+        let memory_values = gpu_memory_expr.values.as_ref().unwrap();
+        assert!(memory_values.contains(&"40".to_string()));
+        assert!(memory_values.contains(&"256".to_string()));
+        assert_eq!(memory_values.len(), 217);
+
+        let gpu_count_expr = exprs
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-count")
+            .unwrap();
+        assert_eq!(gpu_count_expr.operator, "In");
+        let count_values = gpu_count_expr.values.as_ref().unwrap();
+        assert_eq!(
+            count_values,
+            &vec![
+                "2".to_string(),
+                "3".to_string(),
+                "4".to_string(),
+                "5".to_string(),
+                "6".to_string(),
+                "7".to_string(),
+                "8".to_string()
+            ]
+        );
+
+        let container = &pod_spec.containers[0];
+        let resources = container.resources.as_ref().unwrap();
+        let limits = resources.limits.as_ref().unwrap();
+        assert_eq!(limits.get("nvidia.com/gpu").unwrap().0, "2");
+    }
+
+    #[test]
+    fn test_render_deployment_with_fuse_storage_sidecar() {
+        use crate::crd::user_deployment::{PersistentStorageSpec, StorageBackend, StorageSpec};
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "storage-app".to_string(),
+            "nginx:latest".to_string(),
+            1,
+            80,
+            "/deployments/storage-app".to_string(),
+        )
+        .with_storage(StorageSpec {
+            ephemeral: None,
+            persistent: Some(PersistentStorageSpec {
+                enabled: true,
+                backend: StorageBackend::R2,
+                bucket: "my-bucket".to_string(),
+                region: Some("us-west-2".to_string()),
+                endpoint: Some("https://r2.example.com".to_string()),
+                credentials_secret: Some("r2-creds".to_string()),
+                sync_interval_ms: 1000,
+                cache_size_mb: 2048,
+                mount_path: "/data".to_string(),
+            }),
+        });
+
+        let deployment = render_deployment("storage-app", "u-user123", &spec).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        assert_eq!(pod_spec.containers.len(), 2);
+
+        let main_container = &pod_spec.containers[0];
+        assert_eq!(main_container.name, "storage-app");
+        let main_mounts = main_container.volume_mounts.as_ref().unwrap();
+        let data_mount = main_mounts
+            .iter()
+            .find(|m| m.name == "basilica-storage")
+            .unwrap();
+        assert_eq!(data_mount.mount_path, "/data");
+        assert_eq!(
+            data_mount.mount_propagation,
+            Some("HostToContainer".to_string())
+        );
+
+        let fuse_container = &pod_spec.containers[1];
+        assert_eq!(fuse_container.name, "fuse-storage");
+        assert_eq!(
+            fuse_container.image,
+            Some("ghcr.io/one-covenant/basilica-storage-daemon:latest".to_string())
+        );
+
+        let fuse_sc = fuse_container.security_context.as_ref().unwrap();
+        assert_eq!(fuse_sc.run_as_user, Some(0), "Should run as root for FUSE");
+        assert_eq!(fuse_sc.run_as_non_root, Some(false));
+        assert_eq!(
+            fuse_sc.privileged,
+            Some(true),
+            "Must use privileged mode to access /dev/fuse from hostPath"
+        );
+        assert_eq!(
+            fuse_sc.allow_privilege_escalation,
+            Some(true),
+            "Required with privileged mode"
+        );
+        assert_eq!(fuse_sc.read_only_root_filesystem, Some(true));
+
+        let fuse_env = fuse_container.env.as_ref().unwrap();
+        assert!(fuse_env
+            .iter()
+            .any(|e| e.name == "STORAGE_BACKEND" && e.value.as_deref() == Some("r2")));
+        assert!(fuse_env
+            .iter()
+            .any(|e| e.name == "STORAGE_BUCKET" && e.value.as_deref() == Some("my-bucket")));
+        assert!(fuse_env
+            .iter()
+            .any(|e| e.name == "MOUNT_PATH" && e.value.as_deref() == Some("/data")));
+
+        let fuse_mounts = fuse_container.volume_mounts.as_ref().unwrap();
+        let fuse_storage_mount = fuse_mounts
+            .iter()
+            .find(|m| m.name == "basilica-storage")
+            .unwrap();
+        assert_eq!(
+            fuse_storage_mount.mount_propagation,
+            Some("Bidirectional".to_string())
+        );
+
+        assert!(
+            pod_spec.init_containers.is_none(),
+            "Init containers should not be present"
+        );
+
+        let main_command = main_container.command.as_ref().unwrap();
+        assert_eq!(main_command[0], "/bin/sh");
+        assert_eq!(main_command[1], "-c");
+
+        let main_args = main_container.args.as_ref().unwrap();
+        assert_eq!(main_args.len(), 1);
+        let wrapped_script = &main_args[0];
+        assert!(
+            wrapped_script.contains("Waiting for FUSE mount at /data"),
+            "Script should contain FUSE wait logic"
+        );
+        assert!(
+            wrapped_script.contains(".fuse_ready"),
+            "Script should check for .fuse_ready marker"
+        );
+
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        assert!(volumes.iter().any(|v| v.name == "basilica-storage"));
+        assert!(volumes.iter().any(|v| v.name == "fuse-device"));
+
+        let fuse_lifecycle = fuse_container
+            .lifecycle
+            .as_ref()
+            .expect("Lifecycle hook missing");
+        let pre_stop = fuse_lifecycle
+            .pre_stop
+            .as_ref()
+            .expect("PreStop hook missing");
+        let exec = pre_stop.exec.as_ref().expect("PreStop exec missing");
+        let command = exec.command.as_ref().expect("PreStop command missing");
+        assert_eq!(command.len(), 3);
+        assert_eq!(command[0], "sh");
+        assert_eq!(command[1], "-c");
+        assert!(command[2].contains("timeout 120"));
+        assert!(command[2].contains("kill -TERM 1"));
+        assert!(command[2].contains("while kill -0 1"));
+
+        assert_eq!(
+            pod_spec.termination_grace_period_seconds,
+            Some(120),
+            "terminationGracePeriodSeconds should be 120 for storage flush"
+        );
+
+        let fuse_resources = fuse_container
+            .resources
+            .as_ref()
+            .expect("Resources missing");
+        let limits = fuse_resources.limits.as_ref().expect("Limits missing");
+        let requests = fuse_resources.requests.as_ref().expect("Requests missing");
+        assert_eq!(
+            limits.get("memory").unwrap().0,
+            "512Mi",
+            "Memory should be 512Mi for UserDeployment"
+        );
+        assert_eq!(requests.get("memory").unwrap().0, "512Mi");
+        assert_eq!(limits.get("cpu").unwrap().0, "500m");
+        assert_eq!(requests.get("cpu").unwrap().0, "500m");
+        assert_eq!(
+            limits.get("ephemeral-storage").unwrap().0,
+            "4096Mi",
+            "Should be 2x cache size"
+        );
+
+        let startup_probe = fuse_container
+            .startup_probe
+            .as_ref()
+            .expect("Startup probe missing");
+        let startup_http = startup_probe
+            .http_get
+            .as_ref()
+            .expect("Startup HTTP missing");
+        assert_eq!(startup_http.path.as_ref().unwrap(), "/ready");
+        assert_eq!(startup_probe.initial_delay_seconds, Some(2));
+        assert_eq!(startup_probe.period_seconds, Some(2));
+        assert_eq!(startup_probe.failure_threshold, Some(15));
+
+        let liveness_probe = fuse_container
+            .liveness_probe
+            .as_ref()
+            .expect("Liveness probe missing");
+        let liveness_http = liveness_probe
+            .http_get
+            .as_ref()
+            .expect("Liveness HTTP missing");
+        assert_eq!(liveness_http.path.as_ref().unwrap(), "/health");
+        assert_eq!(liveness_probe.period_seconds, Some(10));
+        assert_eq!(liveness_probe.failure_threshold, Some(3));
+
+        let readiness_probe = fuse_container
+            .readiness_probe
+            .as_ref()
+            .expect("Readiness probe missing");
+        let readiness_http = readiness_probe
+            .http_get
+            .as_ref()
+            .expect("Readiness HTTP missing");
+        assert_eq!(readiness_http.path.as_ref().unwrap(), "/ready");
+        assert_eq!(readiness_probe.period_seconds, Some(3));
+        assert_eq!(readiness_probe.failure_threshold, Some(1));
+    }
+
+    #[test]
+    fn test_render_deployment_suspended() {
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "suspended-app".to_string(),
+            "nginx:latest".to_string(),
+            3,
+            80,
+            "/deployments/suspended-app".to_string(),
+        )
+        .suspended();
+
+        let deployment = render_deployment("suspended-app", "u-user123", &spec).unwrap();
+        let deployment_spec = deployment.spec.unwrap();
+
+        assert_eq!(deployment_spec.replicas, Some(0));
+    }
+
+    #[test]
+    fn test_render_deployment_not_suspended() {
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "active-app".to_string(),
+            "nginx:latest".to_string(),
+            3,
+            80,
+            "/deployments/active-app".to_string(),
+        );
+
+        let deployment = render_deployment("active-app", "u-user123", &spec).unwrap();
+        let deployment_spec = deployment.spec.unwrap();
+
+        assert_eq!(deployment_spec.replicas, Some(3));
+    }
+
+    #[test]
+    fn test_render_deployment_gpu_without_optional_fields() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "minimal-gpu-app".to_string(),
+            "tensorflow:latest".to_string(),
+            1,
+            8080,
+            "/deployments/minimal-gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "2000m".to_string(),
+            memory: "8Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 1,
+                model: vec!["V100".to_string()],
+                min_cuda_version: None,
+                min_gpu_memory_gb: None,
+            }),
+        });
+
+        let deployment = render_deployment("minimal-gpu-app", "u-user123", &spec).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        assert!(pod_spec.affinity.is_some());
+        let affinity = pod_spec.affinity.unwrap();
+        let node_affinity = affinity.node_affinity.unwrap();
+        let node_selector = node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .unwrap();
+        let terms = node_selector.node_selector_terms;
+        let expressions = terms[0].match_expressions.as_ref().unwrap();
+
+        let gpu_model_expr = expressions
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-model")
+            .unwrap();
+        assert_eq!(
+            gpu_model_expr.values.as_ref().unwrap(),
+            &vec!["V100".to_string()]
+        );
+
+        let cuda_expr = expressions
+            .iter()
+            .find(|e| e.key == "basilica.ai/cuda-version");
+        assert!(cuda_expr.is_none());
+
+        let gpu_memory_expr = expressions
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-memory-gb");
+        assert!(gpu_memory_expr.is_none());
+
+        let gpu_count_expr = expressions
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-count")
+            .unwrap();
+        assert_eq!(gpu_count_expr.operator, "In");
+        let count_values = gpu_count_expr.values.as_ref().unwrap();
+        assert_eq!(
+            count_values,
+            &vec![
+                "1".to_string(),
+                "2".to_string(),
+                "3".to_string(),
+                "4".to_string(),
+                "5".to_string(),
+                "6".to_string(),
+                "7".to_string(),
+                "8".to_string()
+            ]
+        );
+
+        let container = &pod_spec.containers[0];
+        let resources = container.resources.as_ref().unwrap();
+        let limits = resources.limits.as_ref().unwrap();
+        assert_eq!(limits.get("nvidia.com/gpu").unwrap().0, "1");
     }
 }

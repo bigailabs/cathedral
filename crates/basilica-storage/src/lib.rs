@@ -21,6 +21,10 @@ pub mod config;
 pub mod error;
 #[cfg(feature = "fuse")]
 pub mod fuse;
+#[cfg(feature = "fuse")]
+pub mod http;
+pub mod metrics;
+pub mod quota;
 pub mod snapshot;
 
 pub use backend::{S3Backend, StorageBackend};
@@ -28,4 +32,8 @@ pub use config::StorageConfig;
 pub use error::{Result, StorageError};
 #[cfg(feature = "fuse")]
 pub use fuse::{BasilicaFS, DirtyPageTracker, PageCache, SyncWorker};
+#[cfg(feature = "fuse")]
+pub use http::HttpServer;
+pub use metrics::StorageMetrics;
+pub use quota::{QuotaError, QuotaUsage, StorageQuota};
 pub use snapshot::{SnapshotManager, SnapshotMetadata};
