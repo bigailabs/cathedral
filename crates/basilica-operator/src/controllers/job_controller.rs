@@ -146,7 +146,7 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
 }
 
 // Phase 3: Added volume support for FUSE mounts
-pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> Job {
+pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> anyhow::Result<Job> {
     let (pod_sc, container_sc) = build_security_contexts();
 
     // Track persistent storage config for volume mounts
@@ -306,6 +306,16 @@ pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> Job {
                 let (startup_probe, liveness_probe, readiness_probe) =
                     storage_utils::build_fuse_health_probes();
 
+                let resources = storage_utils::build_fuse_sidecar_resources(cache_size_mb, true)
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Invalid cache size {} for job {}: {}",
+                            cache_size_mb,
+                            name,
+                            e
+                        )
+                    })?;
+
                 let storage_sidecar = Container {
                     name: format!("basilica-storage-{}", name),
                     image: Some("ghcr.io/one-covenant/basilica-storage-daemon:latest".into()),
@@ -332,10 +342,7 @@ pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> Job {
                         },
                     ]),
                     security_context: Some(storage_utils::build_fuse_security_context()),
-                    resources: Some(
-                        storage_utils::build_fuse_sidecar_resources(cache_size_mb, true)
-                            .expect("Valid cache size"),
-                    ),
+                    resources: Some(resources),
                     lifecycle: Some(storage_utils::build_fuse_lifecycle_hook(120)),
                     startup_probe,
                     liveness_probe,
@@ -467,7 +474,7 @@ pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> Job {
         None
     };
 
-    Job {
+    Ok(Job {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             labels: Some(labels_map),
@@ -480,7 +487,7 @@ pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> Job {
             ..Default::default()
         }),
         status: None,
-    }
+    })
 }
 
 #[derive(Clone)]
@@ -560,7 +567,7 @@ impl<C: K8sClient> JobController<C> {
 
         // Ensure Job exists
         let created = if self.client.get_job(ns, &name).await.is_err() {
-            let job = render_job(ns, &name, &spec);
+            let job = render_job(ns, &name, &spec)?;
             self.client.create_job(ns, &job).await?;
             true
         } else {
@@ -688,7 +695,7 @@ mod tests {
     #[test]
     fn render_includes_resources_and_security() {
         let spec = sample_spec();
-        let job = render_job("test-namespace", "job-abc", &spec);
+        let job = render_job("test-namespace", "job-abc", &spec).unwrap();
         let tmpl = job.spec.unwrap().template;
         let pod = tmpl.spec.unwrap();
         assert_eq!(pod.restart_policy.unwrap(), "Never");
@@ -731,7 +738,7 @@ mod tests {
     #[test]
     fn render_includes_affinity_tolerations_and_ttl() {
         let spec = sample_spec();
-        let job = render_job("test-namespace", "job-abc", &spec);
+        let job = render_job("test-namespace", "job-abc", &spec).unwrap();
         let jobspec = job.spec.as_ref().unwrap();
         assert_eq!(jobspec.active_deadline_seconds, Some(3600));
         let pod = jobspec.template.spec.as_ref().unwrap();
@@ -778,7 +785,7 @@ mod tests {
             credentials_secret: None,
             enabled: true,
         });
-        let job = render_job("test-namespace", "job-artifacts", &spec);
+        let job = render_job("test-namespace", "job-artifacts", &spec).unwrap();
         let pod = job.spec.unwrap().template.spec.unwrap();
         assert!(pod
             .containers
@@ -811,7 +818,7 @@ mod tests {
                 mount_path: String::new(),
             }),
         });
-        let job = render_job("test-namespace", "storage-job", &spec);
+        let job = render_job("test-namespace", "storage-job", &spec).unwrap();
         let pod = job.spec.unwrap().template.spec.unwrap();
         assert_eq!(
             pod.containers.len(),
