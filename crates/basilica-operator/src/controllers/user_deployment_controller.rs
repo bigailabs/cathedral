@@ -317,7 +317,7 @@ fn build_fuse_sidecar(
     namespace: &str,
     instance_name: &str,
     storage: &crate::crd::user_deployment::PersistentStorageSpec,
-) -> Container {
+) -> anyhow::Result<Container> {
     let backend_str = match storage.backend {
         crate::crd::user_deployment::StorageBackend::R2 => "r2",
         crate::crd::user_deployment::StorageBackend::S3 => "s3",
@@ -452,7 +452,7 @@ fn build_fuse_sidecar(
         args.push(storage.bucket.clone());
     }
 
-    Container {
+    Ok(Container {
         name: "fuse-storage".to_string(),
         image: Some("ghcr.io/one-covenant/basilica-storage-daemon:latest".to_string()),
         command: Some(vec!["/usr/local/bin/basilica-storage-daemon".to_string()]),
@@ -478,27 +478,48 @@ fn build_fuse_sidecar(
         ]),
         security_context: Some(storage_utils::build_fuse_security_context()),
         resources: Some(
-            storage_utils::build_fuse_sidecar_resources(cache_size_mb, false)
-                .expect("Valid cache size"),
+            storage_utils::build_fuse_sidecar_resources(cache_size_mb, false).map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid cache size {} for deployment {}: {}",
+                    cache_size_mb,
+                    instance_name,
+                    e
+                )
+            })?,
         ),
         lifecycle: Some(storage_utils::build_fuse_lifecycle_hook(120)),
         startup_probe,
         liveness_probe,
         readiness_probe,
         ..Default::default()
-    }
+    })
 }
 
 fn build_node_affinity(gpu: &crate::crd::user_deployment::GpuSpec) -> Option<Affinity> {
-    let mut match_expressions = Vec::new();
+    let mut match_expressions = vec![
+        NodeSelectorRequirement {
+            key: "basilica.ai/node-role".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["miner".to_string()]),
+        },
+        NodeSelectorRequirement {
+            key: "basilica.ai/validated".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["true".to_string()]),
+        },
+        NodeSelectorRequirement {
+            key: "basilica.ai/node-group".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["user-deployments".to_string()]),
+        },
+        NodeSelectorRequirement {
+            key: "basilica.ai/gpu-model".to_string(),
+            operator: "In".to_string(),
+            values: Some(gpu.model.clone()),
+        },
+    ];
 
-    match_expressions.push(NodeSelectorRequirement {
-        key: "basilica.ai/gpu-model".to_string(),
-        operator: "In".to_string(),
-        values: Some(gpu.model.clone()),
-    });
-
-    if gpu.min_cuda_version.is_some() {
+    if let Some(_cuda_version) = &gpu.min_cuda_version {
         match_expressions.push(NodeSelectorRequirement {
             key: "basilica.ai/cuda-version".to_string(),
             operator: "Exists".to_string(),
@@ -540,7 +561,7 @@ pub fn render_deployment(
     instance_name: &str,
     namespace: &str,
     spec: &crate::crd::user_deployment::UserDeploymentSpec,
-) -> Deployment {
+) -> anyhow::Result<Deployment> {
     let (pod_sc, container_sc) = build_security_contexts();
     let (mut volumes, mut volume_mounts) = build_writable_volumes();
     let (liveness_probe, readiness_probe) = build_health_probes(spec.port, &spec.health_check);
@@ -639,7 +660,7 @@ pub fn render_deployment(
     let mut pod_annotations = BTreeMap::new();
 
     if let Some(storage) = storage_config {
-        containers.push(build_fuse_sidecar(namespace, instance_name, storage));
+        containers.push(build_fuse_sidecar(namespace, instance_name, storage)?);
         pod_annotations.insert(
             "container.apparmor.security.beta.kubernetes.io/fuse-storage".to_string(),
             "unconfined".to_string(),
@@ -676,7 +697,7 @@ pub fn render_deployment(
         spec.replicas as i32
     };
 
-    Deployment {
+    Ok(Deployment {
         metadata: ObjectMeta {
             name: Some(format!("{}-deployment", instance_name)),
             namespace: Some(namespace.to_string()),
@@ -697,7 +718,7 @@ pub fn render_deployment(
             ..Default::default()
         }),
         ..Default::default()
-    }
+    })
 }
 
 pub fn render_service(instance_name: &str, namespace: &str, port: u32) -> Service {
@@ -823,7 +844,7 @@ impl UserDeploymentController {
         let service_name = make_service_name(instance_name);
         let netpol_name = format!("{}-netpol", instance_name);
 
-        let desired_deployment = render_deployment(instance_name, ns, spec);
+        let desired_deployment = render_deployment(instance_name, ns, spec)?;
         let current_deployment = self.client.get_deployment(ns, &deployment_name).await.ok();
         if current_deployment
             .as_ref()
@@ -971,7 +992,7 @@ mod tests {
             gpus: None,
         });
 
-        let deployment = render_deployment("my-app", "u-user123", &spec);
+        let deployment = render_deployment("my-app", "u-user123", &spec).unwrap();
 
         assert_eq!(
             deployment.metadata.name,
@@ -1240,7 +1261,7 @@ mod tests {
             }),
         });
 
-        let deployment = render_deployment("gpu-app", "u-user123", &spec);
+        let deployment = render_deployment("gpu-app", "u-user123", &spec).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         assert!(pod_spec.affinity.is_some());
@@ -1341,7 +1362,7 @@ mod tests {
             }),
         });
 
-        let deployment = render_deployment("storage-app", "u-user123", &spec);
+        let deployment = render_deployment("storage-app", "u-user123", &spec).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         assert_eq!(pod_spec.containers.len(), 2);
@@ -1520,7 +1541,7 @@ mod tests {
         )
         .suspended();
 
-        let deployment = render_deployment("suspended-app", "u-user123", &spec);
+        let deployment = render_deployment("suspended-app", "u-user123", &spec).unwrap();
         let deployment_spec = deployment.spec.unwrap();
 
         assert_eq!(deployment_spec.replicas, Some(0));
@@ -1537,7 +1558,7 @@ mod tests {
             "/deployments/active-app".to_string(),
         );
 
-        let deployment = render_deployment("active-app", "u-user123", &spec);
+        let deployment = render_deployment("active-app", "u-user123", &spec).unwrap();
         let deployment_spec = deployment.spec.unwrap();
 
         assert_eq!(deployment_spec.replicas, Some(3));
@@ -1566,7 +1587,7 @@ mod tests {
             }),
         });
 
-        let deployment = render_deployment("minimal-gpu-app", "u-user123", &spec);
+        let deployment = render_deployment("minimal-gpu-app", "u-user123", &spec).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         assert!(pod_spec.affinity.is_some());
