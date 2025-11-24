@@ -1068,15 +1068,13 @@ impl SharedBasilicaFS {
         Arc::clone(&self.inner)
     }
 
+    #[allow(clippy::await_holding_lock)]
     pub async fn shutdown(&self) -> Result<(), String> {
-        let sync_worker = {
-            let fs = self.inner.lock();
-            fs.sync_worker.clone()
-        };
+        info!("Shutting down SharedBasilicaFS");
 
-        info!("Shutting down BasilicaFS");
-        sync_worker.stop().await;
-        sync_worker.flush_all().await
+        let inner = Arc::clone(&self.inner);
+        let fs = inner.lock();
+        fs.shutdown().await
     }
 }
 
