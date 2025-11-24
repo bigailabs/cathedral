@@ -275,6 +275,8 @@ struct UnifiedOfferingItem {
 /// * `api_client` - Authenticated API client
 /// * `gpu_filter` - Optional GPU type filter (e.g., "h100", "a100")
 /// * `gpu_count_filter` - Optional GPU count filter
+/// * `country_filter` - Optional country filter for location-based filtering
+/// * `min_gpu_memory_filter` - Optional minimum GPU memory filter
 ///
 /// # Returns
 /// Returns `SelectedOffering` enum containing either secure or community cloud data
@@ -282,6 +284,8 @@ pub async fn resolve_offering_unified(
     api_client: &BasilicaClient,
     gpu_filter: Option<&str>,
     gpu_count_filter: Option<u32>,
+    country_filter: Option<&str>,
+    min_gpu_memory_filter: Option<u32>,
 ) -> Result<SelectedOffering> {
     let spinner = create_spinner("Fetching available GPUs from all clouds...");
 
@@ -290,10 +294,14 @@ pub async fn resolve_offering_unified(
         api_client.list_secure_cloud_gpus(),
         api_client.list_available_nodes(Some(ListAvailableNodesQuery {
             available: Some(true),
-            min_gpu_memory: None,
+            min_gpu_memory: min_gpu_memory_filter,
             gpu_type: gpu_filter.map(|s| s.to_string()),
             min_gpu_count: gpu_count_filter,
-            location: None,
+            location: country_filter.map(|c| basilica_common::LocationProfile {
+                city: None,
+                region: None,
+                country: Some(c.to_string()),
+            }),
         }))
     );
 

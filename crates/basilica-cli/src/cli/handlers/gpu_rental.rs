@@ -854,9 +854,15 @@ pub async fn handle_up(
         ensure_ssh_key_registered(&api_client).await?;
 
         // Use unified offering resolver to select from both clouds
-        let selected = resolve_offering_unified(&api_client, None, options.gpu_count)
-            .await
-            .map_err(CliError::Internal)?;
+        let selected = resolve_offering_unified(
+            &api_client,
+            None, // gpu_filter - no direct option for this in unified path
+            options.gpu_count,
+            options.country.as_deref(),
+            None, // min_gpu_memory - not available in UpOptions
+        )
+        .await
+        .map_err(CliError::Internal)?;
 
         match selected {
             SelectedOffering::SecureCloud(offering) => {
@@ -879,13 +885,24 @@ pub async fn handle_up(
         }
     }
 
-    // Determine compute category (default to secure cloud when --compute flag is used)
+    // Determine compute category
+    // - If --compute flag is specified, use that
+    // - If target is a NodeId (without --compute), route to CommunityCloud since NodeId
+    //   is not supported for SecureCloud
+    // - Otherwise default to SecureCloud
     let compute_category = compute
         .map(|c| match c {
             ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
             ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
         })
-        .unwrap_or(ComputeCategory::SecureCloud);
+        .unwrap_or_else(|| {
+            // If target is a NodeId, route to CommunityCloud (SecureCloud doesn't support NodeId)
+            if matches!(target, Some(TargetType::NodeId(_))) {
+                ComputeCategory::CommunityCloud
+            } else {
+                ComputeCategory::SecureCloud
+            }
+        });
 
     // Branch based on compute type
     match compute_category {
