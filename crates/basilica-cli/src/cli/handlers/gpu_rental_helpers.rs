@@ -299,9 +299,6 @@ pub async fn resolve_offering_unified(
 
     complete_spinner_and_clear(spinner);
 
-    // Get markup percentage for pricing display (15% as per design decision)
-    let markup_percent = 15.0;
-
     // Build unified list
     let mut unified_items: Vec<UnifiedOfferingItem> = Vec::new();
 
@@ -327,10 +324,9 @@ pub async fn resolve_offering_unified(
                 }
             }
 
-            // Calculate total instance price with markup
-            let base_price_per_gpu = offering.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
-            let total_price =
-                base_price_per_gpu * (offering.gpu_count as f64) * (1.0 + markup_percent / 100.0);
+            // Calculate total instance price (API already includes markup)
+            let price_per_gpu = offering.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
+            let total_price = price_per_gpu * (offering.gpu_count as f64);
 
             let memory_str = if let Some(mem_per_gpu) = offering.gpu_memory_gb_per_gpu {
                 format!("{}GB", mem_per_gpu * offering.gpu_count)

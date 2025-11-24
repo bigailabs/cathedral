@@ -422,17 +422,13 @@ fn interactive_offering_selector(
         )));
     }
 
-    // Get markup percentage (using 15% as per design decision)
-    let markup_percent = 15.0;
-
-    // Format offerings for display
+    // Format offerings for display (API already includes markup in hourly_rate_per_gpu)
     let options: Vec<String> = offerings
         .iter()
         .map(|o| {
-            // Calculate total instance price (per-GPU rate × gpu_count) with markup
-            let base_price_per_gpu = o.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
-            let total_price =
-                base_price_per_gpu * (o.gpu_count as f64) * (1.0 + markup_percent / 100.0);
+            // Calculate total instance price (per-GPU rate × gpu_count)
+            let price_per_gpu = o.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
+            let total_price = price_per_gpu * (o.gpu_count as f64);
 
             let memory_str = if let Some(mem_per_gpu) = o.gpu_memory_gb_per_gpu {
                 format!("{}GB", mem_per_gpu * o.gpu_count)
