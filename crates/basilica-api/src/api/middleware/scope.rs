@@ -93,6 +93,9 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, p) if p.starts_with("/rentals/") && p.ends_with("/logs") => {
             Some("rentals:logs".to_string())
         }
+        (&Method::POST, p) if p.starts_with("/rentals/") && p.ends_with("/restart") => {
+            Some("rentals:restart".to_string())
+        }
         (&Method::GET, p) if p.starts_with("/rentals/") => Some("rentals:view".to_string()),
 
         // Rental endpoints (v2)

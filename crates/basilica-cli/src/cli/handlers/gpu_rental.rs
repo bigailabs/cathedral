@@ -1,7 +1,9 @@
 //! GPU rental command handlers
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
-use crate::cli::handlers::gpu_rental_helpers::resolve_target_rental_unified;
+use crate::cli::handlers::gpu_rental_helpers::{
+    resolve_offering_unified, resolve_target_rental_unified, SelectedOffering,
+};
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
@@ -462,6 +464,331 @@ fn interactive_offering_selector(
     Ok(offerings[selection].clone())
 }
 
+/// Handle secure cloud rental with a pre-selected offering (from unified selector)
+async fn handle_secure_cloud_rental_with_offering(
+    api_client: basilica_sdk::BasilicaClient,
+    offering: basilica_aggregator::models::GpuOffering,
+    options: UpOptions,
+    config: &CliConfig,
+) -> Result<(), CliError> {
+    // Get SSH key ID (SSH key registration already done in handle_up)
+    let ssh_key_id = api_client
+        .get_ssh_key()
+        .await
+        .map_err(|e| CliError::Internal(eyre!(e)))?
+        .ok_or_else(|| {
+            CliError::Internal(
+                eyre!("No SSH key registered with Basilica")
+                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+            )
+        })?
+        .id;
+
+    // Start rental
+    let spinner = create_spinner("Starting rental...");
+
+    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
+
+    // Parse port mappings if provided
+    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
+        basilica_common::utils::parse_port_mappings(&options.ports)
+            .map_err(|e| {
+                complete_spinner_error(spinner.clone(), "Invalid port mapping");
+                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
+            })?
+            .into_iter()
+            .map(|pm| PortMappingRequest {
+                container_port: pm.container_port,
+                host_port: pm.host_port,
+                protocol: pm.protocol,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Parse environment variables if provided
+    let environment = if !options.env.is_empty() {
+        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Invalid environment variables");
+            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
+        })?
+    } else {
+        HashMap::new()
+    };
+
+    let request = StartSecureCloudRentalRequest {
+        offering_id: offering.id.clone(),
+        ssh_public_key_id: ssh_key_id,
+        container_image: options.image.clone(),
+        environment,
+        ports,
+    };
+
+    let response = api_client
+        .start_secure_cloud_rental(request)
+        .await
+        .map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Failed to start rental");
+            CliError::Api(e)
+        })?;
+    complete_spinner_and_clear(spinner);
+
+    print_success(&format!(
+        "Successfully started secure cloud rental {}",
+        response.rental_id
+    ));
+
+    // Handle SSH based on options
+    if options.no_ssh {
+        return Ok(());
+    }
+
+    if options.detach {
+        if let Some(ssh_cmd) = &response.ssh_command {
+            display_secure_cloud_reconnection_instructions(
+                &response.rental_id,
+                ssh_cmd,
+                config,
+                "To connect to this rental:",
+            )?;
+        } else {
+            println!();
+            print_info("Instance is starting up. Use 'basilica ps' to check status.");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+        return Ok(());
+    }
+
+    // Wait for rental to become active
+    print_info("Waiting for rental to become active...");
+    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
+
+    if let Some(rental) = rental {
+        if let Some(ssh_cmd) = &rental.ssh_command {
+            print_info("Connecting to rental...");
+            let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
+            let ssh_access = SshAccess {
+                host,
+                port,
+                username,
+            };
+
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
+
+            let ssh_client = SshClient::new(&config.ssh)?;
+            match retry_ssh_connection(
+                &ssh_client,
+                &ssh_access,
+                Some(private_key_path),
+                Duration::from_secs(120),
+            )
+            .await
+            {
+                Ok(_) => {
+                    print_info("SSH session closed");
+                    display_secure_cloud_reconnection_instructions(
+                        &response.rental_id,
+                        ssh_cmd,
+                        config,
+                        "To reconnect to this rental:",
+                    )?;
+                }
+                Err(e) => {
+                    print_error(&format!("SSH connection failed: {}", e));
+                    display_secure_cloud_reconnection_instructions(
+                        &response.rental_id,
+                        ssh_cmd,
+                        config,
+                        "Try manually connecting using:",
+                    )?;
+                }
+            }
+        } else {
+            println!();
+            print_info("Rental is active but SSH is not yet available");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+    } else {
+        println!();
+        print_info("Rental is taking longer than expected to become active");
+        print_info("Check status with: basilica ps");
+        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+    }
+
+    Ok(())
+}
+
+/// Handle community cloud rental with a pre-selected node (from unified selector)
+async fn handle_community_cloud_rental_with_selection(
+    api_client: basilica_sdk::BasilicaClient,
+    node_selection: NodeSelection,
+    options: UpOptions,
+    config: &CliConfig,
+) -> Result<(), CliError> {
+    let spinner = create_spinner("Preparing rental request...");
+
+    // Build rental request
+    let container_image = options.image.unwrap_or_else(|| config.image.name.clone());
+
+    let env_vars = parse_env_vars(&options.env)
+        .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
+        .inspect_err(|_e| {
+            complete_spinner_error(spinner.clone(), "Environment variable parsing failed");
+        })?;
+
+    let port_mappings: Vec<basilica_sdk::types::PortMappingRequest> =
+        parse_port_mappings(&options.ports)
+            .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
+            .inspect_err(|_e| {
+                complete_spinner_error(spinner.clone(), "Port mapping parsing failed");
+            })?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+
+    let command = if options.command.is_empty() {
+        vec!["/bin/bash".to_string()]
+    } else {
+        options.command
+    };
+
+    let request = StartRentalApiRequest {
+        node_selection,
+        container_image,
+        environment: env_vars,
+        ports: port_mappings,
+        resources: ResourceRequirementsRequest {
+            cpu_cores: options.cpu_cores.unwrap_or(0.0),
+            memory_mb: options.memory_mb.unwrap_or(0),
+            storage_mb: options.storage_mb.unwrap_or(0),
+            gpu_count: options.gpu_count.unwrap_or(0),
+            gpu_types: vec![],
+        },
+        command,
+        volumes: vec![],
+        no_ssh: options.no_ssh,
+    };
+
+    spinner.set_message("Creating rental...");
+    let response = api_client.start_rental(request).await.map_err(|e| {
+        complete_spinner_error(spinner.clone(), "Failed to create rental");
+        CliError::Internal(
+            eyre!(e)
+                .note("The selected node is experiencing issues.")
+                .suggestion("Try running 'basilica up' again to select a different node."),
+        )
+    })?;
+
+    complete_spinner_and_clear(spinner);
+
+    print_success(&format!(
+        "Successfully started community cloud rental {}",
+        response.rental_id
+    ));
+
+    // Handle SSH based on options
+    if options.no_ssh {
+        return Ok(());
+    }
+
+    let ssh_creds = match response.ssh_credentials {
+        Some(ref creds) => creds,
+        None => {
+            print_info("SSH access not available (unexpected error)");
+            return Ok(());
+        }
+    };
+
+    if options.detach {
+        display_ssh_connection_instructions(
+            &response.rental_id,
+            ssh_creds,
+            config,
+            "SSH connection options:",
+        )?;
+    } else {
+        print_info("Waiting for rental to become active...");
+        let rental_active = poll_rental_status(&response.rental_id, &api_client).await?;
+
+        if rental_active {
+            print_info("Connecting to rental...");
+            let (host, port, username) = parse_ssh_credentials(ssh_creds)?;
+            let ssh_access = SshAccess {
+                host,
+                port,
+                username,
+            };
+
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
+
+            let ssh_client = SshClient::new(&config.ssh)?;
+            match retry_ssh_connection(
+                &ssh_client,
+                &ssh_access,
+                Some(private_key_path),
+                Duration::from_secs(120),
+            )
+            .await
+            {
+                Ok(_) => {
+                    print_info("SSH session closed");
+                    display_ssh_connection_instructions(
+                        &response.rental_id,
+                        ssh_creds,
+                        config,
+                        "To reconnect to this rental:",
+                    )?;
+                }
+                Err(e) => {
+                    print_error(&format!("SSH connection failed: {}", e));
+                    display_ssh_connection_instructions(
+                        &response.rental_id,
+                        ssh_creds,
+                        config,
+                        "Try manually connecting using:",
+                    )?;
+                }
+            }
+        } else {
+            println!();
+            print_info("Rental is taking longer than expected to become active");
+            print_info("Check status with: basilica ps");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle secure cloud rental workflow
 async fn handle_secure_cloud_rental(
     api_client: basilica_sdk::BasilicaClient,
@@ -470,7 +797,7 @@ async fn handle_secure_cloud_rental(
     config: &CliConfig,
 ) -> Result<(), CliError> {
     // Step 1: Ensure SSH key registered
-    let ssh_key_id = ensure_ssh_key_registered(&api_client).await?;
+    ensure_ssh_key_registered(&api_client).await?;
 
     // Step 2: List offerings
     let spinner = create_spinner("Fetching available GPUs...");
@@ -512,171 +839,8 @@ async fn handle_secure_cloud_rental(
     // Step 4: Interactive selector
     let selected = interactive_offering_selector(&filtered_offerings)?;
 
-    // Step 5: Start rental
-    let spinner = create_spinner("Starting rental...");
-
-    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
-
-    // Parse port mappings if provided
-    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
-        basilica_common::utils::parse_port_mappings(&options.ports)
-            .map_err(|e| {
-                complete_spinner_error(spinner.clone(), "Invalid port mapping");
-                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
-            })?
-            .into_iter()
-            .map(|pm| PortMappingRequest {
-                container_port: pm.container_port,
-                host_port: pm.host_port,
-                protocol: pm.protocol,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Parse environment variables if provided
-    let environment = if !options.env.is_empty() {
-        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Invalid environment variables");
-            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
-        })?
-    } else {
-        HashMap::new()
-    };
-
-    let request = StartSecureCloudRentalRequest {
-        offering_id: selected.id.clone(),
-        ssh_public_key_id: ssh_key_id,
-        container_image: options.image.clone(),
-        environment,
-        ports,
-    };
-
-    let response = api_client
-        .start_secure_cloud_rental(request)
-        .await
-        .map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Failed to start rental");
-            CliError::Api(e)
-        })?;
-    complete_spinner_and_clear(spinner);
-
-    print_success(&format!(
-        "Successfully started secure cloud rental {}",
-        response.rental_id
-    ));
-
-    // Step 6: Check for --detach or --no-ssh flags
-    if options.no_ssh {
-        // SSH disabled entirely
-        return Ok(());
-    }
-
-    if options.detach {
-        // Detached mode - show connection instructions and exit
-        if let Some(ssh_cmd) = &response.ssh_command {
-            display_secure_cloud_reconnection_instructions(
-                &response.rental_id,
-                ssh_cmd,
-                config,
-                "To connect to this rental:",
-            )?;
-        } else {
-            println!();
-            print_info("Instance is starting up. Use 'basilica ps' to check status.");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-        }
-        return Ok(());
-    }
-
-    // Step 7: Wait for rental to become active
-    print_info("Waiting for rental to become active...");
-
-    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
-
-    if let Some(rental) = rental {
-        // Rental is running, connect via SSH
-        if let Some(ssh_cmd) = &rental.ssh_command {
-            print_info("Connecting to rental...");
-
-            // Parse SSH credentials
-            let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
-            let ssh_access = SshAccess {
-                host,
-                port,
-                username,
-            };
-
-            // Fetch API-registered SSH key and find matching private key
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
-                                .note("SSH keys are required to connect to rentals"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
-
-            debug!(
-                "Using private key for secure cloud auto-SSH: {}",
-                private_key_path.display()
-            );
-
-            // Establish SSH session with retry logic
-            let ssh_client = SshClient::new(&config.ssh)?;
-            match retry_ssh_connection(
-                &ssh_client,
-                &ssh_access,
-                Some(private_key_path),
-                Duration::from_secs(120),
-            )
-            .await
-            {
-                Ok(_) => {
-                    // SSH session ended normally
-                    print_info("SSH session closed");
-                    display_secure_cloud_reconnection_instructions(
-                        &response.rental_id,
-                        ssh_cmd,
-                        config,
-                        "To reconnect to this rental:",
-                    )?;
-                }
-                Err(e) => {
-                    // SSH connection failed after retries
-                    print_error(&format!("SSH connection failed: {}", e));
-                    display_secure_cloud_reconnection_instructions(
-                        &response.rental_id,
-                        ssh_cmd,
-                        config,
-                        "Try manually connecting using:",
-                    )?;
-                }
-            }
-        } else {
-            // No SSH command available yet
-            println!();
-            print_info("Rental is active but SSH is not yet available");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-        }
-    } else {
-        // Timeout - rental didn't become active in time
-        println!();
-        print_info("Rental is taking longer than expected to become active");
-        print_info("Check status with: basilica ps");
-        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-    }
-
-    Ok(())
+    // Step 5: Delegate to shared handler
+    handle_secure_cloud_rental_with_offering(api_client, selected, options, config).await
 }
 
 /// Handle the `up` command - provision GPU instances
@@ -688,7 +852,38 @@ pub async fn handle_up(
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    // Determine compute category (default to secure cloud)
+    // If no compute flag specified AND no target specified, use unified selection from both clouds
+    if compute.is_none() && target.is_none() {
+        // Ensure SSH key is registered before proceeding (needed for both clouds)
+        ensure_ssh_key_registered(&api_client).await?;
+
+        // Use unified offering resolver to select from both clouds
+        let selected = resolve_offering_unified(&api_client, None, options.gpu_count)
+            .await
+            .map_err(CliError::Internal)?;
+
+        match selected {
+            SelectedOffering::SecureCloud(offering) => {
+                // Start secure cloud rental with selected offering
+                return handle_secure_cloud_rental_with_offering(
+                    api_client, offering, options, config,
+                )
+                .await;
+            }
+            SelectedOffering::CommunityCloud(node_selection) => {
+                // Start community cloud rental with selected node
+                return handle_community_cloud_rental_with_selection(
+                    api_client,
+                    node_selection,
+                    options,
+                    config,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Determine compute category (default to secure cloud when --compute flag is used)
     let compute_category = compute
         .map(|c| match c {
             ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
