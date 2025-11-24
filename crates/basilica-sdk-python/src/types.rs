@@ -822,7 +822,7 @@ pub struct PersistentStorageSpec {
 #[pymethods]
 impl PersistentStorageSpec {
     #[new]
-    #[pyo3(signature = (enabled, backend, bucket, region=None, endpoint=None, credentials_secret=None, sync_interval_ms=1000, cache_size_mb=1024, mount_path="/data".to_string()))]
+    #[pyo3(signature = (enabled, backend, bucket, region=None, endpoint=None, credentials_secret=None, sync_interval_ms=1000, cache_size_mb=1024, mount_path="/data"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         enabled: bool,
@@ -833,7 +833,7 @@ impl PersistentStorageSpec {
         credentials_secret: Option<String>,
         sync_interval_ms: u64,
         cache_size_mb: usize,
-        mount_path: String,
+        mount_path: &str,
     ) -> Self {
         Self {
             enabled,
@@ -844,7 +844,7 @@ impl PersistentStorageSpec {
             credentials_secret,
             sync_interval_ms,
             cache_size_mb,
-            mount_path,
+            mount_path: mount_path.to_string(),
         }
     }
 }
