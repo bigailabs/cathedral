@@ -96,3 +96,29 @@ resource "aws_secretsmanager_secret_version" "k3s_ssh_key" {
     ignore_changes = [secret_string]
   }
 }
+
+# =============================================================================
+# GPU AGGREGATOR SECRETS
+# =============================================================================
+
+# Hyperstack API key for GPU provider access
+resource "aws_secretsmanager_secret" "hyperstack_api_key" {
+  name                    = "${local.name_prefix}-hyperstack-api-key"
+  description             = "API key for Hyperstack GPU provider"
+  recovery_window_in_days = 7
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-hyperstack-api-key"
+  })
+}
+
+# Store the Hyperstack API key (only if provided)
+resource "aws_secretsmanager_secret_version" "hyperstack_api_key" {
+  count         = var.hyperstack_api_key != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.hyperstack_api_key.id
+  secret_string = var.hyperstack_api_key
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

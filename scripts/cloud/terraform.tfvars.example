@@ -98,3 +98,10 @@ cloudflare_api_token     = "your-cloudflare-api-token"
 cloudflare_zone_id       = "your-cloudflare-zone-id"
 cloudflare_domain        = "deployments.basilica.ai"
 deployments_alb_dns_name = "your-deployments-alb-dns-name"
+
+# =============================================================================
+# GPU AGGREGATOR CONFIGURATION (Secure Cloud)
+# =============================================================================
+# API key for Hyperstack GPU provider
+# Get your API key from: https://infrahub-api.nexgencloud.com/
+hyperstack_api_key = "your-hyperstack-api-key"

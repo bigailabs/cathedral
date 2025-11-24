@@ -180,14 +180,13 @@ impl AggregatorService {
         Ok(supported_offerings)
     }
 
-    /// Get health status for all providers
+    /// Get health status for all providers (performs actual health checks)
     pub async fn get_provider_health(&self) -> Result<Vec<ProviderHealth>> {
         let mut health_statuses = Vec::new();
 
-        // Get health for all enabled providers
+        // Perform actual health check for each enabled provider
         for provider in &self.providers {
-            let provider_id = provider.provider_id();
-            let health = self.db.get_provider_health(provider_id).await?;
+            let health = provider.health_check().await?;
             health_statuses.push(health);
         }
 
