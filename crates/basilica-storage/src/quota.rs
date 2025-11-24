@@ -40,15 +40,21 @@ pub struct StorageQuota {
 impl StorageQuota {
     /// Create a new storage quota with specified limits
     pub fn new(max_size_bytes: u64, max_files: u64, max_operations_per_second: u32) -> Self {
+        let effective_ops = if max_operations_per_second == 0 {
+            100
+        } else {
+            max_operations_per_second
+        };
+
         let quota = Quota::per_second(
-            NonZeroU32::new(max_operations_per_second).unwrap_or(NonZeroU32::new(100).unwrap()),
+            NonZeroU32::new(effective_ops).expect("effective_ops guaranteed non-zero"),
         );
         let rate_limiter = Arc::new(RateLimiter::direct(quota));
 
         Self {
             max_size_bytes,
             max_files,
-            max_operations_per_second,
+            max_operations_per_second: effective_ops,
             current_size: Arc::new(AtomicU64::new(0)),
             current_files: Arc::new(AtomicU64::new(0)),
             rate_limiter,
