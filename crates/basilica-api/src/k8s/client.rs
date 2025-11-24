@@ -614,6 +614,7 @@ impl ApiK8sClient for K8sClient {
             }
             Err(kube::Error::Api(ae)) if ae.code == 409 => {
                 if name.starts_with("u-") {
+                    helpers::create_reference_grant_for_namespace(&self.client, name).await?;
                     helpers::copy_default_storage_secret(&self.client, name).await?;
                 }
                 Ok(())
@@ -785,11 +786,22 @@ impl ApiK8sClient for K8sClient {
                     crate::api::routes::deployments::types::StorageBackend::GCS => "gcs",
                 };
 
-                let is_custom_storage = persistent.credentials_secret.is_some()
-                    && persistent
-                        .credentials_secret
-                        .as_ref()
-                        .is_some_and(|s| !s.is_empty());
+                let is_custom_storage = persistent
+                    .credentials_secret
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty());
+
+                let default_secret_name = match persistent.backend {
+                    crate::api::routes::deployments::types::StorageBackend::R2 => {
+                        "basilica-r2-credentials"
+                    }
+                    crate::api::routes::deployments::types::StorageBackend::S3 => {
+                        "basilica-s3-credentials"
+                    }
+                    crate::api::routes::deployments::types::StorageBackend::GCS => {
+                        "basilica-gcs-credentials"
+                    }
+                };
 
                 let (bucket, credentials_secret) = if is_custom_storage {
                     (
@@ -797,7 +809,17 @@ impl ApiK8sClient for K8sClient {
                         persistent.credentials_secret.clone(),
                     )
                 } else {
-                    (String::new(), Some("basilica-r2-credentials".to_string()))
+                    if persistent.bucket.is_empty() {
+                        return Err(ApiError::BadRequest {
+                            message:
+                                "bucket name is required when using default storage credentials"
+                                    .to_string(),
+                        });
+                    }
+                    (
+                        persistent.bucket.clone(),
+                        Some(default_secret_name.to_string()),
+                    )
                 };
 
                 let mut persistent_obj = json!({
