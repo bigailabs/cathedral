@@ -17,6 +17,17 @@ impl<C: K8sClient> NodeProfileController<C> {
         Self { client }
     }
 
+    fn build_validation_labels() -> std::collections::BTreeMap<String, String> {
+        let mut labels = std::collections::BTreeMap::new();
+        labels.insert("basilica.ai/validated".to_string(), "true".to_string());
+        labels.insert("basilica.ai/node-role".to_string(), "miner".to_string());
+        labels.insert(
+            "basilica.ai/node-group".to_string(),
+            "user-deployments".to_string(),
+        );
+        labels
+    }
+
     fn validate_node_labels(labels: &std::collections::BTreeMap<String, String>) -> Result<()> {
         let node_type = labels
             .get("basilica.ai/node-type")
@@ -249,7 +260,18 @@ impl<C: K8sClient> NodeProfileController<C> {
                 }
             })?;
 
-        info!(node = %node_name, "NodeProfile created successfully, removing unvalidated taint");
+        info!(node = %node_name, "NodeProfile created successfully, applying validation labels");
+
+        let validation_labels = Self::build_validation_labels();
+        self.client
+            .add_node_labels(node_name, &validation_labels)
+            .await
+            .map_err(|e| {
+                error!(node = %node_name, error = %e, "Failed to apply validation labels");
+                e
+            })?;
+
+        info!(node = %node_name, "Validation labels applied, removing unvalidated taint");
 
         self.client
             .remove_node_taint(node_name, "basilica.ai/unvalidated")
@@ -307,7 +329,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[tokio::test]
-    async fn node_with_datacenter_label_creates_profile() {
+    async fn node_with_datacenter_label_creates_profile_and_applies_labels() {
         let client = MockK8sClient::default();
         let mut labels = BTreeMap::new();
         labels.insert("basilica.ai/node-type".to_string(), "gpu".to_string());
@@ -360,9 +382,13 @@ mod tests {
             ..Default::default()
         };
 
+        // Add node to mock so add_node_labels can find it
+        client.add_node("test-node").await;
+
         let ctrl = NodeProfileController::new(client.clone());
         ctrl.reconcile(&node).await.unwrap();
 
+        // Verify NodeProfile was created
         let profile = client
             .get_node_profile("basilica-system", "node-1")
             .await
@@ -375,6 +401,22 @@ mod tests {
         assert_eq!(profile.spec.cpu.cores, 32);
         assert_eq!(profile.spec.memory_gb, 256);
         assert_eq!(profile.spec.storage_gb, 2000);
+
+        // Verify validation labels were applied to node
+        let updated_node = client.get_node("test-node").await.unwrap();
+        let node_labels = updated_node.metadata.labels.unwrap();
+        assert_eq!(
+            node_labels.get("basilica.ai/validated"),
+            Some(&"true".to_string())
+        );
+        assert_eq!(
+            node_labels.get("basilica.ai/node-role"),
+            Some(&"miner".to_string())
+        );
+        assert_eq!(
+            node_labels.get("basilica.ai/node-group"),
+            Some(&"user-deployments".to_string())
+        );
     }
 
     #[tokio::test]

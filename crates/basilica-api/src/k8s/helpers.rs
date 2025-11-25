@@ -309,6 +309,7 @@ pub fn build_node_labels(params: NodeLabelParams) -> std::collections::HashMap<S
         "basilica.ai/cuda-version".to_string(),
         params.cuda_version.to_string(),
     );
+    labels.insert("basilica.ai/workloads-only".to_string(), "true".to_string());
     labels
 }
 

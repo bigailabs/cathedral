@@ -107,6 +107,11 @@ pub trait K8sClient: Send + Sync {
     async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>>;
     async fn delete_node(&self, name: &str) -> Result<()>;
     async fn remove_node_taint(&self, name: &str, taint_key: &str) -> Result<()>;
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()>;
     /// Attempt to evict a pod using the Eviction subresource. Returns Ok(true)
     /// when accepted, Ok(false) when blocked (e.g., by PDB), or Err on errors.
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool>;
@@ -586,6 +591,26 @@ impl K8sClient for MockK8sClient {
             }
         }
         Ok(())
+    }
+
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        let mut nodes = self.nodes.write().await;
+        if let Some(node) = nodes.get_mut(name) {
+            let node_labels = node
+                .metadata
+                .labels
+                .get_or_insert_with(std::collections::BTreeMap::new);
+            for (k, v) in labels {
+                node_labels.insert(k.clone(), v.clone());
+            }
+            Ok(())
+        } else {
+            Err(anyhow!("Node {} not found", name))
+        }
     }
 
     async fn evict_pod(&self, ns: &str, name: &str, _grace_seconds: Option<i64>) -> Result<bool> {
@@ -1139,6 +1164,31 @@ impl K8sClient for KubeClient {
         let patch = serde_json::json!({
             "spec": {
                 "taints": current_taints
+            }
+        });
+
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
+
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+        let api: Api<Node> = Api::all(self.client.clone());
+
+        let labels_json: serde_json::Map<String, serde_json::Value> = labels
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+
+        let patch = serde_json::json!({
+            "metadata": {
+                "labels": labels_json
             }
         });
 
