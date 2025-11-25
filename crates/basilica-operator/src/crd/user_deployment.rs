@@ -38,10 +38,12 @@ pub struct UserDeploymentSpec {
     #[serde(default = "default_enable_billing")]
     pub enable_billing: bool,
     #[serde(default)]
+    #[schemars(length(max = 255))]
     pub queue_name: Option<String>,
     #[serde(default)]
     pub suspended: bool,
     #[serde(default)]
+    #[schemars(length(max = 50))]
     pub priority: Option<String>,
 }
 

@@ -647,6 +647,61 @@ spec:
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
+  name: basilicaqueues.basilica.ai
+spec:
+  group: basilica.ai
+  names:
+    categories: []
+    kind: BasilicaQueue
+    plural: basilicaqueues
+    shortNames: []
+    singular: basilicaqueue
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for BasilicaQueueSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              concurrency:
+                format: uint32
+                minimum: 0.0
+                type: integer
+              gpu_limits:
+                nullable: true
+                properties:
+                  models:
+                    additionalProperties:
+                      format: uint32
+                      minimum: 0.0
+                      type: integer
+                    nullable: true
+                    type: object
+                  total:
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                required:
+                - total
+                type: object
+            required:
+            - concurrency
+            type: object
+        required:
+        - spec
+        title: BasilicaQueue
+        type: object
+    served: true
+    storage: true
+    subresources: {}
+
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
   name: userdeployments.basilica.ai
 spec:
   group: basilica.ai
@@ -658,7 +713,16 @@ spec:
     singular: userdeployment
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .status.state
+      name: State
+      type: string
+    - jsonPath: .status.replicasReady
+      name: Replicas
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1
     schema:
       openAPIV3Schema:
@@ -676,6 +740,9 @@ spec:
                 items:
                   type: string
                 type: array
+              enableBilling:
+                default: true
+                type: boolean
               env:
                 default: []
                 items:
@@ -689,129 +756,6 @@ spec:
                   - value
                   type: object
                 type: array
-              image:
-                type: string
-              instanceName:
-                type: string
-              pathPrefix:
-                type: string
-              port:
-                format: uint32
-                minimum: 0.0
-                type: integer
-              replicas:
-                format: uint32
-                minimum: 0.0
-                type: integer
-              resources:
-                nullable: true
-                properties:
-                  cpu:
-                    type: string
-                  memory:
-                    type: string
-                  gpus:
-                    nullable: true
-                    properties:
-                      count:
-                        format: uint32
-                        maximum: 8.0
-                        minimum: 1.0
-                        type: integer
-                      model:
-                        items:
-                          type: string
-                        maxItems: 10
-                        minItems: 1
-                        type: array
-                      minCudaVersion:
-                        nullable: true
-                        pattern: ^\d+\.\d+$
-                        type: string
-                      minGpuMemoryGb:
-                        format: uint32
-                        maximum: 256.0
-                        minimum: 1.0
-                        nullable: true
-                        type: integer
-                    required:
-                    - count
-                    - model
-                    type: object
-                required:
-                - cpu
-                - memory
-                type: object
-              ttlSeconds:
-                format: uint32
-                minimum: 0.0
-                nullable: true
-                type: integer
-              userId:
-                type: string
-              storage:
-                nullable: true
-                properties:
-                  ephemeral:
-                    nullable: true
-                    type: string
-                  persistent:
-                    nullable: true
-                    properties:
-                      enabled:
-                        type: boolean
-                      backend:
-                        enum:
-                        - r2
-                        - s3
-                        - gcs
-                        type: string
-                      bucket:
-                        type: string
-                      region:
-                        nullable: true
-                        type: string
-                      endpoint:
-                        nullable: true
-                        type: string
-                      credentialsSecret:
-                        nullable: true
-                        type: string
-                      syncIntervalMs:
-                        default: 1000
-                        format: uint64
-                        maximum: 60000.0
-                        minimum: 100.0
-                        type: integer
-                      cacheSizeMb:
-                        default: 2048
-                        format: uint
-                        maximum: 16384.0
-                        minimum: 512.0
-                        type: integer
-                      mountPath:
-                        default: /data
-                        type: string
-                    required:
-                    - enabled
-                    - backend
-                    - bucket
-                    type: object
-                type: object
-              enableBilling:
-                default: true
-                type: boolean
-              queueName:
-                maxLength: 255
-                nullable: true
-                type: string
-              suspended:
-                default: false
-                type: boolean
-              priority:
-                maxLength: 50
-                nullable: true
-                type: string
               healthCheck:
                 nullable: true
                 properties:
@@ -872,6 +816,126 @@ spec:
                     - path
                     type: object
                 type: object
+              image:
+                type: string
+              instanceName:
+                type: string
+              pathPrefix:
+                type: string
+              port:
+                format: uint32
+                minimum: 0.0
+                type: integer
+              priority:
+                maxLength: 50
+                nullable: true
+                type: string
+              queueName:
+                maxLength: 255
+                nullable: true
+                type: string
+              replicas:
+                format: uint32
+                minimum: 0.0
+                type: integer
+              resources:
+                nullable: true
+                properties:
+                  cpu:
+                    type: string
+                  gpus:
+                    nullable: true
+                    properties:
+                      count:
+                        format: uint32
+                        maximum: 8.0
+                        minimum: 1.0
+                        type: integer
+                      minCudaVersion:
+                        nullable: true
+                        pattern: ^\d+\.\d+$
+                        type: string
+                      minGpuMemoryGb:
+                        format: uint32
+                        maximum: 256.0
+                        minimum: 1.0
+                        nullable: true
+                        type: integer
+                      model:
+                        items:
+                          type: string
+                        maxItems: 10
+                        minItems: 1
+                        type: array
+                    required:
+                    - count
+                    - model
+                    type: object
+                  memory:
+                    type: string
+                required:
+                - cpu
+                - memory
+                type: object
+              storage:
+                nullable: true
+                properties:
+                  ephemeral:
+                    nullable: true
+                    type: string
+                  persistent:
+                    nullable: true
+                    properties:
+                      backend:
+                        enum:
+                        - r2
+                        - s3
+                        - gcs
+                        type: string
+                      bucket:
+                        type: string
+                      cacheSizeMb:
+                        default: 2048
+                        format: uint
+                        maximum: 16384.0
+                        minimum: 512.0
+                        type: integer
+                      credentialsSecret:
+                        nullable: true
+                        type: string
+                      enabled:
+                        type: boolean
+                      endpoint:
+                        nullable: true
+                        type: string
+                      mountPath:
+                        default: /data
+                        type: string
+                      region:
+                        nullable: true
+                        type: string
+                      syncIntervalMs:
+                        default: 1000
+                        format: uint64
+                        maximum: 60000.0
+                        minimum: 100.0
+                        type: integer
+                    required:
+                    - backend
+                    - bucket
+                    - enabled
+                    type: object
+                type: object
+              suspended:
+                default: false
+                type: boolean
+              ttlSeconds:
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              userId:
+                type: string
             required:
             - image
             - instanceName
@@ -898,6 +962,14 @@ spec:
               publicUrl:
                 default: ''
                 type: string
+              queuePosition:
+                format: uint32
+                minimum: 0.0
+                nullable: true
+                type: integer
+              queued:
+                default: false
+                type: boolean
               replicasDesired:
                 default: 0
                 format: uint32
@@ -908,6 +980,28 @@ spec:
                 format: uint32
                 minimum: 0.0
                 type: integer
+              resourceUsage:
+                nullable: true
+                properties:
+                  cpuUsage:
+                    format: double
+                    type: number
+                  gpuUsage:
+                    format: double
+                    nullable: true
+                    type: number
+                  memoryUsage:
+                    format: double
+                    type: number
+                  storageUsed:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                required:
+                - cpuUsage
+                - memoryUsage
+                type: object
               serviceName:
                 default: ''
                 type: string
@@ -920,36 +1014,6 @@ spec:
               suspended:
                 default: false
                 type: boolean
-              queued:
-                default: false
-                type: boolean
-              queuePosition:
-                format: uint32
-                minimum: 0.0
-                nullable: true
-                type: integer
-              resourceUsage:
-                nullable: true
-                properties:
-                  cpuUsage:
-                    format: double
-                    type: number
-                  memoryUsage:
-                    format: double
-                    type: number
-                  gpuUsage:
-                    format: double
-                    nullable: true
-                    type: number
-                  storageUsed:
-                    format: uint64
-                    minimum: 0.0
-                    nullable: true
-                    type: integer
-                required:
-                - cpuUsage
-                - memoryUsage
-                type: object
             type: object
         required:
         - spec
