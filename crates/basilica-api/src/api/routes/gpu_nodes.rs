@@ -285,5 +285,9 @@ mod tests {
             labels.get("basilica.ai/gpu-memory-gb"),
             Some(&"80".to_string())
         );
+        assert_eq!(
+            labels.get("basilica.ai/workloads-only"),
+            Some(&"true".to_string())
+        );
     }
 }
