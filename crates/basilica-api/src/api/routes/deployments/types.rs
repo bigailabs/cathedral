@@ -530,16 +530,37 @@ pub fn generate_path_prefix(instance_name: &str) -> String {
     format!("/deployments/{}", instance_name)
 }
 
-pub fn resolve_instance_name(provided: Option<String>) -> String {
-    match provided {
-        Some(name) if !name.is_empty() => {
-            tracing::warn!(
-                provided_name = %name,
-                "User-provided instance_name is deprecated and will be ignored. Server will auto-generate UUID."
-            );
-            generate_instance_name()
-        }
-        _ => generate_instance_name(),
+/// Sanitize instance name for use as a Kubernetes resource identifier.
+/// If no name is provided or sanitization results in empty string, generates a random UUID.
+#[must_use]
+pub fn sanitize_instance_name(provided: Option<String>) -> String {
+    let name = match provided {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => return generate_instance_name(),
+    };
+
+    // Sanitize: lowercase, keep alphanumeric + hyphens, max 63 chars
+    let sanitized: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(63)
+        .collect();
+
+    // Remove leading/trailing hyphens
+    let result = sanitized.trim_matches('-');
+
+    // If sanitization resulted in empty string, generate UUID
+    if result.is_empty() {
+        generate_instance_name()
+    } else {
+        result.to_string()
     }
 }
 
@@ -850,21 +871,65 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_instance_name_none() {
-        let name = resolve_instance_name(None);
+    fn test_sanitize_instance_name_none() {
+        // When no name provided, generates a UUID
+        let name = sanitize_instance_name(None);
         assert_eq!(name.len(), 36);
     }
 
     #[test]
-    fn test_resolve_instance_name_empty() {
-        let name = resolve_instance_name(Some("".to_string()));
+    fn test_sanitize_instance_name_empty() {
+        // When empty string provided, generates a UUID
+        let name = sanitize_instance_name(Some("".to_string()));
         assert_eq!(name.len(), 36);
     }
 
     #[test]
-    fn test_resolve_instance_name_provided() {
-        let name = resolve_instance_name(Some("user-provided".to_string()));
+    fn test_sanitize_instance_name_provided() {
+        // When valid name provided, returns sanitized version
+        let name = sanitize_instance_name(Some("my-app".to_string()));
+        assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_uppercase() {
+        // Converts to lowercase
+        let name = sanitize_instance_name(Some("My-App".to_string()));
+        assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_special_chars() {
+        // Replaces special characters with hyphens
+        let name = sanitize_instance_name(Some("my_app.test".to_string()));
+        assert_eq!(name, "my-app-test");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_leading_trailing_hyphens() {
+        // Removes leading/trailing hyphens
+        let name = sanitize_instance_name(Some("-my-app-".to_string()));
+        assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_all_dashes() {
+        // All dashes results in UUID generation
+        let name = sanitize_instance_name(Some("---".to_string()));
+        assert_eq!(name.len(), 36); // UUID length
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_all_special_chars() {
+        // All special chars become dashes, then trimmed to empty, generates UUID
+        let name = sanitize_instance_name(Some("@#$%".to_string()));
         assert_eq!(name.len(), 36);
-        assert_ne!(name, "user-provided");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_whitespace_only() {
+        // Whitespace-only generates UUID
+        let name = sanitize_instance_name(Some("   ".to_string()));
+        assert_eq!(name.len(), 36);
     }
 }

@@ -22,7 +22,7 @@ use crate::controllers::storage_utils;
 use crate::crd::user_deployment::{EnvVar as CrdEnvVar, UserDeployment, UserDeploymentStatus};
 use crate::k8s_client::K8sClient;
 use anyhow::Result;
-use tracing::debug;
+use tracing::{debug, error};
 
 fn deployment_needs_update(current: &Deployment, desired: &Deployment) -> bool {
     let current_spec = match &current.spec {
@@ -209,7 +209,7 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
         allow_privilege_escalation: Some(false),
         capabilities: Some(Capabilities {
             drop: Some(vec!["ALL".into()]),
-            add: Some(vec!["SETUID".into(), "SETGID".into(), "CHOWN".into()]),
+            add: None,
         }),
         seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
             type_: "RuntimeDefault".into(),
@@ -839,6 +839,16 @@ impl UserDeploymentController {
             .ok_or_else(|| anyhow::anyhow!("UserDeployment missing metadata.name"))?;
         let spec = &cr.spec;
         let instance_name = &spec.instance_name;
+
+        if let Err(e) = crate::security::validate_storage_spec(ns, name, &spec.storage) {
+            error!(
+                namespace = %ns,
+                deployment = %name,
+                error = %e,
+                "Storage spec validation failed, rejecting deployment"
+            );
+            return Err(e);
+        }
 
         let deployment_name = format!("{}-deployment", instance_name);
         let service_name = make_service_name(instance_name);

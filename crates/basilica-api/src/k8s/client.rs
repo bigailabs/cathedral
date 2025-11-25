@@ -595,10 +595,46 @@ impl ApiK8sClient for K8sClient {
     }
 
     async fn create_namespace(&self, name: &str) -> Result<()> {
+        use std::collections::BTreeMap;
+
         let api: Api<Namespace> = Api::all(self.client.clone());
+
+        let mut labels = BTreeMap::new();
+
+        if name.starts_with("u-") {
+            labels.insert(
+                "pod-security.kubernetes.io/enforce".to_string(),
+                "privileged".to_string(),
+            );
+            labels.insert(
+                "pod-security.kubernetes.io/audit".to_string(),
+                "restricted".to_string(),
+            );
+            labels.insert(
+                "pod-security.kubernetes.io/warn".to_string(),
+                "restricted".to_string(),
+            );
+
+            tracing::info!(
+                target: "security_audit",
+                event_type = "namespace_created_with_pss",
+                severity = "info",
+                namespace = %name,
+                pss_enforce = "privileged",
+                pss_audit = "restricted",
+                pss_warn = "restricted",
+                "Creating user namespace with PSS privileged enforcement (FUSE requires privileged containers), audit/warn set to restricted for visibility"
+            );
+        }
+
         let ns = Namespace {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                labels: if labels.is_empty() {
+                    None
+                } else {
+                    Some(labels)
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -609,6 +645,16 @@ impl ApiK8sClient for K8sClient {
                 if name.starts_with("u-") {
                     helpers::create_reference_grant_for_namespace(&self.client, name).await?;
                     helpers::copy_default_storage_secret(&self.client, name).await?;
+
+                    if let Err(e) =
+                        crate::k8s::apply_user_namespace_security_policies(&self.client, name).await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            namespace = %name,
+                            "Failed to apply security policies to namespace, continuing anyway"
+                        );
+                    }
                 }
                 Ok(())
             }
@@ -616,6 +662,16 @@ impl ApiK8sClient for K8sClient {
                 if name.starts_with("u-") {
                     helpers::create_reference_grant_for_namespace(&self.client, name).await?;
                     helpers::copy_default_storage_secret(&self.client, name).await?;
+
+                    if let Err(e) =
+                        crate::k8s::apply_user_namespace_security_policies(&self.client, name).await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            namespace = %name,
+                            "Failed to apply security policies to namespace, continuing anyway"
+                        );
+                    }
                 }
                 Ok(())
             }

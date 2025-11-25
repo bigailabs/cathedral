@@ -212,10 +212,6 @@ pub struct Config {
     /// Database configuration
     pub database: DatabaseConfig,
 
-    /// Rental backend selection: "legacy" (validator) or "k8s" (CRDs)
-    #[serde(default)]
-    pub rental_backend: RentalBackend,
-
     /// Payments service configuration
     pub payments: PaymentsServiceConfig,
 
@@ -425,15 +421,4 @@ mod tests {
         assert!(!config.enabled);
         assert!(!config.enforce_balance_checks);
     }
-}
-/// Rental backend selector
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum RentalBackend {
-    #[serde(rename = "auto")]
-    #[default]
-    Auto,
-    #[serde(rename = "legacy")]
-    Legacy,
-    #[serde(rename = "k8s")]
-    K8s,
 }
