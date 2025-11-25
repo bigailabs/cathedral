@@ -13,8 +13,8 @@ use axum::{
 use serde::Serialize;
 
 use super::types::{
-    resolve_instance_name, sanitize_user_id, validate_image, validate_port, validate_replicas,
-    CreateDeploymentRequest, DeploymentResponse,
+    sanitize_instance_name, sanitize_user_id, validate_image, validate_instance_name,
+    validate_port, validate_replicas, CreateDeploymentRequest, DeploymentResponse,
 };
 
 fn user_namespace(user_id: &str) -> String {
@@ -108,10 +108,20 @@ pub async fn create_deployment(
 ) -> Result<impl IntoResponse> {
     let start = std::time::Instant::now();
 
-    let instance_name = resolve_instance_name(req.instance_name.clone());
+    // Sanitize the user-provided instance name (or generate one if not provided)
+    let user_instance_name = sanitize_instance_name(req.instance_name.clone());
+
+    // Validate the sanitized name
+    validate_instance_name(&user_instance_name)?;
+
+    // Get or create a stable instance_id (UUID) for this (user_id, instance_name) pair
+    // This enables idempotent deployments - same name = same storage prefix
+    let instance_name =
+        db::get_or_create_instance_id(&state.db, &auth.user_id, &user_instance_name).await?;
 
     tracing::info!(
         user_id = %auth.user_id,
+        user_instance_name = %user_instance_name,
         instance_name = %instance_name,
         image = %req.image,
         replicas = req.replicas,
