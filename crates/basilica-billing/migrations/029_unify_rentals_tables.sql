@@ -39,6 +39,8 @@ ALTER TABLE billing.community_rentals DROP COLUMN IF EXISTS hourly_rate;
 -- PART 4: Migrate secure_cloud_rentals data into community_rentals
 -- ============================================================================
 
+-- Use ON CONFLICT to skip any duplicate rental_ids (shouldn't happen in production,
+-- but could occur in testing environments)
 INSERT INTO billing.community_rentals (
     rental_id, user_id, node_id, validator_id, status,
     resource_spec, start_time, end_time, total_cost,
@@ -58,7 +60,8 @@ SELECT
     ) || COALESCE(metadata, '{}'::jsonb) as metadata,
     created_at, updated_at, base_price_per_gpu, gpu_count,
     'secure' as cloud_type
-FROM billing.secure_cloud_rentals;
+FROM billing.secure_cloud_rentals
+ON CONFLICT (rental_id) DO NOTHING;
 
 -- ============================================================================
 -- PART 5: Drop node_id and validator_id columns (now in metadata)
