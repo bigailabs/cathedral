@@ -212,22 +212,24 @@ pub async fn list_secure_cloud_rentals(
                     1.0 + (state.pricing_config.secure_cloud_markup_percent / 100.0);
 
                 // Try to find the offering to get GPU details and pricing
-                let (gpu_type, gpu_count, hourly_cost) =
-                    if let Some(offering) = offerings_map.get(offering_id.as_str()) {
-                        let base_rate = offering.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
-                        let gpu_count = offering.gpu_count;
-                        let hourly_cost = base_rate * markup_multiplier;
+                let (gpu_type, gpu_count, hourly_cost) = if let Some(offering) =
+                    offerings_map.get(offering_id.as_str())
+                {
+                    let base_rate = offering.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
+                    let gpu_count = offering.gpu_count;
+                    // Total hourly cost = per-GPU price × markup × number of GPUs
+                    let hourly_cost = base_rate * markup_multiplier * f64::from(gpu_count.max(1));
 
-                        (offering.gpu_type.to_string(), gpu_count, hourly_cost)
-                    } else {
-                        // Fallback if offering not found (e.g., offering expired)
-                        tracing::warn!(
-                            "Offering {} not found for rental {}, using defaults",
-                            offering_id,
-                            rental_id
-                        );
-                        ("unknown".to_string(), 0, 0.0)
-                    };
+                    (offering.gpu_type.to_string(), gpu_count, hourly_cost)
+                } else {
+                    // Fallback if offering not found (e.g., offering expired)
+                    tracing::warn!(
+                        "Offering {} not found for rental {}, using defaults",
+                        offering_id,
+                        rental_id
+                    );
+                    ("unknown".to_string(), 0, 0.0)
+                };
 
                 // Use resource specs from database JOIN (already available)
                 let vcpu_count = db_vcpu_count.map(|v| v as u32);

@@ -321,10 +321,10 @@ pub async fn start_rental(
         let markup_multiplier = 1.0 + (state.pricing_config.community_markup_percent / 100.0);
         let marked_up_price = base_price_per_gpu * markup_multiplier;
 
+        // Get total GPU count from the resource spec (each GPU is a separate entry with count=1)
         let gpu_count = resource_spec
             .as_ref()
-            .and_then(|spec| spec.gpus.first())
-            .map(|gpu| gpu.count)
+            .map(|spec| spec.gpus.len() as u32)
             .unwrap_or(1);
 
         let track_request = TrackRentalRequest {
