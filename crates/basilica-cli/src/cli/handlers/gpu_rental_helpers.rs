@@ -4,12 +4,15 @@ use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create
 use basilica_aggregator::models::GpuOffering;
 use basilica_common::types::ComputeCategory;
 use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, NodeSelection, RentalState};
-use basilica_sdk::BasilicaClient;
+use basilica_sdk::{ApiError, BasilicaClient};
 use basilica_validator::api::types::AvailableNode;
 use color_eyre::eyre::{eyre, Result};
 use console::{style, Term};
 use dialoguer::Select;
 use rust_decimal::prelude::ToPrimitive;
+use std::time::Duration;
+use tokio::time::timeout;
+use tracing::warn;
 
 /// Resolve target rental ID - if not provided, fetch active rentals and prompt for selection
 ///
@@ -130,13 +133,22 @@ pub async fn resolve_target_rental_unified(
             (None, Some(rentals))
         }
         None => {
-            // Fetch both types in parallel
+            // Fetch both types in parallel with 5-second timeout for community cloud
+            let community_future = api_client.list_rentals(Some(ListRentalsQuery {
+                status: Some(RentalState::Active),
+                gpu_type: None,
+                min_gpu_count: None,
+            }));
             let (community_result, secure_result) = tokio::join!(
-                api_client.list_rentals(Some(ListRentalsQuery {
-                    status: Some(RentalState::Active),
-                    gpu_type: None,
-                    min_gpu_count: None,
-                })),
+                async {
+                    match timeout(Duration::from_secs(5), community_future).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!("Validator request timed out after 5 seconds");
+                            Err(ApiError::Timeout)
+                        }
+                    }
+                },
                 api_client.list_secure_cloud_rentals()
             );
 
@@ -289,21 +301,28 @@ pub async fn resolve_offering_unified(
 ) -> Result<SelectedOffering> {
     let spinner = create_spinner("Fetching available GPUs from all clouds...");
 
-    // Fetch offerings from both clouds in parallel
-    let (secure_result, community_result) = tokio::join!(
-        api_client.list_secure_cloud_gpus(),
-        api_client.list_available_nodes(Some(ListAvailableNodesQuery {
-            available: Some(true),
-            min_gpu_memory: min_gpu_memory_filter,
-            gpu_type: gpu_filter.map(|s| s.to_string()),
-            min_gpu_count: gpu_count_filter,
-            location: country_filter.map(|c| basilica_common::LocationProfile {
-                city: None,
-                region: None,
-                country: Some(c.to_string()),
-            }),
-        }))
-    );
+    // Fetch offerings from both clouds in parallel with 5-second timeout for community cloud
+    let community_future = api_client.list_available_nodes(Some(ListAvailableNodesQuery {
+        available: Some(true),
+        min_gpu_memory: min_gpu_memory_filter,
+        gpu_type: gpu_filter.map(|s| s.to_string()),
+        min_gpu_count: gpu_count_filter,
+        location: country_filter.map(|c| basilica_common::LocationProfile {
+            city: None,
+            region: None,
+            country: Some(c.to_string()),
+        }),
+    }));
+    let (secure_result, community_result) =
+        tokio::join!(api_client.list_secure_cloud_gpus(), async {
+            match timeout(Duration::from_secs(5), community_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Validator request timed out after 5 seconds");
+                    Err(ApiError::Timeout)
+                }
+            }
+        });
 
     complete_spinner_and_clear(spinner);
 
