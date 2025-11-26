@@ -70,14 +70,14 @@
 #   1. Run: /usr/local/bin/k3s-agent-uninstall.sh
 #   2. Revoke the node token via API or dashboard
 #
-# VERSION: 1.1.0
+# VERSION: 1.2.0
 # AUTHOR: Basilica Network
 # LICENSE: MIT
 #
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.2.0"
 readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
@@ -87,11 +87,9 @@ readonly NODE_ID="${BASILICA_NODE_ID:-$(hostname)}"
 
 # WireGuard variables (set by register_node if needed)
 WIREGUARD_ENABLED="false"
-WG_SERVER_ENDPOINT=""
-WG_SERVER_PUBKEY=""
 WG_NODE_IP=""
-WG_ALLOWED_IPS=""
 WG_KEEPALIVE=""
+WG_PEERS_JSON=""
 
 main() {
     log "Basilica GPU Node Join v${SCRIPT_VERSION}"
@@ -195,14 +193,14 @@ EOF
     # Parse WireGuard configuration if present
     WIREGUARD_ENABLED=$(echo "$response" | jq -r '.wireguard.enabled // "false"')
     if [ "${WIREGUARD_ENABLED}" = "true" ]; then
-        WG_SERVER_ENDPOINT=$(echo "$response" | jq -r '.wireguard.server_endpoint')
-        WG_SERVER_PUBKEY=$(echo "$response" | jq -r '.wireguard.server_public_key')
         WG_NODE_IP=$(echo "$response" | jq -r '.wireguard.node_ip')
-        WG_ALLOWED_IPS=$(echo "$response" | jq -r '.wireguard.allowed_ips | join(",")')
         WG_KEEPALIVE=$(echo "$response" | jq -r '.wireguard.persistent_keepalive')
+        WG_PEERS_JSON=$(echo "$response" | jq -c '.wireguard.peers')
+        local peer_count
+        peer_count=$(echo "$WG_PEERS_JSON" | jq 'length')
         log "WireGuard VPN required"
-        log "  Server endpoint: ${WG_SERVER_ENDPOINT}"
         log "  Node IP: ${WG_NODE_IP}"
+        log "  Server peers: ${peer_count}"
     fi
 
     if [ -n "$NODE_PASSWORD" ]; then
@@ -239,18 +237,45 @@ setup_wireguard() {
     WG_PRIVATE_KEY=$(cat /etc/wireguard/private.key)
     WG_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
 
-    log "Creating WireGuard configuration..."
+    log "Creating WireGuard configuration with multiple peers..."
+
+    # Start config with interface section
     cat > /etc/wireguard/${WIREGUARD_INTERFACE}.conf <<EOF
 [Interface]
 Address = ${WG_NODE_IP}/16
 PrivateKey = ${WG_PRIVATE_KEY}
+EOF
+
+    # Add each peer from the JSON array
+    local peer_count
+    peer_count=$(echo "$WG_PEERS_JSON" | jq 'length')
+
+    for i in $(seq 0 $((peer_count - 1))); do
+        local endpoint public_key wireguard_ip vpc_subnet route_pod_network
+        endpoint=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].endpoint")
+        public_key=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].public_key")
+        wireguard_ip=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].wireguard_ip")
+        vpc_subnet=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].vpc_subnet")
+        route_pod_network=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].route_pod_network")
+
+        # Build AllowedIPs: WireGuard IP + VPC subnet + pod network (if first peer)
+        local allowed_ips="${wireguard_ip}/32,${vpc_subnet}"
+        if [ "$route_pod_network" = "true" ]; then
+            allowed_ips="${allowed_ips},10.42.0.0/16"
+        fi
+
+        log "  Adding peer: ${endpoint} (WG: ${wireguard_ip}, VPC: ${vpc_subnet})"
+
+        cat >> /etc/wireguard/${WIREGUARD_INTERFACE}.conf <<EOF
 
 [Peer]
-PublicKey = ${WG_SERVER_PUBKEY}
-Endpoint = ${WG_SERVER_ENDPOINT}
-AllowedIPs = ${WG_ALLOWED_IPS}
+PublicKey = ${public_key}
+Endpoint = ${endpoint}
+AllowedIPs = ${allowed_ips}
 PersistentKeepalive = ${WG_KEEPALIVE}
 EOF
+    done
+
     chmod 600 /etc/wireguard/${WIREGUARD_INTERFACE}.conf
 
     log "Registering public key with Basilica API..."
@@ -278,6 +303,7 @@ EOF
     log "WireGuard VPN established"
     log "  Interface: ${WIREGUARD_INTERFACE}"
     log "  Node IP: ${WG_NODE_IP}"
+    log "  Peers: ${peer_count}"
     wg show ${WIREGUARD_INTERFACE}
 }
 
