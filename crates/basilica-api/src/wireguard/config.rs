@@ -41,12 +41,18 @@ pub struct WireGuardConfig {
 impl WireGuardConfig {
     /// Primary server endpoint (first peer)
     pub fn server_endpoint(&self) -> String {
-        self.peers.first().map(|p| p.endpoint.clone()).unwrap_or_default()
+        self.peers
+            .first()
+            .map(|p| p.endpoint.clone())
+            .unwrap_or_default()
     }
 
     /// Primary server public key (first peer)
     pub fn server_public_key(&self) -> String {
-        self.peers.first().map(|p| p.public_key.clone()).unwrap_or_default()
+        self.peers
+            .first()
+            .map(|p| p.public_key.clone())
+            .unwrap_or_default()
     }
 
     /// All allowed IPs (union of all peer routes)

@@ -170,9 +170,7 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::POST, "/v1/gpu-nodes/register") => Some(String::new()),
         (&Method::POST, "/v1/gpu-nodes/revoke") => Some(String::new()),
         // WireGuard key registration: /v1/gpu-nodes/{node_id}/wireguard-key
-        (&Method::POST, p)
-            if p.starts_with("/v1/gpu-nodes/") && p.ends_with("/wireguard-key") =>
-        {
+        (&Method::POST, p) if p.starts_with("/v1/gpu-nodes/") && p.ends_with("/wireguard-key") => {
             Some(String::new())
         }
 
