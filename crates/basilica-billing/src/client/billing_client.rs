@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use basilica_protocol::billing::{
-    billing_service_client::BillingServiceClient, get_active_rentals_request,
-    GetActiveRentalsRequest, GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse,
-    UsageAggregation, UsageReportRequest, UsageReportResponse,
+    billing_service_client::BillingServiceClient, GetActiveRentalsRequest,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, UsageAggregation,
+    UsageReportRequest, UsageReportResponse,
 };
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -156,7 +156,7 @@ impl BillingClient {
     ) -> Result<GetActiveRentalsResponse> {
         let user_id = user_id.into();
         let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::UserId(user_id.clone())),
+            user_id: user_id.clone(),
             limit: limit.unwrap_or(50),
             offset: offset.unwrap_or(0),
         };
@@ -168,56 +168,6 @@ impl BillingClient {
             .get_active_rentals(request)
             .await
             .with_context(|| format!("Failed to get active rentals for user: {}", user_id))?;
-
-        Ok(response.into_inner())
-    }
-
-    pub async fn get_active_rentals_for_validator(
-        &self,
-        validator_id: String,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> Result<GetActiveRentalsResponse> {
-        let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::ValidatorId(
-                validator_id.clone(),
-            )),
-            limit: limit.unwrap_or(50),
-            offset: offset.unwrap_or(0),
-        };
-
-        debug!("Fetching active rentals for validator: {}", validator_id);
-
-        let mut client = self.client.clone();
-        let response = client.get_active_rentals(request).await.with_context(|| {
-            format!(
-                "Failed to get active rentals for validator: {}",
-                validator_id
-            )
-        })?;
-
-        Ok(response.into_inner())
-    }
-
-    pub async fn get_active_rentals_for_node(
-        &self,
-        node_id: String,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> Result<GetActiveRentalsResponse> {
-        let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::NodeId(node_id.clone())),
-            limit: limit.unwrap_or(50),
-            offset: offset.unwrap_or(0),
-        };
-
-        debug!("Fetching active rentals for node: {}", node_id);
-
-        let mut client = self.client.clone();
-        let response = client
-            .get_active_rentals(request)
-            .await
-            .with_context(|| format!("Failed to get active rentals for node: {}", node_id))?;
 
         Ok(response.into_inner())
     }

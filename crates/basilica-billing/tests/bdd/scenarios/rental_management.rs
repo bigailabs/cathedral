@@ -1,8 +1,8 @@
 use crate::bdd::TestContext;
 use basilica_protocol::billing::{
-    active_rental, get_active_rentals_request::Filter, track_rental_request::CloudType,
-    CommunityCloudData, FinalizeRentalRequest, GetActiveRentalsRequest, GpuSpec, RentalStatus,
-    ResourceSpec, TrackRentalRequest, UpdateRentalStatusRequest,
+    track_rental_request::CloudType, CommunityCloudData, FinalizeRentalRequest,
+    GetActiveRentalsRequest, GpuSpec, RentalStatus, ResourceSpec, TrackRentalRequest,
+    UpdateRentalStatusRequest,
 };
 use uuid::Uuid;
 
@@ -241,9 +241,9 @@ async fn test_get_active_rentals_by_user() {
     }
 
     let request = GetActiveRentalsRequest {
+        user_id: user_id.to_string(),
         limit: 100,
         offset: 0,
-        filter: Some(Filter::UserId(user_id.to_string())),
     };
 
     let response = context
@@ -276,81 +276,6 @@ async fn test_get_active_rentals_by_user() {
 
     assert_eq!(active_count, 2, "Should have 2 active rentals");
     assert_eq!(pending_count, 1, "Should have 1 pending rental");
-
-    context.cleanup().await;
-}
-
-#[tokio::test]
-async fn test_get_active_rentals_by_node() {
-    let mut context = TestContext::new().await;
-    let node_id = "node_specific_001";
-
-    for i in 0..2 {
-        let user_id = format!("user_{}", i);
-        context.create_test_user(&user_id, "1000.0").await;
-
-        let rental_id = Uuid::new_v4().to_string();
-        let request = TrackRentalRequest {
-            rental_id: rental_id.clone(),
-            user_id: user_id.clone(),
-            start_time: None,
-            metadata: std::collections::HashMap::new(),
-            resource_spec: None,
-            cloud_type: Some(CloudType::Community(CommunityCloudData {
-                node_id: node_id.to_string(),
-                validator_id: "validator_001".to_string(),
-                base_price_per_gpu: 2.5,
-                gpu_count: 1,
-            })),
-        };
-
-        let track_response = context
-            .client
-            .track_rental(request)
-            .await
-            .expect("Failed to track rental")
-            .into_inner();
-
-        // Activate the rental so it shows up in active rentals query
-        let update_request = UpdateRentalStatusRequest {
-            rental_id: track_response.tracking_id,
-            status: RentalStatus::Active.into(),
-            reason: String::new(),
-            timestamp: None,
-        };
-
-        context
-            .client
-            .update_rental_status(update_request)
-            .await
-            .expect("Failed to activate rental");
-    }
-
-    let request = GetActiveRentalsRequest {
-        limit: 100,
-        offset: 0,
-        filter: Some(Filter::NodeId(node_id.to_string())),
-    };
-
-    let response = context
-        .client
-        .get_active_rentals(request)
-        .await
-        .expect("Failed to get rentals by node")
-        .into_inner();
-
-    assert!(
-        response.rentals.len() >= 2,
-        "Should return at least 2 rentals for node"
-    );
-
-    for rental in &response.rentals {
-        if let Some(active_rental::CloudType::Community(ref community_data)) = rental.cloud_type {
-            assert_eq!(community_data.node_id, node_id);
-        } else {
-            panic!("Expected Community cloud type");
-        }
-    }
 
     context.cleanup().await;
 }

@@ -179,12 +179,15 @@ impl TelemetryProcessor {
 
         let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
 
+        // Extract validator_id from metadata (for community cloud rentals)
+        let validator_id = rental.validator_id().unwrap_or("").to_string();
+
         let telemetry_event = UsageEvent {
             event_id: Uuid::new_v4(),
             rental_id: rental_id.as_uuid(),
             user_id: rental.user_id.to_string(),
             node_id: data.node_id.clone(),
-            validator_id: rental.validator_id.clone(),
+            validator_id: validator_id.clone(),
             event_type: EventType::Telemetry,
             event_data,
             timestamp: telemetry_timestamp,
@@ -203,7 +206,7 @@ impl TelemetryProcessor {
                     e,
                     rental_id,
                     data.node_id,
-                    rental.validator_id,
+                    validator_id,
                     telemetry_event.event_type,
                     telemetry_event.idempotency_key
                 );

@@ -456,7 +456,7 @@ impl EventHandlers for BillingEventHandlers {
             network_bandwidth_mbps: 100,
         };
 
-        let mut rental = Rental::new_marketplace(
+        let mut rental = Rental::new_community(
             user_id.clone(),
             event.node_id.clone(),
             event.validator_id.clone(),
