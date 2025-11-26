@@ -409,19 +409,40 @@ impl EventHandlers for BillingEventHandlers {
 
         let user_id = UserId::new(event.user_id.clone());
 
-        // Extract marketplace pricing from event data
+        // Extract and validate marketplace pricing from event data
         let base_price_per_gpu = event
             .event_data
             .get("base_price_per_gpu")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<Decimal>().ok())
-            .unwrap_or(Decimal::ZERO);
+            .ok_or_else(|| {
+                warn!(
+                    rental_id = %event.rental_id,
+                    event_id = %event.event_id,
+                    "Missing or invalid base_price_per_gpu in rental start event"
+                );
+                BillingError::ValidationError {
+                    field: "base_price_per_gpu".to_string(),
+                    message: "Missing or invalid base_price_per_gpu in rental start event data".to_string(),
+                }
+            })?;
 
         let gpu_count = event
             .event_data
             .get("gpu_count")
             .and_then(|v| v.as_u64())
-            .unwrap_or(1) as u32;
+            .filter(|&count| count > 0)
+            .ok_or_else(|| {
+                warn!(
+                    rental_id = %event.rental_id,
+                    event_id = %event.event_id,
+                    "Missing or invalid gpu_count in rental start event"
+                );
+                BillingError::ValidationError {
+                    field: "gpu_count".to_string(),
+                    message: "Missing or invalid gpu_count (must be > 0) in rental start event data".to_string(),
+                }
+            })? as u32;
 
         let resource_spec = ResourceSpec {
             gpu_specs: vec![],
