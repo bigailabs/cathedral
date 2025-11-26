@@ -24,6 +24,10 @@ pub trait RentalRepository: Send + Sync {
     async fn create_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()>;
     async fn get_secure_cloud_rental(&self, id: &RentalId) -> Result<Option<SecureCloudRental>>;
     async fn update_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()>;
+    async fn get_active_secure_cloud_rentals(
+        &self,
+        user_id: Option<&UserId>,
+    ) -> Result<Vec<SecureCloudRental>>;
 }
 
 pub struct SqlRentalRepository {
@@ -491,6 +495,47 @@ impl RentalRepository for SqlRentalRepository {
         }
 
         Ok(())
+    }
+
+    async fn get_active_secure_cloud_rentals(
+        &self,
+        user_id: Option<&UserId>,
+    ) -> Result<Vec<SecureCloudRental>> {
+        let query = if let Some(uid) = user_id {
+            sqlx::query(
+                r#"
+                SELECT rental_id, user_id, provider, provider_instance_id, offering_id, status,
+                       resource_spec, start_time, end_time, total_cost,
+                       metadata, created_at, updated_at,
+                       base_price_per_gpu, gpu_count
+                FROM billing.secure_cloud_rentals
+                WHERE user_id = $1 AND status IN ('active', 'pending', 'running')
+                ORDER BY start_time DESC
+                "#,
+            )
+            .bind(uid.as_str())
+        } else {
+            sqlx::query(
+                r#"
+                SELECT rental_id, user_id, provider, provider_instance_id, offering_id, status,
+                       resource_spec, start_time, end_time, total_cost,
+                       metadata, created_at, updated_at,
+                       base_price_per_gpu, gpu_count
+                FROM billing.secure_cloud_rentals
+                WHERE status IN ('active', 'pending', 'running')
+                ORDER BY start_time DESC
+                "#,
+            )
+        };
+
+        let rows = query.fetch_all(self.connection.pool()).await.map_err(|e| {
+            BillingError::DatabaseError {
+                operation: "get_active_secure_cloud_rentals".to_string(),
+                source: Box::new(e),
+            }
+        })?;
+
+        Ok(rows.iter().map(Self::secure_cloud_rental_from_row).collect())
     }
 }
 

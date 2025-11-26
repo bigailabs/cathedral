@@ -519,10 +519,11 @@ impl BillingService for BillingServiceImpl {
     ) -> std::result::Result<Response<GetActiveRentalsResponse>, Status> {
         let req = request.into_inner();
 
-        let rentals = if let Some(filter) = req.filter {
+        // Get community cloud rentals
+        let community_rentals = if let Some(ref filter) = req.filter {
             match filter {
                 basilica_protocol::billing::get_active_rentals_request::Filter::UserId(user_id) => {
-                    let uid = UserId::new(user_id);
+                    let uid = UserId::new(user_id.clone());
                     self.rental_repository
                         .get_active_rentals(Some(&uid))
                         .await
@@ -537,7 +538,7 @@ impl BillingService for BillingServiceImpl {
 
                     all_rentals
                         .into_iter()
-                        .filter(|r| r.node_id == node_id)
+                        .filter(|r| r.node_id == *node_id)
                         .collect()
                 }
                 basilica_protocol::billing::get_active_rentals_request::Filter::ValidatorId(
@@ -551,7 +552,7 @@ impl BillingService for BillingServiceImpl {
 
                     all_rentals
                         .into_iter()
-                        .filter(|r| r.validator_id == validator_id)
+                        .filter(|r| r.validator_id == *validator_id)
                         .collect()
                 }
             }
@@ -562,7 +563,32 @@ impl BillingService for BillingServiceImpl {
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         };
 
-        let active_rentals: Vec<ActiveRental> = rentals
+        // Get secure cloud rentals
+        let secure_rentals = if let Some(ref filter) = req.filter {
+            match filter {
+                basilica_protocol::billing::get_active_rentals_request::Filter::UserId(user_id) => {
+                    let uid = UserId::new(user_id.clone());
+                    self.rental_repository
+                        .get_active_secure_cloud_rentals(Some(&uid))
+                        .await
+                        .map_err(|e| {
+                            Status::internal(format!("Failed to list secure cloud rentals: {}", e))
+                        })?
+                }
+                // NodeId and ValidatorId filters don't apply to secure cloud rentals
+                _ => Vec::new(),
+            }
+        } else {
+            self.rental_repository
+                .get_active_secure_cloud_rentals(None)
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("Failed to list secure cloud rentals: {}", e))
+                })?
+        };
+
+        // Convert community rentals to ActiveRental
+        let mut active_rentals: Vec<ActiveRental> = community_rentals
             .into_iter()
             .filter(|r| r.state.is_active())
             .map(|r| {
@@ -611,6 +637,59 @@ impl BillingService for BillingServiceImpl {
             })
             .collect();
 
+        // Convert secure cloud rentals to ActiveRental and append
+        let secure_active_rentals: Vec<ActiveRental> = secure_rentals
+            .into_iter()
+            .filter(|r| r.state.is_active())
+            .map(|r| {
+                // Convert ResourceSpec to proto format
+                let resource_spec = Some(basilica_protocol::billing::ResourceSpec {
+                    cpu_cores: r.resource_spec.cpu_cores,
+                    memory_mb: (r.resource_spec.memory_gb as u64) * 1024,
+                    gpus: r
+                        .resource_spec
+                        .gpu_specs
+                        .iter()
+                        .map(|gpu| basilica_protocol::billing::GpuSpec {
+                            model: gpu.model.clone(),
+                            memory_mb: gpu.memory_mb,
+                            count: gpu.count,
+                        })
+                        .collect(),
+                    disk_gb: r.resource_spec.storage_gb as u64,
+                    network_bandwidth_mbps: r.resource_spec.network_bandwidth_mbps,
+                });
+
+                ActiveRental {
+                    rental_id: r.id.to_string(),
+                    user_id: r.user_id.to_string(),
+                    status: Self::domain_status_to_proto(r.state).into(),
+                    resource_spec,
+                    current_cost: Self::format_credit_balance(r.cost_breakdown.total_cost),
+                    start_time: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
+                        r.created_at,
+                    ))),
+                    last_updated: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
+                        r.last_updated,
+                    ))),
+                    metadata: std::collections::HashMap::new(),
+                    cloud_type: Some(
+                        basilica_protocol::billing::active_rental::CloudType::Secure(
+                            basilica_protocol::billing::SecureCloudData {
+                                provider_instance_id: r.provider_instance_id.clone(),
+                                provider: r.provider.clone(),
+                                offering_id: r.offering_id.clone(),
+                                base_price_per_gpu: r.base_price_per_gpu.to_f64().unwrap_or(0.0),
+                                gpu_count: r.gpu_count,
+                            },
+                        ),
+                    ),
+                }
+            })
+            .collect();
+
+        active_rentals.extend(secure_active_rentals);
+
         let response = GetActiveRentalsResponse {
             rentals: active_rentals.clone(),
             total_count: active_rentals.len() as u64,
@@ -634,112 +713,196 @@ impl BillingService for BillingServiceImpl {
             let rental_id = RentalId::from_str(&req.rental_id)
                 .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
 
-            let rental = self
+            // Try community rental first, then secure cloud rental
+            let community_rental = self
                 .rental_repository
                 .get_rental(&rental_id)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?
-                .ok_or_else(|| Status::not_found(format!("Rental {} not found", rental_id)))?;
+                .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?;
 
-            info!(
-                "finalize_rental called for {} - telemetry already charged incrementally (actual_cost: {})",
-                rental_id, rental.actual_cost
-            );
-
-            let final_cost_decimal = if req.final_cost.is_empty() {
-                rental.actual_cost.as_decimal()
-            } else {
-                req.final_cost.parse::<rust_decimal::Decimal>()
-                    .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
-            };
+            let secure_rental = self
+                .rental_repository
+                .get_secure_cloud_rental(&rental_id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get secure cloud rental: {}", e)))?;
 
             let end_time = req.end_time
                 .map(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32).unwrap())
                 .unwrap_or_else(chrono::Utc::now);
 
-            let rental_end_data = crate::domain::processor::RentalEndData {
-                end_time,
-                final_cost: final_cost_decimal,
-                termination_reason: if req.termination_reason.is_empty() {
-                    None
-                } else {
-                    Some(req.termination_reason.clone())
-                },
-            };
+            // Handle based on which rental type was found
+            match (community_rental, secure_rental) {
+                (Some(rental), None) => {
+                    // Community rental finalization
+                    info!(
+                        "finalize_rental called for community rental {} - telemetry already charged incrementally (actual_cost: {})",
+                        rental_id, rental.actual_cost
+                    );
 
-            // Update rental status to completed immediately
-            let mut rental = rental.clone();
-            rental.state = crate::domain::types::RentalState::Completed;
-            rental.last_updated = end_time;
+                    let final_cost_decimal = if req.final_cost.is_empty() {
+                        rental.actual_cost.as_decimal()
+                    } else {
+                        req.final_cost.parse::<rust_decimal::Decimal>()
+                            .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
+                    };
 
-            self.rental_repository
-                .update_rental(&rental)
-                .await
-                .map_err(|e| {
-                    error!("Failed to update rental status to completed: {}", e);
-                    Status::internal(format!("Failed to update rental status: {}", e))
-                })?;
+                    let rental_end_data = crate::domain::processor::RentalEndData {
+                        end_time,
+                        final_cost: final_cost_decimal,
+                        termination_reason: if req.termination_reason.is_empty() {
+                            None
+                        } else {
+                            Some(req.termination_reason.clone())
+                        },
+                    };
 
-            info!("Updated rental {} state to completed", rental_id);
+                    // Update rental status to completed immediately
+                    let mut rental = rental.clone();
+                    rental.state = crate::domain::types::RentalState::Completed;
+                    rental.last_updated = end_time;
+                    rental.ended_at = Some(end_time);
+                    rental.actual_cost = CreditBalance::from_decimal(final_cost_decimal);
 
-            // Publish rental_end event for audit purposes
-            let mut event_data = serde_json::to_value(&rental_end_data)
-                .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?;
+                    self.rental_repository
+                        .update_rental(&rental)
+                        .await
+                        .map_err(|e| {
+                            error!("Failed to update rental status to completed: {}", e);
+                            Status::internal(format!("Failed to update rental status: {}", e))
+                        })?;
 
-            if let serde_json::Value::Object(ref mut map) = event_data {
-                map.insert("timestamp".to_string(), serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()));
+                    info!("Updated community rental {} state to completed", rental_id);
+
+                    // Publish rental_end event for audit purposes
+                    let mut event_data = serde_json::to_value(&rental_end_data)
+                        .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?;
+
+                    if let serde_json::Value::Object(ref mut map) = event_data {
+                        map.insert("timestamp".to_string(), serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()));
+                    }
+
+                    let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data);
+
+                    let usage_event = crate::storage::UsageEvent {
+                        event_id: uuid::Uuid::new_v4(),
+                        rental_id: rental.id.as_uuid(),
+                        user_id: rental.user_id.as_str().to_string(),
+                        node_id: rental.node_id.clone(),
+                        validator_id: rental.validator_id.clone(),
+                        event_type: crate::storage::EventType::RentalEnd,
+                        event_data,
+                        timestamp: chrono::Utc::now(),
+                        processed: false,
+                        processed_at: None,
+                        batch_id: None,
+                        idempotency_key: Some(idempotency_key),
+                    };
+
+                    self.event_store
+                        .append_usage_event(&usage_event)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to append rental end event: {}", e)))?;
+
+                    info!("Published rental_end event for rental {} for audit purposes", rental_id);
+
+                    let duration = rental.last_updated - rental.created_at;
+
+                    if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .billing_metrics()
+                            .record_rental_finalized(
+                                &rental_id.to_string(),
+                                rental.actual_cost.as_decimal().to_f64().unwrap_or(0.0),
+                            )
+                            .await;
+                    }
+
+                    let duration_proto = prost_types::Duration {
+                        seconds: duration.num_seconds(),
+                        nanos: (duration.num_nanoseconds().unwrap_or(0) % 1_000_000_000) as i32,
+                    };
+
+                    Ok(FinalizeRentalResponse {
+                        success: true,
+                        total_cost: Self::format_credit_balance(rental.actual_cost),
+                        duration: Some(duration_proto),
+                        charged_amount: "0.00".to_string(),
+                        refunded_amount: "0.00".to_string(),
+                    })
+                }
+                (None, Some(rental)) => {
+                    // Secure cloud rental finalization
+                    info!(
+                        "finalize_rental called for secure cloud rental {} (provider: {}, actual_cost: {})",
+                        rental_id, rental.provider, rental.actual_cost
+                    );
+
+                    // Calculate final cost based on duration and pricing
+                    let duration = end_time - rental.started_at;
+                    let hours = rust_decimal::Decimal::from(duration.num_seconds()) / rust_decimal::Decimal::from(3600);
+                    let calculated_cost = rental.base_price_per_gpu * rust_decimal::Decimal::from(rental.gpu_count) * hours;
+
+                    let final_cost_decimal = if req.final_cost.is_empty() {
+                        // Use calculated cost if no explicit final cost provided
+                        if rental.actual_cost.as_decimal() > rust_decimal::Decimal::ZERO {
+                            rental.actual_cost.as_decimal()
+                        } else {
+                            calculated_cost
+                        }
+                    } else {
+                        req.final_cost.parse::<rust_decimal::Decimal>()
+                            .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
+                    };
+
+                    // Update secure cloud rental status to completed
+                    let mut rental = rental.clone();
+                    rental.state = crate::domain::types::RentalState::Completed;
+                    rental.last_updated = end_time;
+                    rental.ended_at = Some(end_time);
+                    rental.actual_cost = CreditBalance::from_decimal(final_cost_decimal);
+
+                    self.rental_repository
+                        .update_secure_cloud_rental(&rental)
+                        .await
+                        .map_err(|e| {
+                            error!("Failed to update secure cloud rental status to completed: {}", e);
+                            Status::internal(format!("Failed to update rental status: {}", e))
+                        })?;
+
+                    info!("Updated secure cloud rental {} state to completed with total_cost: {}", rental_id, final_cost_decimal);
+
+                    if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .billing_metrics()
+                            .record_rental_finalized(
+                                &rental_id.to_string(),
+                                final_cost_decimal.to_f64().unwrap_or(0.0),
+                            )
+                            .await;
+                    }
+
+                    let duration_proto = prost_types::Duration {
+                        seconds: duration.num_seconds(),
+                        nanos: (duration.num_nanoseconds().unwrap_or(0) % 1_000_000_000) as i32,
+                    };
+
+                    Ok(FinalizeRentalResponse {
+                        success: true,
+                        total_cost: Self::format_credit_balance(CreditBalance::from_decimal(final_cost_decimal)),
+                        duration: Some(duration_proto),
+                        charged_amount: "0.00".to_string(),
+                        refunded_amount: "0.00".to_string(),
+                    })
+                }
+                (None, None) => {
+                    Err(Status::not_found(format!("Rental {} not found in community or secure cloud rentals", rental_id)))
+                }
+                (Some(_), Some(_)) => {
+                    // This shouldn't happen - rental ID should be unique across both tables
+                    error!("Rental {} found in both community and secure cloud tables!", rental_id);
+                    Err(Status::internal("Duplicate rental ID found"))
+                }
             }
-
-            let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data);
-
-            let usage_event = crate::storage::UsageEvent {
-                event_id: uuid::Uuid::new_v4(),
-                rental_id: rental.id.as_uuid(),
-                user_id: rental.user_id.as_str().to_string(),
-                node_id: rental.node_id.clone(),
-                validator_id: rental.validator_id.clone(),
-                event_type: crate::storage::EventType::RentalEnd,
-                event_data,
-                timestamp: chrono::Utc::now(),
-                processed: false,
-                processed_at: None,
-                batch_id: None,
-                idempotency_key: Some(idempotency_key),
-            };
-
-            self.event_store
-                .append_usage_event(&usage_event)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to append rental end event: {}", e)))?;
-
-            info!("Published rental_end event for rental {} for audit purposes", rental_id);
-
-            let duration = rental.last_updated - rental.created_at;
-
-            if let Some(ref metrics) = self.metrics {
-                metrics
-                    .billing_metrics()
-                    .record_rental_finalized(
-                        &rental_id.to_string(),
-                        rental.actual_cost.as_decimal().to_f64().unwrap_or(0.0),
-                    )
-                    .await;
-            }
-
-            let duration_proto = prost_types::Duration {
-                seconds: duration.num_seconds(),
-                nanos: (duration.num_nanoseconds().unwrap_or(0) % 1_000_000_000) as i32,
-            };
-
-            let response = FinalizeRentalResponse {
-                success: true,
-                total_cost: Self::format_credit_balance(rental.actual_cost),
-                duration: Some(duration_proto),
-                charged_amount: "0.00".to_string(),
-                refunded_amount: "0.00".to_string(),
-            };
-
-            Ok(response)
         }
         .await;
 
