@@ -7,7 +7,6 @@ pub mod events;
 pub mod idempotency;
 pub mod processor;
 pub mod rentals;
-pub mod rules_engine;
 pub mod types;
 
 pub use aggregations::AggregationJobs;
@@ -18,7 +17,6 @@ pub use credits::{CreditManager, CreditOperations};
 pub use events::{EventStore, EventStoreOperations};
 pub use processor::{EventHandlers, EventProcessor, UsageAggregation};
 pub use rentals::{Rental, RentalManager, RentalOperations};
-pub use rules_engine::{BillingRule, RulesEngine, RulesEvaluator};
 pub use types::{
     BillingPeriod, CostBreakdown, CreditBalance, RentalId, RentalState, UsageMetrics, UserId,
 };
