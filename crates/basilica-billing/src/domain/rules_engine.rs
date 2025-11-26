@@ -1,6 +1,4 @@
-use crate::domain::types::{
-    CostBreakdown, CreditBalance, DiscountType, PackageId, UsageMetrics, UserId,
-};
+use crate::domain::types::{CostBreakdown, CreditBalance, DiscountType, UsageMetrics, UserId};
 use crate::error::Result;
 use crate::metrics::BillingMetrics;
 use crate::storage::{PromoCodeRepository, RulesRepository, UserMetadataRepository};
@@ -144,7 +142,6 @@ impl RulesEngine {
     async fn apply_automatic_discounts(
         &self,
         user_id: &UserId,
-        package_id: &PackageId,
         promo_code: Option<&str>,
         mut cost: CostBreakdown,
     ) -> Result<CostBreakdown> {
@@ -161,56 +158,46 @@ impl RulesEngine {
         if let Some(code) = promo_code {
             match self.promo_code_repository.validate_and_get(code).await {
                 Ok(promo) => {
-                    if promo.applicable_packages.is_empty()
-                        || promo
-                            .applicable_packages
-                            .iter()
-                            .any(|p| p.as_str() == package_id.as_str())
-                    {
-                        if let Some(ref metrics) = self.metrics {
-                            metrics
-                                .record_promo_code_validation(code, true, "valid")
-                                .await;
-                        }
+                    // Promo codes now apply to all rentals (no package-based filtering)
+                    if let Some(ref metrics) = self.metrics {
+                        metrics
+                            .record_promo_code_validation(code, true, "valid")
+                            .await;
+                    }
 
-                        match promo.discount_type {
-                            DiscountType::Percentage => {
-                                if promo.discount_value > best_discount_percentage {
-                                    best_discount_percentage = promo.discount_value;
-                                    promo_applied = true;
-                                }
-                            }
-                            DiscountType::FixedAmount => {
-                                fixed_discount_amount =
-                                    CreditBalance::from_decimal(promo.discount_value);
+                    match promo.discount_type {
+                        DiscountType::Percentage => {
+                            if promo.discount_value > best_discount_percentage {
+                                best_discount_percentage = promo.discount_value;
                                 promo_applied = true;
                             }
                         }
-
-                        let _ = self.promo_code_repository.increment_usage(code).await;
-
-                        if promo_applied {
-                            if let Some(ref metrics) = self.metrics {
-                                let discount_type = match promo.discount_type {
-                                    DiscountType::Percentage => "percentage",
-                                    DiscountType::FixedAmount => "fixed_amount",
-                                };
-                                let amount = if promo.discount_type == DiscountType::Percentage {
-                                    let subtotal = cost.base_cost.add(cost.usage_cost);
-                                    subtotal.multiply(promo.discount_value).as_decimal()
-                                } else {
-                                    promo.discount_value
-                                };
-                                let amount_f64 = amount.to_f64().unwrap_or(0.0);
-                                metrics
-                                    .record_promo_code_applied(code, discount_type, amount_f64)
-                                    .await;
-                            }
+                        DiscountType::FixedAmount => {
+                            fixed_discount_amount =
+                                CreditBalance::from_decimal(promo.discount_value);
+                            promo_applied = true;
                         }
-                    } else if let Some(ref metrics) = self.metrics {
-                        metrics
-                            .record_promo_code_validation(code, false, "package_not_applicable")
-                            .await;
+                    }
+
+                    let _ = self.promo_code_repository.increment_usage(code).await;
+
+                    if promo_applied {
+                        if let Some(ref metrics) = self.metrics {
+                            let discount_type = match promo.discount_type {
+                                DiscountType::Percentage => "percentage",
+                                DiscountType::FixedAmount => "fixed_amount",
+                            };
+                            let amount = if promo.discount_type == DiscountType::Percentage {
+                                let subtotal = cost.base_cost.add(cost.usage_cost);
+                                subtotal.multiply(promo.discount_value).as_decimal()
+                            } else {
+                                promo.discount_value
+                            };
+                            let amount_f64 = amount.to_f64().unwrap_or(0.0);
+                            metrics
+                                .record_promo_code_applied(code, discount_type, amount_f64)
+                                .await;
+                        }
                     }
                 }
                 Err(_) => {

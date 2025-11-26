@@ -47,9 +47,8 @@ impl From<AvailableNode> for UnifiedGpu {
 
         let gpu_count = node.gpu_specs.len() as u32;
 
-        // Community cloud pricing comes from billing packages, not individual nodes
-        // Show as "package-based" to indicate this
-        let price_per_hour = "package-based".to_string();
+        // Community cloud pricing comes from API responses
+        let price_per_hour = "varies".to_string();
 
         let region = node.location.unwrap_or_else(|| "Unknown".to_string());
 

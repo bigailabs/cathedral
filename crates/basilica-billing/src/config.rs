@@ -87,8 +87,7 @@ pub struct TelemetryConfig {
 pub struct RulesEngineConfig {
     pub evaluation_interval_seconds: u64,
     pub cache_ttl_seconds: u64,
-    pub max_rules_per_package: u32,
-    pub default_package_id: String,
+    pub max_rules: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,8 +156,7 @@ impl Default for BillingConfig {
             rules_engine: RulesEngineConfig {
                 evaluation_interval_seconds: 60,
                 cache_ttl_seconds: 300,
-                max_rules_per_package: 100,
-                default_package_id: "standard".to_string(),
+                max_rules: 100,
             },
             aws: AwsConfig {
                 region: "us-east-1".to_string(),

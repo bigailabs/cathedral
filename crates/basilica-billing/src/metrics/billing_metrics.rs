@@ -191,8 +191,8 @@ impl BillingMetrics {
             .await;
     }
 
-    pub async fn record_rental_tracked(&self, rental_id: &str, package_id: &str) {
-        let labels = &[("rental_id", rental_id), ("package_id", package_id)];
+    pub async fn record_rental_tracked(&self, rental_id: &str) {
+        let labels = &[("rental_id", rental_id)];
         self.recorder
             .increment_counter(BillingMetricNames::RENTALS_TRACKED, labels)
             .await;

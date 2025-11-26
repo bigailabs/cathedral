@@ -1,4 +1,4 @@
-use crate::domain::types::{DiscountType, PackageId};
+use crate::domain::types::DiscountType;
 use crate::error::{BillingError, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -17,7 +17,6 @@ pub struct PromoCode {
     pub valid_from: DateTime<Utc>,
     pub valid_until: Option<DateTime<Utc>>,
     pub active: bool,
-    pub applicable_packages: Vec<PackageId>,
     pub description: String,
 }
 
@@ -73,7 +72,7 @@ impl PromoCodeRepository for SqlPromoCodeRepository {
         let row = sqlx::query(
             r#"
             SELECT code, discount_type, discount_value, max_uses, current_uses,
-                   valid_from, valid_until, active, applicable_packages, description
+                   valid_from, valid_until, active, description
             FROM billing.promo_codes
             WHERE code = $1
             "#,
@@ -98,12 +97,6 @@ impl PromoCodeRepository for SqlPromoCodeRepository {
             let discount_type =
                 DiscountType::from_str(&discount_type_str).unwrap_or(DiscountType::Percentage);
 
-            let applicable_packages: Vec<String> = row.get("applicable_packages");
-            let packages = applicable_packages
-                .into_iter()
-                .map(PackageId::new)
-                .collect();
-
             let promo = PromoCode {
                 code: row.get("code"),
                 discount_type,
@@ -113,7 +106,6 @@ impl PromoCodeRepository for SqlPromoCodeRepository {
                 valid_from: row.get("valid_from"),
                 valid_until: row.get("valid_until"),
                 active: row.get("active"),
-                applicable_packages: packages,
                 description: row.get("description"),
             };
 

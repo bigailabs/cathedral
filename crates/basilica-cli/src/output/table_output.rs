@@ -1,22 +1,17 @@
 //! Table formatting for CLI output
 
-use crate::{
-    error::{CliError, Result},
-    output::format_credits,
-};
+use crate::error::Result;
 use basilica_aggregator::GpuOffering;
 use basilica_api::country_mapping::get_country_name_from_code;
 use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{
-        ApiKeyInfo, ApiRentalListItem, BalanceResponse, BillingPackageInfo, GpuSpec,
-        ListDepositsResponse, NodeDetails, PackagesResponse, RentalStatusResponse,
-        RentalUsageResponse, UsageHistoryResponse,
+        ApiKeyInfo, ApiRentalListItem, GpuSpec, ListDepositsResponse, NodeDetails,
+        RentalStatusResponse, RentalUsageResponse, UsageHistoryResponse,
     },
     AvailableNode,
 };
 use chrono::{DateTime, Local};
-use color_eyre::eyre::eyre;
 use console::style;
 use rust_decimal::Decimal;
 use std::{collections::HashMap, str::FromStr};
@@ -120,51 +115,44 @@ pub fn display_rental_items(
     show_standard: bool,
     show_ids: bool,
     usage_map: &HashMap<String, basilica_sdk::types::RentalUsageRecord>,
-    pricing_map: &HashMap<String, String>,
+    _pricing_map: &HashMap<String, String>,
     is_history_mode: bool,
 ) -> Result<()> {
     // Helper to calculate rate and cost for a rental
     let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
-        // Calculate rate from pricing_map (packages API) for consistency
-        // Only use usage_map for the accumulated cost
-        let gpu_count = rental.gpu_specs.len();
-
-        // Get rate from pricing_map based on GPU type
-        let rate = if let Some(first_gpu) = rental.gpu_specs.first() {
-            let category = GpuCategory::from_str(&first_gpu.name).unwrap();
-            let lookup_key = category.to_string().to_lowercase();
-
-            pricing_map
-                .get(&lookup_key)
-                .and_then(|rate_str| {
-                    rate_str.parse::<Decimal>().ok().map(|r| {
-                        let total_rate = r * Decimal::from(gpu_count);
-                        format!("${:.2}/hr", total_rate)
-                    })
-                })
-                .unwrap_or_else(|| "-".to_string())
-        } else {
-            "-".to_string()
-        };
-
-        // Get cost from usage map if available
         // Strip "rental-" prefix if present to match usage API format
         let lookup_id = rental
             .rental_id
             .strip_prefix("rental-")
             .unwrap_or(&rental.rental_id);
 
-        let cost = usage_map
-            .get(lookup_id)
-            .map(|usage| {
-                usage
-                    .current_cost
-                    .parse::<Decimal>()
-                    .ok()
-                    .map(|c| format!("${:.2}", c))
-                    .unwrap_or_else(|| usage.current_cost.clone())
-            })
-            .unwrap_or_else(|| "-".to_string());
+        // Get rate and cost from usage map if available
+        let (rate, cost) = if let Some(usage) = usage_map.get(lookup_id) {
+            let gpu_count = rental.gpu_specs.len();
+
+            // Get hourly rate from usage record
+            let rate = usage
+                .hourly_rate
+                .parse::<Decimal>()
+                .ok()
+                .map(|r| {
+                    let total_rate = r * Decimal::from(gpu_count);
+                    format!("${:.2}/hr", total_rate)
+                })
+                .unwrap_or_else(|| "-".to_string());
+
+            // Get cost from usage record
+            let cost = usage
+                .current_cost
+                .parse::<Decimal>()
+                .ok()
+                .map(|c| format!("${:.2}", c))
+                .unwrap_or_else(|| usage.current_cost.clone());
+
+            (rate, cost)
+        } else {
+            ("-".to_string(), "-".to_string())
+        };
 
         (rate, cost)
     };
@@ -765,7 +753,7 @@ pub fn display_available_nodes_compact(
                     let category = GpuCategory::from_str(&gpu_spec.name).unwrap();
                     let gpu_count = first_node.node.gpu_specs.len();
 
-                    // Look up price by category string (lowercase, as package names are h100, a100, etc.)
+                    // Look up price by category string (lowercase, e.g., h100, a100)
                     pricing_map
                         .get(&category.to_string().to_lowercase())
                         .map(|rate| {
@@ -916,7 +904,7 @@ pub fn display_available_nodes_detailed(
         if let Some(gpu_spec) = node.node.gpu_specs.first() {
             let category = GpuCategory::from_str(&gpu_spec.name).unwrap();
             let gpu_count = node.node.gpu_specs.len();
-            // Package names are lowercase (h100, a100, etc.)
+            // GPU types are lowercase (h100, a100, etc.)
             let lookup_key = category.to_string().to_lowercase();
 
             pricing_map
@@ -1320,210 +1308,6 @@ pub fn display_deposits(response: &ListDepositsResponse) -> Result<()> {
     println!();
     println!("{}:", style("Total Deposits").bold());
     println!("  {} TAO", style(format!("{:.3}", total_tao)).green());
-
-    Ok(())
-}
-
-/// Display pricing table for all GPU types
-pub fn display_pricing_table(
-    packages: &PackagesResponse,
-    balance: Option<&BalanceResponse>,
-) -> Result<()> {
-    if packages.packages.is_empty() {
-        println!("{}", style("No pricing packages available").yellow());
-        return Ok(());
-    }
-
-    #[derive(Tabled)]
-    struct PricingRow {
-        #[tabled(rename = "GPU Type")]
-        gpu_type: String,
-        #[tabled(rename = "Hourly Rate")]
-        hourly_rate: String,
-        #[tabled(rename = "8-Hour Cost")]
-        eight_hour: String,
-        #[tabled(rename = "24-Hour Cost")]
-        twenty_four_hour: String,
-        #[tabled(rename = "Hours Available")]
-        hours_available: String,
-    }
-
-    let mut rows: Vec<(Decimal, PricingRow)> = Vec::new();
-
-    // Parse balance once if available
-    let available_balance = balance.and_then(|b| b.available.parse::<Decimal>().ok());
-
-    for package in &packages.packages {
-        if !package.is_active {
-            continue;
-        }
-
-        let hourly_rate = package
-            .hourly_rate
-            .parse::<Decimal>()
-            .map_err(|e| CliError::Internal(eyre!("Invalid hourly rate format: {}", e)))?;
-
-        let eight_hour_cost = hourly_rate * Decimal::from(8);
-        let twenty_four_hour_cost = hourly_rate * Decimal::from(24);
-
-        let hours_available = if let Some(balance) = available_balance {
-            if hourly_rate > Decimal::ZERO {
-                let hours = balance / hourly_rate;
-                format!("{:.1}h", hours)
-            } else {
-                "N/A".to_string()
-            }
-        } else {
-            "-".to_string()
-        };
-
-        rows.push((
-            hourly_rate,
-            PricingRow {
-                gpu_type: package.name.clone(),
-                hourly_rate: format!("${:.2}/hr", hourly_rate),
-                eight_hour: format!("${:.2}", eight_hour_cost),
-                twenty_four_hour: format!("${:.2}", twenty_four_hour_cost),
-                hours_available,
-            },
-        ));
-    }
-
-    // Sort by hourly rate ascending (numeric)
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // Extract rows after sorting
-    let rows: Vec<PricingRow> = rows.into_iter().map(|(_, r)| r).collect();
-
-    let mut table = Table::new(&rows);
-    table.with(Style::modern());
-    println!("{}", table);
-    println!();
-
-    if let Some(balance) = balance {
-        println!(
-            "{}: {} credits",
-            style("Your Balance").cyan(),
-            style(format_credits(&balance.available)).green().bold()
-        );
-    }
-
-    println!();
-    println!("{}", style("Quick Commands:").cyan().bold());
-    println!(
-        "  {} {}",
-        style("basilica fund").yellow().bold(),
-        style("- Add TAO credits to your account").dim()
-    );
-    println!(
-        "  {} {}",
-        style("basilica up").yellow().bold(),
-        style("- Start a GPU rental session").dim()
-    );
-
-    Ok(())
-}
-
-/// Display pricing for a specific GPU type
-pub fn display_gpu_pricing(
-    package: &BillingPackageInfo,
-    hours: Option<u32>,
-    balance: Option<&BalanceResponse>,
-) -> Result<()> {
-    let hourly_rate = package
-        .hourly_rate
-        .parse::<Decimal>()
-        .map_err(|e| CliError::Internal(eyre!("Invalid hourly rate format: {}", e)))?;
-
-    println!("{}", style(&package.name).bold().cyan());
-    println!();
-    println!("  {}: {}", style("Description").dim(), package.description);
-    println!(
-        "  {}: {}",
-        style("Hourly Rate").cyan(),
-        style(format!("${:.2}/hr", hourly_rate)).green().bold()
-    );
-
-    if let Some(hours) = hours {
-        let total_cost = hourly_rate * Decimal::from(hours);
-        println!();
-        println!(
-            "  {}: {} hours",
-            style("Duration").cyan(),
-            style(hours).yellow()
-        );
-        println!(
-            "  {}: {}",
-            style("Estimated Cost").cyan(),
-            style(format!("${:.2}", total_cost)).green().bold()
-        );
-    }
-
-    if let Some(balance) = balance {
-        let available_balance = balance
-            .available
-            .parse::<Decimal>()
-            .map_err(|e| CliError::Internal(eyre!("Invalid balance format: {}", e)))?;
-
-        println!();
-        println!(
-            "  {}: {} credits",
-            style("Your Balance").cyan(),
-            style(format!("{:.2}", available_balance)).green()
-        );
-
-        if hourly_rate > Decimal::ZERO {
-            let hours_available = available_balance / hourly_rate;
-            println!(
-                "  {}: {} hours",
-                style("Hours Available").cyan(),
-                style(format!("{:.1}", hours_available)).yellow()
-            );
-
-            if let Some(requested_hours) = hours {
-                let total_cost = hourly_rate * Decimal::from(requested_hours);
-                if total_cost > available_balance {
-                    let shortfall = total_cost - available_balance;
-                    println!();
-                    println!(
-                        "  {}: {} credits",
-                        style("Shortfall").red().bold(),
-                        style(format!("{:.2}", shortfall)).red()
-                    );
-                    println!(
-                        "  {} Run `basilica fund` to add credits",
-                        style("⚠").yellow()
-                    );
-                } else {
-                    let remaining = available_balance - total_cost;
-                    println!(
-                        "  {}: {} credits",
-                        style("Remaining After").dim(),
-                        style(format!("{:.2}", remaining)).dim()
-                    );
-                }
-            }
-        }
-    }
-
-    println!();
-
-    println!("{}", style("Quick Commands:").cyan().bold());
-    println!(
-        "  {} {}",
-        style("basilica fund").yellow().bold(),
-        style("- Add TAO credits to your account").dim()
-    );
-    println!(
-        "  {} {}",
-        style("basilica up").yellow().bold(),
-        style("- Start a GPU rental session").dim()
-    );
-    println!(
-        "  {} {}",
-        style("basilica ps").yellow().bold(),
-        style("- List active rentals").dim()
-    );
 
     Ok(())
 }

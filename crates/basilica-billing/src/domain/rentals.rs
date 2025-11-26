@@ -1,6 +1,5 @@
 use crate::domain::types::{
-    CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
-    UserId,
+    CostBreakdown, CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
 };
 use crate::error::{BillingError, Result};
 use async_trait::async_trait;
@@ -18,9 +17,6 @@ pub struct Rental {
     pub user_id: UserId,
     pub node_id: String,
     pub validator_id: String,
-    /// Legacy package ID (deprecated, kept for backward compatibility)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub package_id: Option<PackageId>,
     pub state: RentalState,
     pub resource_spec: ResourceSpec,
     pub usage_metrics: UsageMetrics,
@@ -91,7 +87,6 @@ impl Rental {
             user_id,
             node_id,
             validator_id,
-            package_id: None, // No package in marketplace model
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -114,51 +109,6 @@ impl Rental {
             actual_cost: CreditBalance::zero(),
             base_price_per_gpu,
             gpu_count,
-        }
-    }
-
-    /// Legacy constructor with package-based pricing (DEPRECATED)
-    #[deprecated(
-        since = "1.0.0",
-        note = "Use new_marketplace for marketplace-2-compute"
-    )]
-    pub fn new(
-        user_id: UserId,
-        node_id: String,
-        validator_id: String,
-        package_id: PackageId,
-        resource_spec: ResourceSpec,
-    ) -> Self {
-        let now = Utc::now();
-        Self {
-            id: RentalId::new(),
-            user_id,
-            node_id,
-            validator_id,
-            package_id: Some(package_id),
-            state: RentalState::Pending,
-            resource_spec,
-            usage_metrics: UsageMetrics::zero(),
-            cost_breakdown: CostBreakdown {
-                base_cost: CreditBalance::zero(),
-                usage_cost: CreditBalance::zero(),
-                volume_discount: CreditBalance::zero(),
-                discounts: CreditBalance::zero(),
-                overage_charges: CreditBalance::zero(),
-                total_cost: CreditBalance::zero(),
-            },
-            started_at: now,
-            updated_at: now,
-            ended_at: None,
-            metadata: HashMap::new(),
-            created_at: now,
-            last_updated: now,
-            actual_start_time: None,
-            actual_end_time: None,
-            actual_cost: CreditBalance::zero(),
-            // Default marketplace pricing (for legacy compatibility)
-            base_price_per_gpu: Decimal::ZERO,
-            gpu_count: 1,
         }
     }
 
@@ -319,8 +269,9 @@ pub struct CreateRentalParams {
     pub user_id: UserId,
     pub node_id: String,
     pub validator_id: String,
-    pub package_id: PackageId,
     pub resource_spec: ResourceSpec,
+    pub base_price_per_gpu: Decimal,
+    pub gpu_count: u32,
 }
 
 /// Rental management operations
@@ -364,14 +315,14 @@ impl RentalManager {
 
 #[async_trait]
 impl RentalOperations for RentalManager {
-    #[allow(deprecated)]
     async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
-        let rental = Rental::new(
+        let rental = Rental::new_marketplace(
             params.user_id,
             params.node_id,
             params.validator_id,
-            params.package_id,
             params.resource_spec,
+            params.base_price_per_gpu,
+            params.gpu_count,
         );
         let rental_id = rental.id;
 

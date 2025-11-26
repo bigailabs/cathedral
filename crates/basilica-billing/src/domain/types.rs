@@ -73,62 +73,6 @@ impl FromStr for RentalId {
     }
 }
 
-/// Billing package identifier
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct PackageId(String);
-
-impl PackageId {
-    pub fn new(id: String) -> Self {
-        Self(id)
-    }
-
-    pub fn h100() -> Self {
-        Self("h100".to_string())
-    }
-
-    pub fn h200() -> Self {
-        Self("h200".to_string())
-    }
-
-    pub fn custom() -> Self {
-        Self("custom".to_string())
-    }
-
-    // Legacy aliases for backward compatibility
-    pub fn standard() -> Self {
-        Self::h100()
-    }
-
-    pub fn premium() -> Self {
-        Self::h200()
-    }
-
-    pub fn enterprise() -> Self {
-        Self::custom()
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn from_gpu_model(gpu_model: &str) -> Self {
-        let model_lower = gpu_model.to_lowercase();
-        if model_lower.contains("h100") {
-            Self::h100()
-        } else if model_lower.contains("h200") {
-            Self::h200()
-        } else {
-            Self::custom()
-        }
-    }
-}
-
-impl fmt::Display for PackageId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 /// Credit balance with precision handling
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CreditBalance(Decimal);

@@ -1,8 +1,7 @@
 use crate::domain::{
     rentals::{Rental, RentalStatistics, SecureCloudRental},
     types::{
-        CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
-        UserId,
+        CostBreakdown, CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
     },
 };
 use crate::error::{BillingError, Result};
@@ -126,9 +125,6 @@ impl SqlRentalRepository {
                 network_bandwidth_mbps: 0,
             });
 
-        // Package ID is now optional (legacy field)
-        let package_id = r.get::<Option<String>, _>("package_id").map(PackageId::new);
-
         // Read marketplace pricing fields (with defaults for legacy rentals)
         let base_price_per_gpu = r
             .get::<Option<rust_decimal::Decimal>, _>("base_price_per_gpu")
@@ -143,7 +139,6 @@ impl SqlRentalRepository {
             validator_id: r
                 .get::<Option<String>, _>("validator_id")
                 .unwrap_or_default(),
-            package_id,
             state,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -204,7 +199,7 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             Some(&rental.validator_id)
         })
-        .bind(rental.package_id.as_ref().map(|p| p.as_str())) // Now optional
+        .bind::<Option<&str>>(None) // package_id deprecated, always null
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
         .bind(hourly_rate)

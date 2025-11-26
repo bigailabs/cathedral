@@ -411,23 +411,6 @@ pub struct BalanceResponse {
     pub last_updated: String,
 }
 
-/// Billing package information
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BillingPackageInfo {
-    pub package_id: String,
-    pub name: String,
-    pub description: String,
-    pub hourly_rate: String,
-    pub is_active: bool,
-}
-
-/// Packages response
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PackagesResponse {
-    pub packages: Vec<BillingPackageInfo>,
-    pub current_package_id: String,
-}
-
 // Usage History Types
 
 /// Individual rental usage record

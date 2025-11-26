@@ -409,7 +409,7 @@ impl BillingService for BillingServiceImpl {
             if let Some(ref metrics) = self.metrics {
                 metrics
                     .billing_metrics()
-                    .record_rental_tracked(&rental_id.to_string(), "marketplace")
+                    .record_rental_tracked(&rental_id.to_string())
                     .await;
             }
 

@@ -15,7 +15,6 @@
 //! ```
 
 use rust_decimal::Decimal;
-use std::str::FromStr;
 
 use crate::domain::types::{CostBreakdown, CreditBalance};
 
@@ -82,56 +81,6 @@ pub fn calculate_marketplace_cost(
         volume_discount: CreditBalance::zero(), // No volume discounts in marketplace model
         discounts: CreditBalance::zero(),  // No discounts in this model
         overage_charges: CreditBalance::zero(), // Reserved for future use
-        total_cost: CreditBalance::from_decimal(total_cost),
-    }
-}
-
-/// Legacy package-based cost calculation (DEPRECATED)
-///
-/// This function is kept for backward compatibility with existing tests
-/// and code that hasn't been migrated yet. New code should use
-/// `calculate_marketplace_cost` instead.
-///
-/// # Deprecation Notice
-///
-/// This will be removed in a future version once all callers have been
-/// migrated to the marketplace pricing model.
-#[deprecated(
-    since = "1.0.0",
-    note = "Use calculate_marketplace_cost for marketplace-2-compute pricing"
-)]
-pub fn calculate_legacy_cost(
-    hourly_rate: Decimal,
-    gpu_hours: Decimal,
-    gpu_count: u32,
-) -> CostBreakdown {
-    let effective_gpu_count = Decimal::from(gpu_count.max(1));
-
-    // Legacy formula: hourly_rate × gpu_hours × gpu_count
-    let raw_gpu_cost = hourly_rate
-        .checked_mul(gpu_hours)
-        .and_then(|v| v.checked_mul(effective_gpu_count))
-        .unwrap_or(Decimal::ZERO);
-
-    // Legacy volume discount: 10% if gpu_count > 1
-    let volume_discount = if gpu_count > 1 {
-        raw_gpu_cost
-            .checked_mul(Decimal::from_str("0.10").unwrap())
-            .unwrap_or(Decimal::ZERO)
-    } else {
-        Decimal::ZERO
-    };
-
-    let total_cost = raw_gpu_cost
-        .checked_sub(volume_discount)
-        .unwrap_or(raw_gpu_cost);
-
-    CostBreakdown {
-        base_cost: CreditBalance::from_decimal(raw_gpu_cost),
-        usage_cost: CreditBalance::zero(),
-        volume_discount: CreditBalance::from_decimal(volume_discount),
-        discounts: CreditBalance::zero(),
-        overage_charges: CreditBalance::zero(),
         total_cost: CreditBalance::from_decimal(total_cost),
     }
 }
@@ -220,35 +169,5 @@ mod tests {
         assert_eq!(breakdown.base_cost.as_decimal(), dec!(88000.00));
         assert_eq!(breakdown.total_cost.as_decimal(), dec!(88000.00));
         assert_eq!(breakdown.discounts.as_decimal(), dec!(0.00));
-    }
-
-    #[test]
-    fn test_legacy_cost_basic() {
-        // Legacy: 10 hours × $2.50 × 1 GPU = $25.00
-        #[allow(deprecated)]
-        let breakdown = calculate_legacy_cost(
-            dec!(2.50), // hourly_rate
-            dec!(10.0), // gpu_hours
-            1,          // gpu_count
-        );
-
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(25.00));
-        assert_eq!(breakdown.total_cost.as_decimal(), dec!(25.00));
-        assert_eq!(breakdown.volume_discount.as_decimal(), dec!(0.00));
-    }
-
-    #[test]
-    fn test_legacy_cost_volume_discount() {
-        // Legacy: 10 hours × $2.50 × 2 GPUs × 0.9 (10% discount) = $45.00
-        #[allow(deprecated)]
-        let breakdown = calculate_legacy_cost(
-            dec!(2.50), // hourly_rate
-            dec!(10.0), // gpu_hours
-            2,          // gpu_count
-        );
-
-        assert_eq!(breakdown.base_cost.as_decimal(), dec!(50.00));
-        assert_eq!(breakdown.volume_discount.as_decimal(), dec!(5.00));
-        assert_eq!(breakdown.total_cost.as_decimal(), dec!(45.00));
     }
 }
