@@ -859,21 +859,19 @@ impl ApiK8sClient for K8sClient {
                     }
                 };
 
+                // When using custom storage (user-provided credentials), bucket is required
+                // When using system credentials, bucket is read from the credentials secret
+                // by the operator, so we don't pass it in the CR spec
                 let (bucket, credentials_secret) = if is_custom_storage {
                     (
                         persistent.bucket.clone(),
                         persistent.credentials_secret.clone(),
                     )
                 } else {
-                    if persistent.bucket.is_empty() {
-                        return Err(ApiError::BadRequest {
-                            message:
-                                "bucket name is required when using default storage credentials"
-                                    .to_string(),
-                        });
-                    }
+                    // For system credentials, bucket comes from the secret, not the request
+                    // The operator will read STORAGE_BUCKET from the credentials secret
                     (
-                        persistent.bucket.clone(),
+                        String::new(), // Empty bucket - operator reads from secret
                         Some(default_secret_name.to_string()),
                     )
                 };
