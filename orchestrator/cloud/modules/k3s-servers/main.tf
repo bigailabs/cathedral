@@ -112,16 +112,16 @@ resource "aws_vpc_security_group_ingress_rule" "k3s_server_vxlan" {
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "k3s_server_wireguard" {
+resource "aws_vpc_security_group_ingress_rule" "k3s_server_wireguard_vpn" {
   security_group_id = aws_security_group.k3s_server.id
-  description       = "Flannel WireGuard"
+  description       = "WireGuard VPN for remote GPU nodes"
   ip_protocol       = "udp"
   from_port         = 51820
-  to_port           = 51821
-  cidr_ipv4         = var.vpc_cidr
+  to_port           = 51820
+  cidr_ipv4         = "0.0.0.0/0"
 
   tags = {
-    Name = "flannel-wireguard"
+    Name = "wireguard-vpn"
   }
 }
 
