@@ -1,6 +1,6 @@
 //! WireGuard configuration types
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Individual K3s server WireGuard peer configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,8 +17,10 @@ pub struct WireGuardPeer {
     /// Server's VPC subnet (e.g., 10.101.0.0/24) for routing
     pub vpc_subnet: String,
 
-    /// Whether to route Flannel pod network through this peer
+    /// Whether to route Flannel pod network (10.42.0.0/16) through this peer
     pub route_pod_network: bool,
+    // NOTE: Service network (10.43.0.0/16) should NOT be routed via WireGuard.
+    // ClusterIP services are virtual IPs handled locally by kube-proxy iptables rules.
 }
 
 /// WireGuard configuration returned to GPU nodes during registration
@@ -64,6 +66,8 @@ impl WireGuardConfig {
             if peer.route_pod_network {
                 ips.push("10.42.0.0/16".to_string());
             }
+            // NOTE: Service network (10.43.0.0/16) is NOT routed via WireGuard
+            // because ClusterIP services are virtual IPs handled by kube-proxy locally
         }
         ips
     }
@@ -104,12 +108,38 @@ pub struct WireGuardServerConfig {
     pub enabled: bool,
 
     /// All K3s servers with their WireGuard configurations
-    #[serde(default)]
+    /// Accepts either a JSON string or a native array (for env var compatibility)
+    #[serde(default, deserialize_with = "deserialize_servers")]
     pub servers: Vec<WireGuardServerEntry>,
 
     /// Persistent keepalive interval in seconds
     #[serde(default = "default_keepalive")]
     pub persistent_keepalive: u32,
+}
+
+/// Deserialize servers from either a JSON string or a native array
+fn deserialize_servers<'de, D>(deserializer: D) -> Result<Vec<WireGuardServerEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ServersInput {
+        String(String),
+        Array(Vec<WireGuardServerEntry>),
+    }
+
+    match ServersInput::deserialize(deserializer)? {
+        ServersInput::String(s) => {
+            if s.is_empty() {
+                return Ok(Vec::new());
+            }
+            serde_json::from_str(&s).map_err(|e| D::Error::custom(format!("invalid JSON: {}", e)))
+        }
+        ServersInput::Array(arr) => Ok(arr),
+    }
 }
 
 fn default_keepalive() -> u32 {
@@ -139,6 +169,7 @@ impl WireGuardServerConfig {
                 wireguard_ip: server.wireguard_ip.clone(),
                 vpc_subnet: server.vpc_subnet.clone(),
                 route_pod_network: i == 0, // First server routes pod network
+                                           // NOTE: Service network (10.43.0.0/16) is NOT routed via WireGuard
             })
             .collect();
 
@@ -172,6 +203,48 @@ mod tests {
         assert_eq!(parsed[0].endpoint, "1.2.3.4:51820");
         assert_eq!(parsed[0].vpc_subnet, "10.101.0.0/24");
         assert_eq!(parsed[1].wireguard_ip, "10.200.0.2");
+    }
+
+    #[test]
+    fn test_wireguard_server_config_from_json_string() {
+        // Test that WireGuardServerConfig can deserialize servers from a JSON string
+        // This is how figment passes environment variables
+        let config_json = r#"{
+            "enabled": true,
+            "servers": "[{\"endpoint\":\"1.2.3.4:51820\",\"public_key\":\"key1\",\"wireguard_ip\":\"10.200.0.1\",\"vpc_subnet\":\"10.101.0.0/24\"}]",
+            "persistent_keepalive": 25
+        }"#;
+        let config: WireGuardServerConfig = serde_json::from_str(config_json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].endpoint, "1.2.3.4:51820");
+    }
+
+    #[test]
+    fn test_wireguard_server_config_from_native_array() {
+        // Test that WireGuardServerConfig can also deserialize from native array
+        let config_json = r#"{
+            "enabled": true,
+            "servers": [{"endpoint":"1.2.3.4:51820","public_key":"key1","wireguard_ip":"10.200.0.1","vpc_subnet":"10.101.0.0/24"}],
+            "persistent_keepalive": 25
+        }"#;
+        let config: WireGuardServerConfig = serde_json::from_str(config_json).unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.servers.len(), 1);
+        assert_eq!(config.servers[0].endpoint, "1.2.3.4:51820");
+    }
+
+    #[test]
+    fn test_wireguard_server_config_empty_string() {
+        // Test that empty string for servers results in empty vec
+        let config_json = r#"{
+            "enabled": false,
+            "servers": "",
+            "persistent_keepalive": 25
+        }"#;
+        let config: WireGuardServerConfig = serde_json::from_str(config_json).unwrap();
+        assert!(!config.enabled);
+        assert!(config.servers.is_empty());
     }
 
     #[test]
@@ -233,7 +306,7 @@ mod tests {
         assert_eq!(node_config.peers.len(), 3);
         assert_eq!(node_config.persistent_keepalive, 30);
 
-        // First peer routes pod network
+        // First peer routes pod network (service network is NOT routed via WireGuard)
         assert!(node_config.peers[0].route_pod_network);
         assert!(!node_config.peers[1].route_pod_network);
         assert!(!node_config.peers[2].route_pod_network);
@@ -243,11 +316,12 @@ mod tests {
         assert_eq!(node_config.peers[1].vpc_subnet, "10.101.1.0/24");
         assert_eq!(node_config.peers[2].vpc_subnet, "10.101.2.0/24");
 
-        // Check allowed_ips helper
+        // Check allowed_ips helper (service network is NOT included)
         let allowed = node_config.allowed_ips();
         assert!(allowed.contains(&"10.200.0.1/32".to_string()));
         assert!(allowed.contains(&"10.101.0.0/24".to_string()));
         assert!(allowed.contains(&"10.42.0.0/16".to_string())); // Pod network via first peer
+        assert!(!allowed.contains(&"10.43.0.0/16".to_string())); // Service network NOT routed
         assert!(allowed.contains(&"10.200.0.2/32".to_string()));
         assert!(allowed.contains(&"10.101.1.0/24".to_string()));
     }
