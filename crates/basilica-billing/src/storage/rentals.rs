@@ -81,7 +81,8 @@ impl SqlRentalRepository {
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
             cost_breakdown: {
-                let hourly_rate = r.get::<rust_decimal::Decimal, _>("hourly_rate");
+                // Derive hourly rate from base_price_per_gpu * gpu_count
+                let hourly_rate = base_price_per_gpu * rust_decimal::Decimal::from(gpu_count);
                 let total_cost = r
                     .get::<Option<rust_decimal::Decimal>, _>("total_cost")
                     .unwrap_or(rust_decimal::Decimal::ZERO);
@@ -184,7 +185,7 @@ impl RentalRepository for SqlRentalRepository {
 
         sqlx::query(
             r#"
-            INSERT INTO billing.rentals
+            INSERT INTO billing.community_rentals
             (rental_id, user_id, node_id, validator_id, status,
              resource_spec, hourly_rate, start_time, metadata,
              base_price_per_gpu, gpu_count)
@@ -224,7 +225,7 @@ impl RentalRepository for SqlRentalRepository {
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
                    base_price_per_gpu, gpu_count
-            FROM billing.rentals
+            FROM billing.community_rentals
             WHERE rental_id = $1
             "#,
         )
@@ -247,7 +248,7 @@ impl RentalRepository for SqlRentalRepository {
 
         let result = sqlx::query(
             r#"
-            UPDATE billing.rentals
+            UPDATE billing.community_rentals
             SET status = $2, resource_spec = $3, hourly_rate = $4,
                 updated_at = $5, end_time = $6, metadata = $7, total_cost = $8
             WHERE rental_id = $1
@@ -289,7 +290,7 @@ impl RentalRepository for SqlRentalRepository {
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at,
                        base_price_per_gpu, gpu_count
-                FROM billing.rentals
+                FROM billing.community_rentals
                 WHERE user_id = $1 AND status IN ('active', 'pending')
                 ORDER BY start_time DESC
                 "#,
@@ -302,7 +303,7 @@ impl RentalRepository for SqlRentalRepository {
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at,
                        base_price_per_gpu, gpu_count
-                FROM billing.rentals
+                FROM billing.community_rentals
                 WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
                 "#,
@@ -326,7 +327,7 @@ impl RentalRepository for SqlRentalRepository {
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
                    base_price_per_gpu, gpu_count
-            FROM billing.rentals
+            FROM billing.community_rentals
             WHERE status = $1
             ORDER BY start_time DESC
             "#,
@@ -354,7 +355,7 @@ impl RentalRepository for SqlRentalRepository {
                     COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time)) / 3600), 0) as total_gpu_hours,
                     COALESCE(SUM(total_cost), 0) as total_cost,
                     COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time)) / 3600), 0) as avg_duration_hours
-                FROM billing.rentals
+                FROM billing.community_rentals
                 WHERE user_id = $1
                 "#,
             )
@@ -370,7 +371,7 @@ impl RentalRepository for SqlRentalRepository {
                     COALESCE(SUM(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time)) / 3600), 0) as total_gpu_hours,
                     COALESCE(SUM(total_cost), 0) as total_cost,
                     COALESCE(AVG(EXTRACT(EPOCH FROM (COALESCE(end_time, NOW()) - start_time)) / 3600), 0) as avg_duration_hours
-                FROM billing.rentals
+                FROM billing.community_rentals
                 "#,
             )
         };
@@ -399,15 +400,14 @@ impl RentalRepository for SqlRentalRepository {
     async fn create_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()> {
         let resource_spec_json = serde_json::to_value(&rental.resource_spec)?;
         let metadata_json = serde_json::to_value(&rental.metadata)?;
-        let hourly_rate = rental.cost_breakdown.base_cost.as_decimal();
 
         sqlx::query(
             r#"
             INSERT INTO billing.secure_cloud_rentals
             (rental_id, user_id, provider, provider_instance_id, offering_id, status,
-             resource_spec, hourly_rate, start_time, metadata,
+             resource_spec, start_time, metadata,
              base_price_per_gpu, gpu_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -417,7 +417,6 @@ impl RentalRepository for SqlRentalRepository {
         .bind(&rental.offering_id)
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
-        .bind(hourly_rate)
         .bind(rental.started_at)
         .bind(metadata_json)
         .bind(rental.base_price_per_gpu)
@@ -436,7 +435,7 @@ impl RentalRepository for SqlRentalRepository {
         let row = sqlx::query(
             r#"
             SELECT rental_id, user_id, provider, provider_instance_id, offering_id, status,
-                   resource_spec, hourly_rate, start_time, end_time, total_cost,
+                   resource_spec, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
                    base_price_per_gpu, gpu_count
             FROM billing.secure_cloud_rentals
@@ -457,21 +456,19 @@ impl RentalRepository for SqlRentalRepository {
     async fn update_secure_cloud_rental(&self, rental: &SecureCloudRental) -> Result<()> {
         let resource_spec_json = serde_json::to_value(&rental.resource_spec)?;
         let metadata_json = serde_json::to_value(&rental.metadata)?;
-        let hourly_rate = rental.cost_breakdown.base_cost.as_decimal();
         let total_cost = rental.actual_cost.as_decimal();
 
         let result = sqlx::query(
             r#"
             UPDATE billing.secure_cloud_rentals
-            SET status = $2, resource_spec = $3, hourly_rate = $4,
-                updated_at = $5, end_time = $6, metadata = $7, total_cost = $8
+            SET status = $2, resource_spec = $3,
+                updated_at = $4, end_time = $5, metadata = $6, total_cost = $7
             WHERE rental_id = $1
             "#,
         )
         .bind(rental.id.as_uuid())
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
-        .bind(hourly_rate)
         .bind(chrono::Utc::now())
         .bind(rental.ended_at)
         .bind(metadata_json)
@@ -510,7 +507,7 @@ impl SqlRentalRepository {
 
         let result = sqlx::query(
             r#"
-            UPDATE billing.rentals
+            UPDATE billing.community_rentals
             SET status = $2, resource_spec = $3, hourly_rate = $4,
                 updated_at = $5, end_time = $6, metadata = $7, total_cost = $8
             WHERE rental_id = $1
