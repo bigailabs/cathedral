@@ -169,6 +169,12 @@ fn get_required_scope(req: &Request) -> Option<String> {
         // All authenticated users should be able to register their own GPU nodes
         (&Method::POST, "/v1/gpu-nodes/register") => Some(String::new()),
         (&Method::POST, "/v1/gpu-nodes/revoke") => Some(String::new()),
+        // WireGuard key registration: /v1/gpu-nodes/{node_id}/wireguard-key
+        (&Method::POST, p)
+            if p.starts_with("/v1/gpu-nodes/") && p.ends_with("/wireguard-key") =>
+        {
+            Some(String::new())
+        }
 
         // Health check requires authentication but no specific scope
         // We use an empty string to indicate "authenticated but no specific scope required"
@@ -337,6 +343,21 @@ mod tests {
         let req = Request::builder()
             .method(Method::POST)
             .uri("/v1/gpu-nodes/revoke")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        // Test WireGuard key registration endpoint
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/gpu-nodes/shadecloud/wireguard-key")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(get_required_scope(&req), Some(String::new()));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/gpu-nodes/evan-test-40/wireguard-key")
             .body(Body::empty())
             .unwrap();
         assert_eq!(get_required_scope(&req), Some(String::new()));
