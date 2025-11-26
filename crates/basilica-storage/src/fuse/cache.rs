@@ -275,7 +275,7 @@ impl PageCache {
                 }
             }
 
-            if new_size % PAGE_SIZE as u64 != 0 {
+            if !new_size.is_multiple_of(PAGE_SIZE as u64) {
                 let last_page_offset = new_last_page * PAGE_SIZE as u64;
                 if let Some(page) = file.pages.get_mut(&last_page_offset) {
                     let new_page_size = (new_size % PAGE_SIZE as u64) as usize;

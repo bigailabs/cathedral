@@ -24,9 +24,7 @@ impl TestContext {
             .await
             .expect("Failed to get test database pool");
 
-        // Only seed test data (packages) - don't cleanup to allow parallel test execution
         // Each test uses unique user IDs so they won't conflict
-        Self::seed_test_data(&pool).await;
 
         // Get the database URL from the test container
         let database_url = common::test_db::get_test_database_url()

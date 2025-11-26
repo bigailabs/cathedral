@@ -423,7 +423,8 @@ impl EventHandlers for BillingEventHandlers {
                 );
                 BillingError::ValidationError {
                     field: "base_price_per_gpu".to_string(),
-                    message: "Missing or invalid base_price_per_gpu in rental start event data".to_string(),
+                    message: "Missing or invalid base_price_per_gpu in rental start event data"
+                        .to_string(),
                 }
             })?;
 
@@ -440,7 +441,9 @@ impl EventHandlers for BillingEventHandlers {
                 );
                 BillingError::ValidationError {
                     field: "gpu_count".to_string(),
-                    message: "Missing or invalid gpu_count (must be > 0) in rental start event data".to_string(),
+                    message:
+                        "Missing or invalid gpu_count (must be > 0) in rental start event data"
+                            .to_string(),
                 }
             })? as u32;
 

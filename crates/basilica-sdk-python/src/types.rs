@@ -768,9 +768,9 @@ impl From<SdkPodInfo> for PodInfo {
 }
 
 /// Storage backend type
-#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
-#[pyclass]
-#[derive(Clone)]
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, PartialEq)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum StorageBackend {
     R2,
