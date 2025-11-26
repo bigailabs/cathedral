@@ -70,14 +70,14 @@
 #   1. Run: /usr/local/bin/k3s-agent-uninstall.sh
 #   2. Revoke the node token via API or dashboard
 #
-# VERSION: 1.2.0
+# VERSION: 1.5.0
 # AUTHOR: Basilica Network
 # LICENSE: MIT
 #
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.5.0"
 readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
@@ -240,10 +240,13 @@ setup_wireguard() {
     log "Creating WireGuard configuration with multiple peers..."
 
     # Start config with interface section
+    # MTU 1420 accounts for WireGuard overhead (~80 bytes) to allow room for
+    # Flannel VXLAN encapsulation (~50 bytes) on top
     cat > /etc/wireguard/${WIREGUARD_INTERFACE}.conf <<EOF
 [Interface]
 Address = ${WG_NODE_IP}/16
 PrivateKey = ${WG_PRIVATE_KEY}
+MTU = 1420
 EOF
 
     # Add each peer from the JSON array
@@ -258,7 +261,9 @@ EOF
         vpc_subnet=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].vpc_subnet")
         route_pod_network=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].route_pod_network")
 
-        # Build AllowedIPs: WireGuard IP + VPC subnet + pod network (if first peer)
+        # Build AllowedIPs: WireGuard IP + VPC subnet + pod network (if designated)
+        # NOTE: Service network (10.43.0.0/16) should NOT be routed via WireGuard
+        # because ClusterIP services are virtual IPs handled locally by kube-proxy
         local allowed_ips="${wireguard_ip}/32,${vpc_subnet}"
         if [ "$route_pod_network" = "true" ]; then
             allowed_ips="${allowed_ips},10.42.0.0/16"
@@ -312,11 +317,17 @@ join_k3s_cluster() {
 
     local TAINTS="--kubelet-arg=register-with-taints=basilica.ai/unvalidated=true:NoSchedule"
     local NODE_IP_FLAG=""
+    local FLANNEL_IFACE_FLAG=""
 
-    # Use WireGuard IP for kubelet if VPN is enabled
+    # Use WireGuard IP for kubelet and flannel if VPN is enabled
     if [ "${WIREGUARD_ENABLED}" = "true" ]; then
         NODE_IP_FLAG="--node-ip ${WG_NODE_IP}"
+        FLANNEL_IFACE_FLAG="--flannel-iface ${WIREGUARD_INTERFACE}"
+        # Add WireGuard-specific labels for scheduling and affinity rules
+        NODE_LABELS="${NODE_LABELS} --node-label basilica.ai/wireguard=true --node-label basilica.ai/network=remote"
         log "Using WireGuard IP for kubelet: ${WG_NODE_IP}"
+        log "Using WireGuard interface for Flannel VXLAN: ${WIREGUARD_INTERFACE}"
+        log "WireGuard MTU: 1420 (configured in wg0.conf)"
     fi
 
     curl -sfL https://get.k3s.io | \
@@ -324,7 +335,7 @@ join_k3s_cluster() {
         K3S_URL="${K3S_URL}" \
         K3S_TOKEN="${K3S_TOKEN}" \
         K3S_NODE_NAME="${K3S_NODE_NAME}" \
-        INSTALL_K3S_EXEC="agent ${NODE_LABELS} ${TAINTS} ${NODE_IP_FLAG}" \
+        INSTALL_K3S_EXEC="agent ${NODE_LABELS} ${TAINTS} ${NODE_IP_FLAG} ${FLANNEL_IFACE_FLAG}" \
         sh -
 
     log "Waiting for node to be Ready..."
