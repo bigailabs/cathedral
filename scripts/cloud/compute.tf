@@ -401,6 +401,12 @@ module "basilica_api_service" {
     BASILICA_API_K3S_SSH__KEY_PATH     = "/tmp/.ssh/k3s_key"
     BASILICA_API_K3S_SSH__TIMEOUT_SECS = "30"
 
+    # WireGuard VPN Configuration
+    BASILICA_API_WIREGUARD__ENABLED           = tostring(var.wireguard_enabled)
+    BASILICA_API_WIREGUARD__SERVER_ENDPOINT   = var.wireguard_server_endpoint
+    BASILICA_API_WIREGUARD__SERVER_PUBLIC_KEY = var.wireguard_server_public_key
+    BASILICA_API_WIREGUARD__ALLOWED_IPS       = jsonencode(var.wireguard_allowed_ips)
+
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
   }
