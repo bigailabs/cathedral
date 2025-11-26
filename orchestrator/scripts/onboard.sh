@@ -5,7 +5,8 @@
 # This script automatically onboards a GPU node to the Basilica network by:
 #   1. Detecting GPU hardware (NVIDIA GPUs via nvidia-smi)
 #   2. Registering the node with the Basilica API
-#   3. Joining the K3s cluster as a worker node
+#   3. Setting up WireGuard VPN (if configured by cluster)
+#   4. Joining the K3s cluster as a worker node
 #
 # PREREQUISITES:
 #   - Ubuntu 20.04+ or compatible Linux distribution
@@ -53,9 +54,10 @@
 #   2. Checks connectivity to Basilica API
 #   3. Auto-detects GPU model, count, memory, driver version, CUDA version
 #   4. Registers node with Basilica API (creates/reuses K3s join token)
-#   5. Installs K3s agent and joins the cluster
-#   6. Node starts with taint "basilica.ai/unvalidated=true:NoSchedule"
-#   7. After validation by network, taint is removed and node becomes schedulable
+#   5. If WireGuard is required: sets up VPN tunnel to cluster
+#   6. Installs K3s agent and joins the cluster (using WireGuard IP if applicable)
+#   7. Node starts with taint "basilica.ai/unvalidated=true:NoSchedule"
+#   8. After validation by network, taint is removed and node becomes schedulable
 #
 # TROUBLESHOOTING:
 #   - "nvidia-smi not found": Install NVIDIA drivers first
@@ -68,19 +70,28 @@
 #   1. Run: /usr/local/bin/k3s-agent-uninstall.sh
 #   2. Revoke the node token via API or dashboard
 #
-# VERSION: 1.0.0
+# VERSION: 1.1.0
 # AUTHOR: Basilica Network
 # LICENSE: MIT
 #
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.1.0"
+readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
 : "${BASILICA_DATACENTER_API_KEY:?ERROR: BASILICA_DATACENTER_API_KEY not set}"
 
 readonly NODE_ID="${BASILICA_NODE_ID:-$(hostname)}"
+
+# WireGuard variables (set by register_node if needed)
+WIREGUARD_ENABLED="false"
+WG_SERVER_ENDPOINT=""
+WG_SERVER_PUBKEY=""
+WG_NODE_IP=""
+WG_ALLOWED_IPS=""
+WG_KEEPALIVE=""
 
 main() {
     log "Basilica GPU Node Join v${SCRIPT_VERSION}"
@@ -96,6 +107,11 @@ main() {
 
     log "Registering node with Basilica..."
     register_node
+
+    if [ "${WIREGUARD_ENABLED}" = "true" ]; then
+        log "Setting up WireGuard VPN..."
+        setup_wireguard
+    fi
 
     log "Joining K3s cluster..."
     join_k3s_cluster
@@ -170,25 +186,32 @@ EOF
         -H "Content-Type: application/json" \
         -d "${payload}")
 
-    echo "=== RAW RESPONSE ===" >&2
-    echo "$response" >&2
-    echo "=== END RESPONSE ===" >&2
-    echo "$response" | xxd | head -20 >&2
-
     K3S_URL=$(echo "$response" | jq -r '.k3s_url')
     K3S_TOKEN=$(echo "$response" | jq -r '.k3s_token')
     K3S_NODE_NAME=$(echo "$response" | jq -r '.node_id')
     NODE_PASSWORD=$(echo "$response" | jq -r '.node_password // empty')
-
     NODE_LABELS=$(echo "$response" | jq -r '.node_labels | to_entries | map("--node-label \(.key)=\(.value)") | join(" ")')
+
+    # Parse WireGuard configuration if present
+    WIREGUARD_ENABLED=$(echo "$response" | jq -r '.wireguard.enabled // "false"')
+    if [ "${WIREGUARD_ENABLED}" = "true" ]; then
+        WG_SERVER_ENDPOINT=$(echo "$response" | jq -r '.wireguard.server_endpoint')
+        WG_SERVER_PUBKEY=$(echo "$response" | jq -r '.wireguard.server_public_key')
+        WG_NODE_IP=$(echo "$response" | jq -r '.wireguard.node_ip')
+        WG_ALLOWED_IPS=$(echo "$response" | jq -r '.wireguard.allowed_ips | join(",")')
+        WG_KEEPALIVE=$(echo "$response" | jq -r '.wireguard.persistent_keepalive')
+        log "WireGuard VPN required"
+        log "  Server endpoint: ${WG_SERVER_ENDPOINT}"
+        log "  Node IP: ${WG_NODE_IP}"
+    fi
 
     if [ -n "$NODE_PASSWORD" ]; then
         log "Setting up node password for K3s authentication"
-        sudo mkdir -p /etc/rancher/node
-        sudo chmod 755 /etc/rancher/node
-        echo -n "$NODE_PASSWORD" | sudo tee /etc/rancher/node/password > /dev/null
-        sudo chown root:root /etc/rancher/node/password
-        sudo chmod 400 /etc/rancher/node/password
+        mkdir -p /etc/rancher/node
+        chmod 755 /etc/rancher/node
+        echo -n "$NODE_PASSWORD" > /etc/rancher/node/password
+        chown root:root /etc/rancher/node/password
+        chmod 400 /etc/rancher/node/password
     fi
 
     log "Registration approved"
@@ -196,17 +219,86 @@ EOF
     log "  Node name: ${K3S_NODE_NAME}"
 }
 
+setup_wireguard() {
+    log "Installing WireGuard..."
+    if command -v apt-get &> /dev/null; then
+        apt-get update -qq
+        apt-get install -y -qq wireguard wireguard-tools
+    elif command -v yum &> /dev/null; then
+        yum install -y epel-release
+        yum install -y wireguard-tools
+    else
+        die "Unsupported package manager. Please install WireGuard manually."
+    fi
+
+    log "Generating WireGuard keypair..."
+    umask 077
+    mkdir -p /etc/wireguard
+    wg genkey > /etc/wireguard/private.key
+    wg pubkey < /etc/wireguard/private.key > /etc/wireguard/public.key
+    WG_PRIVATE_KEY=$(cat /etc/wireguard/private.key)
+    WG_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
+
+    log "Creating WireGuard configuration..."
+    cat > /etc/wireguard/${WIREGUARD_INTERFACE}.conf <<EOF
+[Interface]
+Address = ${WG_NODE_IP}/16
+PrivateKey = ${WG_PRIVATE_KEY}
+
+[Peer]
+PublicKey = ${WG_SERVER_PUBKEY}
+Endpoint = ${WG_SERVER_ENDPOINT}
+AllowedIPs = ${WG_ALLOWED_IPS}
+PersistentKeepalive = ${WG_KEEPALIVE}
+EOF
+    chmod 600 /etc/wireguard/${WIREGUARD_INTERFACE}.conf
+
+    log "Registering public key with Basilica API..."
+    local key_response
+    key_response=$(curl -sSf -X POST "${BASILICA_API_URL}/v1/gpu-nodes/${NODE_ID}/wireguard-key" \
+        -H "Authorization: Bearer ${BASILICA_DATACENTER_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"public_key\": \"${WG_PUBLIC_KEY}\"}")
+
+    local status
+    status=$(echo "$key_response" | jq -r '.status')
+    if [ "$status" != "peer_added" ]; then
+        die "Failed to register WireGuard public key: $key_response"
+    fi
+
+    log "Starting WireGuard interface..."
+    systemctl enable wg-quick@${WIREGUARD_INTERFACE}
+    systemctl start wg-quick@${WIREGUARD_INTERFACE}
+
+    sleep 2
+    if ! wg show ${WIREGUARD_INTERFACE} &> /dev/null; then
+        die "WireGuard interface failed to start. Check: journalctl -u wg-quick@${WIREGUARD_INTERFACE}"
+    fi
+
+    log "WireGuard VPN established"
+    log "  Interface: ${WIREGUARD_INTERFACE}"
+    log "  Node IP: ${WG_NODE_IP}"
+    wg show ${WIREGUARD_INTERFACE}
+}
+
 join_k3s_cluster() {
     log "Installing K3s agent..."
 
     local TAINTS="--kubelet-arg=register-with-taints=basilica.ai/unvalidated=true:NoSchedule"
+    local NODE_IP_FLAG=""
+
+    # Use WireGuard IP for kubelet if VPN is enabled
+    if [ "${WIREGUARD_ENABLED}" = "true" ]; then
+        NODE_IP_FLAG="--node-ip ${WG_NODE_IP}"
+        log "Using WireGuard IP for kubelet: ${WG_NODE_IP}"
+    fi
 
     curl -sfL https://get.k3s.io | \
         INSTALL_K3S_VERSION="v1.31.1+k3s1" \
         K3S_URL="${K3S_URL}" \
         K3S_TOKEN="${K3S_TOKEN}" \
         K3S_NODE_NAME="${K3S_NODE_NAME}" \
-        INSTALL_K3S_EXEC="agent ${NODE_LABELS} ${TAINTS}" \
+        INSTALL_K3S_EXEC="agent ${NODE_LABELS} ${TAINTS} ${NODE_IP_FLAG}" \
         sh -
 
     log "Waiting for node to be Ready..."
