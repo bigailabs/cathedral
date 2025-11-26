@@ -1,6 +1,7 @@
 use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+use basilica_operator::admission::{admission_router, AdmissionState};
 use serde_json::json;
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() {
@@ -41,7 +42,37 @@ async fn main() {
         }
     });
 
-    // Optionally monitor the task or implement graceful shutdown
+    // Start admission webhook server if enabled
+    let webhook_enabled = std::env::var("OPERATOR_WEBHOOK_ENABLED")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
+    if webhook_enabled {
+        let fuse_base_path = std::env::var("OPERATOR_FUSE_BASE_PATH")
+            .unwrap_or_else(|_| "/var/lib/basilica/fuse".into());
+        let webhook_bind =
+            std::env::var("OPERATOR_WEBHOOK_ADDR").unwrap_or_else(|_| "0.0.0.0:9443".into());
+
+        let admission_state = AdmissionState { fuse_base_path };
+        let webhook_app = admission_router(admission_state);
+
+        match tokio::net::TcpListener::bind(&webhook_bind).await {
+            Ok(listener) => {
+                info!("Admission webhook server listening on {}", webhook_bind);
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, webhook_app).await {
+                        tracing::error!("Admission webhook server failed: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to bind admission webhook server to {}: {} - webhook disabled",
+                    webhook_bind, e
+                );
+            }
+        }
+    }
 
     info!("basilica-operator starting controllers");
     if let Err(e) = basilica_operator::runtime::run().await {
