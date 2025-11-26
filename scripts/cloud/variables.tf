@@ -171,20 +171,13 @@ variable "wireguard_enabled" {
   default     = false
 }
 
-variable "wireguard_server_endpoint" {
-  type        = string
-  description = "WireGuard server endpoint (public_ip:port) for GPU nodes to connect"
-  default     = ""
-}
-
-variable "wireguard_server_public_key" {
-  type        = string
-  description = "WireGuard server public key (base64)"
-  default     = ""
-}
-
-variable "wireguard_allowed_ips" {
-  type        = list(string)
-  description = "CIDR ranges allowed through the WireGuard tunnel"
-  default     = ["10.200.0.0/16", "10.42.0.0/16"]
+variable "wireguard_servers" {
+  type = list(object({
+    endpoint     = string # public_ip:port
+    public_key   = string # WireGuard public key (base64)
+    wireguard_ip = string # e.g., 10.200.0.1
+    vpc_subnet   = string # e.g., 10.101.0.0/24
+  }))
+  description = "List of K3s servers with their WireGuard configurations"
+  default     = []
 }
