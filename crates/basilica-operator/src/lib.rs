@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod billing;
 pub mod controllers;
 pub mod crd;

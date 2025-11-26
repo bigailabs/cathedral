@@ -58,3 +58,21 @@ subjects:
   - kind: ServiceAccount
     name: basilica-operator
     namespace: basilica-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fuse-daemon-secret-reader
+  namespace: TENANT_NAMESPACE
+  labels:
+    app.kubernetes.io/name: basilica
+    app.kubernetes.io/component: storage-daemon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fuse-daemon-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: fuse-daemon
+    namespace: basilica-storage

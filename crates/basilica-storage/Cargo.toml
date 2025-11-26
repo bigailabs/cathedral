@@ -43,6 +43,10 @@ tokio-util = { workspace = true }
 # Rate limiting and quotas
 governor = "0.6"
 
+# Kubernetes API (for daemon mode credential fetching and namespace watching)
+kube = { version = "0.88", features = ["derive", "rustls-tls", "runtime"] }
+k8s-openapi = { version = "0.21", features = ["v1_29"] }
+
 # CLI
 clap = { workspace = true }
 tracing-subscriber = { workspace = true }

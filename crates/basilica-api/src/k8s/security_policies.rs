@@ -256,6 +256,10 @@ mod tests {
 
         assert!(yaml_content.contains("namespace: u-test-user"));
         assert!(!yaml_content.contains("TENANT_NAMESPACE"));
+
+        // Verify fuse-daemon RoleBinding is present
+        assert!(yaml_content.contains("name: fuse-daemon-secret-reader"));
+        assert!(yaml_content.contains("namespace: basilica-storage"));
     }
 
     #[test]
