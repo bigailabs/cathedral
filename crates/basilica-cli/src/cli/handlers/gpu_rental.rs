@@ -1016,12 +1016,11 @@ pub async fn handle_ps(
                 min_gpu_count: filters.min_gpu_count,
             });
 
-            // Fetch rentals, usage history, and pricing packages in parallel
+            // Fetch rentals and usage history in parallel
             // Use a reasonable limit for usage history to cover active rentals
-            let (rentals_result, usage_result, packages_result) = tokio::join!(
+            let (rentals_result, usage_result) = tokio::join!(
                 api_client.list_rentals(query),
-                api_client.list_usage_history(Some(100), None),
-                api_client.get_packages()
+                api_client.list_usage_history(Some(100), None)
             );
 
             let rentals_list = rentals_result.inspect_err(|_| {
@@ -1041,25 +1040,8 @@ pub async fn handle_ps(
                 })
                 .unwrap_or_default();
 
-            // Build pricing map: GPU type -> hourly rate
-            // Package names are like "H100 GPU Package", we need to extract just "h100"
-            let pricing_map: HashMap<String, String> = match packages_result {
-                Ok(packages) => {
-                    packages
-                        .packages
-                        .into_iter()
-                        .filter(|p| p.is_active)
-                        .filter_map(|p| {
-                            // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
-                            let gpu_type =
-                                p.name.split_whitespace().next().map(|s| s.to_lowercase());
-
-                            gpu_type.map(|t| (t, p.hourly_rate))
-                        })
-                        .collect()
-                }
-                Err(_e) => HashMap::new(),
-            };
+            // Pricing is now included in usage records (hourly_rate field)
+            let pricing_map: HashMap<String, String> = HashMap::new();
 
             complete_spinner_and_clear(spinner);
 
@@ -1181,7 +1163,7 @@ pub async fn handle_ps(
 
             // Fetch both rental types in parallel
             let (community_result, secure_result) = tokio::join!(
-                // Community cloud: rentals + usage + packages
+                // Community cloud: rentals + usage
                 async {
                     let query = Some(ListRentalsQuery {
                         status: if filters.history {
@@ -1193,21 +1175,19 @@ pub async fn handle_ps(
                         min_gpu_count: filters.min_gpu_count,
                     });
 
-                    let (rentals_result, usage_result, packages_result) = tokio::join!(
+                    let (rentals_result, usage_result) = tokio::join!(
                         api_client.list_rentals(query),
-                        api_client.list_usage_history(Some(100), None),
-                        api_client.get_packages()
+                        api_client.list_usage_history(Some(100), None)
                     );
 
-                    (rentals_result, usage_result, packages_result)
+                    (rentals_result, usage_result)
                 },
                 // Secure cloud: just rentals
                 api_client.list_secure_cloud_rentals()
             );
 
             // Process community cloud data
-            let (community_rentals_result, community_usage_result, community_packages_result) =
-                community_result;
+            let (community_rentals_result, community_usage_result) = community_result;
 
             let community_rentals_list = community_rentals_result.inspect_err(|_| {
                 complete_spinner_error(spinner.clone(), "Failed to load community cloud rentals")
@@ -1226,19 +1206,8 @@ pub async fn handle_ps(
                     })
                     .unwrap_or_default();
 
-            // Build pricing map: GPU type -> hourly rate
-            let pricing_map: HashMap<String, String> = match community_packages_result {
-                Ok(packages) => packages
-                    .packages
-                    .into_iter()
-                    .filter(|p| p.is_active)
-                    .filter_map(|p| {
-                        let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
-                        gpu_type.map(|t| (t, p.hourly_rate))
-                    })
-                    .collect(),
-                Err(_e) => HashMap::new(),
-            };
+            // Pricing is now included in usage records (hourly_rate field)
+            let pricing_map: HashMap<String, String> = HashMap::new();
 
             // Process secure cloud data
             let secure_rentals_list = secure_result.inspect_err(|_| {

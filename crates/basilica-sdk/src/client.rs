@@ -47,8 +47,8 @@ use crate::{
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
         DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
         ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
-        PackagesResponse, RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
-        SshKeyResponse, UsageHistoryResponse,
+        RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse, SshKeyResponse,
+        UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -360,11 +360,6 @@ impl BasilicaClient {
     /// Get balance for the authenticated user
     pub async fn get_balance(&self) -> Result<BalanceResponse> {
         self.get("/billing/balance").await
-    }
-
-    /// Get available billing packages
-    pub async fn get_packages(&self) -> Result<PackagesResponse> {
-        self.get("/billing/packages").await
     }
 
     /// List usage history for authenticated user

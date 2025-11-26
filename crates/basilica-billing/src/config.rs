@@ -16,7 +16,6 @@ pub struct BillingConfig {
     pub http: HttpConfig,
     pub aggregator: AggregatorConfig,
     pub telemetry: TelemetryConfig,
-    pub rules_engine: RulesEngineConfig,
     pub aws: AwsConfig,
 }
 
@@ -84,14 +83,6 @@ pub struct TelemetryConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RulesEngineConfig {
-    pub evaluation_interval_seconds: u64,
-    pub cache_ttl_seconds: u64,
-    pub max_rules_per_package: u32,
-    pub default_package_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwsConfig {
     pub region: String,
     pub use_iam_auth: bool,
@@ -153,12 +144,6 @@ impl Default for BillingConfig {
                 flush_interval_seconds: 10,
                 max_batch_size: 500,
                 compression_enabled: true,
-            },
-            rules_engine: RulesEngineConfig {
-                evaluation_interval_seconds: 60,
-                cache_ttl_seconds: 300,
-                max_rules_per_package: 100,
-                default_package_id: "standard".to_string(),
             },
             aws: AwsConfig {
                 region: "us-east-1".to_string(),

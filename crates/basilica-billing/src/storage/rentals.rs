@@ -1,8 +1,7 @@
 use crate::domain::{
     rentals::{Rental, RentalStatistics, SecureCloudRental},
     types::{
-        CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
-        UserId,
+        CostBreakdown, CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
     },
 };
 use crate::error::{BillingError, Result};
@@ -126,9 +125,6 @@ impl SqlRentalRepository {
                 network_bandwidth_mbps: 0,
             });
 
-        // Package ID is now optional (legacy field)
-        let package_id = r.get::<Option<String>, _>("package_id").map(PackageId::new);
-
         // Read marketplace pricing fields (with defaults for legacy rentals)
         let base_price_per_gpu = r
             .get::<Option<rust_decimal::Decimal>, _>("base_price_per_gpu")
@@ -143,7 +139,6 @@ impl SqlRentalRepository {
             validator_id: r
                 .get::<Option<String>, _>("validator_id")
                 .unwrap_or_default(),
-            package_id,
             state,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -190,10 +185,10 @@ impl RentalRepository for SqlRentalRepository {
         sqlx::query(
             r#"
             INSERT INTO billing.rentals
-            (rental_id, user_id, node_id, validator_id, package_id, status,
+            (rental_id, user_id, node_id, validator_id, status,
              resource_spec, hourly_rate, start_time, metadata,
              base_price_per_gpu, gpu_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(rental.id.as_uuid())
@@ -204,7 +199,6 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             Some(&rental.validator_id)
         })
-        .bind(rental.package_id.as_ref().map(|p| p.as_str())) // Now optional
         .bind(rental.state.to_string())
         .bind(resource_spec_json)
         .bind(hourly_rate)
@@ -226,7 +220,7 @@ impl RentalRepository for SqlRentalRepository {
     async fn get_rental(&self, id: &RentalId) -> Result<Option<Rental>> {
         let row = sqlx::query(
             r#"
-            SELECT rental_id, user_id, node_id, validator_id, package_id, status,
+            SELECT rental_id, user_id, node_id, validator_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
                    base_price_per_gpu, gpu_count
@@ -291,7 +285,7 @@ impl RentalRepository for SqlRentalRepository {
         let query = if let Some(uid) = user_id {
             sqlx::query(
                 r#"
-                SELECT rental_id, user_id, node_id, validator_id, package_id, status,
+                SELECT rental_id, user_id, node_id, validator_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at,
                        base_price_per_gpu, gpu_count
@@ -304,7 +298,7 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             sqlx::query(
                 r#"
-                SELECT rental_id, user_id, node_id, validator_id, package_id, status,
+                SELECT rental_id, user_id, node_id, validator_id, status,
                        resource_spec, hourly_rate, start_time, end_time, total_cost,
                        metadata, created_at, updated_at,
                        base_price_per_gpu, gpu_count
@@ -328,7 +322,7 @@ impl RentalRepository for SqlRentalRepository {
     async fn get_rentals_by_state(&self, state: RentalState) -> Result<Vec<Rental>> {
         let rows = sqlx::query(
             r#"
-            SELECT rental_id, user_id, node_id, validator_id, package_id, status,
+            SELECT rental_id, user_id, node_id, validator_id, status,
                    resource_spec, hourly_rate, start_time, end_time, total_cost,
                    metadata, created_at, updated_at,
                    base_price_per_gpu, gpu_count

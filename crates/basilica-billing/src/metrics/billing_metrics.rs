@@ -42,13 +42,6 @@ impl BillingMetricNames {
     pub const AGGREGATION_RUNS: &'static str = "basilica_billing_aggregation_runs_total";
     pub const AGGREGATION_FAILURES: &'static str = "basilica_billing_aggregation_failures_total";
     pub const BATCH_SIZE: &'static str = "basilica_billing_batch_size";
-
-    pub const PROMO_CODE_VALIDATIONS: &'static str =
-        "basilica_billing_promo_code_validations_total";
-    pub const PROMO_CODE_APPLIED: &'static str = "basilica_billing_promo_code_applied_total";
-    pub const PROMO_CODE_FAILURES: &'static str = "basilica_billing_promo_code_failures_total";
-    pub const DISCOUNT_AMOUNT: &'static str = "basilica_billing_discount_amount_total";
-    pub const TIER_DISCOUNT_APPLIED: &'static str = "basilica_billing_tier_discount_applied_total";
 }
 
 pub const BILLING_METRIC_NAMES: BillingMetricNames = BillingMetricNames;
@@ -191,8 +184,8 @@ impl BillingMetrics {
             .await;
     }
 
-    pub async fn record_rental_tracked(&self, rental_id: &str, package_id: &str) {
-        let labels = &[("rental_id", rental_id), ("package_id", package_id)];
+    pub async fn record_rental_tracked(&self, rental_id: &str) {
+        let labels = &[("rental_id", rental_id)];
         self.recorder
             .increment_counter(BillingMetricNames::RENTALS_TRACKED, labels)
             .await;
@@ -264,54 +257,6 @@ impl BillingMetrics {
         let value = if healthy { 1.0 } else { 0.0 };
         self.recorder
             .record_gauge(BillingMetricNames::HEALTH_STATUS, value, &[])
-            .await;
-    }
-
-    pub async fn record_promo_code_validation(&self, code: &str, success: bool, reason: &str) {
-        let status = if success { "success" } else { "failure" };
-        let labels = &[("code", code), ("status", status), ("reason", reason)];
-        self.recorder
-            .increment_counter(BillingMetricNames::PROMO_CODE_VALIDATIONS, labels)
-            .await;
-
-        if !success {
-            self.recorder
-                .increment_counter(BillingMetricNames::PROMO_CODE_FAILURES, labels)
-                .await;
-        }
-    }
-
-    pub async fn record_promo_code_applied(&self, code: &str, discount_type: &str, amount: f64) {
-        let labels = &[("code", code), ("discount_type", discount_type)];
-        self.recorder
-            .increment_counter(BillingMetricNames::PROMO_CODE_APPLIED, labels)
-            .await;
-
-        let amount_units = (amount * 1000.0) as u64;
-        let discount_labels = &[("type", "promo_code"), ("code", code)];
-        self.recorder
-            .record_counter(
-                BillingMetricNames::DISCOUNT_AMOUNT,
-                amount_units,
-                discount_labels,
-            )
-            .await;
-    }
-
-    pub async fn record_tier_discount_applied(&self, tier: &str, amount: f64) {
-        let labels = &[("tier", tier)];
-        self.recorder
-            .increment_counter(BillingMetricNames::TIER_DISCOUNT_APPLIED, labels)
-            .await;
-
-        let amount_units = (amount * 1000.0) as u64;
-        let discount_labels = &[("type", "tier"), ("tier", tier)];
-        self.recorder
-            .record_counter(
-                BillingMetricNames::DISCOUNT_AMOUNT,
-                amount_units,
-                discount_labels,
-            )
             .await;
     }
 }

@@ -35,9 +35,14 @@ ALTER TABLE billing.rentals DROP COLUMN package_id;
 -- PART 3: Drop package infrastructure tables
 -- ============================================================================
 
--- Drop dependent tables first (foreign key constraints)
+-- Drop tables with FK constraints to billing_packages first
 DROP TABLE IF EXISTS billing.user_packages;
 DROP TABLE IF EXISTS billing.package_gpu_rates;
+DROP TABLE IF EXISTS billing.user_preferences;
+DROP TABLE IF EXISTS billing.billing_rules;
+
+-- Drop package_id column from billing_summary_facts (keep table for historical data)
+ALTER TABLE billing.billing_summary_facts DROP COLUMN IF EXISTS package_id;
 
 -- Drop main packages table
 DROP TABLE IF EXISTS billing.billing_packages;

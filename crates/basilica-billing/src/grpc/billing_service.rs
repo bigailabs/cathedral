@@ -285,7 +285,10 @@ impl BillingService for BillingServiceImpl {
                 CloudType::Community(community_data) => {
                     let base_price_per_gpu = rust_decimal::Decimal::from_f64(community_data.base_price_per_gpu)
                         .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
-                    let gpu_count = community_data.gpu_count.max(1);
+                    if community_data.gpu_count == 0 {
+                        return Err(Status::invalid_argument("gpu_count must be greater than 0"));
+                    }
+                    let gpu_count = community_data.gpu_count;
 
                     info!(
                         "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs",
@@ -345,7 +348,10 @@ impl BillingService for BillingServiceImpl {
                 CloudType::Secure(secure_data) => {
                     let base_price_per_gpu = rust_decimal::Decimal::from_f64(secure_data.base_price_per_gpu)
                         .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
-                    let gpu_count = secure_data.gpu_count.max(1);
+                    if secure_data.gpu_count == 0 {
+                        return Err(Status::invalid_argument("gpu_count must be greater than 0"));
+                    }
+                    let gpu_count = secure_data.gpu_count;
 
                     info!(
                         "Tracking secure cloud rental {} for user {} (provider: {}) at ${}/GPU/hour × {} GPUs",
@@ -409,7 +415,7 @@ impl BillingService for BillingServiceImpl {
             if let Some(ref metrics) = self.metrics {
                 metrics
                     .billing_metrics()
-                    .record_rental_tracked(&rental_id.to_string(), "marketplace")
+                    .record_rental_tracked(&rental_id.to_string())
                     .await;
             }
 

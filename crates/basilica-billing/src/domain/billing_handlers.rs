@@ -3,7 +3,7 @@ use crate::domain::processor::{
 };
 use crate::domain::rentals::Rental;
 use crate::domain::types::{
-    CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
+    CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
 };
 use crate::error::{BillingError, Result};
 use crate::storage::{
@@ -394,7 +394,6 @@ impl EventHandlers for BillingEventHandlers {
         Ok(())
     }
 
-    #[allow(deprecated)]
     async fn process_rental_start(&self, event: &UsageEvent) -> Result<()> {
         info!(
             "Processing rental start event {} for rental {}",
@@ -410,12 +409,43 @@ impl EventHandlers for BillingEventHandlers {
 
         let user_id = UserId::new(event.user_id.clone());
 
-        let package_id = event
+        // Extract and validate marketplace pricing from event data
+        let base_price_per_gpu = event
             .event_data
-            .get("package_id")
+            .get("base_price_per_gpu")
             .and_then(|v| v.as_str())
-            .map(|s| PackageId::new(s.to_string()))
-            .unwrap_or_else(PackageId::h100); // Default to H100 if not specified
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .ok_or_else(|| {
+                warn!(
+                    rental_id = %event.rental_id,
+                    event_id = %event.event_id,
+                    "Missing or invalid base_price_per_gpu in rental start event"
+                );
+                BillingError::ValidationError {
+                    field: "base_price_per_gpu".to_string(),
+                    message: "Missing or invalid base_price_per_gpu in rental start event data"
+                        .to_string(),
+                }
+            })?;
+
+        let gpu_count = event
+            .event_data
+            .get("gpu_count")
+            .and_then(|v| v.as_u64())
+            .filter(|&count| count > 0)
+            .ok_or_else(|| {
+                warn!(
+                    rental_id = %event.rental_id,
+                    event_id = %event.event_id,
+                    "Missing or invalid gpu_count in rental start event"
+                );
+                BillingError::ValidationError {
+                    field: "gpu_count".to_string(),
+                    message:
+                        "Missing or invalid gpu_count (must be > 0) in rental start event data"
+                            .to_string(),
+                }
+            })? as u32;
 
         let resource_spec = ResourceSpec {
             gpu_specs: vec![],
@@ -426,12 +456,13 @@ impl EventHandlers for BillingEventHandlers {
             network_bandwidth_mbps: 100,
         };
 
-        let mut rental = Rental::new(
+        let mut rental = Rental::new_marketplace(
             user_id.clone(),
             event.node_id.clone(),
             event.validator_id.clone(),
-            package_id.clone(),
             resource_spec,
+            base_price_per_gpu,
+            gpu_count,
         );
         rental.id = rental_id;
 
@@ -445,10 +476,9 @@ impl EventHandlers for BillingEventHandlers {
             &rental_id.to_string(),
             user_id.as_uuid().ok(),
             serde_json::json!({
-                "package_id": rental.package_id.as_ref().map(|p| p.to_string()).unwrap_or_else(|| "marketplace".to_string()),
                 "node_id": event.node_id,
                 "validator_id": event.validator_id,
-                "billing_model": "pay_as_you_go",
+                "billing_model": "marketplace",
                 "base_price_per_gpu": rental.base_price_per_gpu.to_string(),
                 "gpu_count": rental.gpu_count,
                 "timestamp": event.timestamp,
