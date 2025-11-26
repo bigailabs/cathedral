@@ -1,0 +1,29 @@
+---
+# WireGuard defaults
+
+# Enable/disable WireGuard
+wireguard_enabled: true
+
+# WireGuard interface name
+wireguard_interface: wg0
+
+# UDP port for WireGuard
+wireguard_port: 51820
+
+# WireGuard network CIDR
+wireguard_network: "10.200.0.0/16"
+
+# Persistent keepalive interval (seconds)
+wireguard_keepalive: 25
+
+# AllowedIPs for peers (GPU nodes can reach these networks)
+wireguard_allowed_ips:
+  - "10.200.0.0/16"   # WireGuard overlay network
+  - "10.42.0.0/16"    # Flannel pod network
+
+# Server IP assignments (must match inventory hostnames)
+# These are statically assigned to control plane nodes
+wireguard_server_ips:
+  server1: "10.200.0.1"
+  server2: "10.200.0.2"
+  server3: "10.200.0.3"
