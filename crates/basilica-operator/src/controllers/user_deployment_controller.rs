@@ -3,10 +3,9 @@ use k8s_openapi::api::core::v1::{
     Affinity, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
 };
 use k8s_openapi::api::core::v1::{
-    Capabilities, Container, EmptyDirVolumeSource, EnvVar, EnvVarSource, HTTPGetAction,
-    HostPathVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec, Probe,
-    ResourceRequirements, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceSpec,
-    TCPSocketAction, Toleration, Volume, VolumeMount,
+    Capabilities, Container, HTTPGetAction, HostPathVolumeSource, PodSecurityContext, PodSpec,
+    PodTemplateSpec, Probe, ResourceRequirements, SecurityContext, Service, ServicePort,
+    ServiceSpec, TCPSocketAction, Toleration, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
     NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
@@ -285,214 +284,20 @@ fn build_health_probes(
 }
 
 fn build_storage_volumes(
-    instance_name: &str,
+    namespace: &str,
     _storage: &crate::crd::user_deployment::PersistentStorageSpec,
 ) -> Vec<Volume> {
-    vec![
-        Volume {
-            name: "fuse-device".to_string(),
-            host_path: Some(HostPathVolumeSource {
-                path: "/dev/fuse".to_string(),
-                type_: Some("CharDevice".to_string()),
-            }),
-            ..Default::default()
-        },
-        Volume {
-            name: "basilica-storage".to_string(),
-            host_path: Some(HostPathVolumeSource {
-                path: format!("/var/lib/basilica/fuse/{}", instance_name),
-                type_: Some("DirectoryOrCreate".to_string()),
-            }),
-            ..Default::default()
-        },
-        Volume {
-            name: "tmp".to_string(),
-            empty_dir: Some(EmptyDirVolumeSource::default()),
-            ..Default::default()
-        },
-    ]
-}
-
-fn build_fuse_sidecar(
-    namespace: &str,
-    instance_name: &str,
-    storage: &crate::crd::user_deployment::PersistentStorageSpec,
-) -> anyhow::Result<Container> {
-    let backend_str = match storage.backend {
-        crate::crd::user_deployment::StorageBackend::R2 => "r2",
-        crate::crd::user_deployment::StorageBackend::S3 => "s3",
-        crate::crd::user_deployment::StorageBackend::GCS => "gcs",
-    };
-
-    let mut env = vec![
-        EnvVar {
-            name: "STORAGE_BACKEND".to_string(),
-            value: Some(backend_str.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "MOUNT_PATH".to_string(),
-            value: Some(storage.mount_path.clone()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "SYNC_INTERVAL_MS".to_string(),
-            value: Some(storage.sync_interval_ms.to_string()),
-            ..Default::default()
-        },
-        EnvVar {
-            name: "CACHE_SIZE_MB".to_string(),
-            value: Some(storage.cache_size_mb.to_string()),
-            ..Default::default()
-        },
-    ];
-
-    if !storage.bucket.is_empty() {
-        env.push(EnvVar {
-            name: "STORAGE_BUCKET".to_string(),
-            value: Some(storage.bucket.clone()),
-            ..Default::default()
-        });
-    }
-
-    if let Some(ref region) = storage.region {
-        env.push(EnvVar {
-            name: "STORAGE_REGION".to_string(),
-            value: Some(region.clone()),
-            ..Default::default()
-        });
-    }
-
-    if let Some(ref endpoint) = storage.endpoint {
-        env.push(EnvVar {
-            name: "STORAGE_ENDPOINT".to_string(),
-            value: Some(endpoint.clone()),
-            ..Default::default()
-        });
-    }
-
-    if let Some(ref secret_name) = storage.credentials_secret {
-        env.push(EnvVar {
-            name: "STORAGE_ACCESS_KEY_ID".to_string(),
-            value_from: Some(EnvVarSource {
-                secret_key_ref: Some(SecretKeySelector {
-                    name: Some(secret_name.clone()),
-                    key: "STORAGE_ACCESS_KEY_ID".to_string(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-        env.push(EnvVar {
-            name: "STORAGE_SECRET_ACCESS_KEY".to_string(),
-            value_from: Some(EnvVarSource {
-                secret_key_ref: Some(SecretKeySelector {
-                    name: Some(secret_name.clone()),
-                    key: "STORAGE_SECRET_ACCESS_KEY".to_string(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-
-        if storage.endpoint.is_none() {
-            env.push(EnvVar {
-                name: "STORAGE_ENDPOINT".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: Some(secret_name.clone()),
-                        key: "STORAGE_ENDPOINT".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
-
-        if storage.bucket.is_empty() {
-            env.push(EnvVar {
-                name: "STORAGE_BUCKET".to_string(),
-                value_from: Some(EnvVarSource {
-                    secret_key_ref: Some(SecretKeySelector {
-                        name: Some(secret_name.clone()),
-                        key: "STORAGE_BUCKET".to_string(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
-    }
-
-    let cache_size_mb = storage.cache_size_mb as u32;
-    let (startup_probe, liveness_probe, readiness_probe) =
-        storage_utils::build_fuse_health_probes();
-
-    let mut args = vec![
-        "--namespace".to_string(),
-        namespace.to_string(),
-        "--experiment-id".to_string(),
-        instance_name.to_string(),
-        "--backend".to_string(),
-        format!("{:?}", storage.backend).to_lowercase(),
-        "--sync-interval-ms".to_string(),
-        storage.sync_interval_ms.to_string(),
-        "--cache-size-mb".to_string(),
-        storage.cache_size_mb.to_string(),
-        "--mount-point".to_string(),
-        storage.mount_path.clone(),
-    ];
-
-    if !storage.bucket.is_empty() {
-        args.push("--bucket".to_string());
-        args.push(storage.bucket.clone());
-    }
-
-    Ok(Container {
-        name: "fuse-storage".to_string(),
-        image: Some("ghcr.io/one-covenant/basilica-storage-daemon:latest".to_string()),
-        command: Some(vec!["/usr/local/bin/basilica-storage-daemon".to_string()]),
-        args: Some(args),
-        env: Some(env),
-        volume_mounts: Some(vec![
-            VolumeMount {
-                name: "fuse-device".to_string(),
-                mount_path: "/dev/fuse".to_string(),
-                ..Default::default()
-            },
-            VolumeMount {
-                name: "basilica-storage".to_string(),
-                mount_path: storage.mount_path.clone(),
-                mount_propagation: Some("Bidirectional".to_string()),
-                ..Default::default()
-            },
-            VolumeMount {
-                name: "tmp".to_string(),
-                mount_path: "/tmp".to_string(),
-                ..Default::default()
-            },
-        ]),
-        security_context: Some(storage_utils::build_fuse_security_context()),
-        resources: Some(
-            storage_utils::build_fuse_sidecar_resources(cache_size_mb, false).map_err(|e| {
-                anyhow::anyhow!(
-                    "Invalid cache size {} for deployment {}: {}",
-                    cache_size_mb,
-                    instance_name,
-                    e
-                )
-            })?,
-        ),
-        lifecycle: Some(storage_utils::build_fuse_lifecycle_hook(120)),
-        startup_probe,
-        liveness_probe,
-        readiness_probe,
+    // Storage is provided by the FUSE DaemonSet running in basilica-storage namespace.
+    // Each user namespace gets its mount at /var/lib/basilica/fuse/{namespace}/.
+    // User pods consume this via hostPath volume with HostToContainer propagation.
+    vec![Volume {
+        name: "basilica-storage".to_string(),
+        host_path: Some(HostPathVolumeSource {
+            path: format!("/var/lib/basilica/fuse/{}", namespace),
+            type_: Some("Directory".to_string()),
+        }),
         ..Default::default()
-    })
+    }]
 }
 
 fn build_node_affinity(gpu: &crate::crd::user_deployment::GpuSpec) -> Option<Affinity> {
@@ -573,7 +378,7 @@ pub fn render_deployment(
         .filter(|p| p.enabled);
 
     if let Some(storage) = storage_config {
-        volumes.extend(build_storage_volumes(instance_name, storage));
+        volumes.extend(build_storage_volumes(namespace, storage));
         volume_mounts.push(VolumeMount {
             name: "basilica-storage".to_string(),
             mount_path: storage.mount_path.clone(),
@@ -656,25 +461,11 @@ pub fn render_deployment(
         ..Default::default()
     };
 
-    let mut containers = vec![container];
-    let mut pod_annotations = BTreeMap::new();
-
-    if let Some(storage) = storage_config {
-        containers.push(build_fuse_sidecar(namespace, instance_name, storage)?);
-        pod_annotations.insert(
-            "container.apparmor.security.beta.kubernetes.io/fuse-storage".to_string(),
-            "unconfined".to_string(),
-        );
-    }
+    let containers = vec![container];
 
     let pod_template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
             labels: Some(labels.clone()),
-            annotations: if pod_annotations.is_empty() {
-                None
-            } else {
-                Some(pod_annotations)
-            },
             ..Default::default()
         }),
         spec: Some(PodSpec {
@@ -1346,7 +1137,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_deployment_with_fuse_storage_sidecar() {
+    fn test_render_deployment_with_daemonset_storage() {
         use crate::crd::user_deployment::{PersistentStorageSpec, StorageBackend, StorageSpec};
 
         let spec = UserDeploymentSpec::new(
@@ -1375,10 +1166,13 @@ mod tests {
         let deployment = render_deployment("storage-app", "u-user123", &spec).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
-        assert_eq!(pod_spec.containers.len(), 2);
+        // DaemonSet pattern: only 1 container (no sidecar)
+        assert_eq!(pod_spec.containers.len(), 1);
 
         let main_container = &pod_spec.containers[0];
         assert_eq!(main_container.name, "storage-app");
+
+        // Verify storage volume mount with HostToContainer propagation
         let main_mounts = main_container.volume_mounts.as_ref().unwrap();
         let data_mount = main_mounts
             .iter()
@@ -1390,54 +1184,30 @@ mod tests {
             Some("HostToContainer".to_string())
         );
 
-        let fuse_container = &pod_spec.containers[1];
-        assert_eq!(fuse_container.name, "fuse-storage");
-        assert_eq!(
-            fuse_container.image,
-            Some("ghcr.io/one-covenant/basilica-storage-daemon:latest".to_string())
-        );
-
-        let fuse_sc = fuse_container.security_context.as_ref().unwrap();
-        assert_eq!(fuse_sc.run_as_user, Some(0), "Should run as root for FUSE");
-        assert_eq!(fuse_sc.run_as_non_root, Some(false));
-        assert_eq!(
-            fuse_sc.privileged,
-            Some(true),
-            "Must use privileged mode to access /dev/fuse from hostPath"
-        );
-        assert_eq!(
-            fuse_sc.allow_privilege_escalation,
-            Some(true),
-            "Required with privileged mode"
-        );
-        assert_eq!(fuse_sc.read_only_root_filesystem, Some(true));
-
-        let fuse_env = fuse_container.env.as_ref().unwrap();
-        assert!(fuse_env
+        // Verify hostPath volume points to namespace-scoped path
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        let storage_volume = volumes
             .iter()
-            .any(|e| e.name == "STORAGE_BACKEND" && e.value.as_deref() == Some("r2")));
-        assert!(fuse_env
-            .iter()
-            .any(|e| e.name == "STORAGE_BUCKET" && e.value.as_deref() == Some("my-bucket")));
-        assert!(fuse_env
-            .iter()
-            .any(|e| e.name == "MOUNT_PATH" && e.value.as_deref() == Some("/data")));
-
-        let fuse_mounts = fuse_container.volume_mounts.as_ref().unwrap();
-        let fuse_storage_mount = fuse_mounts
-            .iter()
-            .find(|m| m.name == "basilica-storage")
+            .find(|v| v.name == "basilica-storage")
             .unwrap();
+        let host_path = storage_volume.host_path.as_ref().unwrap();
         assert_eq!(
-            fuse_storage_mount.mount_propagation,
-            Some("Bidirectional".to_string())
+            host_path.path, "/var/lib/basilica/fuse/u-user123",
+            "Path should use namespace, not instance_name"
+        );
+        assert_eq!(
+            host_path.type_.as_deref(),
+            Some("Directory"),
+            "Type should be Directory (mount must exist from DaemonSet)"
         );
 
+        // No fuse-device volume needed (DaemonSet handles /dev/fuse)
         assert!(
-            pod_spec.init_containers.is_none(),
-            "Init containers should not be present"
+            !volumes.iter().any(|v| v.name == "fuse-device"),
+            "fuse-device volume should not be present with DaemonSet pattern"
         );
 
+        // Main container should still wait for FUSE mount
         let main_command = main_container.command.as_ref().unwrap();
         assert_eq!(main_command[0], "/bin/sh");
         assert_eq!(main_command[1], "-c");
@@ -1453,90 +1223,6 @@ mod tests {
             wrapped_script.contains(".fuse_ready"),
             "Script should check for .fuse_ready marker"
         );
-
-        let volumes = pod_spec.volumes.as_ref().unwrap();
-        assert!(volumes.iter().any(|v| v.name == "basilica-storage"));
-        assert!(volumes.iter().any(|v| v.name == "fuse-device"));
-
-        let fuse_lifecycle = fuse_container
-            .lifecycle
-            .as_ref()
-            .expect("Lifecycle hook missing");
-        let pre_stop = fuse_lifecycle
-            .pre_stop
-            .as_ref()
-            .expect("PreStop hook missing");
-        let exec = pre_stop.exec.as_ref().expect("PreStop exec missing");
-        let command = exec.command.as_ref().expect("PreStop command missing");
-        assert_eq!(command.len(), 3);
-        assert_eq!(command[0], "sh");
-        assert_eq!(command[1], "-c");
-        assert!(command[2].contains("timeout 120"));
-        assert!(command[2].contains("kill -TERM 1"));
-        assert!(command[2].contains("while kill -0 1"));
-
-        assert_eq!(
-            pod_spec.termination_grace_period_seconds,
-            Some(120),
-            "terminationGracePeriodSeconds should be 120 for storage flush"
-        );
-
-        let fuse_resources = fuse_container
-            .resources
-            .as_ref()
-            .expect("Resources missing");
-        let limits = fuse_resources.limits.as_ref().expect("Limits missing");
-        let requests = fuse_resources.requests.as_ref().expect("Requests missing");
-        assert_eq!(
-            limits.get("memory").unwrap().0,
-            "512Mi",
-            "Memory should be 512Mi for UserDeployment"
-        );
-        assert_eq!(requests.get("memory").unwrap().0, "512Mi");
-        assert_eq!(limits.get("cpu").unwrap().0, "500m");
-        assert_eq!(requests.get("cpu").unwrap().0, "500m");
-        assert_eq!(
-            limits.get("ephemeral-storage").unwrap().0,
-            "4096Mi",
-            "Should be 2x cache size"
-        );
-
-        let startup_probe = fuse_container
-            .startup_probe
-            .as_ref()
-            .expect("Startup probe missing");
-        let startup_http = startup_probe
-            .http_get
-            .as_ref()
-            .expect("Startup HTTP missing");
-        assert_eq!(startup_http.path.as_ref().unwrap(), "/ready");
-        assert_eq!(startup_probe.initial_delay_seconds, Some(2));
-        assert_eq!(startup_probe.period_seconds, Some(2));
-        assert_eq!(startup_probe.failure_threshold, Some(15));
-
-        let liveness_probe = fuse_container
-            .liveness_probe
-            .as_ref()
-            .expect("Liveness probe missing");
-        let liveness_http = liveness_probe
-            .http_get
-            .as_ref()
-            .expect("Liveness HTTP missing");
-        assert_eq!(liveness_http.path.as_ref().unwrap(), "/health");
-        assert_eq!(liveness_probe.period_seconds, Some(10));
-        assert_eq!(liveness_probe.failure_threshold, Some(3));
-
-        let readiness_probe = fuse_container
-            .readiness_probe
-            .as_ref()
-            .expect("Readiness probe missing");
-        let readiness_http = readiness_probe
-            .http_get
-            .as_ref()
-            .expect("Readiness HTTP missing");
-        assert_eq!(readiness_http.path.as_ref().unwrap(), "/ready");
-        assert_eq!(readiness_probe.period_seconds, Some(3));
-        assert_eq!(readiness_probe.failure_threshold, Some(1));
     }
 
     #[test]
