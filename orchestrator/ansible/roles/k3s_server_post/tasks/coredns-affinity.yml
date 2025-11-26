@@ -1,0 +1,60 @@
+---
+# Configure CoreDNS to prefer scheduling on VPC nodes (non-WireGuard)
+# This ensures DNS remains available even if WireGuard tunnels fail
+
+- name: Wait for CoreDNS deployment to be ready
+  ansible.builtin.command:
+    cmd: kubectl -n kube-system get deployment coredns -o jsonpath='{.status.readyReplicas}'
+  register: coredns_ready
+  until: coredns_ready.stdout | int >= 1
+  retries: 30
+  delay: 10
+  changed_when: false
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Get current CoreDNS deployment spec
+  ansible.builtin.command:
+    cmd: kubectl -n kube-system get deployment coredns -o json
+  register: coredns_deployment
+  changed_when: false
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Check if CoreDNS already has WireGuard affinity
+  ansible.builtin.set_fact:
+    coredns_has_affinity: "{{ (coredns_deployment.stdout | from_json).spec.template.spec.affinity.nodeAffinity is defined }}"
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Patch CoreDNS deployment to prefer non-WireGuard nodes
+  ansible.builtin.command:
+    cmd: >
+      kubectl -n kube-system patch deployment coredns --type=strategic -p
+      '{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"preferredDuringSchedulingIgnoredDuringExecution":[{"weight":100,"preference":{"matchExpressions":[{"key":"basilica.ai/wireguard","operator":"DoesNotExist"}]}}]}}}}}}'
+  when: not coredns_has_affinity
+  register: coredns_patch
+  changed_when: coredns_patch.rc == 0
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Display CoreDNS patch result
+  ansible.builtin.debug:
+    msg: "CoreDNS affinity configured to prefer non-WireGuard nodes"
+  when: coredns_patch is changed
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Scale CoreDNS to ensure redundancy
+  ansible.builtin.command:
+    cmd: kubectl -n kube-system scale deployment coredns --replicas=2
+  register: coredns_scale
+  changed_when: "'scaled' in coredns_scale.stdout"
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Verify CoreDNS pods are running on preferred nodes
+  ansible.builtin.command:
+    cmd: kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide
+  register: coredns_pods
+  changed_when: false
+  tags: ['k3s', 'post', 'coredns']
+
+- name: Display CoreDNS pod locations
+  ansible.builtin.debug:
+    msg: "{{ coredns_pods.stdout_lines }}"
+  tags: ['k3s', 'post', 'coredns']
