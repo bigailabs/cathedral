@@ -74,6 +74,12 @@ variable "alb_security_group_id" {
   default     = ""
 }
 
+variable "wireguard_cidr" {
+  type        = string
+  description = "WireGuard VPN network CIDR for remote GPU nodes"
+  default     = "10.200.0.0/16"
+}
+
 variable "tags" {
   type        = map(string)
   description = "Tags to apply to resources"
