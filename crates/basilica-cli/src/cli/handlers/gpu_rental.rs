@@ -31,7 +31,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
-use tracing::debug;
+use tokio::time::timeout;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Represents the target for the `up` command - either an node ID or GPU category
@@ -309,10 +310,21 @@ pub async fn handle_ls(
         None => {
             // Display both tables when --compute flag is not specified
 
-            // Fetch both in parallel
+            // Fetch both in parallel with 5-second timeout for community cloud
+            let community_future =
+                fetch_and_filter_community_cloud(&api_client, gpu_category.clone(), &filters);
             let (secure_result, community_result) = tokio::join!(
-                fetch_and_filter_secure_cloud(&api_client, gpu_category.clone(), &filters),
-                fetch_and_filter_community_cloud(&api_client, gpu_category, &filters)
+                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                async {
+                    match timeout(Duration::from_secs(5), community_future).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!("Validator request timed out after 5 seconds");
+                            // Return empty nodes on timeout
+                            Ok((vec![], std::collections::HashMap::new()))
+                        }
+                    }
+                }
             );
 
             let secure_gpus = secure_result?;
@@ -1018,8 +1030,18 @@ pub async fn handle_ps(
 
             // Fetch rentals and usage history in parallel
             // Use a reasonable limit for usage history to cover active rentals
+            // Add 5-second timeout for rentals to handle unresponsive validator
+            let rentals_future = api_client.list_rentals(query);
             let (rentals_result, usage_result) = tokio::join!(
-                api_client.list_rentals(query),
+                async {
+                    match timeout(Duration::from_secs(5), rentals_future).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!("Validator request timed out after 5 seconds");
+                            Err(ApiError::Timeout)
+                        }
+                    }
+                },
                 api_client.list_usage_history(Some(100), None)
             );
 
@@ -1175,8 +1197,18 @@ pub async fn handle_ps(
                         min_gpu_count: filters.min_gpu_count,
                     });
 
+                    // Add 5-second timeout for rentals to handle unresponsive validator
+                    let rentals_future = api_client.list_rentals(query);
                     let (rentals_result, usage_result) = tokio::join!(
-                        api_client.list_rentals(query),
+                        async {
+                            match timeout(Duration::from_secs(5), rentals_future).await {
+                                Ok(result) => result,
+                                Err(_) => {
+                                    warn!("Validator request timed out after 5 seconds");
+                                    Err(ApiError::Timeout)
+                                }
+                            }
+                        },
                         api_client.list_usage_history(Some(100), None)
                     );
 
@@ -1189,9 +1221,18 @@ pub async fn handle_ps(
             // Process community cloud data
             let (community_rentals_result, community_usage_result) = community_result;
 
-            let community_rentals_list = community_rentals_result.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load community cloud rentals")
-            })?;
+            // Gracefully handle community cloud failures (e.g., validator timeout)
+            // Show empty list instead of failing the whole command
+            let community_rentals_list = match community_rentals_result {
+                Ok(list) => list,
+                Err(e) => {
+                    warn!("Failed to load community cloud rentals: {}", e);
+                    basilica_sdk::types::ApiListRentalsResponse {
+                        rentals: vec![],
+                        total_count: 0,
+                    }
+                }
+            };
 
             // Build usage map: rental_id -> usage record
             let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> =
@@ -1344,12 +1385,23 @@ pub async fn handle_status(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -1494,12 +1546,23 @@ pub async fn handle_logs(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -1695,13 +1758,22 @@ pub async fn handle_down(
                 (None, Some(rentals))
             }
             None => {
-                // Fetch both types
+                // Fetch both types with 5-second timeout for community cloud
+                let community_future = api_client.list_rentals(Some(ListRentalsQuery {
+                    status: Some(RentalState::Active),
+                    gpu_type: None,
+                    min_gpu_count: None,
+                }));
                 let (community_result, secure_result) = tokio::join!(
-                    api_client.list_rentals(Some(ListRentalsQuery {
-                        status: Some(RentalState::Active),
-                        gpu_type: None,
-                        min_gpu_count: None,
-                    })),
+                    async {
+                        match timeout(Duration::from_secs(5), community_future).await {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!("Validator request timed out after 5 seconds");
+                                Err(ApiError::Timeout)
+                            }
+                        }
+                    },
                     api_client.list_secure_cloud_rentals()
                 );
                 (community_result.ok(), secure_result.ok())
@@ -1914,12 +1986,23 @@ pub async fn handle_exec(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -2118,12 +2201,23 @@ pub async fn handle_ssh(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -2367,12 +2461,22 @@ pub async fn handle_cp(
     // Check both community and secure cloud rentals
     let spinner = create_spinner("Looking up rental...");
 
+    // Add 5-second timeout for community cloud (validator) request
+    let community_future = api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+        status: Some(basilica_sdk::types::RentalState::Active),
+        gpu_type: None,
+        min_gpu_count: None,
+    }));
     let (community_result, secure_result) = tokio::join!(
-        api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
-            status: Some(basilica_sdk::types::RentalState::Active),
-            gpu_type: None,
-            min_gpu_count: None,
-        })),
+        async {
+            match timeout(Duration::from_secs(5), community_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Validator request timed out after 5 seconds");
+                    Err(ApiError::Timeout)
+                }
+            }
+        },
         api_client.list_secure_cloud_rentals()
     );
 
