@@ -80,99 +80,6 @@ impl TestContext {
         }
     }
 
-    // Note: cleanup_database was removed to enable parallel test execution
-    // Each test uses unique user IDs, so they don't interfere with each other
-    // The shared test database accumulates test data but tests are isolated by user_id
-
-    async fn seed_test_data(pool: &Pool<Postgres>) {
-        // Test packages matching production pricing from migration 005_billing_packages.sql
-        // h100: $3.50/hour (production default)
-        // h200: $5.00/hour (production)
-        // custom: $0.00/hour (production - for custom deals)
-        // a100: Test-only package for additional coverage
-        let packages = vec![
-            (
-                "h100",
-                "NVIDIA H100",
-                "80",
-                "3.5", // Matches production pricing
-                "0.0",
-                "0.0",
-                "0.0",
-                true,
-            ),
-            (
-                "h200",
-                "NVIDIA H200",
-                "141",
-                "5.0", // Matches production pricing
-                "0.0",
-                "0.0",
-                "0.0",
-                true,
-            ),
-            (
-                "a100",
-                "NVIDIA A100",
-                "40",
-                "2.5", // Test-only package for coverage
-                "0.0",
-                "0.0",
-                "0.0",
-                true,
-            ),
-            (
-                "custom",
-                "Custom Configuration",
-                "0",
-                "0.0", // Matches production pricing (free/custom deals)
-                "0.0",
-                "0.0",
-                "0.0",
-                true,
-            ),
-        ];
-
-        for (id, name, _memory, base_rate, compute_rate, memory_rate, storage_rate, active) in
-            packages
-        {
-            let description = match id {
-                "h100" => "High-performance NVIDIA H100 GPU package for demanding workloads",
-                "h200" => "Next-gen NVIDIA H200 GPU package with increased memory for AI/ML",
-                "custom" => "Custom GPU configuration tailored to your specific requirements",
-                _ => "GPU compute package",
-            };
-
-            sqlx::query(
-                "INSERT INTO billing.billing_packages (package_id, name, description, gpu_model, hourly_rate, cpu_rate_per_hour, memory_rate_per_gb_hour, network_rate_per_gb, disk_iops_rate, is_active)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                 ON CONFLICT (package_id) DO UPDATE SET
-                 name = EXCLUDED.name,
-                 description = EXCLUDED.description,
-                 gpu_model = EXCLUDED.gpu_model,
-                 hourly_rate = EXCLUDED.hourly_rate,
-                 cpu_rate_per_hour = EXCLUDED.cpu_rate_per_hour,
-                 memory_rate_per_gb_hour = EXCLUDED.memory_rate_per_gb_hour,
-                 network_rate_per_gb = EXCLUDED.network_rate_per_gb,
-                 disk_iops_rate = EXCLUDED.disk_iops_rate,
-                 is_active = EXCLUDED.is_active"
-            )
-            .bind(id)
-            .bind(name)
-            .bind(description)
-            .bind(format!("NVIDIA {}", name))
-            .bind(base_rate.parse::<rust_decimal::Decimal>().unwrap())
-            .bind(compute_rate.parse::<rust_decimal::Decimal>().unwrap())
-            .bind(memory_rate.parse::<rust_decimal::Decimal>().unwrap())
-            .bind(storage_rate.parse::<rust_decimal::Decimal>().unwrap())
-            .bind("0.01".parse::<rust_decimal::Decimal>().unwrap())
-            .bind(active)
-            .execute(pool)
-            .await
-            .expect("Failed to seed package data");
-        }
-    }
-
     pub async fn create_test_user(&self, user_id: &str, initial_balance: &str) {
         let mut tx = self
             .pool
@@ -252,17 +159,6 @@ impl TestContext {
             "SELECT status FROM billing.rentals WHERE rental_id = $1::uuid",
         )
         .bind(rental_id)
-        .fetch_optional(&self.pool)
-        .await
-        .unwrap_or(None)
-    }
-
-    #[allow(dead_code)]
-    pub async fn get_user_package(&self, user_id: &str) -> Option<String> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT package_id FROM billing.user_preferences WHERE user_id = $1",
-        )
-        .bind(user_id)
         .fetch_optional(&self.pool)
         .await
         .unwrap_or(None)
