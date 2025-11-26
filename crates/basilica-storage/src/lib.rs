@@ -11,6 +11,11 @@
 //! - Zero code changes for users
 //! - Supports mmap for numpy/PyTorch
 //!
+//! ### DaemonSet Mode (Multi-Tenant)
+//! - Single daemon per node manages mounts for all namespaces
+//! - Reads credentials from Kubernetes secrets in user namespaces
+//! - Namespace-scoped isolation with RBAC
+//!
 //! ### Snapshot Manager (Legacy/Testing)
 //! - Manual snapshot-on-pause approach
 //! - For testing and backwards compatibility
@@ -18,6 +23,9 @@
 
 pub mod backend;
 pub mod config;
+pub mod credentials;
+#[cfg(feature = "fuse")]
+pub mod daemon;
 pub mod error;
 #[cfg(feature = "fuse")]
 pub mod fuse;
@@ -29,9 +37,19 @@ pub mod snapshot;
 
 pub use backend::{S3Backend, StorageBackend};
 pub use config::StorageConfig;
+pub use credentials::{
+    CredentialError, CredentialProvider, KubernetesCredentialProvider, StorageCredentials,
+};
+#[cfg(feature = "fuse")]
+pub use daemon::{
+    MountError, MountInfo, MountManager, MountStatus, NamespaceWatcher, WatcherError,
+    DEFAULT_BASE_PATH,
+};
 pub use error::{Result, StorageError};
 #[cfg(feature = "fuse")]
 pub use fuse::{BasilicaFS, DirtyPageTracker, PageCache, SyncWorker};
+#[cfg(feature = "fuse")]
+pub use http::DaemonHttpServer;
 #[cfg(feature = "fuse")]
 pub use http::HttpServer;
 pub use metrics::StorageMetrics;
