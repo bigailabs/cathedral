@@ -144,3 +144,187 @@
     group: root
     mode: '0644'
   tags: ['wireguard', 'config']
+
+# MASQUERADE rule for WireGuard traffic to VPC
+# Remote GPU nodes send packets with source IP from 10.200.0.0/16 (WireGuard network).
+# AWS VPC drops packets with non-VPC source IPs. MASQUERADE rewrites the source IP
+# to the server's VPC IP so responses can be routed back properly.
+- name: Get primary network interface name
+  ansible.builtin.shell: |
+    ip route get 1.1.1.1 | awk '{print $5; exit}'
+  register: primary_interface
+  changed_when: false
+  tags: ['wireguard', 'iptables']
+
+- name: Add MASQUERADE rule for WireGuard traffic to VPC
+  ansible.builtin.iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "{{ wireguard_network }}"
+    out_interface: "{{ primary_interface.stdout }}"
+    jump: MASQUERADE
+    comment: "NAT WireGuard to VPC for remote GPU nodes"
+  tags: ['wireguard', 'iptables']
+
+- name: Save iptables rules for persistence
+  ansible.builtin.shell: |
+    iptables-save > /etc/iptables.rules.v4
+  changed_when: true
+  tags: ['wireguard', 'iptables']
+
+- name: Deploy iptables-restore systemd service
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Restore iptables rules
+      Before=network-pre.target
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/sbin/iptables-restore /etc/iptables.rules.v4
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/iptables-restore.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: iptables_service
+  tags: ['wireguard', 'iptables']
+
+- name: Enable iptables-restore service
+  ansible.builtin.systemd:
+    name: iptables-restore
+    enabled: yes
+    daemon_reload: "{{ iptables_service.changed }}"
+  tags: ['wireguard', 'iptables']
+
+# Security hardening: Rate limiting and FORWARD chain restrictions
+- name: Install iptables hashlimit module dependencies
+  ansible.builtin.apt:
+    name: xtables-addons-common
+    state: present
+  tags: ['wireguard', 'security']
+
+- name: Check if WireGuard rate limit rule exists
+  ansible.builtin.shell: |
+    iptables -C INPUT -p udp --dport {{ wireguard_port }} -m hashlimit \
+      --hashlimit-name wireguard_handshake --hashlimit-mode srcip \
+      --hashlimit-above 10/minute --hashlimit-burst 5 -j DROP 2>/dev/null
+  register: wg_ratelimit_check
+  failed_when: false
+  changed_when: false
+  tags: ['wireguard', 'security']
+
+- name: Rate limit WireGuard handshakes to prevent DoS
+  ansible.builtin.shell: |
+    iptables -A INPUT -p udp --dport {{ wireguard_port }} -m hashlimit \
+      --hashlimit-name wireguard_handshake --hashlimit-mode srcip \
+      --hashlimit-above 10/minute --hashlimit-burst 5 -j DROP \
+      -m comment --comment "Rate limit WireGuard handshakes"
+  when: wg_ratelimit_check.rc != 0
+  tags: ['wireguard', 'security']
+
+- name: Allow established connections from WireGuard network
+  ansible.builtin.iptables:
+    chain: FORWARD
+    source: "{{ wireguard_network }}"
+    ctstate: ESTABLISHED,RELATED
+    jump: ACCEPT
+    comment: "Allow established WireGuard connections"
+  tags: ['wireguard', 'security']
+
+- name: Allow WireGuard peers to K3s API server
+  ansible.builtin.iptables:
+    chain: FORWARD
+    source: "{{ wireguard_network }}"
+    protocol: tcp
+    destination_port: 6443
+    jump: ACCEPT
+    comment: "Allow WireGuard to K3s API"
+  tags: ['wireguard', 'security']
+
+- name: Allow WireGuard peers to Flannel pod network
+  ansible.builtin.iptables:
+    chain: FORWARD
+    source: "{{ wireguard_network }}"
+    destination: "10.42.0.0/16"
+    jump: ACCEPT
+    comment: "Allow WireGuard to Flannel pods"
+  tags: ['wireguard', 'security']
+
+- name: Allow WireGuard peers to Flannel VXLAN port
+  ansible.builtin.iptables:
+    chain: FORWARD
+    source: "{{ wireguard_network }}"
+    protocol: udp
+    destination_port: 8472
+    jump: ACCEPT
+    comment: "Allow WireGuard to Flannel VXLAN"
+  tags: ['wireguard', 'security']
+
+- name: Allow WireGuard peers to kubelet
+  ansible.builtin.iptables:
+    chain: FORWARD
+    source: "{{ wireguard_network }}"
+    protocol: tcp
+    destination_port: 10250
+    jump: ACCEPT
+    comment: "Allow WireGuard to kubelet"
+  tags: ['wireguard', 'security']
+
+# Kernel hardening for network security
+- name: Enable reverse path filtering
+  ansible.posix.sysctl:
+    name: net.ipv4.conf.all.rp_filter
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags: ['wireguard', 'security', 'sysctl']
+
+- name: Disable source routing
+  ansible.posix.sysctl:
+    name: net.ipv4.conf.all.accept_source_route
+    value: '0'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags: ['wireguard', 'security', 'sysctl']
+
+- name: Enable SYN cookies protection
+  ansible.posix.sysctl:
+    name: net.ipv4.tcp_syncookies
+    value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags: ['wireguard', 'security', 'sysctl']
+
+- name: Disable ICMP redirects
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: '0'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  loop:
+    - net.ipv4.conf.all.accept_redirects
+    - net.ipv4.conf.default.accept_redirects
+    - net.ipv4.conf.all.send_redirects
+    - net.ipv4.conf.default.send_redirects
+  tags: ['wireguard', 'security', 'sysctl']
+
+- name: Update saved iptables rules with security rules
+  ansible.builtin.shell: |
+    iptables-save > /etc/iptables.rules.v4
+  changed_when: true
+  tags: ['wireguard', 'security']
+
+# WireGuard monitoring setup
+- name: Setup WireGuard Prometheus monitoring
+  ansible.builtin.include_tasks: monitoring.yml
+  tags: ['wireguard', 'monitoring']
+  when: wireguard_monitoring_enabled | default(true)
