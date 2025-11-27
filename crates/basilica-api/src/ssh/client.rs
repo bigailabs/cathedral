@@ -472,17 +472,15 @@ impl K3sSshClient {
         }
 
         // Validate public key format (base64, 44 chars for WireGuard)
-        if public_key.len() != 44 {
+        if !crate::wireguard::is_valid_wireguard_public_key(public_key) {
             return Err(ApiError::InvalidRequest {
-                message: format!(
-                    "Invalid WireGuard public key length: expected 44, got {}",
-                    public_key.len()
-                ),
+                message: "Invalid WireGuard public key: must be 44 characters of valid base64"
+                    .into(),
             });
         }
 
-        // Validate allowed_ip format
-        if !allowed_ip.starts_with("10.200.") {
+        // Validate allowed_ip format using the full IP validator
+        if !crate::wireguard::is_valid_gpu_node_ip(allowed_ip) {
             return Err(ApiError::InvalidRequest {
                 message: format!("Invalid WireGuard IP: {}", allowed_ip),
             });
@@ -579,13 +577,11 @@ impl K3sSshClient {
             ));
         }
 
-        // Validate public key format
-        if public_key.len() != 44 {
+        // Validate public key format (base64, 44 chars for WireGuard)
+        if !crate::wireguard::is_valid_wireguard_public_key(public_key) {
             return Err(ApiError::InvalidRequest {
-                message: format!(
-                    "Invalid WireGuard public key length: expected 44, got {}",
-                    public_key.len()
-                ),
+                message: "Invalid WireGuard public key: must be 44 characters of valid base64"
+                    .into(),
             });
         }
 

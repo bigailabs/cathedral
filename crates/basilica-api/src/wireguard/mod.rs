@@ -17,3 +17,4 @@ pub use config::WireGuardServerConfig;
 pub use config::WireGuardServerEntry;
 pub use ip_allocator::allocate_wireguard_ip;
 pub use ip_allocator::is_valid_gpu_node_ip;
+pub use ip_allocator::is_valid_wireguard_public_key;

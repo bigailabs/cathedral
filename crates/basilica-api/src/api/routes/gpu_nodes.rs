@@ -224,12 +224,9 @@ pub async fn register_wireguard_key(
     })?;
 
     // Validate public key format (base64, 44 chars for WireGuard)
-    if req.public_key.len() != 44 {
+    if !crate::wireguard::is_valid_wireguard_public_key(&req.public_key) {
         return Err(ApiError::InvalidRequest {
-            message: format!(
-                "Invalid WireGuard public key length: expected 44, got {}",
-                req.public_key.len()
-            ),
+            message: "Invalid WireGuard public key: must be 44 characters of valid base64".into(),
         });
     }
 

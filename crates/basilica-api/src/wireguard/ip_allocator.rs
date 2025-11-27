@@ -5,6 +5,26 @@
 
 use sha2::{Digest, Sha256};
 
+/// Validate that a WireGuard public key has valid base64 format.
+///
+/// WireGuard public keys are 32 bytes encoded as base64, resulting in exactly
+/// 44 characters. This validation ensures the key contains only valid base64
+/// characters (A-Z, a-z, 0-9, +, /, =) to prevent injection attacks.
+///
+/// # Arguments
+/// * `public_key` - The WireGuard public key to validate
+///
+/// # Returns
+/// `true` if the key is exactly 44 characters and contains only valid base64 characters
+pub fn is_valid_wireguard_public_key(public_key: &str) -> bool {
+    if public_key.len() != 44 {
+        return false;
+    }
+    public_key
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+}
+
 /// Allocate a deterministic WireGuard IP from node_id.
 ///
 /// Uses SHA-256 hash to map node_id to IP in 10.200.X.Y range:
@@ -49,9 +69,9 @@ pub fn is_valid_gpu_node_ip(ip: &str) -> bool {
     match octets {
         Ok(o) if o.len() == 4 => {
             // Must be in 10.200.x.y range
-            // Third octet must be >= 1 (0 is server subnet)
-            // Fourth octet must be 1-254
-            o[0] == 10 && o[1] == 200 && o[2] >= 1 && o[3] >= 1 && o[3] <= 254
+            // Third octet must be 1-254 (0 is server subnet, 255 reserved)
+            // Fourth octet must be 1-254 (0 is network, 255 is broadcast)
+            o[0] == 10 && o[1] == 200 && o[2] >= 1 && o[2] <= 254 && o[3] >= 1 && o[3] <= 254
         }
         _ => false,
     }
@@ -139,11 +159,47 @@ mod tests {
 
         // Invalid IPs
         assert!(!is_valid_gpu_node_ip("10.200.0.1")); // Third octet is 0 (server subnet)
+        assert!(!is_valid_gpu_node_ip("10.200.255.1")); // Third octet is 255 (reserved)
         assert!(!is_valid_gpu_node_ip("10.200.1.0")); // Fourth octet is 0 (network)
         assert!(!is_valid_gpu_node_ip("10.200.1.255")); // Fourth octet is 255 (broadcast)
         assert!(!is_valid_gpu_node_ip("10.201.1.1")); // Wrong second octet
         assert!(!is_valid_gpu_node_ip("192.168.1.1")); // Wrong network
         assert!(!is_valid_gpu_node_ip("invalid")); // Not an IP
         assert!(!is_valid_gpu_node_ip("10.200.1")); // Missing octet
+    }
+
+    #[test]
+    fn test_is_valid_wireguard_public_key() {
+        // Valid WireGuard public keys (44 char base64)
+        // Real WireGuard public key format: 32 bytes -> 44 base64 chars with padding
+        assert!(is_valid_wireguard_public_key(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn+/=="
+        ));
+        assert!(is_valid_wireguard_public_key(
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd+/=="
+        ));
+
+        // Invalid: wrong length
+        assert!(!is_valid_wireguard_public_key("tooshort"));
+        assert!(!is_valid_wireguard_public_key(
+            "dGVzdGtleXRoYXRpc3dheXRvb2xvbmdhbmRub3R2YWxpZGJhc2U2NA=="
+        ));
+
+        // Invalid: contains shell metacharacters
+        assert!(!is_valid_wireguard_public_key(
+            "AAAA'$(rm -rf /)AAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+        assert!(!is_valid_wireguard_public_key(
+            "AAAA`whoami`AAAAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+        assert!(!is_valid_wireguard_public_key(
+            "AAAA;rm -rf /AAAAAAAAAAAAAAAAAAAAAAAA"
+        ));
+        assert!(!is_valid_wireguard_public_key(
+            "AAAA|cat /etc/passwdAAAAAAAAAAAAAAAAA"
+        ));
+
+        // Invalid: empty
+        assert!(!is_valid_wireguard_public_key(""));
     }
 }

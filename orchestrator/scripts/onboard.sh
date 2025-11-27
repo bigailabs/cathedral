@@ -193,11 +193,20 @@ EOF
     # Parse WireGuard configuration if present
     WIREGUARD_ENABLED=$(echo "$response" | jq -r '.wireguard.enabled // "false"')
     if [ "${WIREGUARD_ENABLED}" = "true" ]; then
-        WG_NODE_IP=$(echo "$response" | jq -r '.wireguard.node_ip')
-        WG_KEEPALIVE=$(echo "$response" | jq -r '.wireguard.persistent_keepalive')
-        WG_PEERS_JSON=$(echo "$response" | jq -c '.wireguard.peers')
+        WG_NODE_IP=$(echo "$response" | jq -r '.wireguard.node_ip // empty')
+        WG_KEEPALIVE=$(echo "$response" | jq -r '.wireguard.persistent_keepalive // empty')
+        WG_PEERS_JSON=$(echo "$response" | jq -c '.wireguard.peers // []')
         local peer_count
         peer_count=$(echo "$WG_PEERS_JSON" | jq 'length')
+
+        # Validate required WireGuard configuration
+        if [ -z "${WG_NODE_IP}" ]; then
+            die "WireGuard enabled but node_ip is missing from API response"
+        fi
+        if [ "${peer_count}" -eq 0 ]; then
+            die "WireGuard enabled but no peers configured in API response"
+        fi
+
         log "WireGuard VPN required"
         log "  Node IP: ${WG_NODE_IP}"
         log "  Server peers: ${peer_count}"
@@ -218,6 +227,11 @@ EOF
 }
 
 setup_wireguard() {
+    # Guard: ensure WireGuard configuration is present
+    if [ -z "${WG_NODE_IP}" ] || [ -z "${WG_PEERS_JSON}" ]; then
+        die "setup_wireguard called without valid WireGuard configuration"
+    fi
+
     log "Installing WireGuard..."
     if command -v apt-get &> /dev/null; then
         apt-get update -qq
