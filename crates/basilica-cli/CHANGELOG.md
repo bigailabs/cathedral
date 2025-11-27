@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-alpha.1]
+
+### Added
+- Secure cloud integration: rent GPUs from secure cloud providers alongside community cloud
+- New `restart` command to restart rental containers
+- Automatic SSH private key detection for rentals
+- SSH keys are automatically registered during `basilica up`
+
 ## [0.5.5]
 
 ### Added
