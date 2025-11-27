@@ -428,26 +428,29 @@ pub async fn stop_rental(
         .terminate_rental(&owned_rental.rental_id, request.clone())
         .await?;
 
-    // Notify billing service that rental is stopping
+    // Finalize rental in billing service (calculate final cost and mark completed)
     if let Some(billing_client) = &state.billing_client {
-        use basilica_protocol::billing::{RentalStatus, UpdateRentalStatusRequest};
+        use basilica_protocol::billing::FinalizeRentalRequest;
 
         let now = chrono::Utc::now();
-        let timestamp = prost_types::Timestamp {
+        let end_timestamp = prost_types::Timestamp {
             seconds: now.timestamp(),
             nanos: now.timestamp_subsec_nanos() as i32,
         };
 
-        let update_request = UpdateRentalStatusRequest {
+        let finalize_request = FinalizeRentalRequest {
             rental_id: owned_rental.rental_id.clone(),
-            status: RentalStatus::Stopped as i32,
-            timestamp: Some(timestamp),
-            reason: request.reason.clone().unwrap_or_default(),
+            end_time: Some(end_timestamp),
+            final_cost: String::new(), // Let billing service calculate from tracked usage
+            termination_reason: request
+                .reason
+                .clone()
+                .unwrap_or_else(|| "user_requested".to_string()),
         };
 
-        if let Err(e) = billing_client.update_rental_status(update_request).await {
+        if let Err(e) = billing_client.finalize_rental(finalize_request).await {
             error!(
-                "Failed to update rental status in billing service for {}: {}",
+                "Failed to finalize rental in billing service for {}: {}",
                 owned_rental.rental_id, e
             );
         }
