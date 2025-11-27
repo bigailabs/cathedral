@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use basilica_protocol::billing::{
     billing_service_client::BillingServiceClient, GetActiveRentalsRequest,
-    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, UsageAggregation,
-    UsageReportRequest, UsageReportResponse,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse, TelemetryData,
+    UsageAggregation, UsageReportRequest, UsageReportResponse,
 };
+use futures::stream;
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
@@ -232,6 +233,19 @@ impl BillingClient {
                 e.message()
             )
         })?;
+
+        Ok(response.into_inner())
+    }
+
+    pub async fn ingest_telemetry(&self, batch: Vec<TelemetryData>) -> Result<IngestResponse> {
+        debug!("Ingesting telemetry batch of {} records", batch.len());
+
+        let mut client = self.client.clone();
+        let stream = stream::iter(batch);
+        let response = client
+            .ingest_telemetry(stream)
+            .await
+            .context("Failed to ingest telemetry batch")?;
 
         Ok(response.into_inner())
     }

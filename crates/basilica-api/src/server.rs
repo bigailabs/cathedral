@@ -11,9 +11,11 @@ use axum::Router;
 use basilica_aggregator::{AggregatorService, Database as AggregatorDatabase};
 use basilica_billing::BillingClient;
 use basilica_payments::client::PaymentsClient;
+use basilica_protocol::billing::{GpuUsage, ResourceUsage, TelemetryData};
 use basilica_validator::{api::types::RentalStatus, ValidatorClient};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::signal;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -119,6 +121,82 @@ async fn process_rental_health_check(
                 rental_id,
                 e
             );
+        }
+    }
+}
+
+/// Send synthetic telemetry for active secure cloud rentals to billing service
+async fn process_secure_cloud_billing(billing_client: &BillingClient, db: &PgPool) {
+    // Query active secure cloud rentals with their GPU count from offerings
+    let rentals: Vec<(String, i32)> = match sqlx::query_as(
+        r#"
+        SELECT r.id, COALESCE(o.gpu_count, 1) as gpu_count
+        FROM secure_cloud_rentals r
+        LEFT JOIN gpu_offerings o ON r.offering_id = o.id
+        WHERE r.status = 'active'
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::error!("Failed to query secure cloud rentals for billing: {}", e);
+            return;
+        }
+    };
+
+    if rentals.is_empty() {
+        return;
+    }
+
+    // Build telemetry batch for all active rentals
+    let telemetry_batch: Vec<TelemetryData> = rentals
+        .iter()
+        .map(|(rental_id, gpu_count)| {
+            let gpu_count = (*gpu_count).max(1) as u32;
+
+            TelemetryData {
+                rental_id: rental_id.clone(),
+                node_id: format!("secure-cloud-{}", rental_id),
+                timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
+                resource_usage: Some(ResourceUsage {
+                    cpu_percent: 100.0,
+                    memory_mb: 0,
+                    network_rx_bytes: 0,
+                    network_tx_bytes: 0,
+                    disk_read_bytes: 0,
+                    disk_write_bytes: 0,
+                    gpu_usage: (0..gpu_count)
+                        .map(|i| GpuUsage {
+                            index: i,
+                            utilization_percent: 100.0,
+                            memory_used_mb: 0,
+                            temperature_celsius: 0.0,
+                            power_watts: 0,
+                        })
+                        .collect(),
+                }),
+                custom_metrics: std::collections::HashMap::new(),
+            }
+        })
+        .collect();
+
+    let batch_size = telemetry_batch.len();
+
+    // Send telemetry batch to billing service
+    match billing_client.ingest_telemetry(telemetry_batch).await {
+        Ok(response) => {
+            tracing::debug!(
+                "Secure cloud billing: sent {} telemetry records (received: {}, processed: {}, failed: {})",
+                batch_size,
+                response.events_received,
+                response.events_processed,
+                response.events_failed
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to send secure cloud billing telemetry: {}", e);
         }
     }
 }
@@ -678,6 +756,27 @@ impl Server {
             "Started Secure Cloud health check task (interval: {} seconds)",
             health_check_interval.as_secs()
         );
+
+        // Start Secure Cloud billing task (sends synthetic telemetry for active rentals)
+        if let Some(billing_client) = state.billing_client.clone() {
+            let billing_task_db = state.db.clone();
+            let billing_interval = std::time::Duration::from_secs(30); // Same as validator telemetry interval
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(billing_interval);
+                loop {
+                    interval.tick().await;
+                    process_secure_cloud_billing(&billing_client, &billing_task_db).await;
+                }
+            });
+
+            tracing::info!(
+                "Started Secure Cloud billing task (interval: {} seconds)",
+                billing_interval.as_secs()
+            );
+        } else {
+            tracing::info!("Secure Cloud billing task not started (billing service disabled)");
+        }
 
         // Start node token cleanup task
         let cleanup_db = state.db.clone();
