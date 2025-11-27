@@ -36,6 +36,8 @@
         msg: "Configuring WireGuard on: {{ inventory_hostname }} ({{ ansible_host }})"
 
   roles:
+    - role: performance_tuning
+      tags: ['wireguard', 'performance']
     - role: wireguard
       tags: ['wireguard']
 

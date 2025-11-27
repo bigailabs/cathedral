@@ -70,14 +70,14 @@
 #   1. Run: /usr/local/bin/k3s-agent-uninstall.sh
 #   2. Revoke the node token via API or dashboard
 #
-# VERSION: 1.5.0
+# VERSION: 1.6.0
 # AUTHOR: Basilica Network
 # LICENSE: MIT
 #
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.5.0"
+readonly SCRIPT_VERSION="1.6.0"
 readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
@@ -105,6 +105,9 @@ main() {
 
     log "Registering node with Basilica..."
     register_node
+
+    log "Applying performance tuning..."
+    setup_performance_tuning
 
     if [ "${WIREGUARD_ENABLED}" = "true" ]; then
         log "Setting up WireGuard VPN..."
@@ -141,6 +144,127 @@ check_connectivity() {
         die "Cannot reach Basilica API at ${BASILICA_API_URL}"
     fi
     log "Basilica API reachable"
+}
+
+setup_performance_tuning() {
+    log "Loading kernel modules for performance tuning..."
+
+    # Load BBR congestion control module
+    if modprobe tcp_bbr 2>/dev/null; then
+        log "  BBR module loaded"
+        echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    else
+        log "  BBR module not available (kernel may be too old)"
+    fi
+
+    # Load conntrack module for connection tracking tuning
+    if modprobe nf_conntrack 2>/dev/null; then
+        log "  nf_conntrack module loaded"
+        echo "nf_conntrack" > /etc/modules-load.d/conntrack.conf
+    fi
+
+    # Load br_netfilter module (required for bridge-nf-call settings)
+    if modprobe br_netfilter 2>/dev/null; then
+        log "  br_netfilter module loaded"
+        echo "br_netfilter" > /etc/modules-load.d/br_netfilter.conf
+    fi
+
+    log "Deploying sysctl performance configuration..."
+    cat > /etc/sysctl.d/99-wireguard-performance.conf <<'SYSCTL_EOF'
+# WireGuard and Network Performance Tuning for K3s GPU Clusters
+# Deployed by Basilica onboard.sh - Do not edit manually
+# Architecture: WireGuard (MTU 1420) -> Flannel VXLAN (MTU ~1370) -> Pods
+
+# IP forwarding and routing (mandatory for K3s/Flannel)
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+
+# Bridge netfilter (mandatory for Flannel/kube-proxy)
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+
+# Socket buffer sizing (64MB max for high-throughput GPU workloads)
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.core.rmem_default = 16777216
+net.core.wmem_default = 16777216
+net.ipv4.tcp_rmem = 4096 1048576 67108864
+net.ipv4.tcp_wmem = 4096 1048576 67108864
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+
+# Network device tuning (increased for 10Gbps line-rate)
+net.core.netdev_max_backlog = 50000
+net.core.netdev_budget = 3000
+net.core.netdev_budget_usecs = 8000
+net.core.somaxconn = 65535
+
+# BBR congestion control (ideal for WireGuard tunnels)
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_notsent_lowat = 16384
+
+# Connection tracking (1M entries, tuned timeouts for K8s)
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_buckets = 262144
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_udp_timeout = 120
+net.netfilter.nf_conntrack_udp_timeout_stream = 180
+
+# TCP optimizations
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_max_orphans = 65536
+net.ipv4.tcp_max_syn_backlog = 65536
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+
+# Path MTU Discovery (critical for nested encapsulation)
+net.ipv4.ip_no_pmtu_disc = 0
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_base_mss = 1280
+
+# ARP cache tuning (for large clusters)
+net.ipv4.neigh.default.gc_thresh1 = 8192
+net.ipv4.neigh.default.gc_thresh2 = 32768
+net.ipv4.neigh.default.gc_thresh3 = 65536
+
+# Inotify limits (for kubelet/containerd)
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 524288
+
+# File descriptor limits
+fs.file-max = 2097152
+
+# ICMP rate limiting (security + PMTUD)
+net.ipv4.icmp_ratelimit = 1000
+net.ipv4.icmp_msgs_per_sec = 1000
+SYSCTL_EOF
+
+    chmod 644 /etc/sysctl.d/99-wireguard-performance.conf
+
+    log "Applying sysctl settings..."
+    if sysctl --system > /dev/null 2>&1; then
+        log "  Performance tuning applied successfully"
+    else
+        log "  Performance tuning applied (some settings may require reboot)"
+    fi
+
+    # Verify critical settings
+    local bbr_status ip_forward netdev_budget udp_timeout
+    bbr_status=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+    ip_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo "unknown")
+    netdev_budget=$(sysctl -n net.core.netdev_budget 2>/dev/null || echo "unknown")
+    udp_timeout=$(sysctl -n net.netfilter.nf_conntrack_udp_timeout 2>/dev/null || echo "unknown")
+
+    log "  Congestion control: ${bbr_status}"
+    log "  IP forwarding: ${ip_forward}"
+    log "  Netdev budget: ${netdev_budget}"
+    log "  UDP conntrack timeout: ${udp_timeout}s"
 }
 
 detect_gpu_specs() {
