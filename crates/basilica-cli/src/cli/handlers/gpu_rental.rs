@@ -25,7 +25,6 @@ use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -1010,115 +1009,38 @@ pub async fn handle_ps(
     // Branch based on compute category
     match compute_category {
         Some(ComputeCategory::CommunityCloud) => {
-            // Existing community cloud logic
-            let spinner = if filters.history {
-                create_spinner("Fetching rental history...")
-            } else {
-                create_spinner("Fetching active rentals...")
-            };
+            let spinner = create_spinner("Fetching active rentals...");
 
             // Build query from filters - default to "active" if no status specified
             let query = Some(ListRentalsQuery {
-                status: if filters.history {
-                    None // No filter - get all rentals
-                } else {
-                    filters.status.or(Some(RentalState::Active)) // Default to active
-                },
+                status: filters.status.or(Some(RentalState::Active)),
                 gpu_type: filters.gpu_type.clone(),
                 min_gpu_count: filters.min_gpu_count,
             });
 
-            // Fetch rentals and usage history in parallel
-            // Use a reasonable limit for usage history to cover active rentals
-            // Add 5-second timeout for rentals to handle unresponsive validator
+            // Fetch rentals with 5-second timeout to handle unresponsive validator
             let rentals_future = api_client.list_rentals(query);
-            let (rentals_result, usage_result) = tokio::join!(
-                async {
-                    match timeout(Duration::from_secs(5), rentals_future).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!("Validator request timed out after 5 seconds");
-                            Err(ApiError::Timeout)
-                        }
-                    }
-                },
-                api_client.list_usage_history(Some(100), None)
-            );
+            let rentals_result = match timeout(Duration::from_secs(5), rentals_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Validator request timed out after 5 seconds");
+                    Err(ApiError::Timeout)
+                }
+            };
 
             let rentals_list = rentals_result.inspect_err(|_| {
                 complete_spinner_error(spinner.clone(), "Failed to load rentals")
             })?;
 
-            // Build usage map: rental_id -> usage record
-            // If usage fetch fails, continue with empty map (graceful degradation)
-            let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> = usage_result
-                .ok()
-                .map(|usage| {
-                    usage
-                        .rentals
-                        .into_iter()
-                        .map(|record| (record.rental_id.clone(), record))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Pricing is now included in usage records (hourly_rate field)
-            let pricing_map: HashMap<String, String> = HashMap::new();
-
             complete_spinner_and_clear(spinner);
 
             if json {
                 json_output(&rentals_list)?;
-            } else if filters.history {
-                // History mode: use usage_map data and filter out active rentals
-                // Create a set of active rental IDs from the current rentals list
-                let active_rental_ids: std::collections::HashSet<String> = rentals_list
-                    .rentals
-                    .iter()
-                    .filter(|r| {
-                        // Only include rentals that are currently active or provisioning
-                        matches!(r.state, RentalState::Active | RentalState::Provisioning)
-                    })
-                    .map(|r| {
-                        // Strip "rental-" prefix to match usage_map format
-                        r.rental_id
-                            .strip_prefix("rental-")
-                            .unwrap_or(&r.rental_id)
-                            .to_string()
-                    })
-                    .collect();
-
-                // Filter usage_map to exclude active rentals
-                let historical_rentals: Vec<_> = usage_map
-                    .values()
-                    .filter(|r| !active_rental_ids.contains(&r.rental_id))
-                    .collect();
-
-                table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
-
-                let total_cost: Decimal = historical_rentals
-                    .iter()
-                    .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
-                    .sum();
-
-                println!();
-                println!(
-                    "{}: {}",
-                    style("Total Cost").cyan(),
-                    style(format!("${:.2}", total_cost)).green().bold()
-                );
-
-                println!("\nTotal: {} rentals", historical_rentals.len());
-
-                display_ps_quick_start_commands();
             } else {
                 table_output::display_rental_items(
                     &rentals_list.rentals[..],
                     !filters.compact,
                     filters.detailed,
-                    &usage_map,
-                    &pricing_map,
-                    false,
                 )?;
 
                 println!("\nTotal: {} active rentals", rentals_list.rentals.len());
@@ -1127,12 +1049,7 @@ pub async fn handle_ps(
             }
         }
         Some(ComputeCategory::SecureCloud) => {
-            // Secure cloud rentals logic
-            let spinner = if filters.history {
-                create_spinner("Fetching rental history...")
-            } else {
-                create_spinner("Fetching active rentals...")
-            };
+            let spinner = create_spinner("Fetching active rentals...");
 
             // Fetch secure cloud rentals
             let rentals_result = api_client.list_secure_cloud_rentals().await;
@@ -1146,22 +1063,12 @@ pub async fn handle_ps(
             if json {
                 json_output(&rentals_list)?;
             } else {
-                // Filter rentals based on history flag
-                let rentals_to_display: Vec<_> = if filters.history {
-                    // Show stopped rentals only
-                    rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_some())
-                        .collect()
-                } else {
-                    // Show active/running rentals only
-                    rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none())
-                        .collect()
-                };
+                // Show active/running rentals only
+                let rentals_to_display: Vec<_> = rentals_list
+                    .rentals
+                    .iter()
+                    .filter(|r| r.stopped_at.is_none())
+                    .collect();
 
                 table_output::display_secure_cloud_rentals(
                     &rentals_to_display,
@@ -1169,12 +1076,10 @@ pub async fn handle_ps(
                     filters.detailed,
                 )?;
 
-                let label = if filters.history {
-                    "historical secure cloud rentals"
-                } else {
-                    "active secure cloud rentals"
-                };
-                println!("\nTotal: {} {}", rentals_to_display.len(), label);
+                println!(
+                    "\nTotal: {} active secure cloud rentals",
+                    rentals_to_display.len()
+                );
 
                 display_ps_quick_start_commands();
             }
@@ -1184,46 +1089,30 @@ pub async fn handle_ps(
             let spinner = create_spinner("Fetching rentals...");
 
             // Fetch both rental types in parallel
+            let query = Some(ListRentalsQuery {
+                status: filters.status.or(Some(RentalState::Active)),
+                gpu_type: filters.gpu_type.clone(),
+                min_gpu_count: filters.min_gpu_count,
+            });
+
             let (community_result, secure_result) = tokio::join!(
-                // Community cloud: rentals + usage
+                // Community cloud with 5-second timeout
                 async {
-                    let query = Some(ListRentalsQuery {
-                        status: if filters.history {
-                            None // No filter - get all rentals
-                        } else {
-                            filters.status.or(Some(RentalState::Active)) // Default to active
-                        },
-                        gpu_type: filters.gpu_type.clone(),
-                        min_gpu_count: filters.min_gpu_count,
-                    });
-
-                    // Add 5-second timeout for rentals to handle unresponsive validator
                     let rentals_future = api_client.list_rentals(query);
-                    let (rentals_result, usage_result) = tokio::join!(
-                        async {
-                            match timeout(Duration::from_secs(5), rentals_future).await {
-                                Ok(result) => result,
-                                Err(_) => {
-                                    warn!("Validator request timed out after 5 seconds");
-                                    Err(ApiError::Timeout)
-                                }
-                            }
-                        },
-                        api_client.list_usage_history(Some(100), None)
-                    );
-
-                    (rentals_result, usage_result)
+                    match timeout(Duration::from_secs(5), rentals_future).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!("Validator request timed out after 5 seconds");
+                            Err(ApiError::Timeout)
+                        }
+                    }
                 },
-                // Secure cloud: just rentals
+                // Secure cloud
                 api_client.list_secure_cloud_rentals()
             );
 
-            // Process community cloud data
-            let (community_rentals_result, community_usage_result) = community_result;
-
             // Gracefully handle community cloud failures (e.g., validator timeout)
-            // Show empty list instead of failing the whole command
-            let community_rentals_list = match community_rentals_result {
+            let community_rentals_list = match community_result {
                 Ok(list) => list,
                 Err(e) => {
                     warn!("Failed to load community cloud rentals: {}", e);
@@ -1233,22 +1122,6 @@ pub async fn handle_ps(
                     }
                 }
             };
-
-            // Build usage map: rental_id -> usage record
-            let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> =
-                community_usage_result
-                    .ok()
-                    .map(|usage| {
-                        usage
-                            .rentals
-                            .into_iter()
-                            .map(|record| (record.rental_id.clone(), record))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-            // Pricing is now included in usage records (hourly_rate field)
-            let pricing_map: HashMap<String, String> = HashMap::new();
 
             // Process secure cloud data
             let secure_rentals_list = secure_result.inspect_err(|_| {
@@ -1269,65 +1142,16 @@ pub async fn handle_ps(
                 // Display community cloud table
                 println!("\n{}", style("Community Cloud Rentals").bold());
 
-                if filters.history {
-                    // History mode: use usage_map data and filter out active rentals
-                    let active_rental_ids: std::collections::HashSet<String> =
-                        community_rentals_list
-                            .rentals
-                            .iter()
-                            .filter(|r| {
-                                matches!(r.state, RentalState::Active | RentalState::Provisioning)
-                            })
-                            .map(|r| {
-                                r.rental_id
-                                    .strip_prefix("rental-")
-                                    .unwrap_or(&r.rental_id)
-                                    .to_string()
-                            })
-                            .collect();
+                table_output::display_rental_items(
+                    &community_rentals_list.rentals[..],
+                    !filters.compact,
+                    filters.detailed,
+                )?;
 
-                    let historical_rentals: Vec<_> = usage_map
-                        .values()
-                        .filter(|r| !active_rental_ids.contains(&r.rental_id))
-                        .collect();
-
-                    table_output::display_usage_history_for_ps(
-                        &historical_rentals,
-                        filters.detailed,
-                    )?;
-
-                    let total_cost: Decimal = historical_rentals
-                        .iter()
-                        .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
-                        .sum();
-
-                    println!();
-                    println!(
-                        "{}: {}",
-                        style("Total Cost").cyan(),
-                        style(format!("${:.2}", total_cost)).green().bold()
-                    );
-
-                    println!(
-                        "\nTotal: {} community cloud rentals",
-                        historical_rentals.len()
-                    );
-                } else {
-                    // Active rentals
-                    table_output::display_rental_items(
-                        &community_rentals_list.rentals[..],
-                        !filters.compact,
-                        filters.detailed,
-                        &usage_map,
-                        &pricing_map,
-                        false,
-                    )?;
-
-                    println!(
-                        "\nTotal: {} community cloud rentals",
-                        community_rentals_list.rentals.len()
-                    );
-                }
+                println!(
+                    "\nTotal: {} community cloud rentals",
+                    community_rentals_list.rentals.len()
+                );
 
                 // Separator between tables
                 println!();
@@ -1335,19 +1159,11 @@ pub async fn handle_ps(
                 // Display secure cloud table
                 println!("{}", style("Secure Cloud Rentals").bold());
 
-                let secure_rentals_to_display: Vec<_> = if filters.history {
-                    secure_rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_some())
-                        .collect()
-                } else {
-                    secure_rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none())
-                        .collect()
-                };
+                let secure_rentals_to_display: Vec<_> = secure_rentals_list
+                    .rentals
+                    .iter()
+                    .filter(|r| r.stopped_at.is_none())
+                    .collect();
 
                 table_output::display_secure_cloud_rentals(
                     &secure_rentals_to_display,
@@ -1355,12 +1171,10 @@ pub async fn handle_ps(
                     filters.detailed,
                 )?;
 
-                let label = if filters.history {
-                    "historical secure cloud rentals"
-                } else {
-                    "secure cloud rentals"
-                };
-                println!("\nTotal: {} {}", secure_rentals_to_display.len(), label);
+                println!(
+                    "\nTotal: {} secure cloud rentals",
+                    secure_rentals_to_display.len()
+                );
 
                 display_ps_quick_start_commands();
             }

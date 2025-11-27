@@ -88,6 +88,12 @@ pub struct ApiRentalListItem {
     /// Port mappings for this rental
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
+    /// Hourly cost rate for this rental (includes markup)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hourly_cost: Option<f64>,
+    /// Accumulated cost from billing service
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accumulated_cost: Option<String>,
 }
 
 /// API list rentals response with GPU information
