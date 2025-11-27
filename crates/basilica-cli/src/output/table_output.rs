@@ -6,8 +6,8 @@ use basilica_api::country_mapping::get_country_name_from_code;
 use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{
-        ApiKeyInfo, ApiRentalListItem, GpuSpec, ListDepositsResponse, NodeDetails,
-        RentalStatusResponse, RentalUsageResponse, UsageHistoryResponse,
+        ApiKeyInfo, ApiRentalListItem, GpuSpec, HistoricalRentalItem, ListDepositsResponse,
+        NodeDetails, RentalStatusResponse, RentalUsageResponse, UsageHistoryResponse,
     },
     AvailableNode,
 };
@@ -1296,6 +1296,140 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
         style("basilica balance").yellow().bold(),
         style("- Show your current credit balance").dim()
     );
+
+    Ok(())
+}
+
+/// Display historical rental data from billing service
+pub fn display_rental_history(rentals: &[&HistoricalRentalItem], detailed: bool) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No rental history found").yellow());
+        return Ok(());
+    }
+
+    // Helper to format duration
+    let format_duration = |seconds: i64| -> String {
+        let hours = seconds / 3600;
+        let minutes = (seconds % 3600) / 60;
+        if hours > 0 {
+            format!("{}h {}m", hours, minutes)
+        } else {
+            format!("{}m", minutes)
+        }
+    };
+
+    if detailed {
+        #[derive(Tabled)]
+        struct DetailedHistoryRow {
+            #[tabled(rename = "Rental ID")]
+            rental_id: String,
+            #[tabled(rename = "Node ID")]
+            node_id: String,
+            #[tabled(rename = "GPUs")]
+            gpu_count: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Started")]
+            started: String,
+            #[tabled(rename = "Stopped")]
+            stopped: String,
+            #[tabled(rename = "Duration")]
+            duration: String,
+        }
+
+        let mut rows: Vec<DetailedHistoryRow> = rentals
+            .iter()
+            .map(|rental| {
+                let total_cost = rental
+                    .total_cost
+                    .parse::<Decimal>()
+                    .ok()
+                    .map(|c| format!("${:.2}", c))
+                    .unwrap_or_else(|| rental.total_cost.clone());
+
+                DetailedHistoryRow {
+                    rental_id: rental.rental_id.clone(),
+                    node_id: rental.node_id.clone().unwrap_or_else(|| "-".to_string()),
+                    gpu_count: format!("{}x GPU", rental.gpu_count),
+                    status: rental.status.clone(),
+                    total_cost,
+                    started: rental
+                        .started_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    stopped: rental
+                        .stopped_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    duration: format_duration(rental.duration_seconds),
+                }
+            })
+            .collect();
+
+        rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{table}");
+    } else {
+        #[derive(Tabled)]
+        struct HistoryRow {
+            #[tabled(rename = "Rental ID")]
+            rental_id: String,
+            #[tabled(rename = "GPUs")]
+            gpu_count: String,
+            #[tabled(rename = "Status")]
+            status: String,
+            #[tabled(rename = "Total Cost")]
+            total_cost: String,
+            #[tabled(rename = "Started")]
+            started: String,
+            #[tabled(rename = "Stopped")]
+            stopped: String,
+            #[tabled(rename = "Duration")]
+            duration: String,
+        }
+
+        let mut rows: Vec<HistoryRow> = rentals
+            .iter()
+            .map(|rental| {
+                let total_cost = rental
+                    .total_cost
+                    .parse::<Decimal>()
+                    .ok()
+                    .map(|c| format!("${:.2}", c))
+                    .unwrap_or_else(|| rental.total_cost.clone());
+
+                HistoryRow {
+                    rental_id: rental.rental_id.clone(),
+                    gpu_count: format!("{}x GPU", rental.gpu_count),
+                    status: rental.status.clone(),
+                    total_cost,
+                    started: rental
+                        .started_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    stopped: rental
+                        .stopped_at
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    duration: format_duration(rental.duration_seconds),
+                }
+            })
+            .collect();
+
+        rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+        let mut table = Table::new(&rows);
+        table.with(Style::modern());
+        println!("{table}");
+    }
 
     Ok(())
 }

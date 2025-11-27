@@ -585,24 +585,43 @@ impl BillingService for BillingServiceImpl {
     ) -> std::result::Result<Response<GetActiveRentalsResponse>, Status> {
         let req = request.into_inner();
 
-        // Single query to unified rentals table
+        // Single query to unified rentals table (returns all rentals, filtering done below)
         let rentals = if req.user_id.is_empty() {
             self.rental_repository
-                .get_active_rentals(None)
+                .get_rentals(None)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         } else {
             let uid = UserId::new(req.user_id);
             self.rental_repository
-                .get_active_rentals(Some(&uid))
+                .get_rentals(Some(&uid))
                 .await
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         };
 
-        // Convert to ActiveRental proto messages
+        // Convert status_filter from proto to domain states
+        let status_filter: Vec<RentalState> = req
+            .status_filter
+            .iter()
+            .map(|s| {
+                Self::rental_status_to_domain(
+                    RentalStatus::try_from(*s).unwrap_or(RentalStatus::Unspecified),
+                )
+            })
+            .collect();
+
+        // Convert to ActiveRental proto messages, filtering by status if specified
         let active_rentals: Vec<ActiveRental> = rentals
             .into_iter()
-            .filter(|r| r.state.is_active())
+            .filter(|r| {
+                if status_filter.is_empty() {
+                    // Default behavior: return only active rentals
+                    r.state.is_active()
+                } else {
+                    // Filter by specified statuses
+                    status_filter.contains(&r.state)
+                }
+            })
             .map(|r| Self::rental_to_active_rental(&r))
             .collect();
 

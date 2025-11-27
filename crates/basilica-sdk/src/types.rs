@@ -103,6 +103,29 @@ pub struct ApiListRentalsResponse {
     pub total_count: usize,
 }
 
+/// Historical rental item from billing service
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoricalRentalItem {
+    pub rental_id: String,
+    pub node_id: Option<String>,
+    pub status: String,
+    pub total_cost: String,
+    pub hourly_rate: Option<f64>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub stopped_at: chrono::DateTime<chrono::Utc>,
+    pub duration_seconds: i64,
+    pub gpu_count: u32,
+    pub cloud_type: String, // "community" or "secure"
+}
+
+/// API response for historical rentals
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HistoricalRentalsResponse {
+    pub rentals: Vec<HistoricalRentalItem>,
+    pub total_count: usize,
+    pub total_cost: String,
+}
+
 /// Rental status query parameters
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RentalStatusQuery {

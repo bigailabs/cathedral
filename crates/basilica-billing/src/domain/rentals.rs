@@ -309,9 +309,9 @@ pub trait RentalOperations: Send + Sync {
 
     async fn update_rental_cost(&self, rental_id: &RentalId, cost: CostBreakdown) -> Result<()>;
 
-    async fn get_active_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>>;
+    async fn get_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>>;
 
-    async fn get_all_active_rentals(&self) -> Result<Vec<Rental>>;
+    async fn get_all_rentals(&self) -> Result<Vec<Rental>>;
 
     async fn get_rental_statistics(&self, user_id: Option<&UserId>) -> Result<RentalStatistics>;
 
@@ -394,12 +394,12 @@ impl RentalOperations for RentalManager {
         self.repository.update_rental(&rental).await
     }
 
-    async fn get_active_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>> {
-        self.repository.get_active_rentals(Some(user_id)).await
+    async fn get_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>> {
+        self.repository.get_rentals(Some(user_id)).await
     }
 
-    async fn get_all_active_rentals(&self) -> Result<Vec<Rental>> {
-        self.repository.get_active_rentals(None).await
+    async fn get_all_rentals(&self) -> Result<Vec<Rental>> {
+        self.repository.get_rentals(None).await
     }
 
     async fn get_rental_statistics(&self, user_id: Option<&UserId>) -> Result<RentalStatistics> {

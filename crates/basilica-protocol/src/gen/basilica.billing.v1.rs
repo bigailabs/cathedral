@@ -182,6 +182,9 @@ pub struct GetActiveRentalsRequest {
     pub limit: u32,
     #[prost(uint32, tag = "5")]
     pub offset: u32,
+    /// Filter by status; empty = all statuses
+    #[prost(enumeration = "RentalStatus", repeated, tag = "6")]
+    pub status_filter: ::prost::alloc::vec::Vec<i32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

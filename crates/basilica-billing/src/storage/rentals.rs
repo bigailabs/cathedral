@@ -15,7 +15,7 @@ pub trait RentalRepository: Send + Sync {
     async fn create_rental(&self, rental: &Rental) -> Result<()>;
     async fn get_rental(&self, id: &RentalId) -> Result<Option<Rental>>;
     async fn update_rental(&self, rental: &Rental) -> Result<()>;
-    async fn get_active_rentals(&self, user_id: Option<&UserId>) -> Result<Vec<Rental>>;
+    async fn get_rentals(&self, user_id: Option<&UserId>) -> Result<Vec<Rental>>;
     async fn get_rentals_by_state(&self, state: RentalState) -> Result<Vec<Rental>>;
     async fn get_rental_statistics(&self, user_id: Option<&UserId>) -> Result<RentalStatistics>;
 }
@@ -219,7 +219,9 @@ impl RentalRepository for SqlRentalRepository {
         Ok(())
     }
 
-    async fn get_active_rentals(&self, user_id: Option<&UserId>) -> Result<Vec<Rental>> {
+    async fn get_rentals(&self, user_id: Option<&UserId>) -> Result<Vec<Rental>> {
+        // Note: This returns ALL rentals for the user. Filtering by status is done
+        // in the gRPC service layer based on the status_filter parameter.
         let query = if let Some(uid) = user_id {
             sqlx::query(
                 r#"
@@ -228,7 +230,7 @@ impl RentalRepository for SqlRentalRepository {
                        metadata, created_at, updated_at,
                        base_price_per_gpu, gpu_count
                 FROM billing.rentals
-                WHERE user_id = $1 AND status IN ('active', 'pending')
+                WHERE user_id = $1
                 ORDER BY start_time DESC
                 "#,
             )
@@ -241,7 +243,6 @@ impl RentalRepository for SqlRentalRepository {
                        metadata, created_at, updated_at,
                        base_price_per_gpu, gpu_count
                 FROM billing.rentals
-                WHERE status IN ('active', 'pending')
                 ORDER BY start_time DESC
                 "#,
             )
@@ -249,7 +250,7 @@ impl RentalRepository for SqlRentalRepository {
 
         let rows = query.fetch_all(self.connection.pool()).await.map_err(|e| {
             BillingError::DatabaseError {
-                operation: "get_active_rentals".to_string(),
+                operation: "get_rentals".to_string(),
                 source: Box::new(e),
             }
         })?;

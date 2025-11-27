@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use basilica_protocol::billing::{
     billing_service_client::BillingServiceClient, GetActiveRentalsRequest,
-    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse, TelemetryData,
-    UsageAggregation, UsageReportRequest, UsageReportResponse,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse, RentalStatus,
+    TelemetryData, UsageAggregation, UsageReportRequest, UsageReportResponse,
 };
 use futures::stream;
 use std::time::Duration;
@@ -155,14 +155,43 @@ impl BillingClient {
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> Result<GetActiveRentalsResponse> {
+        self.get_rentals_for_user(user_id, limit, offset, vec![])
+            .await
+    }
+
+    /// Get historical (completed/failed) rentals for a user
+    pub async fn get_historical_rentals_for_user(
+        &self,
+        user_id: impl Into<String>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<GetActiveRentalsResponse> {
+        self.get_rentals_for_user(
+            user_id,
+            limit,
+            offset,
+            vec![RentalStatus::Stopped as i32, RentalStatus::Failed as i32],
+        )
+        .await
+    }
+
+    /// Get rentals for a user with optional status filter
+    pub async fn get_rentals_for_user(
+        &self,
+        user_id: impl Into<String>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+        status_filter: Vec<i32>,
+    ) -> Result<GetActiveRentalsResponse> {
         let user_id = user_id.into();
         let request = GetActiveRentalsRequest {
             user_id: user_id.clone(),
             limit: limit.unwrap_or(50),
             offset: offset.unwrap_or(0),
+            status_filter,
         };
 
-        debug!("Fetching active rentals for user: {}", user_id);
+        debug!("Fetching rentals for user: {}", user_id);
 
         let mut client = self.client.clone();
         let response = client
