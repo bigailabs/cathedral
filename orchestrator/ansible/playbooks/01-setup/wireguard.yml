@@ -40,6 +40,8 @@
       tags: ['wireguard', 'performance']
     - role: wireguard
       tags: ['wireguard']
+    - role: wireguard_watchdog
+      tags: ['wireguard', 'watchdog']
 
   post_tasks:
     - name: Collect WireGuard public keys from all servers
