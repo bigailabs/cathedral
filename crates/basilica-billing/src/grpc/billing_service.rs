@@ -360,7 +360,7 @@ impl BillingService for BillingServiceImpl {
                     let mut rental = Rental::new_community(
                         user_id.clone(),
                         community_data.node_id.clone(),
-                        community_data.validator_id.clone(),
+                        Some(community_data.validator_id.clone()),
                         resource_spec.clone(),
                         base_price_per_gpu,
                         gpu_count,
@@ -390,7 +390,7 @@ impl BillingService for BillingServiceImpl {
                         rental_id: rental_id.as_uuid(),
                         user_id: user_id.to_string(),
                         node_id: community_data.node_id,
-                        validator_id: community_data.validator_id,
+                        validator_id: Some(community_data.validator_id),
                         event_type: EventType::RentalStart,
                         event_data,
                         timestamp: chrono::Utc::now(),
@@ -455,7 +455,7 @@ impl BillingService for BillingServiceImpl {
                         rental_id: rental_id.as_uuid(),
                         user_id: user_id.to_string(),
                         node_id: secure_data.provider_instance_id,
-                        validator_id: format!("secure_cloud:{}", secure_data.provider),
+                        validator_id: None, // Secure cloud has no validator
                         event_type: EventType::RentalStart,
                         event_data,
                         timestamp: chrono::Utc::now(),
@@ -549,7 +549,7 @@ impl BillingService for BillingServiceImpl {
 
         // Extract node_id and validator_id from metadata for events
         let node_id = rental.node_id().unwrap_or("").to_string();
-        let validator_id = rental.validator_id().unwrap_or("").to_string();
+        let validator_id = rental.validator_id().map(|s| s.to_string());
 
         let status_change_event = UsageEvent {
             event_id: uuid::Uuid::new_v4(),
@@ -720,7 +720,7 @@ impl BillingService for BillingServiceImpl {
 
             // Extract node_id and validator_id from metadata for events
             let node_id = rental.node_id().unwrap_or("").to_string();
-            let validator_id = rental.validator_id().unwrap_or("").to_string();
+            let validator_id = rental.validator_id().map(|s| s.to_string());
 
             let usage_event = crate::storage::UsageEvent {
                 event_id: uuid::Uuid::new_v4(),

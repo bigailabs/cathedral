@@ -39,7 +39,7 @@ pub struct UsageEvent {
     pub rental_id: Uuid,
     pub user_id: String,
     pub node_id: String,
-    pub validator_id: String,
+    pub validator_id: Option<String>,
     pub event_type: EventType,
     pub event_data: serde_json::Value,
     pub timestamp: DateTime<Utc>,
@@ -218,12 +218,6 @@ impl SqlEventRepository {
                 message: "node_id cannot be empty for usage event".to_string(),
             });
         }
-        if event.validator_id.is_empty() {
-            return Err(BillingError::ValidationError {
-                field: "validator_id".to_string(),
-                message: "validator_id cannot be empty for usage event".to_string(),
-            });
-        }
         Ok(())
     }
 
@@ -264,7 +258,7 @@ impl SqlEventRepository {
                     "23514" => DatabaseErrorDetails {
                         error_type: "check_violation".to_string(),
                         message: format!(
-                            "CHECK constraint failed. Likely empty user_id/validator_id (user_id='{}', validator_id='{}', constraint: {})",
+                            "CHECK constraint failed. Likely empty user_id/validator_id (user_id='{}', validator_id='{:?}', constraint: {})",
                             event.user_id,
                             event.validator_id,
                             constraint

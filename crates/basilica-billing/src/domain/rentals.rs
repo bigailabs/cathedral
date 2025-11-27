@@ -91,7 +91,7 @@ impl Rental {
     pub fn new_community(
         user_id: UserId,
         node_id: String,
-        validator_id: String,
+        validator_id: Option<String>,
         resource_spec: ResourceSpec,
         base_price_per_gpu: Decimal,
         gpu_count: u32,
@@ -99,7 +99,9 @@ impl Rental {
         let now = Utc::now();
         let mut metadata = HashMap::new();
         metadata.insert("node_id".to_string(), node_id);
-        metadata.insert("validator_id".to_string(), validator_id);
+        if let Some(vid) = validator_id {
+            metadata.insert("validator_id".to_string(), vid);
+        }
 
         Self {
             id: RentalId::new(),
@@ -339,7 +341,7 @@ impl RentalOperations for RentalManager {
             CreateRentalParams::Community(p) => Rental::new_community(
                 p.user_id,
                 p.node_id,
-                p.validator_id,
+                Some(p.validator_id),
                 p.resource_spec,
                 p.base_price_per_gpu,
                 p.gpu_count,
