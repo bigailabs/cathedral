@@ -101,27 +101,66 @@ resource "aws_vpc_security_group_ingress_rule" "k3s_server_etcd" {
 
 resource "aws_vpc_security_group_ingress_rule" "k3s_server_vxlan" {
   security_group_id = aws_security_group.k3s_server.id
-  description       = "Flannel VXLAN"
+  description       = "Flannel VXLAN from VPC"
   ip_protocol       = "udp"
   from_port         = 8472
   to_port           = 8472
   cidr_ipv4         = var.vpc_cidr
 
   tags = {
-    Name = "flannel-vxlan"
+    Name = "flannel-vxlan-vpc"
   }
 }
 
-resource "aws_vpc_security_group_ingress_rule" "k3s_server_wireguard" {
+resource "aws_vpc_security_group_ingress_rule" "k3s_server_vxlan_wireguard" {
   security_group_id = aws_security_group.k3s_server.id
-  description       = "Flannel WireGuard"
+  description       = "Flannel VXLAN from WireGuard GPU nodes"
+  ip_protocol       = "udp"
+  from_port         = 8472
+  to_port           = 8472
+  cidr_ipv4         = var.wireguard_cidr
+
+  tags = {
+    Name = "flannel-vxlan-wireguard"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "k3s_server_wireguard_vpn" {
+  security_group_id = aws_security_group.k3s_server.id
+  description       = "WireGuard VPN for remote GPU nodes"
   ip_protocol       = "udp"
   from_port         = 51820
-  to_port           = 51821
+  to_port           = 51820
+  cidr_ipv4         = "0.0.0.0/0"
+
+  tags = {
+    Name = "wireguard-vpn"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "k3s_server_kubelet_wireguard" {
+  security_group_id = aws_security_group.k3s_server.id
+  description       = "Kubelet from WireGuard GPU nodes"
+  ip_protocol       = "tcp"
+  from_port         = 10250
+  to_port           = 10250
+  cidr_ipv4         = var.wireguard_cidr
+
+  tags = {
+    Name = "kubelet-wireguard"
+  }
+}
+
+resource "aws_vpc_security_group_ingress_rule" "k3s_server_wireguard_exporter" {
+  security_group_id = aws_security_group.k3s_server.id
+  description       = "WireGuard Prometheus exporter"
+  ip_protocol       = "tcp"
+  from_port         = 9586
+  to_port           = 9586
   cidr_ipv4         = var.vpc_cidr
 
   tags = {
-    Name = "flannel-wireguard"
+    Name = "wireguard-exporter"
   }
 }
 
@@ -168,6 +207,7 @@ resource "aws_instance" "k3s_server" {
   subnet_id              = var.subnet_ids[count.index % length(var.subnet_ids)]
   vpc_security_group_ids = [aws_security_group.k3s_server.id]
   key_name               = var.ssh_key_name
+  source_dest_check      = false
 
   root_block_device {
     volume_size           = var.root_volume_size

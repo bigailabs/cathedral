@@ -13,6 +13,7 @@ pub use rate_limit::{RateLimitBackend, RateLimitConfig};
 pub use server::ServerConfig;
 
 use crate::ssh::K3sSshConfig;
+use crate::wireguard::WireGuardServerConfig;
 
 use basilica_common::config::{types::MetricsConfig, BittensorConfig};
 use basilica_common::ConfigurationError as ConfigError;
@@ -241,6 +242,10 @@ pub struct Config {
     /// K3s SSH configuration for token generation
     #[serde(default)]
     pub k3s_ssh: K3sSshConfig,
+
+    /// WireGuard VPN configuration for remote GPU nodes
+    #[serde(default)]
+    pub wireguard: WireGuardServerConfig,
 }
 
 impl Config {

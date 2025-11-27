@@ -37,6 +37,11 @@
   ansible.builtin.include_tasks: taint-control-plane.yml
   tags: ['k3s', 'post', 'taint']
 
+- name: Configure CoreDNS affinity for WireGuard reliability
+  ansible.builtin.include_tasks: coredns-affinity.yml
+  tags: ['k3s', 'post', 'coredns']
+  when: wireguard_enabled | default(false)
+
 - name: Remove tmp directory used for manifests
   ansible.builtin.file:
     path: /tmp/k3s
