@@ -244,6 +244,7 @@ async fn test_get_active_rentals_by_user() {
         user_id: user_id.to_string(),
         limit: 100,
         offset: 0,
+        status_filter: vec![],
     };
 
     let response = context

@@ -46,9 +46,9 @@ use crate::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
         DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
-        HistoricalRentalsResponse, ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse,
-        ListRentalsQuery, RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
-        SshKeyResponse, UsageHistoryResponse,
+        HistoricalRentalsResponse, ListAvailableNodesQuery, ListDepositsQuery,
+        ListDepositsResponse, ListRentalsQuery, RegisterSshKeyRequest, RentalStatusWithSshResponse,
+        RentalUsageResponse, SshKeyResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };

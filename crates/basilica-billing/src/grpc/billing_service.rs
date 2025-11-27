@@ -603,7 +603,11 @@ impl BillingService for BillingServiceImpl {
         let status_filter: Vec<RentalState> = req
             .status_filter
             .iter()
-            .map(|s| Self::rental_status_to_domain(RentalStatus::try_from(*s).unwrap_or(RentalStatus::Unspecified)))
+            .map(|s| {
+                Self::rental_status_to_domain(
+                    RentalStatus::try_from(*s).unwrap_or(RentalStatus::Unspecified),
+                )
+            })
             .collect();
 
         // Convert to ActiveRental proto messages, filtering by status if specified

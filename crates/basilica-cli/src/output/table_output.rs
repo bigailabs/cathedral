@@ -1301,10 +1301,7 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
 }
 
 /// Display historical rental data from billing service
-pub fn display_rental_history(
-    rentals: &[&HistoricalRentalItem],
-    detailed: bool,
-) -> Result<()> {
+pub fn display_rental_history(rentals: &[&HistoricalRentalItem], detailed: bool) -> Result<()> {
     if rentals.is_empty() {
         println!("{}", style("No rental history found").yellow());
         return Ok(());

@@ -18,7 +18,6 @@ use axum::{
     response::{sse::Event, IntoResponse, Response, Sse},
     Json,
 };
-use serde::Deserialize;
 use basilica_common::utils::validate_docker_image;
 use basilica_sdk::types::{
     ApiListRentalsResponse, ApiRentalListItem, HistoricalRentalItem, HistoricalRentalsResponse,
@@ -34,6 +33,7 @@ use basilica_validator::{
 };
 use futures::stream::Stream;
 use rand::seq::SliceRandom;
+use serde::Deserialize;
 use sqlx::Row;
 use tracing::{debug, error, info};
 
@@ -717,11 +717,13 @@ pub async fn list_rental_history(
     let user_id = &auth_context.user_id;
 
     // Get historical rentals from billing service
-    let billing_client = state.billing_client.as_ref().ok_or_else(|| {
-        crate::error::ApiError::Internal {
-            message: "Billing service not configured".to_string(),
-        }
-    })?;
+    let billing_client =
+        state
+            .billing_client
+            .as_ref()
+            .ok_or_else(|| crate::error::ApiError::Internal {
+                message: "Billing service not configured".to_string(),
+            })?;
 
     let response = billing_client
         .get_historical_rentals_for_user(user_id, query.limit, None)
@@ -737,12 +739,14 @@ pub async fn list_rental_history(
         .into_iter()
         .filter_map(|r| {
             // Parse timestamps
-            let started_at = r.start_time.as_ref().and_then(|ts| {
-                chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-            })?;
-            let stopped_at = r.last_updated.as_ref().and_then(|ts| {
-                chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-            })?;
+            let started_at = r
+                .start_time
+                .as_ref()
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32))?;
+            let stopped_at = r
+                .last_updated
+                .as_ref()
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32))?;
 
             // Calculate duration
             let duration_seconds = (stopped_at - started_at).num_seconds();
@@ -756,11 +760,21 @@ pub async fn list_rental_history(
             let (node_id, hourly_rate, gpu_count, cloud_type) = match &r.cloud_type {
                 Some(basilica_protocol::billing::active_rental::CloudType::Community(data)) => {
                     let rate = data.base_price_per_gpu * data.gpu_count as f64;
-                    (Some(data.node_id.clone()), Some(rate), data.gpu_count, "community")
+                    (
+                        Some(data.node_id.clone()),
+                        Some(rate),
+                        data.gpu_count,
+                        "community",
+                    )
                 }
                 Some(basilica_protocol::billing::active_rental::CloudType::Secure(data)) => {
                     let rate = data.base_price_per_gpu * data.gpu_count as f64;
-                    (Some(data.provider_instance_id.clone()), Some(rate), data.gpu_count, "secure")
+                    (
+                        Some(data.provider_instance_id.clone()),
+                        Some(rate),
+                        data.gpu_count,
+                        "secure",
+                    )
                 }
                 None => (None, None, 0, "unknown"),
             };

@@ -1226,7 +1226,9 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", community_total_cost)).green().bold()
+                        style(format!("${:.2}", community_total_cost))
+                            .green()
+                            .bold()
                     );
                     println!(
                         "\nTotal: {} historical community cloud rentals",

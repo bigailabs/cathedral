@@ -155,7 +155,8 @@ impl BillingClient {
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> Result<GetActiveRentalsResponse> {
-        self.get_rentals_for_user(user_id, limit, offset, vec![]).await
+        self.get_rentals_for_user(user_id, limit, offset, vec![])
+            .await
     }
 
     /// Get historical (completed/failed) rentals for a user
