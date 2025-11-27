@@ -18,10 +18,12 @@ use axum::{
     response::{sse::Event, IntoResponse, Response, Sse},
     Json,
 };
+use serde::Deserialize;
 use basilica_common::utils::validate_docker_image;
 use basilica_sdk::types::{
-    ApiListRentalsResponse, ApiRentalListItem, ListRentalsQuery, LogStreamQuery, NodeSelection,
-    RentalStatusWithSshResponse, StartRentalApiRequest, TerminateRentalRequest,
+    ApiListRentalsResponse, ApiRentalListItem, HistoricalRentalItem, HistoricalRentalsResponse,
+    ListRentalsQuery, LogStreamQuery, NodeSelection, RentalStatusWithSshResponse,
+    StartRentalApiRequest, TerminateRentalRequest,
 };
 use basilica_validator::{
     api::{
@@ -696,6 +698,104 @@ pub async fn list_rentals_validator(
     );
 
     Ok(Json(user_rentals))
+}
+
+/// Query parameters for historical rentals
+#[derive(Debug, Deserialize)]
+pub struct HistoricalRentalsQuery {
+    pub limit: Option<u32>,
+}
+
+/// List historical (completed/failed) rentals from billing service
+pub async fn list_rental_history(
+    State(state): State<AppState>,
+    axum::Extension(auth_context): axum::Extension<AuthContext>,
+    Query(query): Query<HistoricalRentalsQuery>,
+) -> Result<Json<HistoricalRentalsResponse>> {
+    info!("Listing rental history for user: {}", auth_context.user_id);
+
+    let user_id = &auth_context.user_id;
+
+    // Get historical rentals from billing service
+    let billing_client = state.billing_client.as_ref().ok_or_else(|| {
+        crate::error::ApiError::Internal {
+            message: "Billing service not configured".to_string(),
+        }
+    })?;
+
+    let response = billing_client
+        .get_historical_rentals_for_user(user_id, query.limit, None)
+        .await
+        .map_err(|e| crate::error::ApiError::Internal {
+            message: format!("Failed to fetch rental history: {}", e),
+        })?;
+
+    // Convert billing rentals to historical rental items
+    let mut total_cost = rust_decimal::Decimal::ZERO;
+    let historical_rentals: Vec<HistoricalRentalItem> = response
+        .rentals
+        .into_iter()
+        .filter_map(|r| {
+            // Parse timestamps
+            let started_at = r.start_time.as_ref().and_then(|ts| {
+                chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+            })?;
+            let stopped_at = r.last_updated.as_ref().and_then(|ts| {
+                chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+            })?;
+
+            // Calculate duration
+            let duration_seconds = (stopped_at - started_at).num_seconds();
+
+            // Parse cost and add to total
+            if let Ok(cost) = r.current_cost.parse::<rust_decimal::Decimal>() {
+                total_cost += cost;
+            }
+
+            // Extract cloud-type specific data
+            let (node_id, hourly_rate, gpu_count, cloud_type) = match &r.cloud_type {
+                Some(basilica_protocol::billing::active_rental::CloudType::Community(data)) => {
+                    let rate = data.base_price_per_gpu * data.gpu_count as f64;
+                    (Some(data.node_id.clone()), Some(rate), data.gpu_count, "community")
+                }
+                Some(basilica_protocol::billing::active_rental::CloudType::Secure(data)) => {
+                    let rate = data.base_price_per_gpu * data.gpu_count as f64;
+                    (Some(data.provider_instance_id.clone()), Some(rate), data.gpu_count, "secure")
+                }
+                None => (None, None, 0, "unknown"),
+            };
+
+            // Map status to string
+            let status = match basilica_protocol::billing::RentalStatus::try_from(r.status) {
+                Ok(basilica_protocol::billing::RentalStatus::Stopped) => "Stopped",
+                Ok(basilica_protocol::billing::RentalStatus::Failed) => "Failed",
+                _ => "Unknown",
+            };
+
+            Some(HistoricalRentalItem {
+                rental_id: format!("rental-{}", r.rental_id),
+                node_id,
+                status: status.to_string(),
+                total_cost: r.current_cost,
+                hourly_rate,
+                started_at,
+                stopped_at,
+                duration_seconds,
+                gpu_count,
+                cloud_type: cloud_type.to_string(),
+            })
+        })
+        .collect();
+
+    let count = historical_rentals.len();
+
+    info!("User {} has {} historical rentals", user_id, count);
+
+    Ok(Json(HistoricalRentalsResponse {
+        rentals: historical_rentals,
+        total_count: count,
+        total_cost: format!("{:.2}", total_cost),
+    }))
 }
 
 /// List available nodes for rentals

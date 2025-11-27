@@ -46,9 +46,9 @@ use crate::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
         DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
-        ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
-        RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse, SshKeyResponse,
-        UsageHistoryResponse,
+        HistoricalRentalsResponse, ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse,
+        ListRentalsQuery, RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
+        SshKeyResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -169,6 +169,23 @@ impl BasilicaClient {
 
         if let Some(q) = &query {
             request = request.query(&q);
+        }
+
+        let request = self.apply_auth(request).await?;
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    /// List historical (completed/failed) rentals
+    pub async fn list_rental_history(
+        &self,
+        limit: Option<u32>,
+    ) -> Result<HistoricalRentalsResponse> {
+        let url = format!("{}/rentals/history", self.base_url);
+        let mut request = self.http_client.get(&url);
+
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit)]);
         }
 
         let request = self.apply_auth(request).await?;

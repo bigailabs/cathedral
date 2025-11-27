@@ -599,10 +599,25 @@ impl BillingService for BillingServiceImpl {
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         };
 
-        // Convert to ActiveRental proto messages
+        // Convert status_filter from proto to domain states
+        let status_filter: Vec<RentalState> = req
+            .status_filter
+            .iter()
+            .map(|s| Self::rental_status_to_domain(RentalStatus::try_from(*s).unwrap_or(RentalStatus::Unspecified)))
+            .collect();
+
+        // Convert to ActiveRental proto messages, filtering by status if specified
         let active_rentals: Vec<ActiveRental> = rentals
             .into_iter()
-            .filter(|r| r.state.is_active())
+            .filter(|r| {
+                if status_filter.is_empty() {
+                    // Default behavior: return only active rentals
+                    r.state.is_active()
+                } else {
+                    // Filter by specified statuses
+                    status_filter.contains(&r.state)
+                }
+            })
             .map(|r| Self::rental_to_active_rental(&r))
             .collect();
 

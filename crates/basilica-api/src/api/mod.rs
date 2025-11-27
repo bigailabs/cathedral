@@ -48,6 +48,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             get(routes::rentals::list_rentals_validator).post(routes::rentals::start_rental),
         )
         .route(
+            "/rentals/history",
+            get(routes::rentals::list_rental_history),
+        )
+        .route(
             "/rentals/:id",
             get(routes::rentals::get_rental_status).delete(routes::rentals::stop_rental),
         )
