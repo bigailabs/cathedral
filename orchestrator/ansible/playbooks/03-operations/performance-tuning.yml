@@ -9,7 +9,7 @@
 #
 
 - name: Apply performance tuning to K3s infrastructure
-  hosts: k3s_server
+  hosts: "{{ target_hosts | default('k3s_server') }}"
   become: yes
   gather_facts: yes
   roles:
