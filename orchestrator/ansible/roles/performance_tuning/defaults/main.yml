@@ -1,0 +1,11 @@
+---
+# Performance tuning defaults
+
+# Enable/disable performance tuning
+performance_tuning_enabled: true
+
+# Sysctl configuration file name
+performance_tuning_sysctl_file: "99-wireguard-performance.conf"
+
+# Verify BBR is loaded after applying
+performance_tuning_verify_bbr: true

@@ -1,0 +1,33 @@
+[Unit]
+Description=WireGuard Connectivity Watchdog
+Documentation=https://github.com/basilica-ai/basilica
+After=network-online.target wg-quick@{{ wireguard_interface | default('wg0') }}.service
+Wants=network-online.target
+Requires=wg-quick@{{ wireguard_interface | default('wg0') }}.service
+
+[Service]
+Type=simple
+User=root
+Environment="WATCHDOG_SERVERS={{ watchdog_servers | default('10.200.0.1 10.200.0.2 10.200.0.3') }}"
+Environment="WATCHDOG_INTERFACE={{ wireguard_interface | default('wg0') }}"
+Environment="WATCHDOG_FAILURE_THRESHOLD={{ watchdog_failure_threshold | default(3) }}"
+Environment="WATCHDOG_CHECK_INTERVAL={{ watchdog_check_interval | default(30) }}"
+Environment="WATCHDOG_PING_TIMEOUT={{ watchdog_ping_timeout | default(3) }}"
+Environment="WATCHDOG_STARTUP_JITTER={{ watchdog_startup_jitter | default(5) }}"
+Environment="WATCHDOG_HANDSHAKE_MAX_AGE={{ watchdog_handshake_max_age | default(150) }}"
+ExecStart=/usr/local/bin/wireguard-watchdog.sh
+Restart=always
+RestartSec=30
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+# Resource limits
+MemoryMax=50M
+CPUQuota=5%
+
+[Install]
+WantedBy=multi-user.target

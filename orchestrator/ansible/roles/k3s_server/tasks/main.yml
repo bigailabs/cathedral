@@ -61,6 +61,10 @@
       {% if ansible_hostname == first_master_hostname %}--cluster-init{% else %}--server https://{{ first_master_ip }}:6443{% endif %}
       --token {{ k3s_token }}
       {% endif %}
+      {% if wireguard_enabled | default(false) %}
+      --flannel-backend=vxlan
+      --flannel-external-ip={{ wireguard_server_ips[inventory_hostname] | default('') }}
+      {% endif %}
       {{ k3s_server_exec_args }}
   tags: ['k3s', 'server']
 

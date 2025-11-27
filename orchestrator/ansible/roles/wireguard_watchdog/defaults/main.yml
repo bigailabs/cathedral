@@ -1,0 +1,27 @@
+---
+# Default variables for wireguard_watchdog role
+
+# Enable/disable watchdog
+wireguard_watchdog_enabled: true
+
+# WireGuard interface name
+wireguard_interface: wg0
+
+# Servers to ping for connectivity check (space-separated)
+watchdog_servers: "10.200.0.1 10.200.0.2 10.200.0.3"
+
+# Number of consecutive failures before restart
+watchdog_failure_threshold: 3
+
+# Seconds between connectivity checks
+watchdog_check_interval: 30
+
+# Ping timeout in seconds (per server, parallel execution)
+watchdog_ping_timeout: 3
+
+# Startup jitter range in seconds (0 to N) to prevent fleet synchronization
+watchdog_startup_jitter: 5
+
+# Maximum WireGuard handshake age in seconds before considering tunnel stale
+# WireGuard handshake timeout is 120s, we use 150s to allow margin
+watchdog_handshake_max_age: 150

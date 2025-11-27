@@ -4,6 +4,8 @@ k3s_version: v1.31.1+k3s1
 k3s_channel: stable
 
 # Server execution arguments
+# Note: When WireGuard is enabled, flannel_mtu should be set to 1370
+# to account for WireGuard + VXLAN encapsulation overhead
 k3s_server_exec_args: >-
   --write-kubeconfig-mode 644
   --disable traefik

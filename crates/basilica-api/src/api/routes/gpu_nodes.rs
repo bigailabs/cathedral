@@ -7,6 +7,7 @@ use crate::{
     api::middleware::AuthContext,
     error::{ApiError, Result},
     server::AppState,
+    wireguard::WireGuardConfig,
 };
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +34,9 @@ pub struct GpuNodeRegistrationResponse {
     pub node_password: Option<String>,
     pub node_labels: HashMap<String, String>,
     pub status: String,
+    /// WireGuard VPN configuration for remote nodes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<WireGuardConfig>,
 }
 
 pub async fn register_gpu_node(
@@ -97,7 +101,21 @@ pub async fn register_gpu_node(
         (token, None)
     };
 
-    let node_labels = crate::k8s::build_node_labels(crate::k8s::NodeLabelParams {
+    // Build WireGuard configuration if enabled
+    let wireguard_config = if state.config.wireguard.is_configured() {
+        let wg_node_ip = crate::wireguard::allocate_wireguard_ip(&req.node_id);
+        info!(
+            node_id = %req.node_id,
+            wireguard_ip = %wg_node_ip,
+            "Allocated WireGuard IP for node"
+        );
+        Some(state.config.wireguard.config_for_node(&wg_node_ip))
+    } else {
+        None
+    };
+
+    // Build node labels
+    let mut node_labels = crate::k8s::build_node_labels(crate::k8s::NodeLabelParams {
         node_id: &req.node_id,
         datacenter_id: &req.datacenter_id,
         gpu_model: &req.gpu_specs.model,
@@ -107,9 +125,19 @@ pub async fn register_gpu_node(
         cuda_version: &req.gpu_specs.cuda_version,
     });
 
+    // Add WireGuard labels if configured
+    if let Some(ref wg) = wireguard_config {
+        node_labels.insert(
+            "basilica.ai/wireguard-enabled".to_string(),
+            "true".to_string(),
+        );
+        node_labels.insert("basilica.ai/wireguard-ip".to_string(), wg.node_ip.clone());
+    }
+
     info!(
         node_id = %req.node_id,
         datacenter_id = %req.datacenter_id,
+        wireguard_enabled = wireguard_config.is_some(),
         "GPU node registration approved"
     );
 
@@ -120,6 +148,7 @@ pub async fn register_gpu_node(
         node_password,
         node_labels,
         status: "ready".to_string(),
+        wireguard: wireguard_config,
     }))
 }
 
@@ -155,6 +184,78 @@ fn validate_gpu_specs(specs: &GpuSpecs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Request to register a WireGuard public key for a GPU node
+#[derive(Debug, Deserialize)]
+pub struct WireGuardKeyRequest {
+    pub public_key: String,
+}
+
+/// Response after WireGuard key registration
+#[derive(Debug, Serialize)]
+pub struct WireGuardKeyResponse {
+    pub status: String,
+    pub node_ip: String,
+}
+
+/// Register a WireGuard public key for a GPU node
+///
+/// This endpoint is called by GPU nodes after they generate their WireGuard keypair
+/// during onboarding. The API adds the peer to all K3s server nodes via SSH.
+pub async fn register_wireguard_key(
+    State(state): State<AppState>,
+    axum::Extension(auth_context): axum::Extension<AuthContext>,
+    axum::extract::Path(node_id): axum::extract::Path<String>,
+    Json(req): Json<WireGuardKeyRequest>,
+) -> Result<Json<WireGuardKeyResponse>> {
+    let user_id = &auth_context.user_id;
+
+    info!(
+        user_id = %user_id,
+        node_id = %node_id,
+        public_key_len = req.public_key.len(),
+        "WireGuard key registration request"
+    );
+
+    // Validate node_id format
+    crate::k8s::validate_node_id(&node_id).map_err(|e| ApiError::InvalidRequest {
+        message: e.to_string(),
+    })?;
+
+    // Validate public key format (base64, 44 chars for WireGuard)
+    if !crate::wireguard::is_valid_wireguard_public_key(&req.public_key) {
+        return Err(ApiError::InvalidRequest {
+            message: "Invalid WireGuard public key: must be 44 characters of valid base64".into(),
+        });
+    }
+
+    // Check if WireGuard is configured
+    if !state.config.wireguard.is_configured() {
+        return Err(ApiError::ConfigError(
+            "WireGuard is not configured on this API server".into(),
+        ));
+    }
+
+    // Calculate deterministic IP for this node
+    let node_ip = crate::wireguard::allocate_wireguard_ip(&node_id);
+
+    // Add peer to all K3s servers via SSH
+    state
+        .ssh_client
+        .add_wireguard_peer(&node_id, &req.public_key, &node_ip)
+        .await?;
+
+    info!(
+        node_id = %node_id,
+        node_ip = %node_ip,
+        "WireGuard peer added successfully"
+    );
+
+    Ok(Json(WireGuardKeyResponse {
+        status: "peer_added".to_string(),
+        node_ip,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

@@ -98,6 +98,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/v1/gpu-nodes/revoke",
             post(routes::gpu_nodes::revoke_gpu_node),
+        )
+        .route(
+            "/v1/gpu-nodes/:node_id/wireguard-key",
+            post(routes::gpu_nodes::register_wireguard_key),
         );
 
     // Add payment and billing service endpoints
