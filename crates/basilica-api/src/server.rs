@@ -133,7 +133,7 @@ async fn process_secure_cloud_billing(billing_client: &BillingClient, db: &PgPoo
         SELECT r.id, COALESCE(o.gpu_count, 1) as gpu_count
         FROM secure_cloud_rentals r
         LEFT JOIN gpu_offerings o ON r.offering_id = o.id
-        WHERE r.status = 'active'
+        WHERE r.status = 'running'
         "#,
     )
     .fetch_all(db)
