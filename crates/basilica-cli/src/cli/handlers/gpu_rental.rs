@@ -1025,12 +1025,13 @@ pub async fn handle_ps(
                 if json {
                     json_output(&history)?;
                 } else {
-                    // Filter to only community cloud rentals
-                    let community_history: Vec<_> = history
+                    // Filter to only community cloud rentals and sort by start time (most recent first)
+                    let mut community_history: Vec<_> = history
                         .rentals
                         .iter()
                         .filter(|r| r.cloud_type == "community")
                         .collect();
+                    community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
                     table_output::display_rental_history(&community_history, filters.detailed)?;
 
@@ -1093,56 +1094,52 @@ pub async fn handle_ps(
             }
         }
         Some(ComputeCategory::SecureCloud) => {
-            let spinner = if filters.history {
-                create_spinner("Fetching rental history...")
-            } else {
-                create_spinner("Fetching active rentals...")
-            };
+            if filters.history {
+                // History mode: fetch from billing service (which stores all rental history)
+                let spinner = create_spinner("Fetching rental history...");
 
-            // Fetch secure cloud rentals
-            let rentals_result = api_client.list_secure_cloud_rentals().await;
+                let history_result = api_client.list_rental_history(Some(100)).await;
 
-            let rentals_list = rentals_result.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
-            })?;
+                let history = history_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load rental history")
+                })?;
 
-            complete_spinner_and_clear(spinner);
+                complete_spinner_and_clear(spinner);
 
-            if json {
-                json_output(&rentals_list)?;
-            } else {
-                // Filter rentals based on history flag
-                let rentals_to_display: Vec<_> = if filters.history {
-                    // Show stopped rentals only
-                    rentals_list
+                if json {
+                    // Filter to only secure cloud rentals and sort by start time (most recent first)
+                    let mut secure_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_some())
-                        .collect()
+                        .filter(|r| r.cloud_type == "secure")
+                        .cloned()
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let filtered_response = HistoricalRentalsResponse {
+                        rentals: secure_history.clone(),
+                        total_count: secure_history.len(),
+                        total_cost: secure_history
+                            .iter()
+                            .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                            .sum::<rust_decimal::Decimal>()
+                            .to_string(),
+                    };
+                    json_output(&filtered_response)?;
                 } else {
-                    // Show active/running rentals only
-                    rentals_list
+                    // Filter to only secure cloud rentals and sort by start time (most recent first)
+                    let mut secure_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_none())
-                        .collect()
-                };
+                        .filter(|r| r.cloud_type == "secure")
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                table_output::display_secure_cloud_rentals(
-                    &rentals_to_display,
-                    !filters.compact,
-                    filters.detailed,
-                )?;
+                    table_output::display_rental_history(&secure_history, filters.detailed)?;
 
-                if filters.history {
-                    // Calculate total cost for historical rentals
-                    let total_cost: rust_decimal::Decimal = rentals_to_display
+                    // Calculate total cost for secure cloud only
+                    let total_cost: rust_decimal::Decimal = secure_history
                         .iter()
-                        .filter_map(|r| {
-                            r.accumulated_cost
-                                .as_ref()
-                                .and_then(|c| c.parse::<rust_decimal::Decimal>().ok())
-                        })
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
 
                     println!();
@@ -1153,16 +1150,46 @@ pub async fn handle_ps(
                     );
                     println!(
                         "\nTotal: {} historical secure cloud rentals",
-                        rentals_to_display.len()
+                        secure_history.len()
                     );
+
+                    display_ps_quick_start_commands();
+                }
+            } else {
+                // Active rentals mode: fetch from secure cloud providers
+                let spinner = create_spinner("Fetching active rentals...");
+
+                let rentals_result = api_client.list_secure_cloud_rentals().await;
+
+                let rentals_list = rentals_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+                })?;
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    json_output(&rentals_list)?;
                 } else {
+                    // Show active/running rentals only
+                    let rentals_to_display: Vec<_> = rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_none())
+                        .collect();
+
+                    table_output::display_secure_cloud_rentals(
+                        &rentals_to_display,
+                        !filters.compact,
+                        filters.detailed,
+                    )?;
+
                     println!(
                         "\nTotal: {} active secure cloud rentals",
                         rentals_to_display.len()
                     );
-                }
 
-                display_ps_quick_start_commands();
+                    display_ps_quick_start_commands();
+                }
             }
         }
         None => {
@@ -1174,15 +1201,13 @@ pub async fn handle_ps(
             };
 
             if filters.history {
-                // History mode: fetch from billing service and secure cloud
-                let (history_result, secure_result) = tokio::join!(
-                    api_client.list_rental_history(Some(100)),
-                    api_client.list_secure_cloud_rentals()
-                );
+                // History mode: fetch from billing service (which stores ALL rental history)
+                let history_result = api_client.list_rental_history(Some(100)).await;
 
                 let history = match history_result {
                     Ok(h) => h,
                     Err(e) => {
+                        complete_spinner_error(spinner.clone(), "Failed to load rental history");
                         warn!("Failed to load rental history: {}", e);
                         HistoricalRentalsResponse {
                             rentals: vec![],
@@ -1192,28 +1217,41 @@ pub async fn handle_ps(
                     }
                 };
 
-                let secure_rentals_list = secure_result.inspect_err(|_| {
-                    complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
-                })?;
-
                 complete_spinner_and_clear(spinner);
 
                 if json {
                     use serde_json::json;
+                    // Split history by cloud type and sort by start time (most recent first)
+                    let mut community_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "community")
+                        .cloned()
+                        .collect();
+                    community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let mut secure_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure")
+                        .cloned()
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
                     let output = json!({
-                        "community_cloud_history": history,
-                        "secure_cloud": secure_rentals_list
+                        "community_cloud_history": community_history,
+                        "secure_cloud_history": secure_history
                     });
                     json_output(&output)?;
                 } else {
                     // Display community cloud history
                     println!("\n{}", style("Community Cloud Rental History").bold());
 
-                    let community_history: Vec<_> = history
+                    // Filter and sort by start time (most recent first)
+                    let mut community_history: Vec<_> = history
                         .rentals
                         .iter()
                         .filter(|r| r.cloud_type == "community")
                         .collect();
+                    community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
                     table_output::display_rental_history(&community_history, filters.detailed)?;
 
@@ -1238,28 +1276,22 @@ pub async fn handle_ps(
                     // Separator between tables
                     println!();
 
-                    // Display secure cloud history
+                    // Display secure cloud history (from the same billing service response)
                     println!("{}", style("Secure Cloud Rental History").bold());
 
-                    let secure_rentals_to_display: Vec<_> = secure_rentals_list
+                    // Filter and sort by start time (most recent first)
+                    let mut secure_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_some())
+                        .filter(|r| r.cloud_type == "secure")
                         .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    table_output::display_secure_cloud_rentals(
-                        &secure_rentals_to_display,
-                        !filters.compact,
-                        filters.detailed,
-                    )?;
+                    table_output::display_rental_history(&secure_history, filters.detailed)?;
 
-                    let secure_total_cost: rust_decimal::Decimal = secure_rentals_to_display
+                    let secure_total_cost: rust_decimal::Decimal = secure_history
                         .iter()
-                        .filter_map(|r| {
-                            r.accumulated_cost
-                                .as_ref()
-                                .and_then(|c| c.parse::<rust_decimal::Decimal>().ok())
-                        })
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
 
                     println!();
@@ -1270,7 +1302,7 @@ pub async fn handle_ps(
                     );
                     println!(
                         "\nTotal: {} historical secure cloud rentals",
-                        secure_rentals_to_display.len()
+                        secure_history.len()
                     );
 
                     display_ps_quick_start_commands();

@@ -585,16 +585,16 @@ impl BillingService for BillingServiceImpl {
     ) -> std::result::Result<Response<GetActiveRentalsResponse>, Status> {
         let req = request.into_inner();
 
-        // Single query to unified rentals table
+        // Single query to unified rentals table (returns all rentals, filtering done below)
         let rentals = if req.user_id.is_empty() {
             self.rental_repository
-                .get_active_rentals(None)
+                .get_rentals(None)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         } else {
             let uid = UserId::new(req.user_id);
             self.rental_repository
-                .get_active_rentals(Some(&uid))
+                .get_rentals(Some(&uid))
                 .await
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         };
