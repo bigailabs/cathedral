@@ -600,6 +600,43 @@ pub async fn list_rentals_validator(
             message: format!("Failed to list rentals: {e}"),
         })?;
 
+    // Get cost data from billing service for this user's rentals
+    // - current_cost: accumulated total from billing.rentals.total_cost column
+    // - hourly_cost: calculated from base_price_per_gpu * gpu_count in CommunityCloudData
+    let cost_map: std::collections::HashMap<String, (String, Option<f64>)> =
+        if let Some(ref billing_client) = state.billing_client {
+            match billing_client
+                .get_active_rentals_for_user(user_id, None, None)
+                .await
+            {
+                Ok(response) => response
+                    .rentals
+                    .into_iter()
+                    .map(|r| {
+                        // Extract hourly rate from community cloud data if available
+                        let hourly_rate = match &r.cloud_type {
+                            Some(
+                                basilica_protocol::billing::active_rental::CloudType::Community(
+                                    data,
+                                ),
+                            ) => Some(data.base_price_per_gpu * data.gpu_count as f64),
+                            _ => None,
+                        };
+                        (
+                            format!("rental-{}", r.rental_id),
+                            (r.current_cost, hourly_rate),
+                        )
+                    })
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!("Failed to fetch billing costs, will use None: {}", e);
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
     // Filter to only include user's rentals and use node details from validator response
     let mut api_rentals = Vec::new();
 
@@ -619,6 +656,12 @@ pub async fn list_rentals_validator(
                     .ok()
             });
 
+        // Get cost info from billing (graceful degradation if unavailable)
+        let (accumulated_cost, hourly_cost) = cost_map
+            .get(&rental.rental_id)
+            .map(|(cost, rate)| (Some(cost.clone()), *rate))
+            .unwrap_or((None, None));
+
         // Create API rental item with node details from validator response
         api_rentals.push(ApiRentalListItem {
             rental_id: rental.rental_id,
@@ -634,6 +677,8 @@ pub async fn list_rentals_validator(
             location: rental.location,
             network_speed: rental.network_speed,
             port_mappings,
+            hourly_cost,
+            accumulated_cost,
         });
     }
 

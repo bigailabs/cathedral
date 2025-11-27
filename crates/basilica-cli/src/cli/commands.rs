@@ -431,10 +431,6 @@ pub struct PsFilters {
     /// Use detailed view (shows rental and node IDs)
     #[arg(long)]
     pub detailed: bool,
-
-    /// Show all rental history instead of just active rentals
-    #[arg(long)]
-    pub history: bool,
 }
 
 /// Options for viewing logs
