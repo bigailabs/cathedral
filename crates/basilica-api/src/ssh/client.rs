@@ -544,12 +544,28 @@ impl K3sSshClient {
     ) -> Result<(), ApiError> {
         let client = self.connect_to_server(server).await?;
 
-        // Use wg set to add peer dynamically
-        // SaveConfig=true in wg0.conf means this will persist
+        // Add peer to runtime with wg set AND persist to config file
+        // This ensures the peer survives WireGuard restarts
         let command = format!(
             "sudo wg set wg0 peer '{}' allowed-ips '{}/32' persistent-keepalive 25 && \
+             if ! grep -q 'PublicKey = {}' /etc/wireguard/wg0.conf 2>/dev/null; then \
+               sudo tee -a /etc/wireguard/wg0.conf > /dev/null <<'PEER'\n\n\
+[Peer]\n\
+# Node: {}\n\
+PublicKey = {}\n\
+AllowedIPs = {}/32\n\
+PersistentKeepalive = 25\n\
+PEER\n\
+             fi && \
              echo 'Peer added: {} -> {}'",
-            public_key, allowed_ip, node_id, allowed_ip
+            public_key,
+            allowed_ip,
+            public_key,
+            node_id,
+            public_key,
+            allowed_ip,
+            node_id,
+            allowed_ip
         );
 
         let result = tokio::time::timeout(self.timeout, client.execute(&command))
@@ -626,15 +642,24 @@ impl K3sSshClient {
     ) -> Result<(), ApiError> {
         let client = self.connect_to_server(server).await?;
 
-        let command = format!("sudo wg set wg0 peer '{}' remove", public_key);
+        // Remove from runtime AND from config file using awk for reliable block removal
+        let command = format!(
+            "sudo wg set wg0 peer '{}' remove 2>/dev/null || true; \
+             sudo awk '/^\\[Peer\\]/{{ block=$0; skip=0; next }} \
+                       /^\\[/{{ if(!skip) print block; block=$0; skip=0; next }} \
+                       {{ block=block\"\\n\"$0; if(/PublicKey = {}/) skip=1 }} \
+                       END{{ if(!skip) print block }}' /etc/wireguard/wg0.conf > /tmp/wg0.conf.tmp && \
+             sudo mv /tmp/wg0.conf.tmp /etc/wireguard/wg0.conf && \
+             sudo chmod 600 /etc/wireguard/wg0.conf || true",
+            public_key, public_key
+        );
 
         let result = tokio::time::timeout(self.timeout, client.execute(&command))
             .await
             .map_err(|_| ApiError::SshCommandTimeout)?
             .map_err(|e| ApiError::SshCommandFailed(e.to_string()))?;
 
-        // Ignore errors if peer doesn't exist
-        if result.exit_status != 0 && !result.stderr.contains("not found") {
+        if result.exit_status != 0 {
             return Err(ApiError::SshCommandFailed(format!(
                 "Failed to remove WireGuard peer: {}",
                 result.stderr

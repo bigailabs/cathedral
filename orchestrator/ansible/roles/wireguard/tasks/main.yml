@@ -166,42 +166,10 @@
     comment: "NAT WireGuard to VPC for remote GPU nodes"
   tags: ['wireguard', 'iptables']
 
-- name: Save iptables rules for persistence
-  ansible.builtin.shell: |
-    iptables-save > /etc/iptables.rules.v4
-  changed_when: true
-  tags: ['wireguard', 'iptables']
-
-- name: Deploy iptables-restore systemd service
-  ansible.builtin.copy:
-    content: |
-      [Unit]
-      Description=Restore iptables rules
-      Before=network-pre.target
-      Wants=network-pre.target
-
-      [Service]
-      Type=oneshot
-      ExecStart=/sbin/iptables-restore /etc/iptables.rules.v4
-      RemainAfterExit=yes
-
-      [Install]
-      WantedBy=multi-user.target
-    dest: /etc/systemd/system/iptables-restore.service
-    owner: root
-    group: root
-    mode: '0644'
-  register: iptables_service
-  tags: ['wireguard', 'iptables']
-
-- name: Enable iptables-restore service
-  ansible.builtin.systemd:
-    name: iptables-restore
-    enabled: yes
-    daemon_reload: "{{ iptables_service.changed }}"
-  tags: ['wireguard', 'iptables']
-
 # Security hardening: Rate limiting and FORWARD chain restrictions
+# Note: All iptables rules must be added BEFORE saving, and hashlimit requires
+# manual idempotency handling since ansible.builtin.iptables doesn't support it
+
 - name: Install iptables hashlimit module dependencies
   ansible.builtin.apt:
     name: xtables-addons-common
@@ -212,7 +180,8 @@
   ansible.builtin.shell: |
     iptables -C INPUT -p udp --dport {{ wireguard_port }} -m hashlimit \
       --hashlimit-name wireguard_handshake --hashlimit-mode srcip \
-      --hashlimit-above 10/minute --hashlimit-burst 5 -j DROP 2>/dev/null
+      --hashlimit-above 10/minute --hashlimit-burst 5 \
+      -m comment --comment "Rate limit WireGuard handshakes" -j DROP 2>/dev/null
   register: wg_ratelimit_check
   failed_when: false
   changed_when: false
@@ -222,8 +191,8 @@
   ansible.builtin.shell: |
     iptables -A INPUT -p udp --dport {{ wireguard_port }} -m hashlimit \
       --hashlimit-name wireguard_handshake --hashlimit-mode srcip \
-      --hashlimit-above 10/minute --hashlimit-burst 5 -j DROP \
-      -m comment --comment "Rate limit WireGuard handshakes"
+      --hashlimit-above 10/minute --hashlimit-burst 5 \
+      -m comment --comment "Rate limit WireGuard handshakes" -j DROP
   when: wg_ratelimit_check.rc != 0
   tags: ['wireguard', 'security']
 
@@ -317,11 +286,41 @@
     - net.ipv4.conf.default.send_redirects
   tags: ['wireguard', 'security', 'sysctl']
 
-- name: Update saved iptables rules with security rules
+# Save and persist iptables rules - must be AFTER all rules are added
+- name: Save iptables rules for persistence
   ansible.builtin.shell: |
     iptables-save > /etc/iptables.rules.v4
   changed_when: true
-  tags: ['wireguard', 'security']
+  tags: ['wireguard', 'iptables']
+
+- name: Deploy iptables-restore systemd service
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=Restore iptables rules
+      Before=network-pre.target
+      Wants=network-pre.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/sbin/iptables-restore /etc/iptables.rules.v4
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+    dest: /etc/systemd/system/iptables-restore.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: iptables_service
+  tags: ['wireguard', 'iptables']
+
+- name: Enable iptables-restore service
+  ansible.builtin.systemd:
+    name: iptables-restore
+    enabled: yes
+    daemon_reload: "{{ iptables_service.changed }}"
+  tags: ['wireguard', 'iptables']
 
 # WireGuard monitoring setup
 - name: Setup WireGuard Prometheus monitoring
