@@ -370,13 +370,35 @@ setup_wireguard() {
         die "Unsupported package manager. Please install WireGuard manually."
     fi
 
-    log "Generating WireGuard keypair..."
     umask 077
     mkdir -p /etc/wireguard
-    wg genkey > /etc/wireguard/private.key
-    wg pubkey < /etc/wireguard/private.key > /etc/wireguard/public.key
-    WG_PRIVATE_KEY=$(cat /etc/wireguard/private.key)
-    WG_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
+
+    # Preserve existing keys if they exist and are valid
+    if [ -f /etc/wireguard/private.key ] && [ -f /etc/wireguard/public.key ]; then
+        local existing_priv existing_pub
+        existing_priv=$(cat /etc/wireguard/private.key 2>/dev/null)
+        existing_pub=$(cat /etc/wireguard/public.key 2>/dev/null)
+
+        # Validate keys are non-empty and properly formatted (44 chars base64)
+        if [ -n "$existing_priv" ] && [ -n "$existing_pub" ] && \
+           [ ${#existing_pub} -eq 44 ]; then
+            log "Using existing WireGuard keypair (public key: ${existing_pub:0:8}...)"
+            WG_PRIVATE_KEY="$existing_priv"
+            WG_PUBLIC_KEY="$existing_pub"
+        else
+            log "Existing keys invalid, generating new WireGuard keypair..."
+            wg genkey > /etc/wireguard/private.key
+            wg pubkey < /etc/wireguard/private.key > /etc/wireguard/public.key
+            WG_PRIVATE_KEY=$(cat /etc/wireguard/private.key)
+            WG_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
+        fi
+    else
+        log "Generating WireGuard keypair..."
+        wg genkey > /etc/wireguard/private.key
+        wg pubkey < /etc/wireguard/private.key > /etc/wireguard/public.key
+        WG_PRIVATE_KEY=$(cat /etc/wireguard/private.key)
+        WG_PUBLIC_KEY=$(cat /etc/wireguard/public.key)
+    fi
 
     log "Creating WireGuard configuration with multiple peers..."
 
