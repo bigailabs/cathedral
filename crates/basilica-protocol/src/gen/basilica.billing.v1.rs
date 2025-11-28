@@ -96,6 +96,9 @@ pub struct CommunityCloudData {
     /// Number of GPUs in this rental
     #[prost(uint32, tag = "4")]
     pub gpu_count: u32,
+    /// Bittensor miner UID for payment reconciliation
+    #[prost(uint32, tag = "5")]
+    pub miner_uid: u32,
 }
 /// Secure cloud rental data (direct provider API)
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -441,6 +444,11 @@ pub struct GetMinerRevenueSummaryRequest {
     pub limit: u32,
     #[prost(uint32, tag = "8")]
     pub offset: u32,
+    /// Filter by miner UIDs
+    ///
+    /// Filter by specific Bittensor miner UIDs
+    #[prost(uint32, repeated, tag = "9")]
+    pub miner_uids: ::prost::alloc::vec::Vec<u32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -461,6 +469,9 @@ pub struct MinerRevenueSummary {
     /// Nullable
     #[prost(string, tag = "3")]
     pub validator_id: ::prost::alloc::string::String,
+    /// Bittensor miner UID (nullable, 0 means unknown)
+    #[prost(uint32, tag = "16")]
+    pub miner_uid: u32,
     /// Time period
     #[prost(message, optional, tag = "4")]
     pub period_start: ::core::option::Option<::prost_types::Timestamp>,

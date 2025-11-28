@@ -13,6 +13,8 @@ pub struct MinerRevenueSummary {
     pub id: Uuid,
     pub node_id: String,
     pub validator_id: Option<String>,
+    /// Bittensor miner UID for payment reconciliation (None means not recorded)
+    pub miner_uid: Option<i32>,
 
     // Time period
     pub period_start: DateTime<Utc>,
@@ -40,6 +42,8 @@ pub struct MinerRevenueSummary {
 pub struct MinerRevenueSummaryFilter {
     pub node_ids: Option<Vec<String>>,
     pub validator_ids: Option<Vec<String>>,
+    /// Filter by Bittensor miner UIDs
+    pub miner_uids: Option<Vec<i32>>,
     pub period_start: Option<DateTime<Utc>>,
     pub period_end: Option<DateTime<Utc>>,
     pub computed_at: Option<DateTime<Utc>>,
@@ -87,6 +91,7 @@ impl SqlMinerRevenueRepository {
             id: row.get("id"),
             node_id: row.get("node_id"),
             validator_id: row.get("validator_id"),
+            miner_uid: row.get("miner_uid"),
             period_start: row.get("period_start"),
             period_end: row.get("period_end"),
             total_rentals: row.get("total_rentals"),
@@ -134,7 +139,7 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
         let mut query = String::from(
             r#"
             SELECT
-                id, node_id, validator_id, period_start, period_end,
+                id, node_id, validator_id, miner_uid, period_start, period_end,
                 total_rentals, completed_rentals, failed_rentals,
                 total_revenue, total_hours, avg_hourly_rate,
                 avg_rental_duration_hours, computed_at, computation_version, created_at
@@ -155,6 +160,12 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
         if let Some(ref validator_ids) = filter.validator_ids {
             if !validator_ids.is_empty() {
                 conditions.push(format!("validator_id = ANY(${})", conditions.len() + 1));
+            }
+        }
+
+        if let Some(ref miner_uids) = filter.miner_uids {
+            if !miner_uids.is_empty() {
+                conditions.push(format!("miner_uid = ANY(${})", conditions.len() + 1));
             }
         }
 
@@ -217,6 +228,12 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
             }
         }
 
+        if let Some(ref miner_uids) = filter.miner_uids {
+            if !miner_uids.is_empty() {
+                sql_query = sql_query.bind(miner_uids);
+            }
+        }
+
         if let Some(period_start) = filter.period_start {
             sql_query = sql_query.bind(period_start);
         }
@@ -262,6 +279,12 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
         if let Some(ref validator_ids) = filter.validator_ids {
             if !validator_ids.is_empty() {
                 conditions.push(format!("validator_id = ANY(${})", conditions.len() + 1));
+            }
+        }
+
+        if let Some(ref miner_uids) = filter.miner_uids {
+            if !miner_uids.is_empty() {
+                conditions.push(format!("miner_uid = ANY(${})", conditions.len() + 1));
             }
         }
 
@@ -314,6 +337,12 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
             }
         }
 
+        if let Some(ref miner_uids) = filter.miner_uids {
+            if !miner_uids.is_empty() {
+                sql_query = sql_query.bind(miner_uids);
+            }
+        }
+
         if let Some(period_start) = filter.period_start {
             sql_query = sql_query.bind(period_start);
         }
@@ -362,6 +391,7 @@ mod tests {
             id: Uuid::new_v4(),
             node_id: "node1".to_string(),
             validator_id: Some("val1".to_string()),
+            miner_uid: Some(42),
             period_start: Utc::now(),
             period_end: Utc::now(),
             total_rentals: 10,

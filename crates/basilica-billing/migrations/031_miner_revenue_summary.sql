@@ -9,6 +9,7 @@ CREATE TABLE billing.miner_revenue_summary (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     node_id VARCHAR(128) NOT NULL,
     validator_id VARCHAR(128),  -- Nullable, preserves NULL from source
+    miner_uid INTEGER,          -- Bittensor miner UID for payment reconciliation (nullable)
 
     -- Time period this summary covers
     period_start TIMESTAMPTZ NOT NULL,
@@ -52,6 +53,10 @@ CREATE INDEX idx_miner_revenue_summary_lookup ON billing.miner_revenue_summary(
     node_id, validator_id, period_start, period_end, computed_at DESC
 );
 
+-- Query by miner_uid to get all summaries for a specific Bittensor miner
+CREATE INDEX idx_miner_revenue_summary_miner_uid ON billing.miner_revenue_summary(miner_uid)
+    WHERE miner_uid IS NOT NULL;
+
 -- ===========================================================================
 -- 3. Add table and column comments for documentation
 -- ===========================================================================
@@ -64,6 +69,9 @@ COMMENT ON COLUMN billing.miner_revenue_summary.node_id IS
 
 COMMENT ON COLUMN billing.miner_revenue_summary.validator_id IS
     'The validator that facilitated the rental (nullable)';
+
+COMMENT ON COLUMN billing.miner_revenue_summary.miner_uid IS
+    'Bittensor miner UID for payment reconciliation (nullable, NULL means not recorded)';
 
 COMMENT ON COLUMN billing.miner_revenue_summary.period_start IS
     'Start of the time period (inclusive)';
@@ -97,7 +105,7 @@ COMMENT ON COLUMN billing.miner_revenue_summary.computation_version IS
 -- ===========================================================================
 
 -- Updated for unified rentals table (migration 029):
--- - node_id and validator_id are now in metadata JSONB field
+-- - node_id, validator_id, and miner_uid are now in metadata JSONB field
 -- - hourly_rate column removed, calculate from base_price_per_gpu * gpu_count
 -- - Only include community cloud rentals (secure cloud handled internally)
 
@@ -114,6 +122,7 @@ BEGIN
     INSERT INTO billing.miner_revenue_summary (
         node_id,
         validator_id,
+        miner_uid,
         period_start,
         period_end,
         total_rentals,
@@ -128,6 +137,8 @@ BEGIN
     SELECT
         r.metadata->>'node_id' AS node_id,
         r.metadata->>'validator_id' AS validator_id,
+        -- Extract miner_uid from metadata, cast to integer (NULL if not present or invalid)
+        (r.metadata->>'miner_uid')::INTEGER AS miner_uid,
         p_period_start,
         p_period_end,
         COUNT(*) AS total_rentals,
@@ -146,7 +157,7 @@ BEGIN
       AND r.end_time IS NOT NULL
       AND r.end_time >= p_period_start
       AND r.end_time < p_period_end
-    GROUP BY r.metadata->>'node_id', r.metadata->>'validator_id';
+    GROUP BY r.metadata->>'node_id', r.metadata->>'validator_id', (r.metadata->>'miner_uid')::INTEGER;
 
     GET DIAGNOSTICS rows_inserted = ROW_COUNT;
     RETURN rows_inserted;

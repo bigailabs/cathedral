@@ -329,6 +329,9 @@ pub async fn start_rental(
             .map(|spec| spec.gpus.len() as u32)
             .unwrap_or(1);
 
+        // Extract miner_uid from rental status (provided by validator)
+        let miner_uid = rental_status.miner_uid as u32;
+
         let track_request = TrackRentalRequest {
             rental_id: validator_response.rental_id.clone(),
             user_id: user_id.clone(),
@@ -340,6 +343,7 @@ pub async fn start_rental(
                 validator_id: state.validator_hotkey.clone(),
                 base_price_per_gpu: marked_up_price,
                 gpu_count,
+                miner_uid,
             })),
         };
 

@@ -76,6 +76,7 @@ message CommunityCloudData {
     string validator_id = 2;      // Validator hotkey
     double base_price_per_gpu = 3; // Final price per GPU per hour (already includes markup)
     uint32 gpu_count = 4;          // Number of GPUs in this rental
+    uint32 miner_uid = 5;          // Bittensor miner UID for payment reconciliation
 }
 
 // Secure cloud rental data (direct provider API)
@@ -279,6 +280,9 @@ message GetMinerRevenueSummaryRequest {
     // Pagination
     uint32 limit = 7;
     uint32 offset = 8;
+
+    // Filter by miner UIDs
+    repeated uint32 miner_uids = 9; // Filter by specific Bittensor miner UIDs
 }
 
 message GetMinerRevenueSummaryResponse {
@@ -290,6 +294,7 @@ message MinerRevenueSummary {
     string id = 1; // UUID
     string node_id = 2;
     string validator_id = 3; // Nullable
+    uint32 miner_uid = 16; // Bittensor miner UID (nullable, 0 means unknown)
 
     // Time period
     google.protobuf.Timestamp period_start = 4;

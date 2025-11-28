@@ -371,6 +371,20 @@ pub async fn get_rental_status(
     // Use node details from rental info directly
     let node = rental_info.node_details.clone();
 
+    // Extract miner_uid from miner_id (format: "miner_{uid}")
+    let miner_uid = rental_info
+        .miner_id
+        .strip_prefix("miner_")
+        .and_then(|uid_str| uid_str.parse::<u16>().ok())
+        .ok_or_else(|| {
+            tracing::error!(
+                "Invalid miner_id format for node {}: expected 'miner_<uid>', got '{}'",
+                rental_info.node_id,
+                rental_info.miner_id
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
     let response = RentalStatusResponse {
         rental_id: status.rental_id,
         status: match status.state {
@@ -381,6 +395,7 @@ pub async fn get_rental_status(
             RentalState::Failed => ApiRentalStatus::Failed,
         },
         node,
+        miner_uid,
         created_at: status.created_at,
         updated_at: status.created_at, // Use created_at for now
     };

@@ -167,6 +167,7 @@ impl BillingServiceImpl {
                         validator_id: rental.validator_id().unwrap_or("").to_string(),
                         base_price_per_gpu: rental.base_price_per_gpu.to_f64().unwrap_or(0.0),
                         gpu_count: rental.gpu_count,
+                        miner_uid: rental.miner_uid().unwrap_or(0),
                     },
                 ),
             ),
@@ -362,16 +363,23 @@ impl BillingService for BillingServiceImpl {
                         return Err(Status::invalid_argument("gpu_count must be greater than 0"));
                     }
                     let gpu_count = community_data.gpu_count;
+                    // miner_uid of 0 means unknown/not provided
+                    let miner_uid = if community_data.miner_uid > 0 {
+                        Some(community_data.miner_uid)
+                    } else {
+                        None
+                    };
 
                     info!(
-                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs",
-                        rental_id, user_id, base_price_per_gpu, gpu_count
+                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs (miner_uid: {:?})",
+                        rental_id, user_id, base_price_per_gpu, gpu_count, miner_uid
                     );
 
                     let mut rental = Rental::new_community(
                         user_id.clone(),
                         community_data.node_id.clone(),
                         Some(community_data.validator_id.clone()),
+                        miner_uid,
                         resource_spec.clone(),
                         base_price_per_gpu,
                         gpu_count,
@@ -387,6 +395,7 @@ impl BillingService for BillingServiceImpl {
                         "cloud_type": "community",
                         "node_id": community_data.node_id,
                         "validator_id": community_data.validator_id,
+                        "miner_uid": miner_uid,
                         "base_price_per_gpu": base_price_per_gpu.to_string(),
                         "gpu_count": gpu_count,
                         "resource_spec": resource_spec_value,
@@ -1149,6 +1158,10 @@ impl BillingService for BillingServiceImpl {
             filter.validator_ids = Some(req.validator_ids);
         }
 
+        if !req.miner_uids.is_empty() {
+            filter.miner_uids = Some(req.miner_uids.into_iter().map(|u| u as i32).collect());
+        }
+
         if let Some(period_start) = req.period_start {
             let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
                 period_start.seconds,
@@ -1208,6 +1221,7 @@ impl BillingService for BillingServiceImpl {
                 id: s.id.to_string(),
                 node_id: s.node_id,
                 validator_id: s.validator_id.unwrap_or_default(),
+                miner_uid: s.miner_uid.unwrap_or(0) as u32,
                 period_start: Some(prost_types::Timestamp {
                     seconds: s.period_start.timestamp(),
                     nanos: s.period_start.timestamp_subsec_nanos() as i32,
