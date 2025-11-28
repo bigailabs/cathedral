@@ -92,6 +92,7 @@ impl Rental {
         user_id: UserId,
         node_id: String,
         validator_id: Option<String>,
+        miner_uid: Option<u32>,
         resource_spec: ResourceSpec,
         base_price_per_gpu: Decimal,
         gpu_count: u32,
@@ -101,6 +102,9 @@ impl Rental {
         metadata.insert("node_id".to_string(), node_id);
         if let Some(vid) = validator_id {
             metadata.insert("validator_id".to_string(), vid);
+        }
+        if let Some(uid) = miner_uid {
+            metadata.insert("miner_uid".to_string(), uid.to_string());
         }
 
         Self {
@@ -189,6 +193,11 @@ impl Rental {
         self.metadata.get("validator_id").map(|s| s.as_str())
     }
 
+    /// Get miner_uid (community cloud only) - Bittensor miner UID
+    pub fn miner_uid(&self) -> Option<u32> {
+        self.metadata.get("miner_uid").and_then(|s| s.parse().ok())
+    }
+
     /// Get provider (secure cloud only)
     pub fn provider(&self) -> Option<&str> {
         self.metadata.get("provider").map(|s| s.as_str())
@@ -271,6 +280,8 @@ pub struct CreateCommunityRentalParams {
     pub user_id: UserId,
     pub node_id: String,
     pub validator_id: String,
+    /// Bittensor miner UID for payment reconciliation
+    pub miner_uid: Option<u32>,
     pub resource_spec: ResourceSpec,
     pub base_price_per_gpu: Decimal,
     pub gpu_count: u32,
@@ -342,6 +353,7 @@ impl RentalOperations for RentalManager {
                 p.user_id,
                 p.node_id,
                 Some(p.validator_id),
+                p.miner_uid,
                 p.resource_spec,
                 p.base_price_per_gpu,
                 p.gpu_count,

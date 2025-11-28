@@ -456,10 +456,18 @@ impl EventHandlers for BillingEventHandlers {
             network_bandwidth_mbps: 100,
         };
 
+        // Extract miner_uid from event_data if available
+        let miner_uid = event
+            .event_data
+            .get("miner_uid")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
         let mut rental = Rental::new_community(
             user_id.clone(),
             event.node_id.clone(),
             event.validator_id.clone(),
+            miner_uid,
             resource_spec,
             base_price_per_gpu,
             gpu_count,

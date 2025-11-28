@@ -15,10 +15,11 @@ use crate::telemetry::{TelemetryIngester, TelemetryProcessor};
 use basilica_protocol::billing::{
     billing_service_server::BillingService, ActiveRental, ApplyCreditsRequest,
     ApplyCreditsResponse, FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
-    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse, RentalStatus,
-    TelemetryData, TrackRentalRequest, TrackRentalResponse, UpdateRentalStatusRequest,
-    UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest, UsageReportResponse,
-    UsageSummary,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, GetMinerRevenueSummaryRequest,
+    GetMinerRevenueSummaryResponse, IngestResponse, RefreshMinerRevenueSummaryRequest,
+    RefreshMinerRevenueSummaryResponse, RentalStatus, TelemetryData, TrackRentalRequest,
+    TrackRentalResponse, UpdateRentalStatusRequest, UpdateRentalStatusResponse, UsageDataPoint,
+    UsageReportRequest, UsageReportResponse, UsageSummary,
 };
 
 use rust_decimal::prelude::*;
@@ -33,6 +34,7 @@ use uuid;
 pub struct BillingServiceImpl {
     credit_manager: Arc<dyn CreditOperations + Send + Sync>,
     rental_manager: Arc<dyn RentalOperations + Send + Sync>,
+    miner_revenue_service: Arc<dyn crate::domain::MinerRevenueOperations + Send + Sync>,
     #[allow(dead_code)] // Used in server's consumer loop
     telemetry_processor: Arc<TelemetryProcessor>,
     telemetry_ingester: Arc<TelemetryIngester>,
@@ -71,9 +73,18 @@ impl BillingServiceImpl {
             90,
         ));
 
+        // Create miner revenue service
+        let miner_revenue_repository = Arc::new(crate::storage::SqlMinerRevenueRepository::new(
+            rds_connection.clone(),
+        ));
+        let miner_revenue_service = Arc::new(crate::domain::MinerRevenueService::new(
+            miner_revenue_repository,
+        ));
+
         Ok(Self {
             credit_manager: Arc::new(CreditManager::new(credit_repository.clone())),
             rental_manager: Arc::new(RentalManager::new(rental_repository.clone())),
+            miner_revenue_service,
             telemetry_processor,
             telemetry_ingester,
             rental_repository: rental_repository.clone(),
@@ -156,6 +167,7 @@ impl BillingServiceImpl {
                         validator_id: rental.validator_id().unwrap_or("").to_string(),
                         base_price_per_gpu: rental.base_price_per_gpu.to_f64().unwrap_or(0.0),
                         gpu_count: rental.gpu_count,
+                        miner_uid: rental.miner_uid().unwrap_or(0),
                     },
                 ),
             ),
@@ -351,16 +363,23 @@ impl BillingService for BillingServiceImpl {
                         return Err(Status::invalid_argument("gpu_count must be greater than 0"));
                     }
                     let gpu_count = community_data.gpu_count;
+                    // miner_uid of 0 means unknown/not provided
+                    let miner_uid = if community_data.miner_uid > 0 {
+                        Some(community_data.miner_uid)
+                    } else {
+                        None
+                    };
 
                     info!(
-                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs",
-                        rental_id, user_id, base_price_per_gpu, gpu_count
+                        "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs (miner_uid: {:?})",
+                        rental_id, user_id, base_price_per_gpu, gpu_count, miner_uid
                     );
 
                     let mut rental = Rental::new_community(
                         user_id.clone(),
                         community_data.node_id.clone(),
                         Some(community_data.validator_id.clone()),
+                        miner_uid,
                         resource_spec.clone(),
                         base_price_per_gpu,
                         gpu_count,
@@ -376,6 +395,7 @@ impl BillingService for BillingServiceImpl {
                         "cloud_type": "community",
                         "node_id": community_data.node_id,
                         "validator_id": community_data.validator_id,
+                        "miner_uid": miner_uid,
                         "base_price_per_gpu": base_price_per_gpu.to_string(),
                         "gpu_count": gpu_count,
                         "resource_spec": resource_spec_value,
@@ -1042,6 +1062,208 @@ impl BillingService for BillingServiceImpl {
             data_points,
             summary: Some(summary),
             total_cost: Self::format_credit_balance(rental.cost_breakdown.total_cost),
+        };
+
+        Ok(Response::new(response))
+    }
+
+    async fn refresh_miner_revenue_summary(
+        &self,
+        request: Request<RefreshMinerRevenueSummaryRequest>,
+    ) -> std::result::Result<Response<RefreshMinerRevenueSummaryResponse>, Status> {
+        let req = request.into_inner();
+
+        // Parse timestamps
+        let period_start = req
+            .period_start
+            .ok_or_else(|| Status::invalid_argument("period_start is required"))?;
+        let period_end = req
+            .period_end
+            .ok_or_else(|| Status::invalid_argument("period_end is required"))?;
+
+        let period_start = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            period_start.seconds,
+            period_start.nanos as u32,
+        )
+        .ok_or_else(|| Status::invalid_argument("Invalid period_start timestamp"))?;
+
+        let period_end = chrono::DateTime::<chrono::Utc>::from_timestamp(
+            period_end.seconds,
+            period_end.nanos as u32,
+        )
+        .ok_or_else(|| Status::invalid_argument("Invalid period_end timestamp"))?;
+
+        let computation_version = if req.computation_version == 0 {
+            1 // Default to version 1
+        } else {
+            req.computation_version as i32
+        };
+
+        info!(
+            "Refreshing miner revenue summary for period {} to {} (version {})",
+            period_start, period_end, computation_version
+        );
+
+        // Call service
+        let result = self
+            .miner_revenue_service
+            .refresh_summary(period_start, period_end, computation_version)
+            .await;
+
+        match result {
+            Ok(summaries_created) => {
+                info!(
+                    "Successfully created {} miner revenue summaries",
+                    summaries_created
+                );
+
+                let response = RefreshMinerRevenueSummaryResponse {
+                    success: true,
+                    summaries_created: summaries_created as u32,
+                    computed_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+                    error_message: String::new(),
+                };
+
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                error!("Failed to refresh miner revenue summary: {}", e);
+
+                let response = RefreshMinerRevenueSummaryResponse {
+                    success: false,
+                    summaries_created: 0,
+                    computed_at: None,
+                    error_message: e.to_string(),
+                };
+
+                Ok(Response::new(response))
+            }
+        }
+    }
+
+    async fn get_miner_revenue_summary(
+        &self,
+        request: Request<GetMinerRevenueSummaryRequest>,
+    ) -> std::result::Result<Response<GetMinerRevenueSummaryResponse>, Status> {
+        let req = request.into_inner();
+
+        // Build filter
+        let mut filter = crate::storage::MinerRevenueSummaryFilter::default();
+
+        if !req.node_ids.is_empty() {
+            filter.node_ids = Some(req.node_ids);
+        }
+
+        if !req.validator_ids.is_empty() {
+            filter.validator_ids = Some(req.validator_ids);
+        }
+
+        if !req.miner_uids.is_empty() {
+            filter.miner_uids = Some(req.miner_uids.into_iter().map(|u| u as i32).collect());
+        }
+
+        if let Some(period_start) = req.period_start {
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                period_start.seconds,
+                period_start.nanos as u32,
+            )
+            .ok_or_else(|| Status::invalid_argument("Invalid period_start timestamp"))?;
+            filter.period_start = Some(dt);
+        }
+
+        if let Some(period_end) = req.period_end {
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                period_end.seconds,
+                period_end.nanos as u32,
+            )
+            .ok_or_else(|| Status::invalid_argument("Invalid period_end timestamp"))?;
+            filter.period_end = Some(dt);
+        }
+
+        if let Some(computed_at) = req.computed_at {
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                computed_at.seconds,
+                computed_at.nanos as u32,
+            )
+            .ok_or_else(|| Status::invalid_argument("Invalid computed_at timestamp"))?;
+            filter.computed_at = Some(dt);
+        }
+
+        filter.latest_only = req.latest_only;
+
+        // Apply pagination
+        if req.limit > 0 {
+            filter.limit = Some(req.limit as i64);
+        } else {
+            filter.limit = Some(100); // Default limit
+        }
+
+        if req.offset > 0 {
+            filter.offset = Some(req.offset as i64);
+        }
+
+        info!("Fetching miner revenue summaries with filter: {:?}", filter);
+
+        // Call service
+        let (summaries, total_count) = self
+            .miner_revenue_service
+            .get_summaries(filter)
+            .await
+            .map_err(|e| {
+                error!("Failed to get miner revenue summaries: {}", e);
+                Status::internal(format!("Failed to get summaries: {}", e))
+            })?;
+
+        // Convert to protocol format
+        let proto_summaries: Vec<basilica_protocol::billing::MinerRevenueSummary> = summaries
+            .into_iter()
+            .map(|s| basilica_protocol::billing::MinerRevenueSummary {
+                id: s.id.to_string(),
+                node_id: s.node_id,
+                validator_id: s.validator_id.unwrap_or_default(),
+                miner_uid: s.miner_uid.unwrap_or(0) as u32,
+                period_start: Some(prost_types::Timestamp {
+                    seconds: s.period_start.timestamp(),
+                    nanos: s.period_start.timestamp_subsec_nanos() as i32,
+                }),
+                period_end: Some(prost_types::Timestamp {
+                    seconds: s.period_end.timestamp(),
+                    nanos: s.period_end.timestamp_subsec_nanos() as i32,
+                }),
+                total_rentals: s.total_rentals as u32,
+                completed_rentals: s.completed_rentals as u32,
+                failed_rentals: s.failed_rentals as u32,
+                total_revenue: Self::format_decimal(s.total_revenue),
+                total_hours: Self::format_decimal(s.total_hours),
+                avg_hourly_rate: s
+                    .avg_hourly_rate
+                    .map(Self::format_decimal)
+                    .unwrap_or_default(),
+                avg_rental_duration_hours: s
+                    .avg_rental_duration_hours
+                    .map(Self::format_decimal)
+                    .unwrap_or_default(),
+                computed_at: Some(prost_types::Timestamp {
+                    seconds: s.computed_at.timestamp(),
+                    nanos: s.computed_at.timestamp_subsec_nanos() as i32,
+                }),
+                computation_version: s.computation_version as u32,
+                created_at: Some(prost_types::Timestamp {
+                    seconds: s.created_at.timestamp(),
+                    nanos: s.created_at.timestamp_subsec_nanos() as i32,
+                }),
+            })
+            .collect();
+
+        info!(
+            "Returning {} miner revenue summaries (total: {})",
+            proto_summaries.len(),
+            total_count
+        );
+
+        let response = GetMinerRevenueSummaryResponse {
+            summaries: proto_summaries,
+            total_count: total_count as u64,
         };
 
         Ok(Response::new(response))

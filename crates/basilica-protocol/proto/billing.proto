@@ -20,6 +20,10 @@ service BillingService {
     // Telemetry ingestion
     rpc IngestTelemetry(stream TelemetryData) returns (IngestResponse);
     rpc GetUsageReport(UsageReportRequest) returns (UsageReportResponse);
+
+    // Miner revenue reconciliation
+    rpc RefreshMinerRevenueSummary(RefreshMinerRevenueSummaryRequest) returns (RefreshMinerRevenueSummaryResponse);
+    rpc GetMinerRevenueSummary(GetMinerRevenueSummaryRequest) returns (GetMinerRevenueSummaryResponse);
 }
 
 // Credit Management Messages
@@ -72,6 +76,7 @@ message CommunityCloudData {
     string validator_id = 2;      // Validator hotkey
     double base_price_per_gpu = 3; // Final price per GPU per hour (already includes markup)
     uint32 gpu_count = 4;          // Number of GPUs in this rental
+    uint32 miner_uid = 5;          // Bittensor miner UID for payment reconciliation
 }
 
 // Secure cloud rental data (direct provider API)
@@ -246,4 +251,68 @@ message ErrorDetail {
     string code = 1;
     string message = 2;
     map<string, string> metadata = 3;
+}
+
+// Miner Revenue Reconciliation Messages
+
+message RefreshMinerRevenueSummaryRequest {
+    google.protobuf.Timestamp period_start = 1; // Start of period (inclusive)
+    google.protobuf.Timestamp period_end = 2; // End of period (exclusive)
+    uint32 computation_version = 3; // Version of computation logic (default: 1)
+}
+
+message RefreshMinerRevenueSummaryResponse {
+    bool success = 1;
+    uint32 summaries_created = 2; // Number of summary rows created
+    google.protobuf.Timestamp computed_at = 3;
+    string error_message = 4;
+}
+
+message GetMinerRevenueSummaryRequest {
+    // Filter criteria (all optional)
+    repeated string node_ids = 1; // Filter by specific node IDs
+    repeated string validator_ids = 2; // Filter by specific validator IDs
+    google.protobuf.Timestamp period_start = 3; // Filter by period start
+    google.protobuf.Timestamp period_end = 4; // Filter by period end
+    google.protobuf.Timestamp computed_at = 5; // Get snapshot from specific computation time
+    bool latest_only = 6; // Only return most recent computation for each (node, validator, period)
+
+    // Pagination
+    uint32 limit = 7;
+    uint32 offset = 8;
+
+    // Filter by miner UIDs
+    repeated uint32 miner_uids = 9; // Filter by specific Bittensor miner UIDs
+}
+
+message GetMinerRevenueSummaryResponse {
+    repeated MinerRevenueSummary summaries = 1;
+    uint64 total_count = 2;
+}
+
+message MinerRevenueSummary {
+    string id = 1; // UUID
+    string node_id = 2;
+    string validator_id = 3; // Nullable
+    uint32 miner_uid = 16; // Bittensor miner UID (nullable, 0 means unknown)
+
+    // Time period
+    google.protobuf.Timestamp period_start = 4;
+    google.protobuf.Timestamp period_end = 5;
+
+    // Aggregated metrics
+    uint32 total_rentals = 6;
+    uint32 completed_rentals = 7;
+    uint32 failed_rentals = 8;
+    string total_revenue = 9; // Decimal string (TAO)
+    string total_hours = 10; // Decimal string
+
+    // Computed metrics
+    string avg_hourly_rate = 11; // Decimal string (nullable)
+    string avg_rental_duration_hours = 12; // Decimal string (nullable)
+
+    // Audit fields
+    google.protobuf.Timestamp computed_at = 13;
+    uint32 computation_version = 14;
+    google.protobuf.Timestamp created_at = 15;
 }
