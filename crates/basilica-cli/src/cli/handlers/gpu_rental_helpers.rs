@@ -1,5 +1,6 @@
 //! Common helper functions for GPU rental operations
 
+use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use basilica_aggregator::models::GpuOffering;
 use basilica_common::types::ComputeCategory;
@@ -7,12 +8,17 @@ use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, NodeSelecti
 use basilica_sdk::{ApiError, BasilicaClient};
 use basilica_validator::api::types::AvailableNode;
 use color_eyre::eyre::{eyre, Result};
+use color_eyre::Help;
 use console::{style, Term};
 use dialoguer::Select;
 use rust_decimal::prelude::ToPrimitive;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::warn;
+
+/// Timeout for community cloud (validator) API requests.
+/// The validator can be slower due to network hops through the Bittensor network.
+pub const VALIDATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Resolve target rental ID - if not provided, fetch active rentals and prompt for selection
 ///
@@ -133,7 +139,7 @@ pub async fn resolve_target_rental_unified(
             (None, Some(rentals))
         }
         None => {
-            // Fetch both types in parallel with 5-second timeout for community cloud
+            // Fetch both types in parallel with timeout for community cloud
             let community_future = api_client.list_rentals(Some(ListRentalsQuery {
                 status: Some(RentalState::Active),
                 gpu_type: None,
@@ -141,7 +147,7 @@ pub async fn resolve_target_rental_unified(
             }));
             let (community_result, secure_result) = tokio::join!(
                 async {
-                    match timeout(Duration::from_secs(5), community_future).await {
+                    match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
                         Ok(result) => result,
                         Err(_) => {
                             warn!("Validator request timed out after 5 seconds");
@@ -301,7 +307,7 @@ pub async fn resolve_offering_unified(
 ) -> Result<SelectedOffering> {
     let spinner = create_spinner("Fetching available GPUs from all clouds...");
 
-    // Fetch offerings from both clouds in parallel with 5-second timeout for community cloud
+    // Fetch offerings from both clouds in parallel with timeout for community cloud
     let community_future = api_client.list_available_nodes(Some(ListAvailableNodesQuery {
         available: Some(true),
         min_gpu_memory: min_gpu_memory_filter,
@@ -315,7 +321,7 @@ pub async fn resolve_offering_unified(
     }));
     let (secure_result, community_result) =
         tokio::join!(api_client.list_secure_cloud_gpus(), async {
-            match timeout(Duration::from_secs(5), community_future).await {
+            match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
                 Ok(result) => result,
                 Err(_) => {
                     warn!("Validator request timed out after 5 seconds");
@@ -515,4 +521,207 @@ pub async fn resolve_offering_unified(
             }))
         }
     }
+}
+
+/// Resolve a rental ID to its compute category by checking both cloud types.
+///
+/// Fetches rentals from both community and secure clouds (in parallel with timeout),
+/// and determines which cloud the rental belongs to.
+pub async fn resolve_rental_by_id(
+    target_id: &str,
+    api_client: &BasilicaClient,
+) -> Result<ComputeCategory, CliError> {
+    let spinner = create_spinner("Looking up rental...");
+
+    let community_future = api_client.list_rentals(Some(ListRentalsQuery {
+        status: Some(RentalState::Active),
+        gpu_type: None,
+        min_gpu_count: None,
+    }));
+
+    let (community_result, secure_result) = tokio::join!(
+        async {
+            match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Validator request timed out after 5 seconds");
+                    Err(ApiError::Timeout)
+                }
+            }
+        },
+        api_client.list_secure_cloud_rentals()
+    );
+
+    complete_spinner_and_clear(spinner);
+
+    // Check community cloud first
+    if let Ok(community) = community_result {
+        if community.rentals.iter().any(|r| r.rental_id == target_id) {
+            return Ok(ComputeCategory::CommunityCloud);
+        }
+    }
+
+    // Check secure cloud
+    if let Ok(secure) = &secure_result {
+        if secure.rentals.iter().any(|r| r.rental_id == target_id) {
+            return Ok(ComputeCategory::SecureCloud);
+        }
+    }
+
+    // Not found in either - provide helpful error
+    Err(CliError::Internal(
+        eyre!("Rental '{}' not found", target_id)
+            .suggestion("Try 'basilica ps' to see your active rentals")
+            .note("The rental may have expired or been terminated"),
+    ))
+}
+
+/// Result of resolving a rental with SSH access
+pub struct RentalWithSsh {
+    pub rental_id: String,
+    pub compute_type: ComputeCategory,
+    pub ssh_command: String,
+}
+
+/// Resolve a rental ID to its compute category and fetch SSH credentials.
+///
+/// When `target_id` is provided, locates the rental and fetches SSH credentials.
+/// When `target_id` is None, uses interactive selector then fetches SSH credentials.
+pub async fn resolve_rental_with_ssh(
+    target_id: Option<&str>,
+    api_client: &BasilicaClient,
+) -> Result<RentalWithSsh, CliError> {
+    if let Some(target_id) = target_id {
+        // Rental ID provided - find it and get SSH credentials
+        let spinner = create_spinner("Looking up rental...");
+
+        let community_future = api_client.list_rentals(Some(ListRentalsQuery {
+            status: Some(RentalState::Active),
+            gpu_type: None,
+            min_gpu_count: None,
+        }));
+
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
+            api_client.list_secure_cloud_rentals()
+        );
+
+        complete_spinner_and_clear(spinner);
+
+        // Check community cloud first
+        if let Ok(community) = community_result {
+            if community.rentals.iter().any(|r| r.rental_id == target_id) {
+                let ssh_command = fetch_community_ssh_credentials(target_id, api_client).await?;
+                return Ok(RentalWithSsh {
+                    rental_id: target_id.to_string(),
+                    compute_type: ComputeCategory::CommunityCloud,
+                    ssh_command,
+                });
+            }
+        }
+
+        // Check secure cloud
+        if let Ok(secure) = secure_result {
+            if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
+                let ssh_command = rental.ssh_command.clone().ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("SSH command not available")
+                            .wrap_err(format!(
+                                "The rental '{}' does not have SSH access configured",
+                                target_id
+                            ))
+                            .note("The rental may still be provisioning or SSH may not be enabled"),
+                    )
+                })?;
+                return Ok(RentalWithSsh {
+                    rental_id: target_id.to_string(),
+                    compute_type: ComputeCategory::SecureCloud,
+                    ssh_command,
+                });
+            }
+        }
+
+        Err(CliError::Internal(
+            eyre!("Rental '{}' not found", target_id)
+                .suggestion("Try 'basilica ps' to see your active rentals"),
+        ))
+    } else {
+        // No rental ID - use interactive selector
+        let (rental_id, compute_type) =
+            resolve_target_rental_unified(None, None, api_client).await?;
+
+        let ssh_command = match compute_type {
+            ComputeCategory::CommunityCloud => {
+                fetch_community_ssh_credentials(&rental_id, api_client).await?
+            }
+            ComputeCategory::SecureCloud => {
+                fetch_secure_ssh_credentials(&rental_id, api_client).await?
+            }
+        };
+
+        Ok(RentalWithSsh {
+            rental_id,
+            compute_type,
+            ssh_command,
+        })
+    }
+}
+
+/// Fetch SSH credentials for a community cloud rental
+async fn fetch_community_ssh_credentials(
+    rental_id: &str,
+    api_client: &BasilicaClient,
+) -> Result<String, CliError> {
+    let rental_status = api_client
+        .get_rental_status(rental_id)
+        .await
+        .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+    rental_status.ssh_credentials.ok_or_else(|| {
+        CliError::Internal(
+            eyre!("SSH credentials not available")
+                .wrap_err(format!(
+                    "The rental '{}' was created without SSH access",
+                    rental_id
+                ))
+                .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
+                .note("Create a new rental without --no-ssh to enable SSH access"),
+        )
+    })
+}
+
+/// Fetch SSH credentials for a secure cloud rental
+async fn fetch_secure_ssh_credentials(
+    rental_id: &str,
+    api_client: &BasilicaClient,
+) -> Result<String, CliError> {
+    let secure_rentals = api_client
+        .list_secure_cloud_rentals()
+        .await
+        .map_err(|e| CliError::Internal(eyre!(e)))?;
+
+    let rental = secure_rentals
+        .rentals
+        .iter()
+        .find(|r| r.rental_id == rental_id)
+        .ok_or_else(|| CliError::Internal(eyre!("Rental '{}' not found", rental_id)))?;
+
+    rental.ssh_command.clone().ok_or_else(|| {
+        CliError::Internal(
+            eyre!("SSH command not available")
+                .wrap_err(format!(
+                    "The rental '{}' does not have SSH access configured",
+                    rental_id
+                ))
+                .note("The rental may still be provisioning or SSH may not be enabled"),
+        )
+    })
 }
