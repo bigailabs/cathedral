@@ -454,4 +454,218 @@ impl K3sSshClient {
 
         Ok(token_id.to_string())
     }
+
+    /// Add a WireGuard peer to all K3s server nodes
+    ///
+    /// This is called when a GPU node reports its WireGuard public key during onboarding.
+    /// The peer is added to all servers for redundancy.
+    pub async fn add_wireguard_peer(
+        &self,
+        node_id: &str,
+        public_key: &str,
+        allowed_ip: &str,
+    ) -> Result<(), ApiError> {
+        if !self.enabled {
+            return Err(ApiError::ConfigError(
+                "SSH is disabled, cannot add WireGuard peer".into(),
+            ));
+        }
+
+        // Validate public key format (base64, 44 chars for WireGuard)
+        if !crate::wireguard::is_valid_wireguard_public_key(public_key) {
+            return Err(ApiError::InvalidRequest {
+                message: "Invalid WireGuard public key: must be 44 characters of valid base64"
+                    .into(),
+            });
+        }
+
+        // Validate allowed_ip format using the full IP validator
+        if !crate::wireguard::is_valid_gpu_node_ip(allowed_ip) {
+            return Err(ApiError::InvalidRequest {
+                message: format!("Invalid WireGuard IP: {}", allowed_ip),
+            });
+        }
+
+        info!(
+            node_id = %node_id,
+            allowed_ip = %allowed_ip,
+            "Adding WireGuard peer to all K3s servers"
+        );
+
+        let mut success_count = 0;
+        let mut last_error = None;
+
+        for server in &self.servers {
+            match self
+                .add_wireguard_peer_on_server(server, node_id, public_key, allowed_ip)
+                .await
+            {
+                Ok(()) => {
+                    success_count += 1;
+                    info!(
+                        server = %server.host,
+                        node_id = %node_id,
+                        "WireGuard peer added successfully"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        server = %server.host,
+                        node_id = %node_id,
+                        error = %e,
+                        "Failed to add WireGuard peer"
+                    );
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        // Require at least one server to succeed
+        if success_count == 0 {
+            return Err(last_error.unwrap_or_else(|| ApiError::NoK3sServersAvailable));
+        }
+
+        info!(
+            node_id = %node_id,
+            success_count = success_count,
+            total_servers = self.servers.len(),
+            "WireGuard peer added to servers"
+        );
+
+        Ok(())
+    }
+
+    async fn add_wireguard_peer_on_server(
+        &self,
+        server: &K3sServer,
+        node_id: &str,
+        public_key: &str,
+        allowed_ip: &str,
+    ) -> Result<(), ApiError> {
+        let client = self.connect_to_server(server).await?;
+
+        // Add peer to runtime with wg set AND persist to config file
+        // This ensures the peer survives WireGuard restarts
+        let command = format!(
+            "sudo wg set wg0 peer '{}' allowed-ips '{}/32' persistent-keepalive 25 && \
+             if ! grep -q 'PublicKey = {}' /etc/wireguard/wg0.conf 2>/dev/null; then \
+               sudo tee -a /etc/wireguard/wg0.conf > /dev/null <<'PEER'\n\n\
+[Peer]\n\
+# Node: {}\n\
+PublicKey = {}\n\
+AllowedIPs = {}/32\n\
+PersistentKeepalive = 25\n\
+PEER\n\
+             fi && \
+             echo 'Peer added: {} -> {}'",
+            public_key,
+            allowed_ip,
+            public_key,
+            node_id,
+            public_key,
+            allowed_ip,
+            node_id,
+            allowed_ip
+        );
+
+        let result = tokio::time::timeout(self.timeout, client.execute(&command))
+            .await
+            .map_err(|_| ApiError::SshCommandTimeout)?
+            .map_err(|e| ApiError::SshCommandFailed(e.to_string()))?;
+
+        if result.exit_status != 0 {
+            return Err(ApiError::SshCommandFailed(format!(
+                "Failed to add WireGuard peer: {}",
+                result.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Remove a WireGuard peer from all K3s server nodes
+    ///
+    /// This is called when a GPU node is revoked or decommissioned.
+    pub async fn remove_wireguard_peer(&self, public_key: &str) -> Result<(), ApiError> {
+        if !self.enabled {
+            return Err(ApiError::ConfigError(
+                "SSH is disabled, cannot remove WireGuard peer".into(),
+            ));
+        }
+
+        // Validate public key format (base64, 44 chars for WireGuard)
+        if !crate::wireguard::is_valid_wireguard_public_key(public_key) {
+            return Err(ApiError::InvalidRequest {
+                message: "Invalid WireGuard public key: must be 44 characters of valid base64"
+                    .into(),
+            });
+        }
+
+        info!(
+            public_key_prefix = %&public_key[..8],
+            "Removing WireGuard peer from all K3s servers"
+        );
+
+        let mut success_count = 0;
+
+        for server in &self.servers {
+            match self
+                .remove_wireguard_peer_on_server(server, public_key)
+                .await
+            {
+                Ok(()) => {
+                    success_count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        server = %server.host,
+                        error = %e,
+                        "Failed to remove WireGuard peer (may not exist)"
+                    );
+                }
+            }
+        }
+
+        info!(
+            success_count = success_count,
+            total_servers = self.servers.len(),
+            "WireGuard peer removal completed"
+        );
+
+        Ok(())
+    }
+
+    async fn remove_wireguard_peer_on_server(
+        &self,
+        server: &K3sServer,
+        public_key: &str,
+    ) -> Result<(), ApiError> {
+        let client = self.connect_to_server(server).await?;
+
+        // Remove from runtime AND from config file using awk for reliable block removal
+        let command = format!(
+            "sudo wg set wg0 peer '{}' remove 2>/dev/null || true; \
+             sudo awk '/^\\[Peer\\]/{{ block=$0; skip=0; next }} \
+                       /^\\[/{{ if(!skip) print block; block=$0; skip=0; next }} \
+                       {{ block=block\"\\n\"$0; if(/PublicKey = {}/) skip=1 }} \
+                       END{{ if(!skip) print block }}' /etc/wireguard/wg0.conf > /tmp/wg0.conf.tmp && \
+             sudo mv /tmp/wg0.conf.tmp /etc/wireguard/wg0.conf && \
+             sudo chmod 600 /etc/wireguard/wg0.conf || true",
+            public_key, public_key
+        );
+
+        let result = tokio::time::timeout(self.timeout, client.execute(&command))
+            .await
+            .map_err(|_| ApiError::SshCommandTimeout)?
+            .map_err(|e| ApiError::SshCommandFailed(e.to_string()))?;
+
+        if result.exit_status != 0 {
+            return Err(ApiError::SshCommandFailed(format!(
+                "Failed to remove WireGuard peer: {}",
+                result.stderr
+            )));
+        }
+
+        Ok(())
+    }
 }

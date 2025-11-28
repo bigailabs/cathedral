@@ -1,0 +1,6 @@
+---
+# Performance tuning handlers
+
+- name: Reload sysctl
+  ansible.builtin.command: sysctl --system
+  listen: "Reload sysctl"

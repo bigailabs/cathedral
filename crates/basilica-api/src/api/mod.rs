@@ -6,7 +6,6 @@ pub mod middleware;
 pub mod query;
 pub mod routes;
 
-use crate::config::RentalBackend;
 use crate::server::AppState;
 use axum::{
     routing::{delete, get, post},
@@ -33,7 +32,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         ));
 
     // Protected routes with unified authentication and scope validation
-    let mut protected_routes = Router::new()
+    let protected_routes = Router::new()
         .route("/jobs", post(routes::jobs::create_job))
         .route(
             "/jobs/:id",
@@ -43,30 +42,26 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/jobs/:id/read-file", post(routes::jobs::read_job_file))
         .route("/jobs/:id/suspend", post(routes::jobs::suspend_job))
         .route("/jobs/:id/resume", post(routes::jobs::resume_job))
-        // v2 rentals namespace is always available when k8s client exists
+        // Rentals endpoints
         .route(
-            "/v2/rentals",
-            get(routes::rentals_v2::list_rentals).post(routes::rentals_v2::create_rental),
+            "/rentals",
+            get(routes::rentals::list_rentals_validator).post(routes::rentals::start_rental),
         )
         .route(
-            "/v2/rentals-compat",
-            post(routes::rentals_v2::create_rental_compat),
+            "/rentals/history",
+            get(routes::rentals::list_rental_history),
         )
         .route(
-            "/v2/rentals/:id",
-            get(routes::rentals_v2::get_rental_status).delete(routes::rentals_v2::delete_rental),
+            "/rentals/:id",
+            get(routes::rentals::get_rental_status).delete(routes::rentals::stop_rental),
         )
         .route(
-            "/v2/rentals/:id/logs",
-            get(routes::rentals_v2::stream_rental_logs),
+            "/rentals/:id/restart",
+            post(routes::rentals::restart_rental),
         )
         .route(
-            "/v2/rentals/:id/exec",
-            post(routes::rentals_v2::exec_rental),
-        )
-        .route(
-            "/v2/rentals/:id/extend",
-            post(routes::rentals_v2::extend_rental),
+            "/rentals/:id/logs",
+            get(routes::rentals::stream_rental_logs),
         )
         .route("/nodes", get(routes::rentals::list_available_nodes))
         // API key management endpoints (JWT auth only)
@@ -103,46 +98,11 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/v1/gpu-nodes/revoke",
             post(routes::gpu_nodes::revoke_gpu_node),
+        )
+        .route(
+            "/v1/gpu-nodes/:node_id/wireguard-key",
+            post(routes::gpu_nodes::register_wireguard_key),
         );
-
-    // Conditionally map legacy vs k8s backend under /rentals
-    let use_k8s_backend = match state.config.rental_backend {
-        RentalBackend::K8s => state.k8s.is_some(),
-        RentalBackend::Auto => state.k8s.is_some(),
-        RentalBackend::Legacy => false,
-    };
-    if use_k8s_backend {
-        protected_routes = protected_routes
-            .route(
-                "/rentals",
-                get(routes::rentals_v2::list_rentals)
-                    .post(routes::rentals_v2::create_rental_compat),
-            )
-            .route(
-                "/rentals/:id",
-                get(routes::rentals_v2::get_rental_status)
-                    .delete(routes::rentals_v2::delete_rental),
-            )
-            .route(
-                "/rentals/:id/logs",
-                get(routes::rentals_v2::stream_rental_logs),
-            )
-            .route("/rentals/:id/exec", post(routes::rentals_v2::exec_rental))
-            .route(
-                "/rentals/:id/extend",
-                post(routes::rentals_v2::extend_rental),
-            );
-    } else {
-        protected_routes = protected_routes
-            .route("/rentals", get(routes::rentals::list_rentals_validator))
-            .route("/rentals", post(routes::rentals::start_rental))
-            .route("/rentals/:id", get(routes::rentals::get_rental_status))
-            .route("/rentals/:id", delete(routes::rentals::stop_rental))
-            .route(
-                "/rentals/:id/logs",
-                get(routes::rentals::stream_rental_logs),
-            );
-    }
 
     // Add payment and billing service endpoints
     let protected_routes = protected_routes

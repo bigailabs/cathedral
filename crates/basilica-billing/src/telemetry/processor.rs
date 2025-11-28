@@ -179,12 +179,15 @@ impl TelemetryProcessor {
 
         let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
 
+        // Extract validator_id from metadata (for community cloud rentals, None for secure cloud)
+        let validator_id = rental.validator_id().map(|s| s.to_string());
+
         let telemetry_event = UsageEvent {
             event_id: Uuid::new_v4(),
             rental_id: rental_id.as_uuid(),
             user_id: rental.user_id.to_string(),
             node_id: data.node_id.clone(),
-            validator_id: rental.validator_id.clone(),
+            validator_id: validator_id.clone(),
             event_type: EventType::Telemetry,
             event_data,
             timestamp: telemetry_timestamp,
@@ -199,11 +202,11 @@ impl TelemetryProcessor {
             .await
             .map_err(|e| {
                 error!(
-                    "Failed to store telemetry event: {} | rental_id={} node_id={} validator_id={} event_type={:?} idempotency_key={:?}",
+                    "Failed to store telemetry event: {} | rental_id={} node_id={} validator_id={:?} event_type={:?} idempotency_key={:?}",
                     e,
                     rental_id,
                     data.node_id,
-                    rental.validator_id,
+                    validator_id,
                     telemetry_event.event_type,
                     telemetry_event.idempotency_key
                 );

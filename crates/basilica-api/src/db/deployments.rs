@@ -59,6 +59,32 @@ pub async fn get_deployment(
     Ok(record)
 }
 
+/// Get deployment including soft-deleted records.
+/// Used for idempotent deployment creation to reactivate previously deleted deployments.
+pub async fn get_deployment_including_deleted(
+    pool: &PgPool,
+    user_id: &str,
+    instance_name: &str,
+) -> Result<Option<DeploymentRecord>> {
+    let record = sqlx::query_as::<_, DeploymentRecord>(
+        r#"
+        SELECT id, user_id, instance_name, namespace, cr_name, image, replicas, port,
+               path_prefix, public_url, public, state, message, created_at, updated_at, deleted_at
+        FROM user_deployments
+        WHERE user_id = $1 AND instance_name = $2
+        "#,
+    )
+    .bind(user_id)
+    .bind(instance_name)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("Database query failed: {e}"),
+    })?;
+
+    Ok(record)
+}
+
 pub async fn create_deployment(
     pool: &PgPool,
     params: CreateDeploymentParams<'_>,
@@ -144,6 +170,56 @@ pub async fn mark_deployment_deleted(pool: &PgPool, id: i32) -> Result<()> {
     })?;
 
     Ok(())
+}
+
+/// Reactivate a soft-deleted deployment with updated configuration.
+/// Used for idempotent deployment creation - when a user recreates a deployment
+/// with the same instance_name, we reactivate the existing record to preserve
+/// the storage path (instance_id) for data persistence.
+pub async fn reactivate_deployment(
+    pool: &PgPool,
+    id: i32,
+    params: ReactivateDeploymentParams<'_>,
+) -> Result<DeploymentRecord> {
+    let record = sqlx::query_as::<_, DeploymentRecord>(
+        r#"
+        UPDATE user_deployments
+        SET deleted_at = NULL,
+            state = 'Pending',
+            message = NULL,
+            image = $2,
+            replicas = $3,
+            port = $4,
+            public_url = $5,
+            public = $6,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, user_id, instance_name, namespace, cr_name, image, replicas, port,
+                  path_prefix, public_url, public, state, message, created_at, updated_at, deleted_at
+        "#,
+    )
+    .bind(id)
+    .bind(params.image)
+    .bind(params.replicas)
+    .bind(params.port)
+    .bind(params.public_url)
+    .bind(params.public)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("Failed to reactivate deployment: {e}"),
+    })?;
+
+    Ok(record)
+}
+
+#[derive(Debug, Clone)]
+pub struct ReactivateDeploymentParams<'a> {
+    pub image: &'a str,
+    pub replicas: i32,
+    pub port: i32,
+    pub public_url: &'a str,
+    pub public: bool,
 }
 
 pub async fn list_user_deployments(pool: &PgPool, user_id: &str) -> Result<Vec<DeploymentRecord>> {

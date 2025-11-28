@@ -1,7 +1,5 @@
 use crate::error::Result;
-use crate::models::{
-    Deployment, DeploymentStatus, GpuOffering, Provider, ProviderHealth, ProviderSshKey, SshKey,
-};
+use crate::models::{Deployment, DeploymentStatus, GpuOffering, Provider, ProviderSshKey, SshKey};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
@@ -93,14 +91,41 @@ impl Database {
         let offerings = rows
             .into_iter()
             .filter_map(|row| {
+                let id: String = row.get("id");
                 let provider_str: String = row.get("provider");
                 let gpu_type_str: String = row.get("gpu_type");
                 let raw_metadata: serde_json::Value = row.get("raw_metadata");
 
+                let provider = match provider_str.parse() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(
+                            row_id = %id,
+                            provider = %provider_str,
+                            error = %e,
+                            "Failed to parse provider from gpu_offerings row, skipping"
+                        );
+                        return None;
+                    }
+                };
+
+                let gpu_type = match gpu_type_str.parse() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::error!(
+                            row_id = %id,
+                            gpu_type = %gpu_type_str,
+                            error = %e,
+                            "Failed to parse gpu_type from gpu_offerings row, skipping"
+                        );
+                        return None;
+                    }
+                };
+
                 Some(GpuOffering {
-                    id: row.get("id"),
-                    provider: provider_str.parse().ok()?,
-                    gpu_type: gpu_type_str.parse().ok()?,
+                    id,
+                    provider,
+                    gpu_type,
                     gpu_memory_gb_per_gpu: row
                         .get::<Option<i32>, _>("gpu_memory_gb_per_gpu")
                         .map(|m| m as u32),
@@ -120,18 +145,6 @@ impl Database {
             .collect();
 
         Ok(offerings)
-    }
-
-    /// Get provider health status (in-memory only, no DB persistence)
-    pub async fn get_provider_health(&self, provider: Provider) -> Result<ProviderHealth> {
-        // Since we removed provider_status table, return default values
-        // Health checks will be done on-demand by the service
-        Ok(ProviderHealth {
-            provider,
-            is_healthy: false,
-            last_success_at: None,
-            last_error: Some("Health check not persisted".to_string()),
-        })
     }
 
     /// Get last fetch time for provider from offerings table
@@ -224,6 +237,58 @@ impl Database {
         Ok(())
     }
 
+    /// Helper function to parse a deployment from a database row with error logging
+    fn parse_deployment_from_row(row: &sqlx::postgres::PgRow) -> Option<Deployment> {
+        let id: String = row.get("id");
+        let provider_str: String = row.get("provider");
+        let status_str: String = row.get("status");
+
+        let provider = match provider_str.parse() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(
+                    deployment_id = %id,
+                    provider = %provider_str,
+                    error = %e,
+                    "Failed to parse provider from deployment row, skipping"
+                );
+                return None;
+            }
+        };
+
+        let status = match status_str.parse() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    deployment_id = %id,
+                    status = %status_str,
+                    error = %e,
+                    "Failed to parse status from deployment row, skipping"
+                );
+                return None;
+            }
+        };
+
+        Some(Deployment {
+            id,
+            user_id: row.get("user_id"),
+            provider,
+            provider_instance_id: row.get("provider_instance_id"),
+            offering_id: row.get("offering_id"),
+            instance_type: row.get("instance_type"),
+            location_code: row.get("location_code"),
+            status,
+            hostname: row.get("hostname"),
+            ssh_key_id: row.get("ssh_key_id"),
+            ip_address: row.get("ip_address"),
+            connection_info: row.get("connection_info"),
+            raw_response: row.get("raw_response"),
+            error_message: row.get("error_message"),
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
     /// Get deployment by ID
     pub async fn get_deployment(&self, id: &str) -> Result<Option<Deployment>> {
         let row = sqlx::query(
@@ -239,31 +304,7 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
 
-        let deployment = row.and_then(|r| {
-            let provider_str: String = r.get("provider");
-            let status_str: String = r.get("status");
-
-            Some(Deployment {
-                id: r.get("id"),
-                user_id: r.get("user_id"),
-                provider: provider_str.parse().ok()?,
-                provider_instance_id: r.get("provider_instance_id"),
-                offering_id: r.get("offering_id"),
-                instance_type: r.get("instance_type"),
-                location_code: r.get("location_code"),
-                status: status_str.parse().ok()?,
-                hostname: r.get("hostname"),
-                ssh_key_id: r.get("ssh_key_id"),
-                ip_address: r.get("ip_address"),
-                connection_info: r.get("connection_info"),
-                raw_response: r.get("raw_response"),
-                error_message: r.get("error_message"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            })
-        });
-
-        Ok(deployment)
+        Ok(row.and_then(|r| Self::parse_deployment_from_row(&r)))
     }
 
     /// Get deployment by ID and user ID (ownership check)
@@ -286,31 +327,7 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
 
-        let deployment = row.and_then(|r| {
-            let provider_str: String = r.get("provider");
-            let status_str: String = r.get("status");
-
-            Some(Deployment {
-                id: r.get("id"),
-                user_id: r.get("user_id"),
-                provider: provider_str.parse().ok()?,
-                provider_instance_id: r.get("provider_instance_id"),
-                offering_id: r.get("offering_id"),
-                instance_type: r.get("instance_type"),
-                location_code: r.get("location_code"),
-                status: status_str.parse().ok()?,
-                hostname: r.get("hostname"),
-                ssh_key_id: r.get("ssh_key_id"),
-                ip_address: r.get("ip_address"),
-                connection_info: r.get("connection_info"),
-                raw_response: r.get("raw_response"),
-                error_message: r.get("error_message"),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-            })
-        });
-
-        Ok(deployment)
+        Ok(row.and_then(|r| Self::parse_deployment_from_row(&r)))
     }
 
     /// List deployments by user
@@ -330,30 +347,8 @@ impl Database {
         .await?;
 
         let deployments = rows
-            .into_iter()
-            .filter_map(|r| {
-                let provider_str: String = r.get("provider");
-                let status_str: String = r.get("status");
-
-                Some(Deployment {
-                    id: r.get("id"),
-                    user_id: r.get("user_id"),
-                    provider: provider_str.parse().ok()?,
-                    provider_instance_id: r.get("provider_instance_id"),
-                    offering_id: r.get("offering_id"),
-                    instance_type: r.get("instance_type"),
-                    location_code: r.get("location_code"),
-                    status: status_str.parse().ok()?,
-                    hostname: r.get("hostname"),
-                    ssh_key_id: r.get("ssh_key_id"),
-                    ip_address: r.get("ip_address"),
-                    connection_info: r.get("connection_info"),
-                    raw_response: r.get("raw_response"),
-                    error_message: r.get("error_message"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                })
-            })
+            .iter()
+            .filter_map(Self::parse_deployment_from_row)
             .collect();
 
         Ok(deployments)
@@ -407,30 +402,8 @@ impl Database {
         let rows = query.fetch_all(&self.pool).await?;
 
         let deployments = rows
-            .into_iter()
-            .filter_map(|r| {
-                let provider_str: String = r.get("provider");
-                let status_str: String = r.get("status");
-
-                Some(Deployment {
-                    id: r.get("id"),
-                    user_id: r.get("user_id"),
-                    provider: provider_str.parse().ok()?,
-                    provider_instance_id: r.get("provider_instance_id"),
-                    offering_id: r.get("offering_id"),
-                    instance_type: r.get("instance_type"),
-                    location_code: r.get("location_code"),
-                    status: status_str.parse().ok()?,
-                    hostname: r.get("hostname"),
-                    ssh_key_id: r.get("ssh_key_id"),
-                    ip_address: r.get("ip_address"),
-                    connection_info: r.get("connection_info"),
-                    raw_response: r.get("raw_response"),
-                    error_message: r.get("error_message"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                })
-            })
+            .iter()
+            .filter_map(Self::parse_deployment_from_row)
             .collect();
 
         Ok(deployments)
@@ -438,44 +411,29 @@ impl Database {
 
     /// Get all active deployments (for telemetry monitoring)
     pub async fn get_all_active_deployments(&self) -> Result<Vec<Deployment>> {
+        let active_statuses: Vec<&str> = vec![
+            DeploymentStatus::Pending.as_str(),
+            DeploymentStatus::Provisioning.as_str(),
+            DeploymentStatus::Running.as_str(),
+        ];
+
         let rows = sqlx::query(
             r#"
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at
             FROM secure_cloud_rentals
-            WHERE status IN ('pending', 'provisioning', 'running')
+            WHERE status = ANY($1)
             ORDER BY created_at DESC
             "#,
         )
+        .bind(&active_statuses)
         .fetch_all(&self.pool)
         .await?;
 
         let deployments = rows
-            .into_iter()
-            .filter_map(|r| {
-                let provider_str: String = r.get("provider");
-                let status_str: String = r.get("status");
-
-                Some(Deployment {
-                    id: r.get("id"),
-                    user_id: r.get("user_id"),
-                    provider: provider_str.parse().ok()?,
-                    provider_instance_id: r.get("provider_instance_id"),
-                    offering_id: r.get("offering_id"),
-                    instance_type: r.get("instance_type"),
-                    location_code: r.get("location_code"),
-                    status: status_str.parse().ok()?,
-                    hostname: r.get("hostname"),
-                    ssh_key_id: r.get("ssh_key_id"),
-                    ip_address: r.get("ip_address"),
-                    connection_info: r.get("connection_info"),
-                    raw_response: r.get("raw_response"),
-                    error_message: r.get("error_message"),
-                    created_at: r.get("created_at"),
-                    updated_at: r.get("updated_at"),
-                })
-            })
+            .iter()
+            .filter_map(Self::parse_deployment_from_row)
             .collect();
 
         Ok(deployments)
@@ -585,17 +543,30 @@ impl Database {
         .await?;
 
         Ok(row.and_then(|r| {
+            let id: String = r.get("id");
             let provider_str: String = r.get("provider");
-            Provider::from_str(&provider_str)
-                .ok()
-                .map(|p| ProviderSshKey {
-                    id: r.get("id"),
-                    ssh_key_id: r.get("ssh_key_id"),
-                    provider: p,
-                    provider_key_id: r.get("provider_key_id"),
-                    created_at: r.get("created_at"),
-                    metadata: r.get("metadata"),
-                })
+
+            let provider = match Provider::from_str(&provider_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!(
+                        provider_ssh_key_id = %id,
+                        provider = %provider_str,
+                        error = %e,
+                        "Failed to parse provider from provider_ssh_keys row, skipping"
+                    );
+                    return None;
+                }
+            };
+
+            Some(ProviderSshKey {
+                id,
+                ssh_key_id: r.get("ssh_key_id"),
+                provider,
+                provider_key_id: r.get("provider_key_id"),
+                created_at: r.get("created_at"),
+                metadata: r.get("metadata"),
+            })
         }))
     }
 
@@ -635,17 +606,30 @@ impl Database {
         let mappings = rows
             .into_iter()
             .filter_map(|r| {
+                let id: String = r.get("id");
                 let provider_str: String = r.get("provider");
-                Provider::from_str(&provider_str)
-                    .ok()
-                    .map(|p| ProviderSshKey {
-                        id: r.get("id"),
-                        ssh_key_id: r.get("ssh_key_id"),
-                        provider: p,
-                        provider_key_id: r.get("provider_key_id"),
-                        created_at: r.get("created_at"),
-                        metadata: r.get("metadata"),
-                    })
+
+                let provider = match Provider::from_str(&provider_str) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::error!(
+                            provider_ssh_key_id = %id,
+                            provider = %provider_str,
+                            error = %e,
+                            "Failed to parse provider from provider_ssh_keys row, skipping"
+                        );
+                        return None;
+                    }
+                };
+
+                Some(ProviderSshKey {
+                    id,
+                    ssh_key_id: r.get("ssh_key_id"),
+                    provider,
+                    provider_key_id: r.get("provider_key_id"),
+                    created_at: r.get("created_at"),
+                    metadata: r.get("metadata"),
+                })
             })
             .collect();
 

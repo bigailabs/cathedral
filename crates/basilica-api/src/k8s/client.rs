@@ -595,10 +595,46 @@ impl ApiK8sClient for K8sClient {
     }
 
     async fn create_namespace(&self, name: &str) -> Result<()> {
+        use std::collections::BTreeMap;
+
         let api: Api<Namespace> = Api::all(self.client.clone());
+
+        let mut labels = BTreeMap::new();
+
+        if name.starts_with("u-") {
+            labels.insert(
+                "pod-security.kubernetes.io/enforce".to_string(),
+                "privileged".to_string(),
+            );
+            labels.insert(
+                "pod-security.kubernetes.io/audit".to_string(),
+                "restricted".to_string(),
+            );
+            labels.insert(
+                "pod-security.kubernetes.io/warn".to_string(),
+                "restricted".to_string(),
+            );
+
+            tracing::info!(
+                target: "security_audit",
+                event_type = "namespace_created_with_pss",
+                severity = "info",
+                namespace = %name,
+                pss_enforce = "privileged",
+                pss_audit = "restricted",
+                pss_warn = "restricted",
+                "Creating user namespace with PSS privileged enforcement (FUSE requires privileged containers), audit/warn set to restricted for visibility"
+            );
+        }
+
         let ns = Namespace {
             metadata: ObjectMeta {
                 name: Some(name.to_string()),
+                labels: if labels.is_empty() {
+                    None
+                } else {
+                    Some(labels)
+                },
                 ..Default::default()
             },
             ..Default::default()
@@ -608,10 +644,37 @@ impl ApiK8sClient for K8sClient {
             Ok(_) => {
                 if name.starts_with("u-") {
                     helpers::create_reference_grant_for_namespace(&self.client, name).await?;
+                    helpers::copy_default_storage_secret(&self.client, name).await?;
+
+                    if let Err(e) =
+                        crate::k8s::apply_user_namespace_security_policies(&self.client, name).await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            namespace = %name,
+                            "Failed to apply security policies to namespace, continuing anyway"
+                        );
+                    }
                 }
                 Ok(())
             }
-            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                if name.starts_with("u-") {
+                    helpers::create_reference_grant_for_namespace(&self.client, name).await?;
+                    helpers::copy_default_storage_secret(&self.client, name).await?;
+
+                    if let Err(e) =
+                        crate::k8s::apply_user_namespace_security_policies(&self.client, name).await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            namespace = %name,
+                            "Failed to apply security policies to namespace, continuing anyway"
+                        );
+                    }
+                }
+                Ok(())
+            }
             Err(e) => Err(ApiError::Internal {
                 message: format!("create namespace failed: {e}"),
             }),
@@ -769,6 +832,71 @@ impl ApiK8sClient for K8sClient {
             }
 
             spec["healthCheck"] = health_check_obj;
+        }
+
+        if let Some(ref storage) = req.storage {
+            if let Some(ref persistent) = storage.persistent {
+                let backend_str = match persistent.backend {
+                    crate::api::routes::deployments::types::StorageBackend::R2 => "r2",
+                    crate::api::routes::deployments::types::StorageBackend::S3 => "s3",
+                    crate::api::routes::deployments::types::StorageBackend::GCS => "gcs",
+                };
+
+                let is_custom_storage = persistent
+                    .credentials_secret
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty());
+
+                let default_secret_name = match persistent.backend {
+                    crate::api::routes::deployments::types::StorageBackend::R2 => {
+                        "basilica-r2-credentials"
+                    }
+                    crate::api::routes::deployments::types::StorageBackend::S3 => {
+                        "basilica-s3-credentials"
+                    }
+                    crate::api::routes::deployments::types::StorageBackend::GCS => {
+                        "basilica-gcs-credentials"
+                    }
+                };
+
+                // When using custom storage (user-provided credentials), bucket is required
+                // When using system credentials, bucket is read from the credentials secret
+                // by the operator, so we don't pass it in the CR spec
+                let (bucket, credentials_secret) = if is_custom_storage {
+                    (
+                        persistent.bucket.clone(),
+                        persistent.credentials_secret.clone(),
+                    )
+                } else {
+                    // For system credentials, bucket comes from the secret, not the request
+                    // The operator will read STORAGE_BUCKET from the credentials secret
+                    (
+                        String::new(), // Empty bucket - operator reads from secret
+                        Some(default_secret_name.to_string()),
+                    )
+                };
+
+                let mut persistent_obj = json!({
+                    "enabled": persistent.enabled,
+                    "backend": backend_str,
+                    "bucket": bucket,
+                    "syncIntervalMs": persistent.sync_interval_ms,
+                    "cacheSizeMb": persistent.cache_size_mb,
+                    "mountPath": persistent.mount_path,
+                });
+                if let Some(ref region) = persistent.region {
+                    persistent_obj["region"] = json!(region);
+                }
+                if let Some(ref endpoint) = persistent.endpoint {
+                    persistent_obj["endpoint"] = json!(endpoint);
+                }
+                if let Some(ref creds) = credentials_secret {
+                    persistent_obj["credentialsSecret"] = json!(creds);
+                }
+                spec["storage"] = json!({
+                    "persistent": persistent_obj
+                });
+            }
         }
 
         let obj = json!({

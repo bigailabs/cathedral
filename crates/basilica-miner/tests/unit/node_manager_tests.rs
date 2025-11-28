@@ -11,7 +11,7 @@ async fn test_node_registration() {
         host: "192.168.1.100".to_string(),
         port: 22,
         username: "basilica".to_string(),
-        hourly_rate_dollars: 2.5,
+        hourly_rate_per_gpu: 2.5,
         additional_opts: None,
     };
 
@@ -41,7 +41,7 @@ async fn test_list_nodes() {
                 host: "192.168.1.100".to_string(),
                 port: 22,
                 username: "basilica".to_string(),
-                hourly_rate_dollars: 2.5,
+                hourly_rate_per_gpu: 2.5,
                 additional_opts: None,
             },
         )
@@ -55,7 +55,7 @@ async fn test_list_nodes() {
                 host: "192.168.1.101".to_string(),
                 port: 22,
                 username: "basilica".to_string(),
-                hourly_rate_dollars: 2.5,
+                hourly_rate_per_gpu: 2.5,
                 additional_opts: None,
             },
         )
@@ -69,7 +69,7 @@ async fn test_list_nodes() {
                 host: "192.168.1.102".to_string(),
                 port: 22,
                 username: "basilica".to_string(),
-                hourly_rate_dollars: 2.5,
+                hourly_rate_per_gpu: 2.5,
                 additional_opts: None,
             },
         )
@@ -98,7 +98,7 @@ async fn test_unregister_node() {
                 host: "192.168.1.100".to_string(),
                 port: 22,
                 username: "basilica".to_string(),
-                hourly_rate_dollars: 2.5,
+                hourly_rate_per_gpu: 2.5,
                 additional_opts: None,
             },
         )

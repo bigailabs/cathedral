@@ -3,6 +3,7 @@ pub mod cluster_tokens;
 mod helpers;
 pub mod k3s_commands;
 mod mock;
+mod security_policies;
 mod r#trait;
 mod types;
 
@@ -22,4 +23,5 @@ pub use helpers::{
 };
 pub use mock::MockK8sClient;
 pub use r#trait::ApiK8sClient;
+pub use security_policies::apply_user_namespace_security_policies;
 pub use types::*;

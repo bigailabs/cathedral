@@ -156,3 +156,28 @@ variable "deployments_alb_dns_name" {
   type        = string
   description = "DNS name of the ALB for deployments.basilica.ai"
 }
+
+variable "hyperstack_api_key" {
+  type        = string
+  description = "API key for Hyperstack GPU provider"
+  sensitive   = true
+  default     = ""
+}
+
+# WireGuard VPN Configuration
+variable "wireguard_enabled" {
+  type        = bool
+  description = "Enable WireGuard VPN for remote GPU nodes"
+  default     = false
+}
+
+variable "wireguard_servers" {
+  type = list(object({
+    endpoint     = string # public_ip:port
+    public_key   = string # WireGuard public key (base64)
+    wireguard_ip = string # e.g., 10.200.0.1
+    vpc_subnet   = string # e.g., 10.101.0.0/24
+  }))
+  description = "List of K3s servers with their WireGuard configurations"
+  default     = []
+}

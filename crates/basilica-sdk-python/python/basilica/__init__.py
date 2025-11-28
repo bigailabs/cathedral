@@ -5,7 +5,7 @@ A Python SDK for interacting with the Basilica GPU rental network.
 """
 
 import os
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 
 from basilica._basilica import (
     BasilicaClient as _BasilicaClient,
@@ -37,6 +37,9 @@ from basilica._basilica import (
     ResourceRequirements,
     ReplicaStatus,
     PodInfo,
+    StorageBackend,
+    PersistentStorageSpec,
+    StorageSpec,
     CreateDeploymentRequest,
     DeploymentResponse,
     DeploymentSummary,
@@ -86,6 +89,9 @@ __all__ = [
     "ResourceRequirements",
     "ReplicaStatus",
     "PodInfo",
+    "StorageBackend",
+    "PersistentStorageSpec",
+    "StorageSpec",
     "CreateDeploymentRequest",
     "DeploymentResponse",
     "DeploymentSummary",
@@ -348,7 +354,8 @@ class BasilicaClient:
         cpu: str = "500m",
         memory: str = "512Mi",
         ttl_seconds: Optional[int] = None,
-        public: bool = True
+        public: bool = True,
+        storage: Optional[Union[str, Any]] = None
     ) -> DeploymentResponse:
         """
         Create a new deployment.
@@ -365,11 +372,46 @@ class BasilicaClient:
             memory: Memory resource request (default: "512Mi")
             ttl_seconds: Optional time-to-live in seconds
             public: Create public URL (default: True)
+            storage: Optional storage specification. Can be:
+                    - str: Mount path (e.g. "/data") - uses default R2 backend
+                    - StorageSpec: Custom storage configuration with your own backend
 
         Returns:
             DeploymentResponse: Typed response with deployment details
+
+        Example:
+            Simple storage (recommended):
+            >>> client.create_deployment(..., storage="/data")
+
+            Custom backend:
+            >>> custom_storage = StorageSpec(
+            ...     persistent=PersistentStorageSpec(
+            ...         enabled=True,
+            ...         backend=StorageBackend.S3,
+            ...         bucket="my-bucket",
+            ...         mount_path="/data"
+            ...     )
+            ... )
+            >>> client.create_deployment(..., storage=custom_storage)
         """
         resources = ResourceRequirements(cpu=cpu, memory=memory) if cpu or memory else None
+
+        storage_spec = None
+        if storage is not None:
+            if isinstance(storage, str):
+                storage_spec = StorageSpec(
+                    persistent=PersistentStorageSpec(
+                        enabled=True,
+                        backend=StorageBackend.R2,
+                        bucket="",
+                        credentials_secret=None,
+                        sync_interval_ms=1000,
+                        cache_size_mb=1024,
+                        mount_path=storage
+                    )
+                )
+            else:
+                storage_spec = storage
 
         request = CreateDeploymentRequest(
             instance_name=instance_name,
@@ -381,7 +423,8 @@ class BasilicaClient:
             env=env,
             resources=resources,
             ttl_seconds=ttl_seconds,
-            public=public
+            public=public,
+            storage=storage_spec
         )
 
         return self._client.create_deployment(request)

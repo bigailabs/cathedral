@@ -34,8 +34,8 @@ pub struct NodeConfig {
     pub port: u16,
     /// SSH username for validator access
     pub username: String,
-    /// Hourly rental rate in dollars (e.g., 2.50 for $2.50/hour per GPU)
-    pub hourly_rate_dollars: f64,
+    /// Hourly rental rate in dollars per GPU (e.g., 2.50 for $2.50/hour/GPU)
+    pub hourly_rate_per_gpu: f64,
     /// Additional SSH options
     pub additional_opts: Option<String>,
 }
@@ -404,7 +404,7 @@ mod tests {
             host: "192.168.1.100".to_string(),
             port: 22,
             username: "basilica".to_string(),
-            hourly_rate_dollars: 2.5,
+            hourly_rate_per_gpu: 2.5,
             additional_opts: None,
         };
 

@@ -142,6 +142,32 @@ impl ValidatorClient {
         }
     }
 
+    /// Restart a rental's container
+    pub async fn restart_rental(
+        &self,
+        rental_id: &str,
+    ) -> Result<crate::rental::RentalRestartResponse> {
+        let url = format!("{}/rentals/{}/restart", self.base_url, rental_id);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .send()
+            .await
+            .context("Failed to send restart request")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            anyhow::bail!("Failed to restart rental: {} - {}", status, error_body);
+        }
+
+        response
+            .json()
+            .await
+            .context("Failed to parse restart response")
+    }
+
     /// Stream rental logs
     pub async fn stream_rental_logs(
         &self,

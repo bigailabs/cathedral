@@ -104,6 +104,12 @@ pub enum Commands {
         all: bool,
     },
 
+    /// Restart instance container
+    Restart {
+        /// Rental UUID to restart (optional)
+        target: Option<String>,
+    },
+
     /// Execute commands on instances
     Exec {
         /// Command to execute
@@ -198,14 +204,6 @@ pub enum Commands {
         json: bool,
     },
 
-    /// List available billing packages and pricing
-    #[cfg(debug_assertions)]
-    Packages {
-        /// Output as JSON
-        #[arg(long, global = true)]
-        json: bool,
-    },
-
     /// Upgrade the Basilica CLI to a newer version
     Upgrade {
         /// Specific version to upgrade to (e.g., "0.5.4")
@@ -292,6 +290,7 @@ impl Commands {
             | Commands::Status { .. }
             | Commands::Logs { .. }
             | Commands::Down { .. }
+            | Commands::Restart { .. }
             | Commands::Exec { .. }
             | Commands::Ssh { .. }
             | Commands::Cp { .. }
@@ -299,10 +298,6 @@ impl Commands {
             | Commands::SshKeys { .. }
             | Commands::Fund { .. }
             | Commands::Balance { .. } => true,
-
-            // Debug commands require authentication
-            #[cfg(debug_assertions)]
-            Commands::Packages { .. } => true,
 
             // Authentication and delegation commands don't require auth
             Commands::Login { .. }
@@ -437,7 +432,7 @@ pub struct PsFilters {
     #[arg(long)]
     pub detailed: bool,
 
-    /// Show all rental history instead of just active rentals
+    /// Show rental history instead of active rentals
     #[arg(long)]
     pub history: bool,
 }

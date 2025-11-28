@@ -401,6 +401,10 @@ module "basilica_api_service" {
     BASILICA_API_K3S_SSH__KEY_PATH     = "/tmp/.ssh/k3s_key"
     BASILICA_API_K3S_SSH__TIMEOUT_SECS = "30"
 
+    # WireGuard VPN Configuration
+    BASILICA_API_WIREGUARD__ENABLED = tostring(var.wireguard_enabled)
+    BASILICA_API_WIREGUARD__SERVERS = jsonencode(var.wireguard_servers)
+
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
   }
@@ -414,6 +418,10 @@ module "basilica_api_service" {
     {
       name      = "SSH_PRIVATE_KEY"
       valueFrom = aws_secretsmanager_secret.k3s_ssh_key.arn
+    },
+    {
+      name      = "BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__API_KEY"
+      valueFrom = aws_secretsmanager_secret.hyperstack_api_key.arn
     }
   ]
 

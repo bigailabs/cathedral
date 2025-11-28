@@ -21,6 +21,9 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+parking_lot = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
 
 # Object storage - AWS SDK for R2 compatibility
 aws-config = "1.1"
@@ -36,6 +39,13 @@ libc = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+
+# Rate limiting and quotas
+governor = "0.6"
+
+# Kubernetes API (for daemon mode credential fetching and namespace watching)
+kube = { version = "0.88", features = ["derive", "rustls-tls", "runtime"] }
+k8s-openapi = { version = "0.21", features = ["v1_29"] }
 
 # CLI
 clap = { workspace = true }

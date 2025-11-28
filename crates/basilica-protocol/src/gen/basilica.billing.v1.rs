@@ -176,25 +176,15 @@ pub struct UpdateRentalStatusResponse {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetActiveRentalsRequest {
+    #[prost(string, tag = "1")]
+    pub user_id: ::prost::alloc::string::String,
     #[prost(uint32, tag = "4")]
     pub limit: u32,
     #[prost(uint32, tag = "5")]
     pub offset: u32,
-    #[prost(oneof = "get_active_rentals_request::Filter", tags = "1, 2, 3")]
-    pub filter: ::core::option::Option<get_active_rentals_request::Filter>,
-}
-/// Nested message and enum types in `GetActiveRentalsRequest`.
-pub mod get_active_rentals_request {
-    #[allow(clippy::derive_partial_eq_without_eq)]
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Filter {
-        #[prost(string, tag = "1")]
-        UserId(::prost::alloc::string::String),
-        #[prost(string, tag = "2")]
-        ValidatorId(::prost::alloc::string::String),
-        #[prost(string, tag = "3")]
-        NodeId(::prost::alloc::string::String),
-    }
+    /// Filter by status; empty = all statuses
+    #[prost(enumeration = "RentalStatus", repeated, tag = "6")]
+    pub status_filter: ::prost::alloc::vec::Vec<i32>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

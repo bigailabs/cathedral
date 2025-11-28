@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use basilica_protocol::billing::{
-    billing_service_client::BillingServiceClient, get_active_rentals_request,
-    GetActiveRentalsRequest, GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse,
-    UsageAggregation, UsageReportRequest, UsageReportResponse,
+    billing_service_client::BillingServiceClient, GetActiveRentalsRequest,
+    GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, IngestResponse, RentalStatus,
+    TelemetryData, UsageAggregation, UsageReportRequest, UsageReportResponse,
 };
+use futures::stream;
 use std::time::Duration;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
@@ -154,70 +155,49 @@ impl BillingClient {
         limit: Option<u32>,
         offset: Option<u32>,
     ) -> Result<GetActiveRentalsResponse> {
+        self.get_rentals_for_user(user_id, limit, offset, vec![])
+            .await
+    }
+
+    /// Get historical (completed/failed) rentals for a user
+    pub async fn get_historical_rentals_for_user(
+        &self,
+        user_id: impl Into<String>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> Result<GetActiveRentalsResponse> {
+        self.get_rentals_for_user(
+            user_id,
+            limit,
+            offset,
+            vec![RentalStatus::Stopped as i32, RentalStatus::Failed as i32],
+        )
+        .await
+    }
+
+    /// Get rentals for a user with optional status filter
+    pub async fn get_rentals_for_user(
+        &self,
+        user_id: impl Into<String>,
+        limit: Option<u32>,
+        offset: Option<u32>,
+        status_filter: Vec<i32>,
+    ) -> Result<GetActiveRentalsResponse> {
         let user_id = user_id.into();
         let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::UserId(user_id.clone())),
+            user_id: user_id.clone(),
             limit: limit.unwrap_or(50),
             offset: offset.unwrap_or(0),
+            status_filter,
         };
 
-        debug!("Fetching active rentals for user: {}", user_id);
+        debug!("Fetching rentals for user: {}", user_id);
 
         let mut client = self.client.clone();
         let response = client
             .get_active_rentals(request)
             .await
             .with_context(|| format!("Failed to get active rentals for user: {}", user_id))?;
-
-        Ok(response.into_inner())
-    }
-
-    pub async fn get_active_rentals_for_validator(
-        &self,
-        validator_id: String,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> Result<GetActiveRentalsResponse> {
-        let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::ValidatorId(
-                validator_id.clone(),
-            )),
-            limit: limit.unwrap_or(50),
-            offset: offset.unwrap_or(0),
-        };
-
-        debug!("Fetching active rentals for validator: {}", validator_id);
-
-        let mut client = self.client.clone();
-        let response = client.get_active_rentals(request).await.with_context(|| {
-            format!(
-                "Failed to get active rentals for validator: {}",
-                validator_id
-            )
-        })?;
-
-        Ok(response.into_inner())
-    }
-
-    pub async fn get_active_rentals_for_node(
-        &self,
-        node_id: String,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> Result<GetActiveRentalsResponse> {
-        let request = GetActiveRentalsRequest {
-            filter: Some(get_active_rentals_request::Filter::NodeId(node_id.clone())),
-            limit: limit.unwrap_or(50),
-            offset: offset.unwrap_or(0),
-        };
-
-        debug!("Fetching active rentals for node: {}", node_id);
-
-        let mut client = self.client.clone();
-        let response = client
-            .get_active_rentals(request)
-            .await
-            .with_context(|| format!("Failed to get active rentals for node: {}", node_id))?;
 
         Ok(response.into_inner())
     }
@@ -282,6 +262,19 @@ impl BillingClient {
                 e.message()
             )
         })?;
+
+        Ok(response.into_inner())
+    }
+
+    pub async fn ingest_telemetry(&self, batch: Vec<TelemetryData>) -> Result<IngestResponse> {
+        debug!("Ingesting telemetry batch of {} records", batch.len());
+
+        let mut client = self.client.clone();
+        let stream = stream::iter(batch);
+        let response = client
+            .ingest_telemetry(stream)
+            .await
+            .context("Failed to ingest telemetry batch")?;
 
         Ok(response.into_inner())
     }

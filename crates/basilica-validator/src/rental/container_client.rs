@@ -560,6 +560,53 @@ impl ContainerClient {
         Ok(())
     }
 
+    /// Restart a container (docker restart)
+    pub async fn restart_container(&self, container_id: &str, timeout_secs: u64) -> Result<()> {
+        let validated_container_id = self.validate_container_id(container_id)?;
+        let restart_cmd = format!(
+            "docker restart -t {} {}",
+            timeout_secs, validated_container_id
+        );
+
+        self.execute_ssh_command(&restart_cmd)
+            .await
+            .context("Failed to restart container")?;
+
+        info!("Container {} restart initiated", container_id);
+
+        // Wait for container to be running (with timeout)
+        self.wait_for_container_running(container_id, Duration::from_secs(30))
+            .await?;
+
+        Ok(())
+    }
+
+    /// Wait for container to reach running state
+    async fn wait_for_container_running(
+        &self,
+        container_id: &str,
+        timeout: Duration,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+
+        loop {
+            if start.elapsed() > timeout {
+                return Err(anyhow::anyhow!(
+                    "Timeout waiting for container {} to start after restart",
+                    container_id
+                ));
+            }
+
+            let status = self.get_container_status(container_id).await?;
+            if status.state == "running" {
+                info!("Container {} is running", container_id);
+                return Ok(());
+            }
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
     /// Stream container logs using StandardSshClient streaming
     pub async fn stream_logs(
         &self,

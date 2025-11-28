@@ -652,6 +652,88 @@ impl RentalManager {
         Ok(())
     }
 
+    /// Restart a rental's container
+    pub async fn restart_rental(&self, rental_id: &str) -> Result<RentalRestartResponse> {
+        let start_time = std::time::Instant::now();
+
+        // Load rental info
+        let rental_info = self
+            .persistence
+            .load_rental(rental_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Rental not found: {}", rental_id))?;
+
+        // Validate state - only Active rentals can be restarted
+        if rental_info.state != RentalState::Active {
+            return Err(anyhow::anyhow!(
+                "Cannot restart rental in {} state. Only Active rentals can be restarted.",
+                rental_info.state
+            ));
+        }
+
+        tracing::info!(
+            rental_id = %rental_id,
+            node_id = %rental_info.node_id,
+            container_id = %rental_info.container_id,
+            "Restarting rental"
+        );
+
+        // Update state to Restarting
+        let mut updated_rental = rental_info.clone();
+        updated_rental.state = RentalState::Restarting;
+        updated_rental.updated_at = chrono::Utc::now();
+        self.persistence.save_rental(&updated_rental).await?;
+
+        // Create container client and perform restart
+        let container_client = match self.create_container_client(&rental_info.ssh_credentials) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!(
+                    rental_id = %rental_id,
+                    error = %e,
+                    "Failed to create container client for restart"
+                );
+                updated_rental.state = RentalState::Failed;
+                updated_rental.updated_at = chrono::Utc::now();
+                self.persistence.save_rental(&updated_rental).await?;
+                return Err(e);
+            }
+        };
+        let restart_result = container_client
+            .restart_container(&rental_info.container_id, 10)
+            .await;
+
+        // Update state based on result
+        let final_state = match restart_result {
+            Ok(_) => {
+                tracing::info!(rental_id = %rental_id, "Successfully restarted rental");
+                RentalState::Active
+            }
+            Err(ref e) => {
+                tracing::error!(
+                    rental_id = %rental_id,
+                    error = %e,
+                    "Failed to restart rental"
+                );
+                RentalState::Failed
+            }
+        };
+
+        updated_rental.state = final_state.clone();
+        updated_rental.updated_at = chrono::Utc::now();
+        self.persistence.save_rental(&updated_rental).await?;
+
+        // Return error if restart failed
+        restart_result?;
+
+        Ok(RentalRestartResponse {
+            rental_id: rental_id.to_string(),
+            status: final_state,
+            message: "Container restarted successfully".to_string(),
+            operation_duration_ms: start_time.elapsed().as_millis() as u64,
+        })
+    }
+
     /// Stream container logs
     pub async fn stream_logs(
         &self,

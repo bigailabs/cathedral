@@ -129,13 +129,11 @@ message UpdateRentalStatusResponse {
 }
 
 message GetActiveRentalsRequest {
-    oneof filter {
-        string user_id = 1;
-        string validator_id = 2;
-        string node_id = 3;
-    }
+    string user_id = 1;
+    reserved 2, 3; // Previously validator_id, node_id (removed - never used in production)
     uint32 limit = 4;
     uint32 offset = 5;
+    repeated RentalStatus status_filter = 6; // Filter by status; empty = all statuses
 }
 
 message GetActiveRentalsResponse {

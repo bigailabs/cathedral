@@ -27,6 +27,20 @@ pub struct CreateDeploymentRequest {
     pub public: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<HealthCheckConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSpec>,
+    #[serde(default = "default_enable_billing")]
+    pub enable_billing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
+    #[serde(default)]
+    pub suspended: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+}
+
+fn default_enable_billing() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +48,66 @@ pub struct CreateDeploymentRequest {
 pub struct ResourceRequirements {
     pub cpu: String,
     pub memory: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<GpuRequirements>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuRequirements {
+    pub count: u32,
+    pub model: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_cuda_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_gpu_memory_gb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistent: Option<PersistentStorageSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentStorageSpec {
+    pub enabled: bool,
+    pub backend: StorageBackend,
+    pub bucket: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credentials_secret: Option<String>,
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval_ms: u64,
+    #[serde(default = "default_cache_size")]
+    pub cache_size_mb: usize,
+    #[serde(default = "default_mount_path")]
+    pub mount_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    R2,
+    S3,
+    GCS,
+}
+
+fn default_sync_interval() -> u64 {
+    1000
+}
+
+fn default_cache_size() -> usize {
+    1024
+}
+
+fn default_mount_path() -> String {
+    "/mnt/storage".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +334,129 @@ pub fn validate_memory_resource(memory: &str) -> Result<()> {
 pub fn validate_resources(resources: &ResourceRequirements) -> Result<()> {
     validate_cpu_resource(&resources.cpu)?;
     validate_memory_resource(&resources.memory)?;
+    if let Some(ref gpus) = resources.gpus {
+        validate_gpu_requirements(gpus)?;
+    }
+    Ok(())
+}
+
+pub fn validate_gpu_requirements(gpu: &GpuRequirements) -> Result<()> {
+    if gpu.count == 0 {
+        return Err(ApiError::InvalidRequest {
+            message: "GPU count must be at least 1".to_string(),
+        });
+    }
+
+    if gpu.count > 8 {
+        return Err(ApiError::InvalidRequest {
+            message: format!("GPU count {} exceeds maximum of 8", gpu.count),
+        });
+    }
+
+    if gpu.model.is_empty() {
+        return Err(ApiError::InvalidRequest {
+            message: "GPU model list cannot be empty".to_string(),
+        });
+    }
+
+    if gpu.model.len() > 10 {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "GPU model list too long: {} models (max 10)",
+                gpu.model.len()
+            ),
+        });
+    }
+
+    for model in &gpu.model {
+        if model.is_empty() {
+            return Err(ApiError::InvalidRequest {
+                message: "GPU model name cannot be empty".to_string(),
+            });
+        }
+    }
+
+    if let Some(ref cuda) = gpu.min_cuda_version {
+        if !cuda.contains('.') {
+            return Err(ApiError::InvalidRequest {
+                message: format!(
+                    "Invalid CUDA version format: '{}' (expected format: 'X.Y')",
+                    cuda
+                ),
+            });
+        }
+    }
+
+    if let Some(vram) = gpu.min_gpu_memory_gb {
+        if vram == 0 {
+            return Err(ApiError::InvalidRequest {
+                message: "Minimum GPU memory must be at least 1 GB".to_string(),
+            });
+        }
+        if vram > 256 {
+            return Err(ApiError::InvalidRequest {
+                message: format!("Minimum GPU memory {} GB exceeds maximum of 256 GB", vram),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_storage_spec(storage: &StorageSpec) -> Result<()> {
+    if let Some(ref persistent) = storage.persistent {
+        validate_persistent_storage(persistent)?;
+    }
+    Ok(())
+}
+
+pub fn validate_persistent_storage(storage: &PersistentStorageSpec) -> Result<()> {
+    if !storage.enabled {
+        return Ok(());
+    }
+
+    if storage.bucket.is_empty() {
+        return Err(ApiError::InvalidRequest {
+            message: "Storage bucket cannot be empty".to_string(),
+        });
+    }
+
+    if storage.sync_interval_ms < 100 {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "Sync interval {} ms is too low (minimum 100 ms)",
+                storage.sync_interval_ms
+            ),
+        });
+    }
+
+    if storage.sync_interval_ms > 60000 {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "Sync interval {} ms is too high (maximum 60000 ms)",
+                storage.sync_interval_ms
+            ),
+        });
+    }
+
+    if storage.cache_size_mb < 512 {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "Cache size {} MB is too low (minimum 512 MB)",
+                storage.cache_size_mb
+            ),
+        });
+    }
+
+    if storage.cache_size_mb > 16384 {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "Cache size {} MB is too high (maximum 16384 MB)",
+                storage.cache_size_mb
+            ),
+        });
+    }
+
     Ok(())
 }
 
@@ -279,6 +476,10 @@ pub fn validate_create_deployment_request(
 
     if let Some(ref resources) = req.resources {
         validate_resources(resources)?;
+    }
+
+    if let Some(ref storage) = req.storage {
+        validate_storage_spec(storage)?;
     }
 
     for key in req.env.keys() {
@@ -329,16 +530,37 @@ pub fn generate_path_prefix(instance_name: &str) -> String {
     format!("/deployments/{}", instance_name)
 }
 
-pub fn resolve_instance_name(provided: Option<String>) -> String {
-    match provided {
-        Some(name) if !name.is_empty() => {
-            tracing::warn!(
-                provided_name = %name,
-                "User-provided instance_name is deprecated and will be ignored. Server will auto-generate UUID."
-            );
-            generate_instance_name()
-        }
-        _ => generate_instance_name(),
+/// Sanitize instance name for use as a Kubernetes resource identifier.
+/// If no name is provided or sanitization results in empty string, generates a random UUID.
+#[must_use]
+pub fn sanitize_instance_name(provided: Option<String>) -> String {
+    let name = match provided {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => return generate_instance_name(),
+    };
+
+    // Sanitize: lowercase, keep alphanumeric + hyphens, max 63 chars
+    let sanitized: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(63)
+        .collect();
+
+    // Remove leading/trailing hyphens
+    let result = sanitized.trim_matches('-');
+
+    // If sanitization resulted in empty string, generate UUID
+    if result.is_empty() {
+        generate_instance_name()
+    } else {
+        result.to_string()
     }
 }
 
@@ -474,18 +696,21 @@ mod tests {
         let valid_resources = ResourceRequirements {
             cpu: "500m".to_string(),
             memory: "512Mi".to_string(),
+            gpus: None,
         };
         assert!(validate_resources(&valid_resources).is_ok());
 
         let invalid_cpu = ResourceRequirements {
             cpu: "invalid".to_string(),
             memory: "512Mi".to_string(),
+            gpus: None,
         };
         assert!(validate_resources(&invalid_cpu).is_err());
 
         let invalid_memory = ResourceRequirements {
             cpu: "500m".to_string(),
             memory: "invalid".to_string(),
+            gpus: None,
         };
         assert!(validate_resources(&invalid_memory).is_err());
     }
@@ -548,10 +773,16 @@ mod tests {
             resources: Some(ResourceRequirements {
                 cpu: "500m".to_string(),
                 memory: "512Mi".to_string(),
+                gpus: None,
             }),
             ttl_seconds: None,
             public: false,
             health_check: None,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_ok());
     }
@@ -569,10 +800,16 @@ mod tests {
             resources: Some(ResourceRequirements {
                 cpu: "500m".to_string(),
                 memory: "512Mi".to_string(),
+                gpus: None,
             }),
             ttl_seconds: None,
             public: false,
             health_check: None,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_ok());
     }
@@ -591,6 +828,11 @@ mod tests {
             ttl_seconds: None,
             public: false,
             health_check: None,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
     }
@@ -612,6 +854,11 @@ mod tests {
             ttl_seconds: None,
             public: false,
             health_check: None,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
         assert!(validate_create_deployment_request(&req, 10).is_err());
     }
@@ -624,21 +871,65 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_instance_name_none() {
-        let name = resolve_instance_name(None);
+    fn test_sanitize_instance_name_none() {
+        // When no name provided, generates a UUID
+        let name = sanitize_instance_name(None);
         assert_eq!(name.len(), 36);
     }
 
     #[test]
-    fn test_resolve_instance_name_empty() {
-        let name = resolve_instance_name(Some("".to_string()));
+    fn test_sanitize_instance_name_empty() {
+        // When empty string provided, generates a UUID
+        let name = sanitize_instance_name(Some("".to_string()));
         assert_eq!(name.len(), 36);
     }
 
     #[test]
-    fn test_resolve_instance_name_provided() {
-        let name = resolve_instance_name(Some("user-provided".to_string()));
+    fn test_sanitize_instance_name_provided() {
+        // When valid name provided, returns sanitized version
+        let name = sanitize_instance_name(Some("my-app".to_string()));
+        assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_uppercase() {
+        // Converts to lowercase
+        let name = sanitize_instance_name(Some("My-App".to_string()));
+        assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_special_chars() {
+        // Replaces special characters with hyphens
+        let name = sanitize_instance_name(Some("my_app.test".to_string()));
+        assert_eq!(name, "my-app-test");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_leading_trailing_hyphens() {
+        // Removes leading/trailing hyphens
+        let name = sanitize_instance_name(Some("-my-app-".to_string()));
+        assert_eq!(name, "my-app");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_all_dashes() {
+        // All dashes results in UUID generation
+        let name = sanitize_instance_name(Some("---".to_string()));
+        assert_eq!(name.len(), 36); // UUID length
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_all_special_chars() {
+        // All special chars become dashes, then trimmed to empty, generates UUID
+        let name = sanitize_instance_name(Some("@#$%".to_string()));
         assert_eq!(name.len(), 36);
-        assert_ne!(name, "user-provided");
+    }
+
+    #[test]
+    fn test_sanitize_instance_name_whitespace_only() {
+        // Whitespace-only generates UUID
+        let name = sanitize_instance_name(Some("   ".to_string()));
+        assert_eq!(name.len(), 36);
     }
 }

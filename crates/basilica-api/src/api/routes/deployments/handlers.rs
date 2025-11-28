@@ -13,8 +13,8 @@ use axum::{
 use serde::Serialize;
 
 use super::types::{
-    resolve_instance_name, sanitize_user_id, validate_image, validate_port, validate_replicas,
-    CreateDeploymentRequest, DeploymentResponse,
+    sanitize_instance_name, sanitize_user_id, validate_image, validate_instance_name,
+    validate_port, validate_replicas, CreateDeploymentRequest, DeploymentResponse,
 };
 
 fn user_namespace(user_id: &str) -> String {
@@ -108,10 +108,20 @@ pub async fn create_deployment(
 ) -> Result<impl IntoResponse> {
     let start = std::time::Instant::now();
 
-    let instance_name = resolve_instance_name(req.instance_name.clone());
+    // Sanitize the user-provided instance name (or generate one if not provided)
+    let user_instance_name = sanitize_instance_name(req.instance_name.clone());
+
+    // Validate the sanitized name
+    validate_instance_name(&user_instance_name)?;
+
+    // Get or create a stable instance_id (UUID) for this (user_id, instance_name) pair
+    // This enables idempotent deployments - same name = same storage prefix
+    let instance_name =
+        db::get_or_create_instance_id(&state.db, &auth.user_id, &user_instance_name).await?;
 
     tracing::info!(
         user_id = %auth.user_id,
+        user_instance_name = %user_instance_name,
         instance_name = %instance_name,
         image = %req.image,
         replicas = req.replicas,
@@ -312,6 +322,116 @@ pub async fn create_deployment(
                 db::update_deployment_state(&state.db, existing.id, "Failed", Some(&error_msg))
                     .await?;
                 return Err(e);
+            }
+        }
+    }
+
+    // Check for soft-deleted deployment with the same instance_name.
+    // If found, reactivate it instead of creating a new record.
+    // This preserves the storage path (instance_id) for data persistence.
+    let deleted =
+        db::get_deployment_including_deleted(&state.db, &auth.user_id, &instance_name).await?;
+
+    if let Some(deleted_record) = deleted {
+        if deleted_record.deleted_at.is_some() {
+            tracing::info!(
+                user_id = %auth.user_id,
+                instance_name = %instance_name,
+                deployment_id = deleted_record.id,
+                "Found soft-deleted deployment, reactivating for storage persistence"
+            );
+
+            let record = db::reactivate_deployment(
+                &state.db,
+                deleted_record.id,
+                db::ReactivateDeploymentParams {
+                    image: &req.image,
+                    replicas: req.replicas as i32,
+                    port: req.port as i32,
+                    public_url: &public_url,
+                    public: req.public,
+                },
+            )
+            .await?;
+
+            match create_k8s_resources(
+                k8s_client.clone(),
+                &state.config,
+                &namespace,
+                &cr_name,
+                &auth.user_id,
+                &instance_name,
+                &req,
+                &path_prefix,
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        user_id = %auth.user_id,
+                        instance_name = %instance_name,
+                        deployment_id = record.id,
+                        "K8s resources created for reactivated deployment"
+                    );
+                    db::update_deployment_state(&state.db, record.id, "Active", None).await?;
+
+                    if req.public {
+                        if let Some(dns_provider) = &state.dns_provider {
+                            let alb_dns_name =
+                                state.config.dns.alb_dns_name.as_ref().ok_or_else(|| {
+                                    ApiError::Internal {
+                                        message:
+                                            "ALB DNS name not configured for public deployments"
+                                                .to_string(),
+                                    }
+                                })?;
+
+                            if let Err(e) = dns_provider
+                                .create_record(&instance_name, alb_dns_name)
+                                .await
+                            {
+                                tracing::error!(
+                                    user_id = %auth.user_id,
+                                    instance_name = %instance_name,
+                                    error = %e,
+                                    "Failed to create DNS record for reactivated deployment"
+                                );
+                            }
+                        }
+                    }
+
+                    apimetrics::record_request("POST /deployments", "200", start, true);
+                    return Ok((
+                        StatusCode::OK,
+                        Json(DeploymentResponse {
+                            instance_name: record.instance_name,
+                            user_id: record.user_id,
+                            namespace: record.namespace,
+                            state: "Active".to_string(),
+                            url: record.public_url,
+                            replicas: super::types::ReplicaStatus {
+                                desired: record.replicas as u32,
+                                ready: 0,
+                            },
+                            created_at: record.created_at.to_rfc3339(),
+                            updated_at: Some(record.updated_at.to_rfc3339()),
+                            pods: None,
+                        }),
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!(
+                        user_id = %auth.user_id,
+                        instance_name = %instance_name,
+                        deployment_id = record.id,
+                        error = %e,
+                        "Failed to create K8s resources for reactivated deployment"
+                    );
+                    let error_msg = format!("K8s resource creation failed: {}", e);
+                    db::update_deployment_state(&state.db, record.id, "Failed", Some(&error_msg))
+                        .await?;
+                    return Err(e);
+                }
             }
         }
     }

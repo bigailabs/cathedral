@@ -76,6 +76,7 @@ pub trait K8sClient: Send + Sync {
     ) -> Result<Vec<Service>>;
 
     async fn create_network_policy(&self, ns: &str, np: &NetworkPolicy) -> Result<NetworkPolicy>;
+    async fn get_network_policy(&self, ns: &str, name: &str) -> Result<NetworkPolicy>;
     async fn create_pvc(
         &self,
         ns: &str,
@@ -88,6 +89,14 @@ pub trait K8sClient: Send + Sync {
 
     async fn create_deployment(&self, ns: &str, dep: &Deployment) -> Result<Deployment>;
     async fn get_deployment(&self, ns: &str, name: &str) -> Result<Deployment>;
+    async fn patch_deployment(&self, ns: &str, name: &str, dep: &Deployment) -> Result<Deployment>;
+    async fn patch_service(&self, ns: &str, name: &str, svc: &Service) -> Result<Service>;
+    async fn patch_network_policy(
+        &self,
+        ns: &str,
+        name: &str,
+        np: &NetworkPolicy,
+    ) -> Result<NetworkPolicy>;
 
     // Queues
     async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue>;
@@ -98,6 +107,11 @@ pub trait K8sClient: Send + Sync {
     async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>>;
     async fn delete_node(&self, name: &str) -> Result<()>;
     async fn remove_node_taint(&self, name: &str, taint_key: &str) -> Result<()>;
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()>;
     /// Attempt to evict a pod using the Eviction subresource. Returns Ok(true)
     /// when accepted, Ok(false) when blocked (e.g., by PDB), or Err on errors.
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool>;
@@ -403,6 +417,14 @@ impl K8sClient for MockK8sClient {
         Ok(np.clone())
     }
 
+    async fn get_network_policy(&self, ns: &str, name: &str) -> Result<NetworkPolicy> {
+        let map = self.network_policies.read().await;
+        map.get(&key(ns))
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("NetworkPolicy {} not found in namespace {}", name, ns))
+    }
+
     async fn create_pvc(
         &self,
         ns: &str,
@@ -471,6 +493,43 @@ impl K8sClient for MockK8sClient {
             .ok_or_else(|| anyhow!("Deployment not found: {}/{}", ns, name))
     }
 
+    async fn patch_deployment(
+        &self,
+        ns: &str,
+        _name: &str,
+        dep: &Deployment,
+    ) -> Result<Deployment> {
+        let name = dep.name_any();
+        let mut map = self.deployments.write().await;
+        map.entry(ns.to_string())
+            .or_default()
+            .insert(name.clone(), dep.clone());
+        Ok(dep.clone())
+    }
+
+    async fn patch_service(&self, ns: &str, _name: &str, svc: &Service) -> Result<Service> {
+        let name = svc.name_any();
+        let mut map = self.services.write().await;
+        map.entry(ns.to_string())
+            .or_default()
+            .insert(name.clone(), svc.clone());
+        Ok(svc.clone())
+    }
+
+    async fn patch_network_policy(
+        &self,
+        ns: &str,
+        _name: &str,
+        np: &NetworkPolicy,
+    ) -> Result<NetworkPolicy> {
+        let name = np.name_any();
+        let mut map = self.network_policies.write().await;
+        map.entry(ns.to_string())
+            .or_default()
+            .insert(name.clone(), np.clone());
+        Ok(np.clone())
+    }
+
     async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue> {
         let name = obj.name_any();
         if name.is_empty() {
@@ -532,6 +591,26 @@ impl K8sClient for MockK8sClient {
             }
         }
         Ok(())
+    }
+
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        let mut nodes = self.nodes.write().await;
+        if let Some(node) = nodes.get_mut(name) {
+            let node_labels = node
+                .metadata
+                .labels
+                .get_or_insert_with(std::collections::BTreeMap::new);
+            for (k, v) in labels {
+                node_labels.insert(k.clone(), v.clone());
+            }
+            Ok(())
+        } else {
+            Err(anyhow!("Node {} not found", name))
+        }
     }
 
     async fn evict_pod(&self, ns: &str, name: &str, _grace_seconds: Option<i64>) -> Result<bool> {
@@ -867,6 +946,11 @@ impl K8sClient for KubeClient {
         }
     }
 
+    async fn get_network_policy(&self, ns: &str, name: &str) -> Result<NetworkPolicy> {
+        let api: kube::Api<NetworkPolicy> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
     async fn create_pvc(
         &self,
         ns: &str,
@@ -919,6 +1003,71 @@ impl K8sClient for KubeClient {
     async fn get_deployment(&self, ns: &str, name: &str) -> Result<Deployment> {
         let api: kube::Api<Deployment> = self.api(ns);
         api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn patch_deployment(&self, ns: &str, name: &str, dep: &Deployment) -> Result<Deployment> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<Deployment> = self.api(ns);
+        let dep_json = serde_json::to_value(dep)?;
+        let patch_params = PatchParams::apply("basilica-operator");
+        match api
+            .patch(name, &patch_params, &Patch::Apply(&dep_json))
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                let force_params = patch_params.force();
+                api.patch(name, &force_params, &Patch::Apply(&dep_json))
+                    .await
+                    .map_err(|e| anyhow!(e))
+            }
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn patch_service(&self, ns: &str, name: &str, svc: &Service) -> Result<Service> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<Service> = self.api(ns);
+        let svc_json = serde_json::to_value(svc)?;
+        let patch_params = PatchParams::apply("basilica-operator");
+        match api
+            .patch(name, &patch_params, &Patch::Apply(&svc_json))
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                let force_params = patch_params.force();
+                api.patch(name, &force_params, &Patch::Apply(&svc_json))
+                    .await
+                    .map_err(|e| anyhow!(e))
+            }
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn patch_network_policy(
+        &self,
+        ns: &str,
+        name: &str,
+        np: &NetworkPolicy,
+    ) -> Result<NetworkPolicy> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<NetworkPolicy> = self.api(ns);
+        let np_json = serde_json::to_value(np)?;
+        let patch_params = PatchParams::apply("basilica-operator");
+        match api
+            .patch(name, &patch_params, &Patch::Apply(&np_json))
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                let force_params = patch_params.force();
+                api.patch(name, &force_params, &Patch::Apply(&np_json))
+                    .await
+                    .map_err(|e| anyhow!(e))
+            }
+            Err(e) => Err(anyhow!(e)),
+        }
     }
 
     async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue> {
@@ -1015,6 +1164,31 @@ impl K8sClient for KubeClient {
         let patch = serde_json::json!({
             "spec": {
                 "taints": current_taints
+            }
+        });
+
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
+
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        use kube::api::{Api, Patch, PatchParams};
+        let api: Api<Node> = Api::all(self.client.clone());
+
+        let labels_json: serde_json::Map<String, serde_json::Value> = labels
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+
+        let patch = serde_json::json!({
+            "metadata": {
+                "labels": labels_json
             }
         });
 

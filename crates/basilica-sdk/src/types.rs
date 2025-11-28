@@ -88,6 +88,12 @@ pub struct ApiRentalListItem {
     /// Port mappings for this rental
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port_mappings: Option<Vec<basilica_validator::rental::PortMapping>>,
+    /// Hourly cost rate for this rental (includes markup)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hourly_cost: Option<f64>,
+    /// Accumulated cost from billing service
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accumulated_cost: Option<String>,
 }
 
 /// API list rentals response with GPU information
@@ -95,6 +101,29 @@ pub struct ApiRentalListItem {
 pub struct ApiListRentalsResponse {
     pub rentals: Vec<ApiRentalListItem>,
     pub total_count: usize,
+}
+
+/// Historical rental item from billing service
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistoricalRentalItem {
+    pub rental_id: String,
+    pub node_id: Option<String>,
+    pub status: String,
+    pub total_cost: String,
+    pub hourly_rate: Option<f64>,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub stopped_at: chrono::DateTime<chrono::Utc>,
+    pub duration_seconds: i64,
+    pub gpu_count: u32,
+    pub cloud_type: String, // "community" or "secure"
+}
+
+/// API response for historical rentals
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HistoricalRentalsResponse {
+    pub rentals: Vec<HistoricalRentalItem>,
+    pub total_count: usize,
+    pub total_cost: String,
 }
 
 /// Rental status query parameters
@@ -411,23 +440,6 @@ pub struct BalanceResponse {
     pub last_updated: String,
 }
 
-/// Billing package information
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BillingPackageInfo {
-    pub package_id: String,
-    pub name: String,
-    pub description: String,
-    pub hourly_rate: String,
-    pub is_active: bool,
-}
-
-/// Packages response
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PackagesResponse {
-    pub packages: Vec<BillingPackageInfo>,
-    pub current_package_id: String,
-}
-
 // Usage History Types
 
 /// Individual rental usage record
@@ -566,6 +578,70 @@ pub struct EnvVar {
 pub struct ResourceRequirements {
     pub cpu: String,
     pub memory: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<GpuRequirementsSpec>,
+}
+
+/// GPU requirements specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuRequirementsSpec {
+    pub count: u32,
+    pub model: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_cuda_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_gpu_memory_gb: Option<u32>,
+}
+
+/// Storage specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub persistent: Option<PersistentStorageSpec>,
+}
+
+/// Persistent storage specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistentStorageSpec {
+    pub enabled: bool,
+    pub backend: StorageBackend,
+    pub bucket: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credentials_secret: Option<String>,
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval_ms: u64,
+    #[serde(default = "default_cache_size")]
+    pub cache_size_mb: usize,
+    #[serde(default = "default_mount_path")]
+    pub mount_path: String,
+}
+
+/// Storage backend types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    R2,
+    S3,
+    GCS,
+}
+
+fn default_sync_interval() -> u64 {
+    1000
+}
+
+fn default_cache_size() -> usize {
+    2048
+}
+
+fn default_mount_path() -> String {
+    "/data".to_string()
 }
 
 fn default_public() -> bool {
@@ -592,6 +668,20 @@ pub struct CreateDeploymentRequest {
     pub ttl_seconds: Option<u32>,
     #[serde(default = "default_public")]
     pub public: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageSpec>,
+    #[serde(default = "default_enable_billing")]
+    pub enable_billing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_name: Option<String>,
+    #[serde(default)]
+    pub suspended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+}
+
+fn default_enable_billing() -> bool {
+    true
 }
 
 /// Replica status for deployments

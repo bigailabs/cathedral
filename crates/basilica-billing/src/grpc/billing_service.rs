@@ -2,7 +2,7 @@ use crate::domain::events::EventStore;
 use crate::domain::idempotency::generate_idempotency_key;
 use crate::domain::{
     credits::{CreditManager, CreditOperations},
-    rentals::{RentalManager, RentalOperations},
+    rentals::{CloudType, Rental, RentalManager, RentalOperations},
     types::{CreditBalance, GpuSpec, RentalId, RentalState, ResourceSpec, UserId},
 };
 use crate::error::BillingError;
@@ -137,6 +137,69 @@ impl BillingServiceImpl {
             RentalState::Terminating => RentalStatus::Stopping,
             RentalState::Completed => RentalStatus::Stopped,
             RentalState::Failed => RentalStatus::Failed,
+        }
+    }
+
+    /// Convert a unified Rental to ActiveRental proto message
+    fn rental_to_active_rental(rental: &Rental) -> ActiveRental {
+        let resource_spec = Some(basilica_protocol::billing::ResourceSpec {
+            cpu_cores: rental.resource_spec.cpu_cores,
+            memory_mb: (rental.resource_spec.memory_gb as u64) * 1024,
+            gpus: rental
+                .resource_spec
+                .gpu_specs
+                .iter()
+                .map(|gpu| basilica_protocol::billing::GpuSpec {
+                    model: gpu.model.clone(),
+                    memory_mb: gpu.memory_mb,
+                    count: gpu.count,
+                })
+                .collect(),
+            disk_gb: rental.resource_spec.storage_gb as u64,
+            network_bandwidth_mbps: rental.resource_spec.network_bandwidth_mbps,
+        });
+
+        let cloud_type = match rental.cloud_type {
+            CloudType::Community => Some(
+                basilica_protocol::billing::active_rental::CloudType::Community(
+                    basilica_protocol::billing::CommunityCloudData {
+                        node_id: rental.node_id().unwrap_or("").to_string(),
+                        validator_id: rental.validator_id().unwrap_or("").to_string(),
+                        base_price_per_gpu: rental.base_price_per_gpu.to_f64().unwrap_or(0.0),
+                        gpu_count: rental.gpu_count,
+                    },
+                ),
+            ),
+            CloudType::Secure => Some(
+                basilica_protocol::billing::active_rental::CloudType::Secure(
+                    basilica_protocol::billing::SecureCloudData {
+                        provider_instance_id: rental
+                            .provider_instance_id()
+                            .unwrap_or("")
+                            .to_string(),
+                        provider: rental.provider().unwrap_or("").to_string(),
+                        offering_id: rental.offering_id().unwrap_or("").to_string(),
+                        base_price_per_gpu: rental.base_price_per_gpu.to_f64().unwrap_or(0.0),
+                        gpu_count: rental.gpu_count,
+                    },
+                ),
+            ),
+        };
+
+        ActiveRental {
+            rental_id: rental.id.to_string(),
+            user_id: rental.user_id.to_string(),
+            status: Self::domain_status_to_proto(rental.state).into(),
+            resource_spec,
+            current_cost: Self::format_credit_balance(rental.cost_breakdown.total_cost),
+            start_time: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
+                rental.created_at,
+            ))),
+            last_updated: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
+                rental.last_updated,
+            ))),
+            metadata: std::collections::HashMap::new(),
+            cloud_type,
         }
     }
 }
@@ -289,24 +352,26 @@ impl BillingService for BillingServiceImpl {
                 return Ok(response);
             }
 
-            use basilica_protocol::billing::track_rental_request::CloudType;
-            use crate::domain::rentals::{Rental, SecureCloudRental};
+            use basilica_protocol::billing::track_rental_request::CloudType as ProtoCloudType;
 
             match cloud_type {
-                CloudType::Community(community_data) => {
+                ProtoCloudType::Community(community_data) => {
                     let base_price_per_gpu = rust_decimal::Decimal::from_f64(community_data.base_price_per_gpu)
                         .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
-                    let gpu_count = community_data.gpu_count.max(1);
+                    if community_data.gpu_count == 0 {
+                        return Err(Status::invalid_argument("gpu_count must be greater than 0"));
+                    }
+                    let gpu_count = community_data.gpu_count;
 
                     info!(
                         "Tracking community rental {} for user {} at ${}/GPU/hour × {} GPUs",
                         rental_id, user_id, base_price_per_gpu, gpu_count
                     );
 
-                    let mut rental = Rental::new_marketplace(
+                    let mut rental = Rental::new_community(
                         user_id.clone(),
                         community_data.node_id.clone(),
-                        community_data.validator_id.clone(),
+                        Some(community_data.validator_id.clone()),
                         resource_spec.clone(),
                         base_price_per_gpu,
                         gpu_count,
@@ -336,7 +401,7 @@ impl BillingService for BillingServiceImpl {
                         rental_id: rental_id.as_uuid(),
                         user_id: user_id.to_string(),
                         node_id: community_data.node_id,
-                        validator_id: community_data.validator_id,
+                        validator_id: Some(community_data.validator_id),
                         event_type: EventType::RentalStart,
                         event_data,
                         timestamp: chrono::Utc::now(),
@@ -353,17 +418,20 @@ impl BillingService for BillingServiceImpl {
                             Status::internal(format!("Failed to store community rental start event: {}", e))
                         })?;
                 }
-                CloudType::Secure(secure_data) => {
+                ProtoCloudType::Secure(secure_data) => {
                     let base_price_per_gpu = rust_decimal::Decimal::from_f64(secure_data.base_price_per_gpu)
                         .ok_or_else(|| Status::invalid_argument("Invalid base_price_per_gpu"))?;
-                    let gpu_count = secure_data.gpu_count.max(1);
+                    if secure_data.gpu_count == 0 {
+                        return Err(Status::invalid_argument("gpu_count must be greater than 0"));
+                    }
+                    let gpu_count = secure_data.gpu_count;
 
                     info!(
                         "Tracking secure cloud rental {} for user {} (provider: {}) at ${}/GPU/hour × {} GPUs",
                         rental_id, user_id, secure_data.provider, base_price_per_gpu, gpu_count
                     );
 
-                    let mut rental = SecureCloudRental::new_marketplace(
+                    let mut rental = Rental::new_secure(
                         user_id.clone(),
                         secure_data.provider.clone(),
                         secure_data.provider_instance_id.clone(),
@@ -375,7 +443,7 @@ impl BillingService for BillingServiceImpl {
                     rental.id = rental_id;
 
                     self.rental_repository
-                        .create_secure_cloud_rental(&rental)
+                        .create_rental(&rental)
                         .await
                         .map_err(|e| Status::internal(format!("Failed to create secure cloud rental: {}", e)))?;
 
@@ -398,7 +466,7 @@ impl BillingService for BillingServiceImpl {
                         rental_id: rental_id.as_uuid(),
                         user_id: user_id.to_string(),
                         node_id: secure_data.provider_instance_id,
-                        validator_id: format!("secure_cloud:{}", secure_data.provider),
+                        validator_id: None, // Secure cloud has no validator
                         event_type: EventType::RentalStart,
                         event_data,
                         timestamp: chrono::Utc::now(),
@@ -420,7 +488,7 @@ impl BillingService for BillingServiceImpl {
             if let Some(ref metrics) = self.metrics {
                 metrics
                     .billing_metrics()
-                    .record_rental_tracked(&rental_id.to_string(), "marketplace")
+                    .record_rental_tracked(&rental_id.to_string())
                     .await;
             }
 
@@ -490,12 +558,16 @@ impl BillingService for BillingServiceImpl {
 
         let idempotency_key = generate_idempotency_key(rental_id.as_uuid(), &event_data);
 
+        // Extract node_id and validator_id from metadata for events
+        let node_id = rental.node_id().unwrap_or("").to_string();
+        let validator_id = rental.validator_id().map(|s| s.to_string());
+
         let status_change_event = UsageEvent {
             event_id: uuid::Uuid::new_v4(),
             rental_id: rental_id.as_uuid(),
             user_id: rental.user_id.to_string(),
-            node_id: rental.node_id.clone(),
-            validator_id: rental.validator_id.clone(),
+            node_id,
+            validator_id,
             event_type: EventType::StatusChange,
             event_data,
             timestamp: chrono::Utc::now(),
@@ -524,96 +596,44 @@ impl BillingService for BillingServiceImpl {
     ) -> std::result::Result<Response<GetActiveRentalsResponse>, Status> {
         let req = request.into_inner();
 
-        let rentals = if let Some(filter) = req.filter {
-            match filter {
-                basilica_protocol::billing::get_active_rentals_request::Filter::UserId(user_id) => {
-                    let uid = UserId::new(user_id);
-                    self.rental_repository
-                        .get_active_rentals(Some(&uid))
-                        .await
-                        .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
-                }
-                basilica_protocol::billing::get_active_rentals_request::Filter::NodeId(node_id) => {
-                    let all_rentals = self
-                        .rental_repository
-                        .get_active_rentals(None)
-                        .await
-                        .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?;
-
-                    all_rentals
-                        .into_iter()
-                        .filter(|r| r.node_id == node_id)
-                        .collect()
-                }
-                basilica_protocol::billing::get_active_rentals_request::Filter::ValidatorId(
-                    validator_id,
-                ) => {
-                    let all_rentals = self
-                        .rental_repository
-                        .get_active_rentals(None)
-                        .await
-                        .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?;
-
-                    all_rentals
-                        .into_iter()
-                        .filter(|r| r.validator_id == validator_id)
-                        .collect()
-                }
-            }
-        } else {
+        // Single query to unified rentals table (returns all rentals, filtering done below)
+        let rentals = if req.user_id.is_empty() {
             self.rental_repository
-                .get_active_rentals(None)
+                .get_rentals(None)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
+        } else {
+            let uid = UserId::new(req.user_id);
+            self.rental_repository
+                .get_rentals(Some(&uid))
                 .await
                 .map_err(|e| Status::internal(format!("Failed to list rentals: {}", e)))?
         };
 
+        // Convert status_filter from proto to domain states
+        let status_filter: Vec<RentalState> = req
+            .status_filter
+            .iter()
+            .map(|s| {
+                Self::rental_status_to_domain(
+                    RentalStatus::try_from(*s).unwrap_or(RentalStatus::Unspecified),
+                )
+            })
+            .collect();
+
+        // Convert to ActiveRental proto messages, filtering by status if specified
         let active_rentals: Vec<ActiveRental> = rentals
             .into_iter()
-            .filter(|r| r.state.is_active())
-            .map(|r| {
-                // Convert ResourceSpec to proto format
-                let resource_spec = Some(basilica_protocol::billing::ResourceSpec {
-                    cpu_cores: r.resource_spec.cpu_cores,
-                    memory_mb: (r.resource_spec.memory_gb as u64) * 1024,
-                    gpus: r
-                        .resource_spec
-                        .gpu_specs
-                        .iter()
-                        .map(|gpu| basilica_protocol::billing::GpuSpec {
-                            model: gpu.model.clone(),
-                            memory_mb: gpu.memory_mb,
-                            count: gpu.count,
-                        })
-                        .collect(),
-                    disk_gb: r.resource_spec.storage_gb as u64,
-                    network_bandwidth_mbps: r.resource_spec.network_bandwidth_mbps,
-                });
-
-                ActiveRental {
-                    rental_id: r.id.to_string(),
-                    user_id: r.user_id.to_string(),
-                    status: Self::domain_status_to_proto(r.state).into(),
-                    resource_spec,
-                    current_cost: Self::format_credit_balance(r.cost_breakdown.total_cost),
-                    start_time: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
-                        r.created_at,
-                    ))),
-                    last_updated: Some(prost_types::Timestamp::from(std::time::SystemTime::from(
-                        r.last_updated,
-                    ))),
-                    metadata: std::collections::HashMap::new(),
-                    cloud_type: Some(
-                        basilica_protocol::billing::active_rental::CloudType::Community(
-                            basilica_protocol::billing::CommunityCloudData {
-                                node_id: r.node_id.clone(),
-                                validator_id: r.validator_id.clone(),
-                                base_price_per_gpu: r.base_price_per_gpu.to_f64().unwrap_or(0.0),
-                                gpu_count: r.gpu_count,
-                            },
-                        ),
-                    ),
+            .filter(|r| {
+                if status_filter.is_empty() {
+                    // Default behavior: return only active rentals
+                    r.state.is_active()
+                } else {
+                    // Filter by specified statuses
+                    status_filter.contains(&r.state)
                 }
             })
+            .map(|r| Self::rental_to_active_rental(&r))
             .collect();
 
         let response = GetActiveRentalsResponse {
@@ -639,6 +659,7 @@ impl BillingService for BillingServiceImpl {
             let rental_id = RentalId::from_str(&req.rental_id)
                 .map_err(|e| Status::invalid_argument(format!("Invalid rental ID: {}", e)))?;
 
+            // Single lookup in unified table
             let rental = self
                 .rental_repository
                 .get_rental(&rental_id)
@@ -646,22 +667,60 @@ impl BillingService for BillingServiceImpl {
                 .map_err(|e| Status::internal(format!("Failed to get rental: {}", e)))?
                 .ok_or_else(|| Status::not_found(format!("Rental {} not found", rental_id)))?;
 
+            let end_time = req
+                .end_time
+                .map(|ts| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+                        .unwrap()
+                })
+                .unwrap_or_else(chrono::Utc::now);
+
             info!(
-                "finalize_rental called for {} - telemetry already charged incrementally (actual_cost: {})",
-                rental_id, rental.actual_cost
+                "finalize_rental called for {} rental {} (actual_cost: {})",
+                rental.cloud_type, rental_id, rental.actual_cost
             );
 
+            // Calculate final cost based on duration and pricing
+            let duration = end_time - rental.started_at;
+            let hours = rust_decimal::Decimal::from(duration.num_seconds())
+                / rust_decimal::Decimal::from(3600);
+            let calculated_cost =
+                rental.base_price_per_gpu * rust_decimal::Decimal::from(rental.gpu_count) * hours;
+
             let final_cost_decimal = if req.final_cost.is_empty() {
-                rental.actual_cost.as_decimal()
+                // Use actual_cost if set, otherwise calculate from duration
+                if rental.actual_cost.as_decimal() > rust_decimal::Decimal::ZERO {
+                    rental.actual_cost.as_decimal()
+                } else {
+                    calculated_cost
+                }
             } else {
-                req.final_cost.parse::<rust_decimal::Decimal>()
+                req.final_cost
+                    .parse::<rust_decimal::Decimal>()
                     .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
             };
 
-            let end_time = req.end_time
-                .map(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts.seconds, ts.nanos as u32).unwrap())
-                .unwrap_or_else(chrono::Utc::now);
+            // Update rental status to completed
+            let mut rental = rental.clone();
+            rental.state = crate::domain::types::RentalState::Completed;
+            rental.last_updated = end_time;
+            rental.ended_at = Some(end_time);
+            rental.actual_cost = CreditBalance::from_decimal(final_cost_decimal);
 
+            self.rental_repository
+                .update_rental(&rental)
+                .await
+                .map_err(|e| {
+                    error!("Failed to update rental status to completed: {}", e);
+                    Status::internal(format!("Failed to update rental status: {}", e))
+                })?;
+
+            info!(
+                "Updated {} rental {} state to completed with total_cost: {}",
+                rental.cloud_type, rental_id, final_cost_decimal
+            );
+
+            // Publish rental_end event for audit purposes
             let rental_end_data = crate::domain::processor::RentalEndData {
                 end_time,
                 final_cost: final_cost_decimal,
@@ -672,37 +731,33 @@ impl BillingService for BillingServiceImpl {
                 },
             };
 
-            // Update rental status to completed immediately
-            let mut rental = rental.clone();
-            rental.state = crate::domain::types::RentalState::Completed;
-            rental.last_updated = end_time;
-
-            self.rental_repository
-                .update_rental(&rental)
-                .await
-                .map_err(|e| {
-                    error!("Failed to update rental status to completed: {}", e);
-                    Status::internal(format!("Failed to update rental status: {}", e))
-                })?;
-
-            info!("Updated rental {} state to completed", rental_id);
-
-            // Publish rental_end event for audit purposes
-            let mut event_data = serde_json::to_value(&rental_end_data)
-                .map_err(|e| Status::internal(format!("Failed to serialize rental end data: {}", e)))?;
+            let mut event_data = serde_json::to_value(&rental_end_data).map_err(|e| {
+                Status::internal(format!("Failed to serialize rental end data: {}", e))
+            })?;
 
             if let serde_json::Value::Object(ref mut map) = event_data {
-                map.insert("timestamp".to_string(), serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()));
+                map.insert(
+                    "timestamp".to_string(),
+                    serde_json::Value::String(chrono::Utc::now().timestamp_millis().to_string()),
+                );
+                map.insert(
+                    "cloud_type".to_string(),
+                    serde_json::Value::String(rental.cloud_type.to_string()),
+                );
             }
 
             let idempotency_key = generate_idempotency_key(rental.id.as_uuid(), &event_data);
+
+            // Extract node_id and validator_id from metadata for events
+            let node_id = rental.node_id().unwrap_or("").to_string();
+            let validator_id = rental.validator_id().map(|s| s.to_string());
 
             let usage_event = crate::storage::UsageEvent {
                 event_id: uuid::Uuid::new_v4(),
                 rental_id: rental.id.as_uuid(),
                 user_id: rental.user_id.as_str().to_string(),
-                node_id: rental.node_id.clone(),
-                validator_id: rental.validator_id.clone(),
+                node_id,
+                validator_id,
                 event_type: crate::storage::EventType::RentalEnd,
                 event_data,
                 timestamp: chrono::Utc::now(),
@@ -715,18 +770,21 @@ impl BillingService for BillingServiceImpl {
             self.event_store
                 .append_usage_event(&usage_event)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to append rental end event: {}", e)))?;
+                .map_err(|e| {
+                    Status::internal(format!("Failed to append rental end event: {}", e))
+                })?;
 
-            info!("Published rental_end event for rental {} for audit purposes", rental_id);
-
-            let duration = rental.last_updated - rental.created_at;
+            info!(
+                "Published rental_end event for rental {} for audit purposes",
+                rental_id
+            );
 
             if let Some(ref metrics) = self.metrics {
                 metrics
                     .billing_metrics()
                     .record_rental_finalized(
                         &rental_id.to_string(),
-                        rental.actual_cost.as_decimal().to_f64().unwrap_or(0.0),
+                        final_cost_decimal.to_f64().unwrap_or(0.0),
                     )
                     .await;
             }
@@ -736,15 +794,15 @@ impl BillingService for BillingServiceImpl {
                 nanos: (duration.num_nanoseconds().unwrap_or(0) % 1_000_000_000) as i32,
             };
 
-            let response = FinalizeRentalResponse {
+            Ok(FinalizeRentalResponse {
                 success: true,
-                total_cost: Self::format_credit_balance(rental.actual_cost),
+                total_cost: Self::format_credit_balance(CreditBalance::from_decimal(
+                    final_cost_decimal,
+                )),
                 duration: Some(duration_proto),
                 charged_amount: "0.00".to_string(),
                 refunded_amount: "0.00".to_string(),
-            };
-
-            Ok(response)
+            })
         }
         .await;
 

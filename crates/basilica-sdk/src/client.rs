@@ -46,9 +46,9 @@ use crate::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
         DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
-        ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
-        PackagesResponse, RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
-        SshKeyResponse, UsageHistoryResponse,
+        HistoricalRentalsResponse, ListAvailableNodesQuery, ListDepositsQuery,
+        ListDepositsResponse, ListRentalsQuery, RegisterSshKeyRequest, RentalStatusWithSshResponse,
+        RentalUsageResponse, SshKeyResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -124,6 +124,15 @@ impl BasilicaClient {
         }
     }
 
+    /// Restart a rental's container
+    pub async fn restart_rental(
+        &self,
+        rental_id: &str,
+    ) -> Result<basilica_validator::rental::RentalRestartResponse> {
+        let path = format!("/rentals/{rental_id}/restart");
+        self.post(&path, &serde_json::json!({})).await
+    }
+
     /// Get rental logs
     pub async fn get_rental_logs(
         &self,
@@ -160,6 +169,23 @@ impl BasilicaClient {
 
         if let Some(q) = &query {
             request = request.query(&q);
+        }
+
+        let request = self.apply_auth(request).await?;
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    /// List historical (completed/failed) rentals
+    pub async fn list_rental_history(
+        &self,
+        limit: Option<u32>,
+    ) -> Result<HistoricalRentalsResponse> {
+        let url = format!("{}/rentals/history", self.base_url);
+        let mut request = self.http_client.get(&url);
+
+        if let Some(limit) = limit {
+            request = request.query(&[("limit", limit)]);
         }
 
         let request = self.apply_auth(request).await?;
@@ -351,11 +377,6 @@ impl BasilicaClient {
     /// Get balance for the authenticated user
     pub async fn get_balance(&self) -> Result<BalanceResponse> {
         self.get("/billing/balance").await
-    }
-
-    /// Get available billing packages
-    pub async fn get_packages(&self) -> Result<PackagesResponse> {
-        self.get("/billing/packages").await
     }
 
     /// List usage history for authenticated user
@@ -1201,6 +1222,11 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1236,7 +1262,9 @@ mod tests {
                     "cpu": "1000m",
                     "memory": "1Gi"
                 },
-                "public": true
+                "public": true,
+                "enableBilling": true,
+                "suspended": false
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "instanceName": "my-app",
@@ -1270,9 +1298,15 @@ mod tests {
             resources: Some(crate::types::ResourceRequirements {
                 cpu: "1000m".to_string(),
                 memory: "1Gi".to_string(),
+                gpus: None,
             }),
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1315,6 +1349,11 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1527,6 +1566,11 @@ mod tests {
             resources: None,
             ttl_seconds: None,
             public: true,
+            storage: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
         };
 
         let result = client.create_deployment(request).await;

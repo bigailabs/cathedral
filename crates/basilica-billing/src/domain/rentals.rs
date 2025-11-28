@@ -1,6 +1,5 @@
 use crate::domain::types::{
-    CostBreakdown, CreditBalance, PackageId, RentalId, RentalState, ResourceSpec, UsageMetrics,
-    UserId,
+    CostBreakdown, CreditBalance, RentalId, RentalState, ResourceSpec, UsageMetrics, UserId,
 };
 use crate::error::{BillingError, Result};
 use async_trait::async_trait;
@@ -11,16 +10,56 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Community cloud rental (validator-based)
+/// Type of cloud for rental
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudType {
+    /// Community cloud (validator-based) rental
+    Community,
+    /// Secure cloud (direct provider API) rental
+    Secure,
+}
+
+impl CloudType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CloudType::Community => "community",
+            CloudType::Secure => "secure",
+        }
+    }
+}
+
+impl std::fmt::Display for CloudType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for CloudType {
+    type Err = BillingError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "community" => Ok(CloudType::Community),
+            "secure" => Ok(CloudType::Secure),
+            _ => Err(BillingError::ValidationError {
+                field: "cloud_type".to_string(),
+                message: format!("unknown cloud type: {}", s),
+            }),
+        }
+    }
+}
+
+/// Unified rental record for both community and secure cloud rentals
+///
+/// Type-specific data is stored in `metadata`:
+/// - Community: `node_id`, `validator_id`
+/// - Secure: `provider`, `provider_instance_id`, `offering_id`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rental {
     pub id: RentalId,
     pub user_id: UserId,
-    pub node_id: String,
-    pub validator_id: String,
-    /// Legacy package ID (deprecated, kept for backward compatibility)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub package_id: Option<PackageId>,
+    pub cloud_type: CloudType,
     pub state: RentalState,
     pub resource_spec: ResourceSpec,
     pub usage_metrics: UsageMetrics,
@@ -28,37 +67,9 @@ pub struct Rental {
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
-    pub metadata: HashMap<String, String>,
-    // Aliases for compatibility
-    pub created_at: DateTime<Utc>,
-    pub last_updated: DateTime<Utc>,
-    // Additional fields for billing handlers
-    pub actual_start_time: Option<DateTime<Utc>>,
-    pub actual_end_time: Option<DateTime<Utc>>,
-    pub actual_cost: CreditBalance,
-
-    // Marketplace-2-compute pricing fields
-    /// Final price per GPU per hour (already includes any markup applied by API layer)
-    pub base_price_per_gpu: Decimal,
-    /// Number of GPUs in this rental
-    pub gpu_count: u32,
-}
-
-/// Secure cloud rental (direct provider API)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecureCloudRental {
-    pub id: RentalId,
-    pub user_id: UserId,
-    pub provider: String,
-    pub provider_instance_id: String,
-    pub offering_id: String,
-    pub state: RentalState,
-    pub resource_spec: ResourceSpec,
-    pub usage_metrics: UsageMetrics,
-    pub cost_breakdown: CostBreakdown,
-    pub started_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub ended_at: Option<DateTime<Utc>>,
+    /// Type-specific metadata:
+    /// - Community: node_id, validator_id
+    /// - Secure: provider, provider_instance_id, offering_id
     pub metadata: HashMap<String, String>,
     // Aliases for compatibility
     pub created_at: DateTime<Utc>,
@@ -76,22 +87,26 @@ pub struct SecureCloudRental {
 }
 
 impl Rental {
-    /// Create a new rental with marketplace-2-compute pricing
-    pub fn new_marketplace(
+    /// Create a new community cloud rental
+    pub fn new_community(
         user_id: UserId,
         node_id: String,
-        validator_id: String,
+        validator_id: Option<String>,
         resource_spec: ResourceSpec,
         base_price_per_gpu: Decimal,
         gpu_count: u32,
     ) -> Self {
         let now = Utc::now();
+        let mut metadata = HashMap::new();
+        metadata.insert("node_id".to_string(), node_id);
+        if let Some(vid) = validator_id {
+            metadata.insert("validator_id".to_string(), vid);
+        }
+
         Self {
             id: RentalId::new(),
             user_id,
-            node_id,
-            validator_id,
-            package_id: None, // No package in marketplace model
+            cloud_type: CloudType::Community,
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -106,7 +121,7 @@ impl Rental {
             started_at: now,
             updated_at: now,
             ended_at: None,
-            metadata: HashMap::new(),
+            metadata,
             created_at: now,
             last_updated: now,
             actual_start_time: None,
@@ -117,103 +132,8 @@ impl Rental {
         }
     }
 
-    /// Legacy constructor with package-based pricing (DEPRECATED)
-    #[deprecated(
-        since = "1.0.0",
-        note = "Use new_marketplace for marketplace-2-compute"
-    )]
-    pub fn new(
-        user_id: UserId,
-        node_id: String,
-        validator_id: String,
-        package_id: PackageId,
-        resource_spec: ResourceSpec,
-    ) -> Self {
-        let now = Utc::now();
-        Self {
-            id: RentalId::new(),
-            user_id,
-            node_id,
-            validator_id,
-            package_id: Some(package_id),
-            state: RentalState::Pending,
-            resource_spec,
-            usage_metrics: UsageMetrics::zero(),
-            cost_breakdown: CostBreakdown {
-                base_cost: CreditBalance::zero(),
-                usage_cost: CreditBalance::zero(),
-                volume_discount: CreditBalance::zero(),
-                discounts: CreditBalance::zero(),
-                overage_charges: CreditBalance::zero(),
-                total_cost: CreditBalance::zero(),
-            },
-            started_at: now,
-            updated_at: now,
-            ended_at: None,
-            metadata: HashMap::new(),
-            created_at: now,
-            last_updated: now,
-            actual_start_time: None,
-            actual_end_time: None,
-            actual_cost: CreditBalance::zero(),
-            // Default marketplace pricing (for legacy compatibility)
-            base_price_per_gpu: Decimal::ZERO,
-            gpu_count: 1,
-        }
-    }
-
-    pub fn duration(&self) -> chrono::Duration {
-        let end = self.ended_at.unwrap_or_else(Utc::now);
-        end - self.started_at
-    }
-
-    pub fn is_active(&self) -> bool {
-        self.state.is_active()
-    }
-
-    pub fn transition_to(&mut self, new_state: RentalState) -> Result<()> {
-        if !self.state.can_transition_to(new_state) {
-            return Err(BillingError::InvalidStateTransition {
-                from: self.state.to_string(),
-                to: new_state.to_string(),
-            });
-        }
-
-        self.state = new_state;
-        let now = Utc::now();
-        self.updated_at = now;
-        self.last_updated = now;
-
-        if new_state.is_terminal() && self.ended_at.is_none() {
-            self.ended_at = Some(now);
-        }
-
-        Ok(())
-    }
-
-    pub fn update_usage(&mut self, metrics: UsageMetrics) {
-        self.usage_metrics = self.usage_metrics.add(&metrics);
-        self.updated_at = Utc::now();
-        self.last_updated = self.updated_at;
-    }
-
-    pub fn update_cost(&mut self, cost_breakdown: CostBreakdown) {
-        self.cost_breakdown = cost_breakdown;
-        self.updated_at = Utc::now();
-        self.last_updated = self.updated_at;
-    }
-
-    pub fn calculate_current_cost(&self, rate_per_hour: CreditBalance) -> CreditBalance {
-        let hours = self.duration().num_seconds() as f64 / 3600.0;
-        let hours_decimal = Decimal::from_f64(hours).unwrap_or(Decimal::ZERO);
-        rate_per_hour.multiply(hours_decimal)
-    }
-}
-
-impl SecureCloudRental {
-    /// Create a new secure cloud rental with marketplace-2-compute pricing
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_marketplace(
+    /// Create a new secure cloud rental
+    pub fn new_secure(
         user_id: UserId,
         provider: String,
         provider_instance_id: String,
@@ -223,12 +143,15 @@ impl SecureCloudRental {
         gpu_count: u32,
     ) -> Self {
         let now = Utc::now();
+        let mut metadata = HashMap::new();
+        metadata.insert("provider".to_string(), provider);
+        metadata.insert("provider_instance_id".to_string(), provider_instance_id);
+        metadata.insert("offering_id".to_string(), offering_id);
+
         Self {
             id: RentalId::new(),
             user_id,
-            provider,
-            provider_instance_id,
-            offering_id,
+            cloud_type: CloudType::Secure,
             state: RentalState::Pending,
             resource_spec,
             usage_metrics: UsageMetrics::zero(),
@@ -243,7 +166,7 @@ impl SecureCloudRental {
             started_at: now,
             updated_at: now,
             ended_at: None,
-            metadata: HashMap::new(),
+            metadata,
             created_at: now,
             last_updated: now,
             actual_start_time: None,
@@ -252,6 +175,35 @@ impl SecureCloudRental {
             base_price_per_gpu,
             gpu_count,
         }
+    }
+
+    // Accessor methods for type-specific metadata
+
+    /// Get node_id (community cloud only)
+    pub fn node_id(&self) -> Option<&str> {
+        self.metadata.get("node_id").map(|s| s.as_str())
+    }
+
+    /// Get validator_id (community cloud only)
+    pub fn validator_id(&self) -> Option<&str> {
+        self.metadata.get("validator_id").map(|s| s.as_str())
+    }
+
+    /// Get provider (secure cloud only)
+    pub fn provider(&self) -> Option<&str> {
+        self.metadata.get("provider").map(|s| s.as_str())
+    }
+
+    /// Get provider_instance_id (secure cloud only)
+    pub fn provider_instance_id(&self) -> Option<&str> {
+        self.metadata
+            .get("provider_instance_id")
+            .map(|s| s.as_str())
+    }
+
+    /// Get offering_id (secure cloud only)
+    pub fn offering_id(&self) -> Option<&str> {
+        self.metadata.get("offering_id").map(|s| s.as_str())
     }
 
     pub fn duration(&self) -> chrono::Duration {
@@ -313,14 +265,34 @@ pub struct RentalStatistics {
     pub average_duration_hours: f64,
 }
 
-/// Parameters for creating a new rental
+/// Parameters for creating a new community cloud rental
 #[derive(Debug, Clone)]
-pub struct CreateRentalParams {
+pub struct CreateCommunityRentalParams {
     pub user_id: UserId,
     pub node_id: String,
     pub validator_id: String,
-    pub package_id: PackageId,
     pub resource_spec: ResourceSpec,
+    pub base_price_per_gpu: Decimal,
+    pub gpu_count: u32,
+}
+
+/// Parameters for creating a new secure cloud rental
+#[derive(Debug, Clone)]
+pub struct CreateSecureRentalParams {
+    pub user_id: UserId,
+    pub provider: String,
+    pub provider_instance_id: String,
+    pub offering_id: String,
+    pub resource_spec: ResourceSpec,
+    pub base_price_per_gpu: Decimal,
+    pub gpu_count: u32,
+}
+
+/// Unified parameters for creating a rental
+#[derive(Debug, Clone)]
+pub enum CreateRentalParams {
+    Community(CreateCommunityRentalParams),
+    Secure(CreateSecureRentalParams),
 }
 
 /// Rental management operations
@@ -337,9 +309,9 @@ pub trait RentalOperations: Send + Sync {
 
     async fn update_rental_cost(&self, rental_id: &RentalId, cost: CostBreakdown) -> Result<()>;
 
-    async fn get_active_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>>;
+    async fn get_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>>;
 
-    async fn get_all_active_rentals(&self) -> Result<Vec<Rental>>;
+    async fn get_all_rentals(&self) -> Result<Vec<Rental>>;
 
     async fn get_rental_statistics(&self, user_id: Option<&UserId>) -> Result<RentalStatistics>;
 
@@ -364,15 +336,26 @@ impl RentalManager {
 
 #[async_trait]
 impl RentalOperations for RentalManager {
-    #[allow(deprecated)]
     async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
-        let rental = Rental::new(
-            params.user_id,
-            params.node_id,
-            params.validator_id,
-            params.package_id,
-            params.resource_spec,
-        );
+        let rental = match params {
+            CreateRentalParams::Community(p) => Rental::new_community(
+                p.user_id,
+                p.node_id,
+                Some(p.validator_id),
+                p.resource_spec,
+                p.base_price_per_gpu,
+                p.gpu_count,
+            ),
+            CreateRentalParams::Secure(p) => Rental::new_secure(
+                p.user_id,
+                p.provider,
+                p.provider_instance_id,
+                p.offering_id,
+                p.resource_spec,
+                p.base_price_per_gpu,
+                p.gpu_count,
+            ),
+        };
         let rental_id = rental.id;
 
         self.repository.create_rental(&rental).await?;
@@ -411,12 +394,12 @@ impl RentalOperations for RentalManager {
         self.repository.update_rental(&rental).await
     }
 
-    async fn get_active_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>> {
-        self.repository.get_active_rentals(Some(user_id)).await
+    async fn get_rentals(&self, user_id: &UserId) -> Result<Vec<Rental>> {
+        self.repository.get_rentals(Some(user_id)).await
     }
 
-    async fn get_all_active_rentals(&self) -> Result<Vec<Rental>> {
-        self.repository.get_active_rentals(None).await
+    async fn get_all_rentals(&self) -> Result<Vec<Rental>> {
+        self.repository.get_rentals(None).await
     }
 
     async fn get_rental_statistics(&self, user_id: Option<&UserId>) -> Result<RentalStatistics> {

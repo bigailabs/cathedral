@@ -1,7 +1,9 @@
 //! GPU rental command handlers
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
-use crate::cli::handlers::gpu_rental_helpers::resolve_target_rental_unified;
+use crate::cli::handlers::gpu_rental_helpers::{
+    resolve_offering_unified, resolve_target_rental_unified, SelectedOffering,
+};
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
@@ -14,8 +16,9 @@ use crate::CliError;
 use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
-    GpuRequirements, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile, NodeSelection,
-    RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
+    GpuRequirements, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
+    LocationProfile, NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess,
+    StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use color_eyre::eyre::eyre;
@@ -23,13 +26,13 @@ use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
 use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
-use tracing::debug;
+use tokio::time::timeout;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Represents the target for the `up` command - either an node ID or GPU category
@@ -307,10 +310,21 @@ pub async fn handle_ls(
         None => {
             // Display both tables when --compute flag is not specified
 
-            // Fetch both in parallel
+            // Fetch both in parallel with 5-second timeout for community cloud
+            let community_future =
+                fetch_and_filter_community_cloud(&api_client, gpu_category.clone(), &filters);
             let (secure_result, community_result) = tokio::join!(
-                fetch_and_filter_secure_cloud(&api_client, gpu_category.clone(), &filters),
-                fetch_and_filter_community_cloud(&api_client, gpu_category, &filters)
+                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                async {
+                    match timeout(Duration::from_secs(5), community_future).await {
+                        Ok(result) => result,
+                        Err(_) => {
+                            warn!("Validator request timed out after 5 seconds");
+                            // Return empty nodes on timeout
+                            Ok((vec![], std::collections::HashMap::new()))
+                        }
+                    }
+                }
             );
 
             let secure_gpus = secure_result?;
@@ -420,17 +434,13 @@ fn interactive_offering_selector(
         )));
     }
 
-    // Get markup percentage (using 15% as per design decision)
-    let markup_percent = 15.0;
-
-    // Format offerings for display
+    // Format offerings for display (API already includes markup in hourly_rate_per_gpu)
     let options: Vec<String> = offerings
         .iter()
         .map(|o| {
-            // Calculate total instance price (per-GPU rate × gpu_count) with markup
-            let base_price_per_gpu = o.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
-            let total_price =
-                base_price_per_gpu * (o.gpu_count as f64) * (1.0 + markup_percent / 100.0);
+            // Calculate total instance price (per-GPU rate × gpu_count)
+            let price_per_gpu = o.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
+            let total_price = price_per_gpu * (o.gpu_count as f64);
 
             let memory_str = if let Some(mem_per_gpu) = o.gpu_memory_gb_per_gpu {
                 format!("{}GB", mem_per_gpu * o.gpu_count)
@@ -462,6 +472,331 @@ fn interactive_offering_selector(
     Ok(offerings[selection].clone())
 }
 
+/// Handle secure cloud rental with a pre-selected offering (from unified selector)
+async fn handle_secure_cloud_rental_with_offering(
+    api_client: basilica_sdk::BasilicaClient,
+    offering: basilica_aggregator::models::GpuOffering,
+    options: UpOptions,
+    config: &CliConfig,
+) -> Result<(), CliError> {
+    // Get SSH key ID (SSH key registration already done in handle_up)
+    let ssh_key_id = api_client
+        .get_ssh_key()
+        .await
+        .map_err(|e| CliError::Internal(eyre!(e)))?
+        .ok_or_else(|| {
+            CliError::Internal(
+                eyre!("No SSH key registered with Basilica")
+                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+            )
+        })?
+        .id;
+
+    // Start rental
+    let spinner = create_spinner("Starting rental...");
+
+    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
+
+    // Parse port mappings if provided
+    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
+        basilica_common::utils::parse_port_mappings(&options.ports)
+            .map_err(|e| {
+                complete_spinner_error(spinner.clone(), "Invalid port mapping");
+                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
+            })?
+            .into_iter()
+            .map(|pm| PortMappingRequest {
+                container_port: pm.container_port,
+                host_port: pm.host_port,
+                protocol: pm.protocol,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Parse environment variables if provided
+    let environment = if !options.env.is_empty() {
+        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Invalid environment variables");
+            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
+        })?
+    } else {
+        HashMap::new()
+    };
+
+    let request = StartSecureCloudRentalRequest {
+        offering_id: offering.id.clone(),
+        ssh_public_key_id: ssh_key_id,
+        container_image: options.image.clone(),
+        environment,
+        ports,
+    };
+
+    let response = api_client
+        .start_secure_cloud_rental(request)
+        .await
+        .map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Failed to start rental");
+            CliError::Api(e)
+        })?;
+    complete_spinner_and_clear(spinner);
+
+    print_success(&format!(
+        "Successfully started secure cloud rental {}",
+        response.rental_id
+    ));
+
+    // Handle SSH based on options
+    if options.no_ssh {
+        return Ok(());
+    }
+
+    if options.detach {
+        if let Some(ssh_cmd) = &response.ssh_command {
+            display_secure_cloud_reconnection_instructions(
+                &response.rental_id,
+                ssh_cmd,
+                config,
+                "To connect to this rental:",
+            )?;
+        } else {
+            println!();
+            print_info("Instance is starting up. Use 'basilica ps' to check status.");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+        return Ok(());
+    }
+
+    // Wait for rental to become active
+    print_info("Waiting for rental to become active...");
+    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
+
+    if let Some(rental) = rental {
+        if let Some(ssh_cmd) = &rental.ssh_command {
+            print_info("Connecting to rental...");
+            let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
+            let ssh_access = SshAccess {
+                host,
+                port,
+                username,
+            };
+
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
+
+            let ssh_client = SshClient::new(&config.ssh)?;
+            match retry_ssh_connection(
+                &ssh_client,
+                &ssh_access,
+                Some(private_key_path),
+                Duration::from_secs(120),
+            )
+            .await
+            {
+                Ok(_) => {
+                    print_info("SSH session closed");
+                    display_secure_cloud_reconnection_instructions(
+                        &response.rental_id,
+                        ssh_cmd,
+                        config,
+                        "To reconnect to this rental:",
+                    )?;
+                }
+                Err(e) => {
+                    print_error(&format!("SSH connection failed: {}", e));
+                    display_secure_cloud_reconnection_instructions(
+                        &response.rental_id,
+                        ssh_cmd,
+                        config,
+                        "Try manually connecting using:",
+                    )?;
+                }
+            }
+        } else {
+            println!();
+            print_info("Rental is active but SSH is not yet available");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+    } else {
+        println!();
+        print_info("Rental is taking longer than expected to become active");
+        print_info("Check status with: basilica ps");
+        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+    }
+
+    Ok(())
+}
+
+/// Handle community cloud rental with a pre-selected node (from unified selector)
+async fn handle_community_cloud_rental_with_selection(
+    api_client: basilica_sdk::BasilicaClient,
+    node_selection: NodeSelection,
+    options: UpOptions,
+    config: &CliConfig,
+) -> Result<(), CliError> {
+    let spinner = create_spinner("Preparing rental request...");
+
+    // Build rental request
+    let container_image = options.image.unwrap_or_else(|| config.image.name.clone());
+
+    let env_vars = parse_env_vars(&options.env)
+        .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
+        .inspect_err(|_e| {
+            complete_spinner_error(spinner.clone(), "Environment variable parsing failed");
+        })?;
+
+    let port_mappings: Vec<basilica_sdk::types::PortMappingRequest> =
+        parse_port_mappings(&options.ports)
+            .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
+            .inspect_err(|_e| {
+                complete_spinner_error(spinner.clone(), "Port mapping parsing failed");
+            })?
+            .into_iter()
+            .map(Into::into)
+            .collect();
+
+    let command = if options.command.is_empty() {
+        vec!["/bin/bash".to_string()]
+    } else {
+        options.command
+    };
+
+    let request = StartRentalApiRequest {
+        node_selection,
+        container_image,
+        environment: env_vars,
+        ports: port_mappings,
+        resources: ResourceRequirementsRequest {
+            cpu_cores: options.cpu_cores.unwrap_or(0.0),
+            memory_mb: options.memory_mb.unwrap_or(0),
+            storage_mb: options.storage_mb.unwrap_or(0),
+            gpu_count: options.gpu_count.unwrap_or(0),
+            gpu_types: vec![],
+        },
+        command,
+        volumes: vec![],
+        no_ssh: options.no_ssh,
+    };
+
+    spinner.set_message("Creating rental...");
+    let response = api_client.start_rental(request).await.map_err(|e| {
+        complete_spinner_error(spinner.clone(), "Failed to create rental");
+        CliError::Internal(
+            eyre!(e)
+                .note("The selected node is experiencing issues.")
+                .suggestion("Try running 'basilica up' again to select a different node."),
+        )
+    })?;
+
+    complete_spinner_and_clear(spinner);
+
+    print_success(&format!(
+        "Successfully started community cloud rental {}",
+        response.rental_id
+    ));
+
+    // Handle SSH based on options
+    if options.no_ssh {
+        return Ok(());
+    }
+
+    let ssh_creds = match response.ssh_credentials {
+        Some(ref creds) => creds,
+        None => {
+            print_info("SSH access not available (unexpected error)");
+            return Ok(());
+        }
+    };
+
+    if options.detach {
+        display_ssh_connection_instructions(
+            &response.rental_id,
+            ssh_creds,
+            config,
+            "SSH connection options:",
+        )?;
+    } else {
+        print_info("Waiting for rental to become active...");
+        let rental_active = poll_rental_status(&response.rental_id, &api_client).await?;
+
+        if rental_active {
+            print_info("Connecting to rental...");
+            let (host, port, username) = parse_ssh_credentials(ssh_creds)?;
+            let ssh_access = SshAccess {
+                host,
+                port,
+                username,
+            };
+
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
+
+            let ssh_client = SshClient::new(&config.ssh)?;
+            match retry_ssh_connection(
+                &ssh_client,
+                &ssh_access,
+                Some(private_key_path),
+                Duration::from_secs(120),
+            )
+            .await
+            {
+                Ok(_) => {
+                    print_info("SSH session closed");
+                    display_ssh_connection_instructions(
+                        &response.rental_id,
+                        ssh_creds,
+                        config,
+                        "To reconnect to this rental:",
+                    )?;
+                }
+                Err(e) => {
+                    print_error(&format!("SSH connection failed: {}", e));
+                    display_ssh_connection_instructions(
+                        &response.rental_id,
+                        ssh_creds,
+                        config,
+                        "Try manually connecting using:",
+                    )?;
+                }
+            }
+        } else {
+            println!();
+            print_info("Rental is taking longer than expected to become active");
+            print_info("Check status with: basilica ps");
+            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle secure cloud rental workflow
 async fn handle_secure_cloud_rental(
     api_client: basilica_sdk::BasilicaClient,
@@ -470,7 +805,7 @@ async fn handle_secure_cloud_rental(
     config: &CliConfig,
 ) -> Result<(), CliError> {
     // Step 1: Ensure SSH key registered
-    let ssh_key_id = ensure_ssh_key_registered(&api_client).await?;
+    ensure_ssh_key_registered(&api_client).await?;
 
     // Step 2: List offerings
     let spinner = create_spinner("Fetching available GPUs...");
@@ -512,171 +847,8 @@ async fn handle_secure_cloud_rental(
     // Step 4: Interactive selector
     let selected = interactive_offering_selector(&filtered_offerings)?;
 
-    // Step 5: Start rental
-    let spinner = create_spinner("Starting rental...");
-
-    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
-
-    // Parse port mappings if provided
-    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
-        basilica_common::utils::parse_port_mappings(&options.ports)
-            .map_err(|e| {
-                complete_spinner_error(spinner.clone(), "Invalid port mapping");
-                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
-            })?
-            .into_iter()
-            .map(|pm| PortMappingRequest {
-                container_port: pm.container_port,
-                host_port: pm.host_port,
-                protocol: pm.protocol,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Parse environment variables if provided
-    let environment = if !options.env.is_empty() {
-        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Invalid environment variables");
-            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
-        })?
-    } else {
-        HashMap::new()
-    };
-
-    let request = StartSecureCloudRentalRequest {
-        offering_id: selected.id.clone(),
-        ssh_public_key_id: ssh_key_id,
-        container_image: options.image.clone(),
-        environment,
-        ports,
-    };
-
-    let response = api_client
-        .start_secure_cloud_rental(request)
-        .await
-        .map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Failed to start rental");
-            CliError::Api(e)
-        })?;
-    complete_spinner_and_clear(spinner);
-
-    print_success(&format!(
-        "Successfully started secure cloud rental {}",
-        response.rental_id
-    ));
-
-    // Step 6: Check for --detach or --no-ssh flags
-    if options.no_ssh {
-        // SSH disabled entirely
-        return Ok(());
-    }
-
-    if options.detach {
-        // Detached mode - show connection instructions and exit
-        if let Some(ssh_cmd) = &response.ssh_command {
-            display_secure_cloud_reconnection_instructions(
-                &response.rental_id,
-                ssh_cmd,
-                config,
-                "To connect to this rental:",
-            )?;
-        } else {
-            println!();
-            print_info("Instance is starting up. Use 'basilica ps' to check status.");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-        }
-        return Ok(());
-    }
-
-    // Step 7: Wait for rental to become active
-    print_info("Waiting for rental to become active...");
-
-    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
-
-    if let Some(rental) = rental {
-        // Rental is running, connect via SSH
-        if let Some(ssh_cmd) = &rental.ssh_command {
-            print_info("Connecting to rental...");
-
-            // Parse SSH credentials
-            let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
-            let ssh_access = SshAccess {
-                host,
-                port,
-                username,
-            };
-
-            // Fetch API-registered SSH key and find matching private key
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
-                                .note("SSH keys are required to connect to rentals"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
-
-            debug!(
-                "Using private key for secure cloud auto-SSH: {}",
-                private_key_path.display()
-            );
-
-            // Establish SSH session with retry logic
-            let ssh_client = SshClient::new(&config.ssh)?;
-            match retry_ssh_connection(
-                &ssh_client,
-                &ssh_access,
-                Some(private_key_path),
-                Duration::from_secs(60),
-            )
-            .await
-            {
-                Ok(_) => {
-                    // SSH session ended normally
-                    print_info("SSH session closed");
-                    display_secure_cloud_reconnection_instructions(
-                        &response.rental_id,
-                        ssh_cmd,
-                        config,
-                        "To reconnect to this rental:",
-                    )?;
-                }
-                Err(e) => {
-                    // SSH connection failed after retries
-                    print_error(&format!("SSH connection failed: {}", e));
-                    display_secure_cloud_reconnection_instructions(
-                        &response.rental_id,
-                        ssh_cmd,
-                        config,
-                        "Try manually connecting using:",
-                    )?;
-                }
-            }
-        } else {
-            // No SSH command available yet
-            println!();
-            print_info("Rental is active but SSH is not yet available");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-        }
-    } else {
-        // Timeout - rental didn't become active in time
-        println!();
-        print_info("Rental is taking longer than expected to become active");
-        print_info("Check status with: basilica ps");
-        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-    }
-
-    Ok(())
+    // Step 5: Start rental and handle SSH (reuse unified handler)
+    handle_secure_cloud_rental_with_offering(api_client, selected, options, config).await
 }
 
 /// Handle the `up` command - provision GPU instances
@@ -688,13 +860,61 @@ pub async fn handle_up(
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    // Determine compute category (default to secure cloud)
+    // If no compute flag specified AND no target specified, use unified selection from both clouds
+    if compute.is_none() && target.is_none() {
+        // Ensure SSH key is registered before proceeding (needed for both clouds)
+        ensure_ssh_key_registered(&api_client).await?;
+
+        // Use unified offering resolver to select from both clouds
+        let selected = resolve_offering_unified(
+            &api_client,
+            None, // gpu_filter - no direct option for this in unified path
+            options.gpu_count,
+            options.country.as_deref(),
+            None, // min_gpu_memory - not available in UpOptions
+        )
+        .await
+        .map_err(CliError::Internal)?;
+
+        match selected {
+            SelectedOffering::SecureCloud(offering) => {
+                // Start secure cloud rental with selected offering
+                return handle_secure_cloud_rental_with_offering(
+                    api_client, offering, options, config,
+                )
+                .await;
+            }
+            SelectedOffering::CommunityCloud(node_selection) => {
+                // Start community cloud rental with selected node
+                return handle_community_cloud_rental_with_selection(
+                    api_client,
+                    node_selection,
+                    options,
+                    config,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Determine compute category
+    // - If --compute flag is specified, use that
+    // - If target is a NodeId (without --compute), route to CommunityCloud since NodeId
+    //   is not supported for SecureCloud
+    // - Otherwise default to SecureCloud
     let compute_category = compute
         .map(|c| match c {
             ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
             ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
         })
-        .unwrap_or(ComputeCategory::SecureCloud);
+        .unwrap_or_else(|| {
+            // If target is a NodeId, route to CommunityCloud (SecureCloud doesn't support NodeId)
+            if matches!(target, Some(TargetType::NodeId(_))) {
+                ComputeCategory::CommunityCloud
+            } else {
+                ComputeCategory::SecureCloud
+            }
+        });
 
     // Branch based on compute type
     match compute_category {
@@ -769,182 +989,8 @@ pub async fn handle_up(
         )?
     };
 
-    let spinner = create_spinner("Preparing rental request...");
-
-    // Build rental request
-    let container_image = options.image.unwrap_or_else(|| config.image.name.clone());
-
-    let env_vars = parse_env_vars(&options.env)
-        .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
-        .inspect_err(|_e| {
-            complete_spinner_error(spinner.clone(), "Environment variable parsing failed");
-        })?;
-
-    // Parse port mappings if provided
-    let port_mappings: Vec<basilica_sdk::types::PortMappingRequest> =
-        parse_port_mappings(&options.ports)
-            .map_err(|e| eyre!("Invalid argument: {}", e.to_string()))
-            .inspect_err(|_e| {
-                complete_spinner_error(spinner.clone(), "Port mapping parsing failed");
-            })?
-            .into_iter()
-            .map(Into::into)
-            .collect();
-
-    let command = if options.command.is_empty() {
-        vec!["/bin/bash".to_string()]
-    } else {
-        options.command
-    };
-
-    // Determine the selection mode for error messaging
-    let is_direct_node_id = matches!(node_selection, NodeSelection::NodeId { .. });
-
-    let request = StartRentalApiRequest {
-        node_selection,
-        container_image,
-        environment: env_vars,
-        ports: port_mappings,
-        resources: ResourceRequirementsRequest {
-            cpu_cores: options.cpu_cores.unwrap_or(0.0),
-            memory_mb: options.memory_mb.unwrap_or(0),
-            storage_mb: options.storage_mb.unwrap_or(0),
-            gpu_count: options.gpu_count.unwrap_or(0),
-            gpu_types: vec![],
-        },
-        command,
-        volumes: vec![],
-        no_ssh: options.no_ssh,
-    };
-
-    spinner.set_message("Creating rental...");
-    let response = api_client
-        .start_rental(request)
-        .await
-        .map_err(|e| -> CliError {
-            complete_spinner_error(spinner.clone(), "Failed to create rental");
-            CliError::Internal(
-                eyre!(e)
-                    .note("The selected node is experiencing issues.")
-                    .with_suggestion(|| {
-                        if is_direct_node_id {
-                            "Try using a different node ID (e.g., 'basilica up <different-node-id>')."
-                        } else {
-                            "Simply rerun the same command to automatically try a different node."
-                        }
-                    })
-            )
-        })?;
-
-    complete_spinner_and_clear(spinner);
-
-    print_success(&format!(
-        "Successfully started community cloud rental {}",
-        response.rental_id
-    ));
-
-    // Handle SSH based on options
-    if options.no_ssh {
-        // SSH disabled entirely, nothing to do
-        return Ok(());
-    }
-
-    // Check if we have SSH credentials
-    let ssh_creds = match response.ssh_credentials {
-        Some(ref creds) => creds,
-        None => {
-            print_info("SSH access not available (unexpected error)");
-            return Ok(());
-        }
-    };
-
-    if options.detach {
-        // Detached mode: just show instructions and exit
-        display_ssh_connection_instructions(
-            &response.rental_id,
-            ssh_creds,
-            config,
-            "SSH connection options:",
-        )?;
-    } else {
-        // Auto-SSH mode: wait for rental to be active and connect
-        print_info("Waiting for rental to become active...");
-
-        // Poll for rental to become active
-        let rental_active = poll_rental_status(&response.rental_id, &api_client).await?;
-
-        if rental_active {
-            // Parse SSH credentials and connect
-            print_info("Connecting to rental...");
-            let (host, port, username) = parse_ssh_credentials(ssh_creds)?;
-            let ssh_access = SshAccess {
-                host,
-                port,
-                username,
-            };
-
-            // Fetch API-registered SSH key and find matching private key
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
-                                .note("SSH keys are required to connect to rentals"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
-
-            debug!(
-                "Using private key for community cloud auto-SSH: {}",
-                private_key_path.display()
-            );
-
-            // Use SSH client to open interactive session
-            let ssh_client = SshClient::new(&config.ssh)?;
-            match ssh_client
-                .interactive_session(&ssh_access, Some(private_key_path))
-                .await
-            {
-                Ok(_) => {
-                    // SSH session ended normally
-                    print_info("SSH session closed");
-                    display_ssh_connection_instructions(
-                        &response.rental_id,
-                        ssh_creds,
-                        config,
-                        "To reconnect to this rental:",
-                    )?;
-                }
-                Err(e) => {
-                    print_error(&format!("SSH connection failed: {}", e));
-                    display_ssh_connection_instructions(
-                        &response.rental_id,
-                        ssh_creds,
-                        config,
-                        "Try manually connecting using:",
-                    )?;
-                }
-            }
-        } else {
-            // Timeout or error - show manual instructions
-            print_info("Rental is taking longer than expected to become active");
-            display_ssh_connection_instructions(
-                &response.rental_id,
-                ssh_creds,
-                config,
-                "You can manually connect once it's ready using:",
-            )?
-        }
-    }
-
-    Ok(())
+    // Start rental and handle SSH (reuse unified handler)
+    handle_community_cloud_rental_with_selection(api_client, node_selection, options, config).await
 }
 
 /// Handle the `ps` command - list active rentals
@@ -964,297 +1010,35 @@ pub async fn handle_ps(
     // Branch based on compute category
     match compute_category {
         Some(ComputeCategory::CommunityCloud) => {
-            // Existing community cloud logic
-            let spinner = if filters.history {
-                create_spinner("Fetching rental history...")
-            } else {
-                create_spinner("Fetching active rentals...")
-            };
+            if filters.history {
+                // History mode: fetch from billing service
+                let spinner = create_spinner("Fetching rental history...");
 
-            // Build query from filters - default to "active" if no status specified
-            let query = Some(ListRentalsQuery {
-                status: if filters.history {
-                    None // No filter - get all rentals
+                let history_result = api_client.list_rental_history(Some(100)).await;
+
+                let history = history_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load rental history")
+                })?;
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    json_output(&history)?;
                 } else {
-                    filters.status.or(Some(RentalState::Active)) // Default to active
-                },
-                gpu_type: filters.gpu_type.clone(),
-                min_gpu_count: filters.min_gpu_count,
-            });
-
-            // Fetch rentals, usage history, and pricing packages in parallel
-            // Use a reasonable limit for usage history to cover active rentals
-            let (rentals_result, usage_result, packages_result) = tokio::join!(
-                api_client.list_rentals(query),
-                api_client.list_usage_history(Some(100), None),
-                api_client.get_packages()
-            );
-
-            let rentals_list = rentals_result.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load rentals")
-            })?;
-
-            // Build usage map: rental_id -> usage record
-            // If usage fetch fails, continue with empty map (graceful degradation)
-            let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> = usage_result
-                .ok()
-                .map(|usage| {
-                    usage
-                        .rentals
-                        .into_iter()
-                        .map(|record| (record.rental_id.clone(), record))
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            // Build pricing map: GPU type -> hourly rate
-            // Package names are like "H100 GPU Package", we need to extract just "h100"
-            let pricing_map: HashMap<String, String> = match packages_result {
-                Ok(packages) => {
-                    packages
-                        .packages
-                        .into_iter()
-                        .filter(|p| p.is_active)
-                        .filter_map(|p| {
-                            // Extract GPU type from package name (e.g., "H100 GPU Package" -> "h100")
-                            let gpu_type =
-                                p.name.split_whitespace().next().map(|s| s.to_lowercase());
-
-                            gpu_type.map(|t| (t, p.hourly_rate))
-                        })
-                        .collect()
-                }
-                Err(_e) => HashMap::new(),
-            };
-
-            complete_spinner_and_clear(spinner);
-
-            if json {
-                json_output(&rentals_list)?;
-            } else if filters.history {
-                // History mode: use usage_map data and filter out active rentals
-                // Create a set of active rental IDs from the current rentals list
-                let active_rental_ids: std::collections::HashSet<String> = rentals_list
-                    .rentals
-                    .iter()
-                    .filter(|r| {
-                        // Only include rentals that are currently active or provisioning
-                        matches!(r.state, RentalState::Active | RentalState::Provisioning)
-                    })
-                    .map(|r| {
-                        // Strip "rental-" prefix to match usage_map format
-                        r.rental_id
-                            .strip_prefix("rental-")
-                            .unwrap_or(&r.rental_id)
-                            .to_string()
-                    })
-                    .collect();
-
-                // Filter usage_map to exclude active rentals
-                let historical_rentals: Vec<_> = usage_map
-                    .values()
-                    .filter(|r| !active_rental_ids.contains(&r.rental_id))
-                    .collect();
-
-                table_output::display_usage_history_for_ps(&historical_rentals, filters.detailed)?;
-
-                let total_cost: Decimal = historical_rentals
-                    .iter()
-                    .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
-                    .sum();
-
-                println!();
-                println!(
-                    "{}: {}",
-                    style("Total Cost").cyan(),
-                    style(format!("${:.2}", total_cost)).green().bold()
-                );
-
-                println!("\nTotal: {} rentals", historical_rentals.len());
-
-                display_ps_quick_start_commands();
-            } else {
-                table_output::display_rental_items(
-                    &rentals_list.rentals[..],
-                    !filters.compact,
-                    filters.detailed,
-                    &usage_map,
-                    &pricing_map,
-                    false,
-                )?;
-
-                println!("\nTotal: {} active rentals", rentals_list.rentals.len());
-
-                display_ps_quick_start_commands();
-            }
-        }
-        Some(ComputeCategory::SecureCloud) => {
-            // Secure cloud rentals logic
-            let spinner = if filters.history {
-                create_spinner("Fetching rental history...")
-            } else {
-                create_spinner("Fetching active rentals...")
-            };
-
-            // Fetch secure cloud rentals
-            let rentals_result = api_client.list_secure_cloud_rentals().await;
-
-            let rentals_list = rentals_result.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
-            })?;
-
-            complete_spinner_and_clear(spinner);
-
-            if json {
-                json_output(&rentals_list)?;
-            } else {
-                // Filter rentals based on history flag
-                let rentals_to_display: Vec<_> = if filters.history {
-                    // Show stopped rentals only
-                    rentals_list
+                    // Filter to only community cloud rentals and sort by start time (most recent first)
+                    let mut community_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_some())
-                        .collect()
-                } else {
-                    // Show active/running rentals only
-                    rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none())
-                        .collect()
-                };
-
-                table_output::display_secure_cloud_rentals(
-                    &rentals_to_display,
-                    !filters.compact,
-                    filters.detailed,
-                )?;
-
-                let label = if filters.history {
-                    "historical secure cloud rentals"
-                } else {
-                    "active secure cloud rentals"
-                };
-                println!("\nTotal: {} {}", rentals_to_display.len(), label);
-
-                display_ps_quick_start_commands();
-            }
-        }
-        None => {
-            // Dual-table display: show both community cloud and secure cloud rentals
-            let spinner = create_spinner("Fetching rentals...");
-
-            // Fetch both rental types in parallel
-            let (community_result, secure_result) = tokio::join!(
-                // Community cloud: rentals + usage + packages
-                async {
-                    let query = Some(ListRentalsQuery {
-                        status: if filters.history {
-                            None // No filter - get all rentals
-                        } else {
-                            filters.status.or(Some(RentalState::Active)) // Default to active
-                        },
-                        gpu_type: filters.gpu_type.clone(),
-                        min_gpu_count: filters.min_gpu_count,
-                    });
-
-                    let (rentals_result, usage_result, packages_result) = tokio::join!(
-                        api_client.list_rentals(query),
-                        api_client.list_usage_history(Some(100), None),
-                        api_client.get_packages()
-                    );
-
-                    (rentals_result, usage_result, packages_result)
-                },
-                // Secure cloud: just rentals
-                api_client.list_secure_cloud_rentals()
-            );
-
-            // Process community cloud data
-            let (community_rentals_result, community_usage_result, community_packages_result) =
-                community_result;
-
-            let community_rentals_list = community_rentals_result.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load community cloud rentals")
-            })?;
-
-            // Build usage map: rental_id -> usage record
-            let usage_map: HashMap<String, basilica_sdk::types::RentalUsageRecord> =
-                community_usage_result
-                    .ok()
-                    .map(|usage| {
-                        usage
-                            .rentals
-                            .into_iter()
-                            .map(|record| (record.rental_id.clone(), record))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-            // Build pricing map: GPU type -> hourly rate
-            let pricing_map: HashMap<String, String> = match community_packages_result {
-                Ok(packages) => packages
-                    .packages
-                    .into_iter()
-                    .filter(|p| p.is_active)
-                    .filter_map(|p| {
-                        let gpu_type = p.name.split_whitespace().next().map(|s| s.to_lowercase());
-                        gpu_type.map(|t| (t, p.hourly_rate))
-                    })
-                    .collect(),
-                Err(_e) => HashMap::new(),
-            };
-
-            // Process secure cloud data
-            let secure_rentals_list = secure_result.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
-            })?;
-
-            complete_spinner_and_clear(spinner);
-
-            if json {
-                // JSON output: combine both rental types
-                use serde_json::json;
-                let output = json!({
-                    "community_cloud": community_rentals_list,
-                    "secure_cloud": secure_rentals_list
-                });
-                json_output(&output)?;
-            } else {
-                // Display community cloud table
-                println!("\n{}", style("Community Cloud Rentals").bold());
-
-                if filters.history {
-                    // History mode: use usage_map data and filter out active rentals
-                    let active_rental_ids: std::collections::HashSet<String> =
-                        community_rentals_list
-                            .rentals
-                            .iter()
-                            .filter(|r| {
-                                matches!(r.state, RentalState::Active | RentalState::Provisioning)
-                            })
-                            .map(|r| {
-                                r.rental_id
-                                    .strip_prefix("rental-")
-                                    .unwrap_or(&r.rental_id)
-                                    .to_string()
-                            })
-                            .collect();
-
-                    let historical_rentals: Vec<_> = usage_map
-                        .values()
-                        .filter(|r| !active_rental_ids.contains(&r.rental_id))
+                        .filter(|r| r.cloud_type == "community")
                         .collect();
+                    community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    table_output::display_usage_history_for_ps(
-                        &historical_rentals,
-                        filters.detailed,
-                    )?;
+                    table_output::display_rental_history(&community_history, filters.detailed)?;
 
-                    let total_cost: Decimal = historical_rentals
+                    // Calculate total cost for community cloud only
+                    let total_cost: rust_decimal::Decimal = community_history
                         .iter()
-                        .filter_map(|r| r.current_cost.parse::<Decimal>().ok())
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
 
                     println!();
@@ -1263,62 +1047,357 @@ pub async fn handle_ps(
                         style("Total Cost").cyan(),
                         style(format!("${:.2}", total_cost)).green().bold()
                     );
+                    println!("\nTotal: {} historical rentals", community_history.len());
+
+                    display_ps_quick_start_commands();
+                }
+            } else {
+                // Active rentals mode
+                let spinner = create_spinner("Fetching active rentals...");
+
+                // Build query from filters - default to "active" if no status specified
+                let query = Some(ListRentalsQuery {
+                    status: filters.status.or(Some(RentalState::Active)),
+                    gpu_type: filters.gpu_type.clone(),
+                    min_gpu_count: filters.min_gpu_count,
+                });
+
+                // Fetch rentals with 5-second timeout to handle unresponsive validator
+                let rentals_future = api_client.list_rentals(query);
+                let rentals_result = match timeout(Duration::from_secs(5), rentals_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                };
+
+                let rentals_list = rentals_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load rentals")
+                })?;
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    json_output(&rentals_list)?;
+                } else {
+                    table_output::display_rental_items(
+                        &rentals_list.rentals[..],
+                        !filters.compact,
+                        filters.detailed,
+                    )?;
+
+                    println!("\nTotal: {} active rentals", rentals_list.rentals.len());
+
+                    display_ps_quick_start_commands();
+                }
+            }
+        }
+        Some(ComputeCategory::SecureCloud) => {
+            if filters.history {
+                // History mode: fetch from billing service (which stores all rental history)
+                let spinner = create_spinner("Fetching rental history...");
+
+                let history_result = api_client.list_rental_history(Some(100)).await;
+
+                let history = history_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load rental history")
+                })?;
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    // Filter to only secure cloud rentals and sort by start time (most recent first)
+                    let mut secure_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure")
+                        .cloned()
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let filtered_response = HistoricalRentalsResponse {
+                        rentals: secure_history.clone(),
+                        total_count: secure_history.len(),
+                        total_cost: secure_history
+                            .iter()
+                            .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                            .sum::<rust_decimal::Decimal>()
+                            .to_string(),
+                    };
+                    json_output(&filtered_response)?;
+                } else {
+                    // Filter to only secure cloud rentals and sort by start time (most recent first)
+                    let mut secure_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure")
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    table_output::display_rental_history(&secure_history, filters.detailed)?;
+
+                    // Calculate total cost for secure cloud only
+                    let total_cost: rust_decimal::Decimal = secure_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", total_cost)).green().bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical secure cloud rentals",
+                        secure_history.len()
+                    );
+
+                    display_ps_quick_start_commands();
+                }
+            } else {
+                // Active rentals mode: fetch from secure cloud providers
+                let spinner = create_spinner("Fetching active rentals...");
+
+                let rentals_result = api_client.list_secure_cloud_rentals().await;
+
+                let rentals_list = rentals_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+                })?;
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    json_output(&rentals_list)?;
+                } else {
+                    // Show active/running rentals only
+                    let rentals_to_display: Vec<_> = rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_none())
+                        .collect();
+
+                    table_output::display_secure_cloud_rentals(
+                        &rentals_to_display,
+                        !filters.compact,
+                        filters.detailed,
+                    )?;
 
                     println!(
-                        "\nTotal: {} community cloud rentals",
-                        historical_rentals.len()
+                        "\nTotal: {} active secure cloud rentals",
+                        rentals_to_display.len()
                     );
+
+                    display_ps_quick_start_commands();
+                }
+            }
+        }
+        None => {
+            // Dual-table display: show both community cloud and secure cloud rentals
+            let spinner = if filters.history {
+                create_spinner("Fetching rental history...")
+            } else {
+                create_spinner("Fetching rentals...")
+            };
+
+            if filters.history {
+                // History mode: fetch from billing service (which stores ALL rental history)
+                let history_result = api_client.list_rental_history(Some(100)).await;
+
+                let history = match history_result {
+                    Ok(h) => h,
+                    Err(e) => {
+                        complete_spinner_error(spinner.clone(), "Failed to load rental history");
+                        warn!("Failed to load rental history: {}", e);
+                        HistoricalRentalsResponse {
+                            rentals: vec![],
+                            total_count: 0,
+                            total_cost: "0.00".to_string(),
+                        }
+                    }
+                };
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    use serde_json::json;
+                    // Split history by cloud type and sort by start time (most recent first)
+                    let mut community_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "community")
+                        .cloned()
+                        .collect();
+                    community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let mut secure_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure")
+                        .cloned()
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let output = json!({
+                        "community_cloud_history": community_history,
+                        "secure_cloud_history": secure_history
+                    });
+                    json_output(&output)?;
                 } else {
-                    // Active rentals
+                    // Display community cloud history
+                    println!("\n{}", style("Community Cloud Rental History").bold());
+
+                    // Filter and sort by start time (most recent first)
+                    let mut community_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "community")
+                        .collect();
+                    community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    table_output::display_rental_history(&community_history, filters.detailed)?;
+
+                    let community_total_cost: rust_decimal::Decimal = community_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", community_total_cost))
+                            .green()
+                            .bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical community cloud rentals",
+                        community_history.len()
+                    );
+
+                    // Separator between tables
+                    println!();
+
+                    // Display secure cloud history (from the same billing service response)
+                    println!("{}", style("Secure Cloud Rental History").bold());
+
+                    // Filter and sort by start time (most recent first)
+                    let mut secure_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure")
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    table_output::display_rental_history(&secure_history, filters.detailed)?;
+
+                    let secure_total_cost: rust_decimal::Decimal = secure_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", secure_total_cost)).green().bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical secure cloud rentals",
+                        secure_history.len()
+                    );
+
+                    display_ps_quick_start_commands();
+                }
+            } else {
+                // Active rentals mode
+                let query = Some(ListRentalsQuery {
+                    status: filters.status.or(Some(RentalState::Active)),
+                    gpu_type: filters.gpu_type.clone(),
+                    min_gpu_count: filters.min_gpu_count,
+                });
+
+                let (community_result, secure_result) = tokio::join!(
+                    // Community cloud with 5-second timeout
+                    async {
+                        let rentals_future = api_client.list_rentals(query);
+                        match timeout(Duration::from_secs(5), rentals_future).await {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!("Validator request timed out after 5 seconds");
+                                Err(ApiError::Timeout)
+                            }
+                        }
+                    },
+                    // Secure cloud
+                    api_client.list_secure_cloud_rentals()
+                );
+
+                // Gracefully handle community cloud failures (e.g., validator timeout)
+                let community_rentals_list = match community_result {
+                    Ok(list) => list,
+                    Err(e) => {
+                        warn!("Failed to load community cloud rentals: {}", e);
+                        basilica_sdk::types::ApiListRentalsResponse {
+                            rentals: vec![],
+                            total_count: 0,
+                        }
+                    }
+                };
+
+                // Process secure cloud data
+                let secure_rentals_list = secure_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+                })?;
+
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    // JSON output: combine both rental types
+                    use serde_json::json;
+                    let output = json!({
+                        "community_cloud": community_rentals_list,
+                        "secure_cloud": secure_rentals_list
+                    });
+                    json_output(&output)?;
+                } else {
+                    // Display community cloud table
+                    println!("\n{}", style("Community Cloud Rentals").bold());
+
                     table_output::display_rental_items(
                         &community_rentals_list.rentals[..],
                         !filters.compact,
                         filters.detailed,
-                        &usage_map,
-                        &pricing_map,
-                        false,
                     )?;
 
                     println!(
                         "\nTotal: {} community cloud rentals",
                         community_rentals_list.rentals.len()
                     );
-                }
 
-                // Separator between tables
-                println!();
+                    // Separator between tables
+                    println!();
 
-                // Display secure cloud table
-                println!("{}", style("Secure Cloud Rentals").bold());
+                    // Display secure cloud table
+                    println!("{}", style("Secure Cloud Rentals").bold());
 
-                let secure_rentals_to_display: Vec<_> = if filters.history {
-                    secure_rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_some())
-                        .collect()
-                } else {
-                    secure_rentals_list
+                    let secure_rentals_to_display: Vec<_> = secure_rentals_list
                         .rentals
                         .iter()
                         .filter(|r| r.stopped_at.is_none())
-                        .collect()
-                };
+                        .collect();
 
-                table_output::display_secure_cloud_rentals(
-                    &secure_rentals_to_display,
-                    !filters.compact,
-                    filters.detailed,
-                )?;
+                    table_output::display_secure_cloud_rentals(
+                        &secure_rentals_to_display,
+                        !filters.compact,
+                        filters.detailed,
+                    )?;
 
-                let label = if filters.history {
-                    "historical secure cloud rentals"
-                } else {
-                    "secure cloud rentals"
-                };
-                println!("\nTotal: {} {}", secure_rentals_to_display.len(), label);
+                    println!(
+                        "\nTotal: {} secure cloud rentals",
+                        secure_rentals_to_display.len()
+                    );
 
-                display_ps_quick_start_commands();
+                    display_ps_quick_start_commands();
+                }
             }
         }
     }
@@ -1341,12 +1420,23 @@ pub async fn handle_status(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -1491,12 +1581,23 @@ pub async fn handle_logs(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -1692,13 +1793,22 @@ pub async fn handle_down(
                 (None, Some(rentals))
             }
             None => {
-                // Fetch both types
+                // Fetch both types with 5-second timeout for community cloud
+                let community_future = api_client.list_rentals(Some(ListRentalsQuery {
+                    status: Some(RentalState::Active),
+                    gpu_type: None,
+                    min_gpu_count: None,
+                }));
                 let (community_result, secure_result) = tokio::join!(
-                    api_client.list_rentals(Some(ListRentalsQuery {
-                        status: Some(RentalState::Active),
-                        gpu_type: None,
-                        min_gpu_count: None,
-                    })),
+                    async {
+                        match timeout(Duration::from_secs(5), community_future).await {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!("Validator request timed out after 5 seconds");
+                                Err(ApiError::Timeout)
+                            }
+                        }
+                    },
                     api_client.list_secure_cloud_rentals()
                 );
                 (community_result.ok(), secure_result.ok())
@@ -1862,6 +1972,39 @@ pub async fn handle_down(
     Ok(())
 }
 
+/// Handle the `restart` command - restart rental container
+pub async fn handle_restart(target: Option<String>, config: &CliConfig) -> Result<(), CliError> {
+    let api_client = create_authenticated_client(config).await?;
+
+    // Single rental restart (no --all flag as per requirements)
+    let (rental_id, _compute_type) =
+        resolve_target_rental_unified(target, None, &api_client).await?;
+    let spinner = create_spinner(&format!("Restarting rental: {}", rental_id));
+
+    api_client
+        .restart_rental(&rental_id)
+        .await
+        .map_err(|e| -> CliError {
+            complete_spinner_error(spinner.clone(), "Failed to restart rental");
+            let report = match e {
+                ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
+                    .suggestion("Try 'basilica ps' to see your active rentals"),
+                ApiError::Conflict { message } => {
+                    eyre!("Cannot restart rental: {}", message).suggestion(
+                        "Only Active rentals can be restarted. Check rental status with 'basilica status'",
+                    )
+                }
+                _ => eyre!(e).suggestion("Check your internet connection and try again"),
+            };
+            CliError::Internal(report)
+        })?;
+
+    complete_spinner_and_clear(spinner);
+    print_success(&format!("Successfully restarted rental: {}", rental_id));
+
+    Ok(())
+}
+
 /// Handle the `exec` command - execute commands via SSH
 pub async fn handle_exec(
     target: Option<String>,
@@ -1878,12 +2021,23 @@ pub async fn handle_exec(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -2082,12 +2236,23 @@ pub async fn handle_ssh(
         // Rental ID provided - check both types to find it
         let spinner = create_spinner("Looking up rental...");
 
-        let (community_result, secure_result) = tokio::join!(
+        // Add 5-second timeout for community cloud (validator) request
+        let community_future =
             api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
                 status: Some(basilica_sdk::types::RentalState::Active),
                 gpu_type: None,
                 min_gpu_count: None,
-            })),
+            }));
+        let (community_result, secure_result) = tokio::join!(
+            async {
+                match timeout(Duration::from_secs(5), community_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!("Validator request timed out after 5 seconds");
+                        Err(ApiError::Timeout)
+                    }
+                }
+            },
             api_client.list_secure_cloud_rentals()
         );
 
@@ -2331,12 +2496,22 @@ pub async fn handle_cp(
     // Check both community and secure cloud rentals
     let spinner = create_spinner("Looking up rental...");
 
+    // Add 5-second timeout for community cloud (validator) request
+    let community_future = api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
+        status: Some(basilica_sdk::types::RentalState::Active),
+        gpu_type: None,
+        min_gpu_count: None,
+    }));
     let (community_result, secure_result) = tokio::join!(
-        api_client.list_rentals(Some(basilica_sdk::types::ListRentalsQuery {
-            status: Some(basilica_sdk::types::RentalState::Active),
-            gpu_type: None,
-            min_gpu_count: None,
-        })),
+        async {
+            match timeout(Duration::from_secs(5), community_future).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("Validator request timed out after 5 seconds");
+                    Err(ApiError::Timeout)
+                }
+            }
+        },
         api_client.list_secure_cloud_rentals()
     );
 
@@ -2476,7 +2651,7 @@ async fn poll_rental_status(
     rental_id: &str,
     api_client: &basilica_sdk::BasilicaClient,
 ) -> Result<bool, CliError> {
-    const MAX_WAIT_TIME: Duration = Duration::from_secs(60);
+    const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
     const INITIAL_INTERVAL: Duration = Duration::from_secs(2);
     const MAX_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -2520,10 +2695,7 @@ async fn poll_rental_status(
                     }
                     RentalStatus::Pending => {
                         // Still pending, continue polling
-                        spinner.set_message(format!(
-                            "Rental is pending... ({}s elapsed)",
-                            start_time.elapsed().as_secs()
-                        ));
+                        spinner.set_message("Rental is pending...");
                     }
                 }
             }
@@ -2690,22 +2862,32 @@ async fn retry_ssh_connection(
     let mut interval = INITIAL_INTERVAL;
     let mut attempt = 0;
 
+    // Use a spinner to show progress and avoid cluttering the terminal
+    let spinner = create_spinner("Waiting for SSH to become available...");
+
     loop {
         attempt += 1;
+        spinner.set_message("SSH not ready yet, retrying...");
 
-        // Try to connect
+        // First test connectivity without starting an interactive session
+        // This captures stderr so we don't print raw SSH errors
         match ssh_client
-            .interactive_session(ssh_access, private_key_override.clone())
+            .test_connection(ssh_access, private_key_override.clone())
             .await
         {
             Ok(_) => {
-                // Connection succeeded
-                return Ok(());
+                // Connection test succeeded, now start the actual interactive session
+                complete_spinner_and_clear(spinner);
+                return ssh_client
+                    .interactive_session(ssh_access, private_key_override)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
             }
             Err(e) => {
                 // Check if we've exceeded the maximum wait time
                 if start_time.elapsed() >= max_wait {
                     // Final attempt failed, return error
+                    complete_spinner_error(spinner, "SSH connection failed");
                     return Err(CliError::Internal(
                         eyre!(
                             "SSH connection failed after {} attempts over {}s: {}",
@@ -2726,14 +2908,6 @@ async fn retry_ssh_connection(
                     e,
                     interval.as_secs()
                 );
-
-                // Print user-friendly message on first few retries
-                if attempt <= 3 {
-                    print_info(&format!(
-                        "SSH not ready yet, retrying... (attempt {})",
-                        attempt
-                    ));
-                }
 
                 // Wait before next attempt
                 tokio::time::sleep(interval).await;

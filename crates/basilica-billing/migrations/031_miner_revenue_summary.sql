@@ -96,6 +96,11 @@ COMMENT ON COLUMN billing.miner_revenue_summary.computation_version IS
 -- 4. Create stored function for refreshing summaries
 -- ===========================================================================
 
+-- Updated for unified rentals table (migration 029):
+-- - node_id and validator_id are now in metadata JSONB field
+-- - hourly_rate column removed, calculate from base_price_per_gpu * gpu_count
+-- - Only include community cloud rentals (secure cloud handled internally)
+
 CREATE OR REPLACE FUNCTION billing.refresh_miner_revenue_summary(
     p_period_start TIMESTAMPTZ,
     p_period_end TIMESTAMPTZ,
@@ -121,8 +126,8 @@ BEGIN
         computation_version
     )
     SELECT
-        r.node_id,
-        r.validator_id,
+        r.metadata->>'node_id' AS node_id,
+        r.metadata->>'validator_id' AS validator_id,
         p_period_start,
         p_period_end,
         COUNT(*) AS total_rentals,
@@ -133,14 +138,15 @@ BEGIN
             SUM(EXTRACT(EPOCH FROM (r.end_time - r.start_time)) / 3600),
             0
         ) AS total_hours,
-        AVG(r.hourly_rate) AS avg_hourly_rate,
+        AVG(r.base_price_per_gpu * r.gpu_count) AS avg_hourly_rate,
         AVG(EXTRACT(EPOCH FROM (r.end_time - r.start_time)) / 3600) AS avg_rental_duration_hours,
         p_computation_version
     FROM billing.rentals r
-    WHERE r.end_time IS NOT NULL
+    WHERE r.cloud_type = 'community'  -- Only community rentals (miners we need to pay)
+      AND r.end_time IS NOT NULL
       AND r.end_time >= p_period_start
       AND r.end_time < p_period_end
-    GROUP BY r.node_id, r.validator_id;
+    GROUP BY r.metadata->>'node_id', r.metadata->>'validator_id';
 
     GET DIAGNOSTICS rows_inserted = ROW_COUNT;
     RETURN rows_inserted;
@@ -148,4 +154,4 @@ END;
 $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION billing.refresh_miner_revenue_summary IS
-    'Refresh miner revenue summary for a given time period. Creates new snapshot rows (append-only). Only includes rentals with end_time IS NOT NULL.';
+    'Refresh miner revenue summary for a given time period. Creates new snapshot rows (append-only). Only includes community cloud rentals with end_time IS NOT NULL.';

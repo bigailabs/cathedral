@@ -133,3 +133,38 @@
     msg: "{{ item.item.name }}: {{ 'HEALTHY' if item.status == 200 else 'UNHEALTHY' }}"
   loop: "{{ health_checks.results }}"
 
+- name: Create scripts directory
+  file:
+    path: "{{ basilica_telemetry_dir }}/scripts"
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
+
+- name: Copy disk cleanup script
+  copy:
+    src: "{{ playbook_dir }}/../scripts/disk_cleanup.sh"
+    dest: "{{ basilica_telemetry_dir }}/scripts/disk_cleanup.sh"
+    owner: root
+    group: root
+    mode: 0755
+
+- name: Create cron job for daily disk cleanup
+  cron:
+    name: "Basilica telemetry disk cleanup"
+    minute: "0"
+    hour: "2"
+    job: "{{ basilica_telemetry_dir }}/scripts/disk_cleanup.sh"
+    user: root
+    state: present
+
+- name: Create cron job for weekly Docker system prune
+  cron:
+    name: "Docker system prune weekly"
+    minute: "0"
+    hour: "3"
+    weekday: "0"
+    job: "docker system prune -f --volumes --filter 'until=336h' >> /var/log/basilica/docker_prune.log 2>&1"
+    user: root
+    state: present
+
