@@ -7,7 +7,7 @@ use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{
         ApiKeyInfo, ApiRentalListItem, GpuSpec, HistoricalRentalItem, ListDepositsResponse,
-        NodeDetails, RentalStatusResponse, RentalUsageResponse, UsageHistoryResponse,
+        RentalUsageResponse, UsageHistoryResponse,
     },
     AvailableNode,
 };
@@ -26,87 +26,6 @@ fn format_timestamp(timestamp: &str) -> String {
             local_dt.format("%y-%m-%d %H:%M:%S").to_string()
         })
         .unwrap_or_else(|| timestamp.to_string())
-}
-
-/// Display nodes in table format
-pub fn display_nodes(nodes: &[NodeDetails]) -> Result<()> {
-    #[derive(Tabled)]
-    struct NodeRow {
-        #[tabled(rename = "ID")]
-        id: String,
-        // #[tabled(rename = "GPUs")]
-        // gpus: String,
-        // #[tabled(rename = "CPU")]
-        // cpu: String,
-        // #[tabled(rename = "Memory")]
-        // memory: String,
-        #[tabled(rename = "Location")]
-        location: String,
-    }
-
-    let rows: Vec<NodeRow> = nodes
-        .iter()
-        .map(|node| {
-            // let gpu_info = if node.gpu_specs.is_empty() {
-            //     "None".to_string()
-            // } else {
-            //     format!(
-            //         "{} x {} ({}GB)",
-            //         node.gpu_specs.len(),
-            //         node.gpu_specs[0].name,
-            //         node.gpu_specs[0].memory_gb
-            //     )
-            // };
-
-            NodeRow {
-                id: node.id.clone(),
-                // gpus: gpu_info,
-                // cpu: format!("{} cores", node.cpu_specs.cores),
-                // memory: format!("{}GB", node.cpu_specs.memory_gb),
-                location: node
-                    .location
-                    .clone()
-                    .unwrap_or_else(|| "Unknown".to_string()),
-            }
-        })
-        .collect();
-
-    let mut table = Table::new(rows);
-    table.with(Style::modern());
-    println!("{table}");
-
-    Ok(())
-}
-
-/// Display active rentals in table format (for RentalStatusResponse - legacy)
-pub fn display_rentals(rentals: &[RentalStatusResponse]) -> Result<()> {
-    #[derive(Tabled)]
-    struct RentalRow {
-        #[tabled(rename = "Rental ID")]
-        rental_id: String,
-        #[tabled(rename = "Status")]
-        status: String,
-        #[tabled(rename = "Node")]
-        node: String,
-        #[tabled(rename = "Created")]
-        created: String,
-    }
-
-    let rows: Vec<RentalRow> = rentals
-        .iter()
-        .map(|rental| RentalRow {
-            rental_id: rental.rental_id.clone(),
-            status: format!("{:?}", rental.status),
-            node: rental.node.id.clone(),
-            created: rental.created_at.format("%y-%m-%d %H:%M:%S").to_string(),
-        })
-        .collect();
-
-    let mut table = Table::new(rows);
-    table.with(Style::modern());
-    println!("{table}");
-
-    Ok(())
 }
 
 /// Display rental items in table format
@@ -193,12 +112,7 @@ pub fn display_rental_items(
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 // Format location
-                let location = rental
-                    .location
-                    .as_ref()
-                    .and_then(|loc| LocationProfile::from_str(loc).ok())
-                    .map(|profile| profile.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
+                let location = format_node_location(&rental.location);
 
                 // Format SSH availability
                 let ssh = if rental.has_ssh { "✓" } else { "✗" };
@@ -279,12 +193,7 @@ pub fn display_rental_items(
                     .unwrap_or_else(|| "Unknown".to_string());
 
                 // Format location
-                let location = rental
-                    .location
-                    .as_ref()
-                    .and_then(|loc| LocationProfile::from_str(loc).ok())
-                    .map(|profile| profile.to_string())
-                    .unwrap_or_else(|| "Unknown".to_string());
+                let location = format_node_location(&rental.location);
 
                 // Format SSH availability
                 let ssh = if rental.has_ssh { "✓" } else { "✗" };
@@ -612,52 +521,12 @@ pub fn display_api_keys(keys: &[ApiKeyInfo]) -> Result<()> {
     Ok(())
 }
 
-/// Helper function to format GPU info for an node
+/// Helper function to format GPU info for an available node
 fn format_node_gpu_info(node: &AvailableNode, show_full_gpu_names: bool) -> String {
     if node.node.gpu_specs.is_empty() {
         "No GPU".to_string()
-    } else if node.node.gpu_specs.len() == 1 {
-        // Single GPU
-        let gpu = &node.node.gpu_specs[0];
-        let gpu_display_name = if show_full_gpu_names {
-            gpu.name.clone()
-        } else {
-            GpuCategory::from_str(&gpu.name).unwrap().to_string()
-        };
-        format!("1x {}", gpu_display_name)
     } else {
-        // Multiple GPUs - check if they're all the same model
-        let first_gpu = &node.node.gpu_specs[0];
-        let all_same = node
-            .node
-            .gpu_specs
-            .iter()
-            .all(|g| g.name == first_gpu.name && g.memory_gb == first_gpu.memory_gb);
-
-        if all_same {
-            // All GPUs are identical - use count prefix format
-            let gpu_display_name = if show_full_gpu_names {
-                first_gpu.name.clone()
-            } else {
-                GpuCategory::from_str(&first_gpu.name).unwrap().to_string()
-            };
-            format!("{}x {}", node.node.gpu_specs.len(), gpu_display_name)
-        } else {
-            // Different GPU models - list them individually
-            let gpu_names: Vec<String> = node
-                .node
-                .gpu_specs
-                .iter()
-                .map(|g| {
-                    if show_full_gpu_names {
-                        g.name.clone()
-                    } else {
-                        GpuCategory::from_str(&g.name).unwrap().to_string()
-                    }
-                })
-                .collect();
-            gpu_names.join(", ")
-        }
+        format_gpu_info(&node.node.gpu_specs, show_full_gpu_names)
     }
 }
 
