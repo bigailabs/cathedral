@@ -13,8 +13,7 @@ use tracing::{debug, error, info};
 
 #[derive(Debug, Serialize)]
 pub struct BalanceResponse {
-    pub available: String,
-    pub total: String,
+    pub balance: String,
     pub last_updated: String,
 }
 
@@ -110,8 +109,7 @@ async fn get_balance(
     };
 
     Ok(Json(BalanceResponse {
-        available: response.available_balance,
-        total: response.total_balance,
+        balance: response.available_balance,
         last_updated,
     }))
 }

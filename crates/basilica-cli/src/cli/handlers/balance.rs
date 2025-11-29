@@ -37,18 +37,7 @@ fn display_balance(balance: &basilica_sdk::BalanceResponse) {
     println!("{}", style("Account Balance").bold());
     println!(
         "  {}: {} credits",
-        style("Available").cyan(),
-        style(format_credits(&balance.available)).green().bold()
-    );
-    println!(
-        "  {}: {} credits",
-        style("Total").cyan(),
-        style(format_credits(&balance.total)).bold()
-    );
-    println!();
-    println!(
-        "{}: {}",
-        style("Last Updated").dim(),
-        style(&balance.last_updated).dim()
+        style("Balance").cyan(),
+        style(format_credits(&balance.balance)).green().bold()
     );
 }

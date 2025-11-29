@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Simplified `balance` command output to show single balance value instead of separate "available" and "total" fields
+
 ## [0.6.0-alpha.1]
 
 ### Added
