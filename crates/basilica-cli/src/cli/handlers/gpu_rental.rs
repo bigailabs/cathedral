@@ -325,7 +325,10 @@ pub async fn handle_ls(
                     match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!("Validator request timed out after {} seconds", VALIDATOR_REQUEST_TIMEOUT.as_secs());
+                            warn!(
+                                "Validator request timed out after {} seconds",
+                                VALIDATOR_REQUEST_TIMEOUT.as_secs()
+                            );
                             Ok((vec![], std::collections::HashMap::new()))
                         }
                     }
