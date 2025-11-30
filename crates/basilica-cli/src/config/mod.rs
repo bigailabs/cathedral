@@ -48,7 +48,7 @@ impl Default for ApiConfig {
 
         Self {
             base_url,
-            request_timeout: 900,
+            request_timeout: default_api_request_timeout(),
         }
     }
 }
@@ -70,7 +70,7 @@ fn default_ssh_timeout() -> u64 {
 }
 
 fn default_api_request_timeout() -> u64 {
-    120
+    900
 }
 
 impl Default for SshConfig {
