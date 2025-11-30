@@ -13,12 +13,38 @@ use console::{style, Term};
 use dialoguer::Select;
 use rust_decimal::prelude::ToPrimitive;
 use std::time::Duration;
-use tokio::time::timeout;
 use tracing::warn;
 
 /// Timeout for community cloud (validator) API requests.
 /// The validator can be slower due to network hops through the Bittensor network.
 pub const VALIDATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wrap a community cloud (validator) request with timeout.
+/// Returns ApiError::Timeout on timeout with a warning logged.
+pub async fn with_validator_timeout<T>(
+    future: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, future).await {
+        Ok(result) => result,
+        Err(_) => {
+            warn!(
+                "Validator request timed out after {} seconds",
+                VALIDATOR_REQUEST_TIMEOUT.as_secs()
+            );
+            Err(ApiError::Timeout)
+        }
+    }
+}
+
+/// Print a bold section header for dual-cloud display.
+/// Use `leading_newline: true` for the first section.
+pub fn print_cloud_section_header(title: &str, leading_newline: bool) {
+    if leading_newline {
+        println!("\n{}", style(title).bold());
+    } else {
+        println!("{}", style(title).bold());
+    }
+}
 
 /// Resolve target rental ID - if not provided, fetch active rentals and prompt for selection
 ///
@@ -146,22 +172,11 @@ pub async fn resolve_target_rental_unified(
                 min_gpu_count: None,
             }));
             let (community_result, secure_result) = tokio::join!(
-                async {
-                    match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!("Validator request timed out after 5 seconds");
-                            Err(ApiError::Timeout)
-                        }
-                    }
-                },
+                with_validator_timeout(community_future),
                 api_client.list_secure_cloud_rentals()
             );
 
-            let community = community_result.ok();
-            let secure = secure_result.ok();
-
-            (community, secure)
+            (community_result.ok(), secure_result.ok())
         }
     };
 
@@ -319,16 +334,10 @@ pub async fn resolve_offering_unified(
             country: Some(c.to_string()),
         }),
     }));
-    let (secure_result, community_result) =
-        tokio::join!(api_client.list_secure_cloud_gpus(), async {
-            match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
-                Ok(result) => result,
-                Err(_) => {
-                    warn!("Validator request timed out after 5 seconds");
-                    Err(ApiError::Timeout)
-                }
-            }
-        });
+    let (secure_result, community_result) = tokio::join!(
+        api_client.list_secure_cloud_gpus(),
+        with_validator_timeout(community_future)
+    );
 
     complete_spinner_and_clear(spinner);
 
@@ -540,15 +549,7 @@ pub async fn resolve_rental_by_id(
     }));
 
     let (community_result, secure_result) = tokio::join!(
-        async {
-            match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
-                Ok(result) => result,
-                Err(_) => {
-                    warn!("Validator request timed out after 5 seconds");
-                    Err(ApiError::Timeout)
-                }
-            }
-        },
+        with_validator_timeout(community_future),
         api_client.list_secure_cloud_rentals()
     );
 
@@ -602,15 +603,7 @@ pub async fn resolve_rental_with_ssh(
         }));
 
         let (community_result, secure_result) = tokio::join!(
-            async {
-                match timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        warn!("Validator request timed out after 5 seconds");
-                        Err(ApiError::Timeout)
-                    }
-                }
-            },
+            with_validator_timeout(community_future),
             api_client.list_secure_cloud_rentals()
         );
 

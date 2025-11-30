@@ -2,8 +2,9 @@
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
 use crate::cli::handlers::gpu_rental_helpers::{
-    resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
-    resolve_target_rental_unified, RentalWithSsh, SelectedOffering,
+    print_cloud_section_header, resolve_offering_unified, resolve_rental_by_id,
+    resolve_rental_with_ssh, resolve_target_rental_unified, with_validator_timeout, RentalWithSsh,
+    SelectedOffering,
 };
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
@@ -32,7 +33,6 @@ use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
-use tokio::time::timeout;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -310,21 +310,22 @@ pub async fn handle_ls(
         }
         None => {
             // Display both tables when --compute flag is not specified
+            use crate::cli::handlers::gpu_rental_helpers::VALIDATOR_REQUEST_TIMEOUT;
 
-            // Single unified spinner for parallel fetch
             let spinner = create_spinner("Fetching available GPUs...");
 
-            // Fetch both in parallel with 5-second timeout for community cloud
+            // Fetch both in parallel with timeout for community cloud
+            // Note: fetch_and_filter_community_cloud returns CliError, not ApiError,
+            // so we use inline timeout here instead of with_validator_timeout
             let community_future =
                 fetch_and_filter_community_cloud(&api_client, gpu_category.clone(), &filters);
             let (secure_result, community_result) = tokio::join!(
                 fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
                 async {
-                    match timeout(Duration::from_secs(5), community_future).await {
+                    match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
                         Ok(result) => result,
                         Err(_) => {
-                            warn!("Validator request timed out after 5 seconds");
-                            // Return empty nodes on timeout
+                            warn!("Validator request timed out after {} seconds", VALIDATOR_REQUEST_TIMEOUT.as_secs());
                             Ok((vec![], std::collections::HashMap::new()))
                         }
                     }
@@ -337,7 +338,6 @@ pub async fn handle_ls(
             let (community_nodes, pricing_map) = community_result?;
 
             if json {
-                // Create combined JSON output
                 #[derive(serde::Serialize)]
                 struct CombinedResponse<'a> {
                     secure_cloud: &'a [basilica_aggregator::GpuOffering],
@@ -349,15 +349,12 @@ pub async fn handle_ls(
                 };
                 json_output(&response)?;
             } else {
-                // Display community cloud table
-                println!("\n{}", style("Community Cloud GPUs").bold());
+                print_cloud_section_header("Community Cloud GPUs", true);
                 display_community_cloud_table(&community_nodes, &pricing_map, &filters)?;
 
-                // Separator
                 println!();
 
-                // Display secure cloud table
-                println!("{}", style("Secure Cloud GPUs").bold());
+                print_cloud_section_header("Secure Cloud GPUs", false);
                 display_secure_cloud_table(&secure_gpus, &filters)?;
             }
         }
@@ -1068,15 +1065,8 @@ pub async fn handle_ps(
                     min_gpu_count: filters.min_gpu_count,
                 });
 
-                // Fetch rentals with 5-second timeout to handle unresponsive validator
-                let rentals_future = api_client.list_rentals(query);
-                let rentals_result = match timeout(Duration::from_secs(5), rentals_future).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        warn!("Validator request timed out after 5 seconds");
-                        Err(ApiError::Timeout)
-                    }
-                };
+                // Fetch rentals with timeout to handle unresponsive validator
+                let rentals_result = with_validator_timeout(api_client.list_rentals(query)).await;
 
                 let rentals_list = rentals_result.inspect_err(|_| {
                     complete_spinner_error(spinner.clone(), "Failed to load rentals")
@@ -1248,9 +1238,6 @@ pub async fn handle_ps(
                     });
                     json_output(&output)?;
                 } else {
-                    // Display community cloud history
-                    println!("\n{}", style("Community Cloud Rental History").bold());
-
                     // Filter and sort by start time (most recent first)
                     let mut community_history: Vec<_> = history
                         .rentals
@@ -1259,6 +1246,15 @@ pub async fn handle_ps(
                         .collect();
                     community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
+                    let mut secure_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure")
+                        .collect();
+                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    // Display community cloud history
+                    print_cloud_section_header("Community Cloud Rental History", true);
                     table_output::display_rental_history(&community_history, filters.detailed)?;
 
                     let community_total_cost: rust_decimal::Decimal = community_history
@@ -1279,20 +1275,10 @@ pub async fn handle_ps(
                         community_history.len()
                     );
 
-                    // Separator between tables
                     println!();
 
-                    // Display secure cloud history (from the same billing service response)
-                    println!("{}", style("Secure Cloud Rental History").bold());
-
-                    // Filter and sort by start time (most recent first)
-                    let mut secure_history: Vec<_> = history
-                        .rentals
-                        .iter()
-                        .filter(|r| r.cloud_type == "secure")
-                        .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-
+                    // Display secure cloud history
+                    print_cloud_section_header("Secure Cloud Rental History", false);
                     table_output::display_rental_history(&secure_history, filters.detailed)?;
 
                     let secure_total_cost: rust_decimal::Decimal = secure_history
@@ -1322,34 +1308,19 @@ pub async fn handle_ps(
                 });
 
                 let (community_result, secure_result) = tokio::join!(
-                    // Community cloud with 5-second timeout
-                    async {
-                        let rentals_future = api_client.list_rentals(query);
-                        match timeout(Duration::from_secs(5), rentals_future).await {
-                            Ok(result) => result,
-                            Err(_) => {
-                                warn!("Validator request timed out after 5 seconds");
-                                Err(ApiError::Timeout)
-                            }
-                        }
-                    },
-                    // Secure cloud
+                    with_validator_timeout(api_client.list_rentals(query)),
                     api_client.list_secure_cloud_rentals()
                 );
 
-                // Gracefully handle community cloud failures (e.g., validator timeout)
-                let community_rentals_list = match community_result {
-                    Ok(list) => list,
-                    Err(e) => {
-                        warn!("Failed to load community cloud rentals: {}", e);
-                        basilica_sdk::types::ApiListRentalsResponse {
-                            rentals: vec![],
-                            total_count: 0,
-                        }
+                // Graceful degradation: use empty results on community cloud timeout
+                let community_rentals_list = community_result.unwrap_or_else(|e| {
+                    warn!("Failed to load community cloud rentals: {}", e);
+                    basilica_sdk::types::ApiListRentalsResponse {
+                        rentals: vec![],
+                        total_count: 0,
                     }
-                };
+                });
 
-                // Process secure cloud data
                 let secure_rentals_list = secure_result.inspect_err(|_| {
                     complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
                 })?;
@@ -1357,7 +1328,6 @@ pub async fn handle_ps(
                 complete_spinner_and_clear(spinner);
 
                 if json {
-                    // JSON output: combine both rental types
                     use serde_json::json;
                     let output = json!({
                         "community_cloud": community_rentals_list,
@@ -1365,8 +1335,7 @@ pub async fn handle_ps(
                     });
                     json_output(&output)?;
                 } else {
-                    // Display community cloud table
-                    println!("\n{}", style("Community Cloud Rentals").bold());
+                    print_cloud_section_header("Community Cloud Rentals", true);
 
                     table_output::display_rental_items(
                         &community_rentals_list.rentals[..],
@@ -1379,11 +1348,9 @@ pub async fn handle_ps(
                         community_rentals_list.rentals.len()
                     );
 
-                    // Separator between tables
                     println!();
 
-                    // Display secure cloud table
-                    println!("{}", style("Secure Cloud Rentals").bold());
+                    print_cloud_section_header("Secure Cloud Rentals", false);
 
                     let secure_rentals_to_display: Vec<_> = secure_rentals_list
                         .rentals
@@ -1677,22 +1644,14 @@ pub async fn handle_down(
                 (None, Some(rentals))
             }
             None => {
-                // Fetch both types with 5-second timeout for community cloud
+                // Fetch both types with timeout for community cloud
                 let community_future = api_client.list_rentals(Some(ListRentalsQuery {
                     status: Some(RentalState::Active),
                     gpu_type: None,
                     min_gpu_count: None,
                 }));
                 let (community_result, secure_result) = tokio::join!(
-                    async {
-                        match timeout(Duration::from_secs(5), community_future).await {
-                            Ok(result) => result,
-                            Err(_) => {
-                                warn!("Validator request timed out after 5 seconds");
-                                Err(ApiError::Timeout)
-                            }
-                        }
-                    },
+                    with_validator_timeout(community_future),
                     api_client.list_secure_cloud_rentals()
                 );
                 (community_result.ok(), secure_result.ok())
