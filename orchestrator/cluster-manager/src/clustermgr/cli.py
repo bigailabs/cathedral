@@ -20,6 +20,7 @@ from clustermgr.commands import (
     fuse_troubleshoot,
     gateway,
     health,
+    kubeconfig,
     latency_matrix,
     logs,
     maintenance,
@@ -135,6 +136,7 @@ main.add_command(fuse_troubleshoot)
 # Register commands - Security
 main.add_command(audit_pods)
 main.add_command(cert_check)
+main.add_command(kubeconfig)
 
 # Register commands - Operations
 main.add_command(fix)

@@ -15,6 +15,7 @@ from clustermgr.commands.flannel import flannel
 from clustermgr.commands.fuse_troubleshoot import fuse_troubleshoot
 from clustermgr.commands.gateway import gateway
 from clustermgr.commands.health import health
+from clustermgr.commands.kubeconfig import kubeconfig
 from clustermgr.commands.latency_matrix import latency_matrix
 from clustermgr.commands.logs import logs
 from clustermgr.commands.maintenance import maintenance
@@ -46,6 +47,7 @@ __all__ = [
     "fuse_troubleshoot",
     "gateway",
     "health",
+    "kubeconfig",
     "latency_matrix",
     "logs",
     "maintenance",

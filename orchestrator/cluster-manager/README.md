@@ -163,6 +163,14 @@ uv run clustermgr audit-pods -e         # Exclude kube-system
 uv run clustermgr cert-check            # Check K3s certs
 uv run clustermgr cert-check -s         # Include TLS secrets
 
+# Read-only kubeconfig generation (NEW!)
+uv run clustermgr kubeconfig generate --name prometheus-readonly
+uv run clustermgr kubeconfig generate --name ci-reader --duration 2160h
+uv run clustermgr kubeconfig list       # List ServiceAccounts
+uv run clustermgr kubeconfig verify --kubeconfig-path ./kubeconfig-name.yaml
+uv run clustermgr kubeconfig rotate --name prometheus-readonly
+uv run clustermgr kubeconfig revoke --name old-account
+
 # Fix issues (with safety guards)
 uv run clustermgr fix --dry-run    # Preview changes
 uv run clustermgr fix              # Execute with confirmation
@@ -318,6 +326,11 @@ uv run clustermgr bundle -n u-alice    # Focus on specific namespace
 |---------|-------------|
 | `audit-pods` | Security audit of pod configurations |
 | `cert-check` | Check certificate expiry dates |
+| `kubeconfig generate` | Generate read-only kubeconfig for monitoring/CI |
+| `kubeconfig list` | List existing ServiceAccounts for cluster access |
+| `kubeconfig verify` | Verify kubeconfig has correct read-only permissions |
+| `kubeconfig rotate` | Rotate ServiceAccount token (create new Secret) |
+| `kubeconfig revoke` | Revoke access by deleting ServiceAccount |
 
 ### Operations
 
@@ -344,6 +357,45 @@ uv run clustermgr bundle -n u-alice    # Focus on specific namespace
 2. **Confirmation prompts**: Required for all destructive operations
 3. **Impact scoring**: Remediation steps are scored by impact (1-10)
 4. **Reversibility indicators**: Shows which operations can be undone
+
+## Read-Only Kubeconfig Generation
+
+Generate secure, read-only kubeconfig files for monitoring systems, CI/CD, or external integrations:
+
+```bash
+# Basic generation (1-year token)
+uv run clustermgr kubeconfig generate --name prometheus-readonly
+
+# Custom duration (90 days for human users)
+uv run clustermgr kubeconfig generate --name alice-viewer --duration 2160h
+
+# Custom output path
+uv run clustermgr kubeconfig generate \
+  --name ci-reader \
+  --output /etc/ci/k3s-kubeconfig.yaml
+
+# List existing accounts
+uv run clustermgr kubeconfig list
+
+# Verify permissions
+uv run clustermgr kubeconfig verify --kubeconfig-path ./kubeconfig-name.yaml
+
+# Rotate token (6-month rotation policy)
+uv run clustermgr kubeconfig rotate --name prometheus-readonly
+
+# Revoke access immediately
+uv run clustermgr kubeconfig revoke --name compromised-account
+```
+
+**Features:**
+- Custom ClusterRole with explicit read-only permissions
+- Long-lived tokens (K8s 1.24+ compatible)
+- Dedicated `basilica-monitoring` namespace
+- Automatic CA certificate and API server extraction
+- Security verification and audit trail
+- Easy rotation and revocation
+
+See [docs/READONLY-KUBECONFIG-GUIDE.md](docs/READONLY-KUBECONFIG-GUIDE.md) for comprehensive documentation.
 
 ## HTTP 503 Troubleshooting
 
@@ -465,6 +517,7 @@ src/clustermgr/
     ├── node_pressure.py  # Node pressure detection
     ├── audit_pods.py     # Security audit
     ├── cert_check.py     # Certificate checking
+    ├── kubeconfig.py     # Read-only kubeconfig generation
     ├── resources.py      # Resource utilization
     ├── deployments.py    # User deployments listing
     └── events.py         # Cluster events
@@ -476,6 +529,7 @@ src/clustermgr/
 - `docs/runbooks/HTTP-503-DIAGNOSIS.md` - HTTP 503 error diagnosis workflow
 - `docs/runbooks/NETWORK-SCALING-GUIDE.md` - Cluster scaling procedures
 - `docs/runbooks/NETWORK-MAINTENANCE-PROCEDURES.md` - Maintenance procedures
+- `docs/READONLY-KUBECONFIG-GUIDE.md` - Read-only kubeconfig generation guide
 
 ## Development
 

@@ -27,6 +27,9 @@ This directory contains detailed documentation for each command group in the clu
 ### Troubleshooting
 - [troubleshooting.md](troubleshooting.md) - Pod, FUSE, and node pressure diagnostics
 
+### Security
+- [kubeconfig.md](kubeconfig.md) - Read-only kubeconfig generation and management
+
 ### Operations
 - [bundle.md](bundle.md) - Diagnostic bundle collection
 
@@ -54,6 +57,9 @@ This directory contains detailed documentation for each command group in the clu
 | `fuse-troubleshoot` | FUSE storage diagnostics | [troubleshooting.md](troubleshooting.md) |
 | `node-pressure` | Node pressure conditions | [troubleshooting.md](troubleshooting.md) |
 | `bundle` | Collect diagnostic data | [bundle.md](bundle.md) |
+| `kubeconfig generate` | Create read-only kubeconfig | [kubeconfig.md](kubeconfig.md) |
+| `kubeconfig list` | List monitoring ServiceAccounts | [kubeconfig.md](kubeconfig.md) |
+| `kubeconfig revoke` | Revoke cluster access | [kubeconfig.md](kubeconfig.md) |
 
 ## Common Workflows
 
@@ -95,4 +101,19 @@ clustermgr flannel diagnose
 ```bash
 clustermgr bundle -o /tmp
 # Attach bundle tarball to ticket
+```
+
+### Grant Read-Only Cluster Access
+```bash
+# Create kubeconfig for monitoring
+clustermgr kubeconfig generate --name prometheus-readonly
+
+# Verify permissions
+clustermgr kubeconfig verify --kubeconfig-path ./kubeconfig-prometheus-readonly.yaml
+
+# List existing accounts
+clustermgr kubeconfig list
+
+# Revoke when no longer needed
+clustermgr kubeconfig revoke --name prometheus-readonly
 ```
