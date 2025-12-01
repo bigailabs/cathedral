@@ -32,39 +32,44 @@ The repository includes an automated deployment script at `scripts/deploy.sh` th
 
 ## Quick Start
 
+> **Note**: Production server addresses and credentials are stored in AWS Secrets Manager.
+> See `basilica/production/deployment-targets` for connection details.
+
 ### Deploy All Services
 
 ```bash
 # Deploy all services (validator, miner, executor)
 ./scripts/deploy.sh -s all \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
-  -e shadeform@160.202.129.13:22
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
+  -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT>
 ```
 
 ### Deploy Individual Services
 
 ```bash
 # Deploy only validator
-./scripts/deploy.sh -s validator -v root@64.247.196.98:9001
+./scripts/deploy.sh -s validator -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT>
 
 # Deploy only miner with wallet sync
-./scripts/deploy.sh -s miner -m root@51.159.160.71:46088 -w
+./scripts/deploy.sh -s miner -m root@<MINER_HOST>:<MINER_PORT> -w
 
 # Deploy validator and miner with health checks
 ./scripts/deploy.sh -s validator,miner \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
   -c
 ```
 
 ## Server Configuration
 
-### Current Target Servers
+### Target Servers
 
-1. **Validator Server**: `root@64.247.196.98` (port 9001)
-2. **Miner Server**: `root@51.159.160.71` (port 46088)
-3. **Executor Server**: `shadeform@160.202.129.13` (port 22)
+Server connection details are stored in AWS Secrets Manager under `basilica/production/deployment-targets`.
+
+1. **Validator Server**: `root@<VALIDATOR_HOST>` (port `<VALIDATOR_PORT>`)
+2. **Miner Server**: `root@<MINER_HOST>` (port `<MINER_PORT>`)
+3. **Executor Server**: `<EXECUTOR_USER>@<EXECUTOR_HOST>` (port `<EXECUTOR_PORT>`)
 
 ## Command Line Options
 
@@ -176,14 +181,14 @@ output_format = "json"
 ```bash
 # Deploy validator with veritas binaries
 ./scripts/deploy.sh -s validator \
-  -v root@64.247.196.98:9001 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
   -b ../veritas/binaries
 
 # Deploy all services with veritas binaries and health checks
 ./scripts/deploy.sh -s all \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
-  -e shadeform@160.202.129.13:22 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
+  -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT> \
   -b ../veritas/binaries \
   -c
 ```
@@ -193,20 +198,22 @@ output_format = "json"
 After deployment, verify the binaries are correctly deployed:
 ```bash
 # Check binaries exist and are executable
-ssh root@64.247.196.98 -p 9001 "ls -la /opt/basilica/bin/"
+ssh root@<VALIDATOR_HOST> -p <VALIDATOR_PORT> "ls -la /opt/basilica/bin/"
 
 # Test binary execution
-ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
+ssh root@<VALIDATOR_HOST> -p <VALIDATOR_PORT> "/opt/basilica/bin/validator-binary --help"
 ```
 
 ## Service-Specific Configuration
+
+> **Note**: Wallet credentials are stored in AWS Secrets Manager under `basilica/production/wallets`.
 
 ### Validator
 
 - Started with: `sudo ./validator --start --config config/validator.toml`
 - Logs to: `/opt/basilica/validator.log`
 - Configuration: `/opt/basilica/config/validator.toml`
-- Wallet: `test_validator` (coldkey: 5CA4nF8hMfxu8NSiVTbm19u2up3YkNQa9ZaC8hAK6Bzf26bN, hotkey: 5Dvs1D21nUF9GLH67ZF3kMcGwLQEoD4LbMQ9hycGMGvviGCe)
+- Wallet: `test_validator` (coldkey: `<VALIDATOR_COLDKEY>`, hotkey: `<VALIDATOR_HOTKEY>`)
 
 ### Miner
 
@@ -215,7 +222,7 @@ ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
 - Configuration: `/opt/basilica/config/miner.toml`
 - SSH key: `/root/.ssh/miner_executor_key`
 - Database: `/opt/basilica/data/miner.db`
-- Wallet: `test_miner` (coldkey: 5GEyEGEE979Fofqa7aLKM8aZ7bzkQEn6pAmFjHT4rSxdbhVU, hotkey: 5C5FSHLrKvrjpkEbKporiz29tengUTMSNrcn8qvh1rSkgtrM)
+- Wallet: `test_miner` (coldkey: `<MINER_COLDKEY>`, hotkey: `<MINER_HOTKEY>`)
 
 ### Executor
 
@@ -234,9 +241,9 @@ ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
 ```bash
 # Deploy all services with wallet sync and health monitoring
 ./scripts/deploy.sh -s all \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
-  -e shadeform@160.202.129.13:22 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
+  -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT> \
   -w -c
 ```
 
@@ -245,9 +252,9 @@ ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
 ```bash
 # Deploy all services and stream logs afterwards
 ./scripts/deploy.sh -s all \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
-  -e shadeform@160.202.129.13:22 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
+  -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT> \
   -f
 ```
 
@@ -256,9 +263,9 @@ ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
 ```bash
 # Deploy with extended timeout for slow connections
 ./scripts/deploy.sh -s all \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
-  -e shadeform@160.202.129.13:22 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
+  -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT> \
   -t 120
 ```
 
@@ -267,14 +274,14 @@ ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
 ```bash
 # Deploy validator with veritas binaries
 ./scripts/deploy.sh -s validator \
-  -v root@64.247.196.98:9001 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
   -b ../veritas/binaries
 
 # Deploy all services with veritas binaries
 ./scripts/deploy.sh -s all \
-  -v root@64.247.196.98:9001 \
-  -m root@51.159.160.71:46088 \
-  -e shadeform@160.202.129.13:22 \
+  -v root@<VALIDATOR_HOST>:<VALIDATOR_PORT> \
+  -m root@<MINER_HOST>:<MINER_PORT> \
+  -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT> \
   -b ../veritas/binaries
 ```
 
@@ -284,33 +291,33 @@ ssh root@64.247.196.98 -p 9001 "/opt/basilica/bin/validator-binary --help"
 
 ```bash
 # Check validator status
-ssh root@64.247.196.98 -p 9001 "pgrep -f validator"
+ssh root@<VALIDATOR_HOST> -p <VALIDATOR_PORT> "pgrep -f validator"
 
-# Check miner status  
-ssh root@51.159.160.71 -p 46088 "pgrep -f miner"
+# Check miner status
+ssh root@<MINER_HOST> -p <MINER_PORT> "pgrep -f miner"
 
 # Check executor status
-ssh shadeform@160.202.129.13 "pgrep -f executor"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "pgrep -f executor"
 ```
 
 ### View Service Logs
 
 ```bash
 # View validator logs
-ssh root@64.247.196.98 -p 9001 "tail -f /opt/basilica/validator.log"
+ssh root@<VALIDATOR_HOST> -p <VALIDATOR_PORT> "tail -f /opt/basilica/validator.log"
 
 # View miner logs
-ssh root@51.159.160.71 -p 46088 "tail -f /opt/basilica/miner.log"
+ssh root@<MINER_HOST> -p <MINER_PORT> "tail -f /opt/basilica/miner.log"
 
 # View executor logs
-ssh shadeform@160.202.129.13 "tail -f /opt/basilica/executor.log"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "tail -f /opt/basilica/executor.log"
 ```
 
 ### Test SSH Connectivity
 
 ```bash
 # Test miner to executor SSH access
-ssh root@51.159.160.71 -p 46088 "ssh -i /root/.ssh/miner_executor_key -o StrictHostKeyChecking=no shadeform@160.202.129.13 'echo SSH test successful'"
+ssh root@<MINER_HOST> -p <MINER_PORT> "ssh -i /root/.ssh/miner_executor_key -o StrictHostKeyChecking=no <EXECUTOR_USER>@<EXECUTOR_HOST> 'echo SSH test successful'"
 ```
 
 ## Configuration Management
@@ -362,13 +369,13 @@ If deployment fails:
 **Solution:**
 ```bash
 # Kill existing executor processes
-ssh shadeform@160.202.129.13 "pkill -f executor"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "pkill -f executor"
 
 # Verify port is free
-ssh shadeform@160.202.129.13 "ss -tlnp | grep 50051"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "ss -tlnp | grep 50051"
 
 # Restart executor with sudo
-ssh shadeform@160.202.129.13 "cd /opt/basilica && sudo nohup ./executor --server --config config/executor.toml > executor.log 2>&1 &"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "cd /opt/basilica && sudo nohup ./executor --server --config config/executor.toml > executor.log 2>&1 &"
 ```
 
 #### 2. Miner Health Check Failures (transport error)
@@ -380,11 +387,11 @@ ssh shadeform@160.202.129.13 "cd /opt/basilica && sudo nohup ./executor --server
 **Solution:**
 ```bash
 # Verify executor configuration has correct IP
-ssh root@51.159.160.71 -p 46088 "grep -n '160.202.129.13' /opt/basilica/config/miner.toml"
+ssh root@<MINER_HOST> -p <MINER_PORT> "grep -n '<EXECUTOR_HOST>' /opt/basilica/config/miner.toml"
 
 # If configuration is wrong, update and restart miner
-ssh root@51.159.160.71 -p 46088 "pkill -f miner"
-ssh root@51.159.160.71 -p 46088 "cd /opt/basilica && ./miner --config config/miner.toml > miner.log 2>&1 &"
+ssh root@<MINER_HOST> -p <MINER_PORT> "pkill -f miner"
+ssh root@<MINER_HOST> -p <MINER_PORT> "cd /opt/basilica && ./miner --config config/miner.toml > miner.log 2>&1 &"
 ```
 
 #### 3. Executor Permission Issues
@@ -396,11 +403,11 @@ ssh root@51.159.160.71 -p 46088 "cd /opt/basilica && ./miner --config config/min
 **Solution:**
 ```bash
 # Ensure executor runs with root privileges
-ssh shadeform@160.202.129.13 "ps aux | grep executor"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "ps aux | grep executor"
 
 # If not running as root, restart with sudo
-ssh shadeform@160.202.129.13 "pkill -f executor"
-ssh shadeform@160.202.129.13 "cd /opt/basilica && sudo nohup ./executor --server --config config/executor.toml > executor.log 2>&1 &"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "pkill -f executor"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "cd /opt/basilica && sudo nohup ./executor --server --config config/executor.toml > executor.log 2>&1 &"
 ```
 
 #### 4. Configuration IP Address Mismatches
@@ -416,7 +423,7 @@ ssh shadeform@160.202.129.13 "cd /opt/basilica && sudo nohup ./executor --server
 # Executor config: config/executor.correct.toml
 
 # Redeploy with updated configurations
-./scripts/deploy.sh -s miner,executor -m root@51.159.160.71:46088 -e shadeform@160.202.129.13:22
+./scripts/deploy.sh -s miner,executor -m root@<MINER_HOST>:<MINER_PORT> -e <EXECUTOR_USER>@<EXECUTOR_HOST>:<EXECUTOR_PORT>
 ```
 
 ### Manual Rollback
@@ -425,21 +432,26 @@ If needed, manually restore from backups:
 
 ```bash
 # Restore validator
-ssh root@64.247.196.98 -p 9001 "pkill -f validator; mv /opt/basilica/validator.backup /opt/basilica/validator"
+ssh root@<VALIDATOR_HOST> -p <VALIDATOR_PORT> "pkill -f validator; mv /opt/basilica/validator.backup /opt/basilica/validator"
 
 # Restore miner
-ssh root@51.159.160.71 -p 46088 "pkill -f miner; mv /opt/basilica/miner.backup /opt/basilica/miner"
+ssh root@<MINER_HOST> -p <MINER_PORT> "pkill -f miner; mv /opt/basilica/miner.backup /opt/basilica/miner"
 
 # Restore executor
-ssh shadeform@160.202.129.13 "pkill -f executor; sudo mv /opt/basilica/executor.backup /opt/basilica/executor"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "pkill -f executor; sudo mv /opt/basilica/executor.backup /opt/basilica/executor"
 ```
 
 ## Security Considerations
 
-1. **SSH Keys**: The script manages SSH keys for miner-executor communication
-2. **Wallet Security**: Wallet files are secured with restrictive permissions
-3. **Process Management**: Services are stopped gracefully before deployment
-4. **Backup Strategy**: Previous binaries are backed up before replacement
+1. **Credential Storage**: All production credentials (server IPs, wallet keys, API tokens) are stored in AWS Secrets Manager:
+   - `basilica/production/deployment-targets`: Server connection details
+   - `basilica/production/wallets`: Wallet coldkeys and hotkeys
+   - Access via AWS CLI: `aws secretsmanager get-secret-value --secret-id basilica/production/deployment-targets`
+2. **SSH Keys**: The script manages SSH keys for miner-executor communication
+3. **Wallet Security**: Wallet files are secured with restrictive permissions (700 for directories, 600 for files)
+4. **Process Management**: Services are stopped gracefully before deployment
+5. **Backup Strategy**: Previous binaries are backed up before replacement
+6. **Access Control**: Limit access to production credentials to authorized personnel only
 
 ## Post-Deployment Verification
 
@@ -448,33 +460,33 @@ After successful deployment, verify all services are working correctly:
 ### 1. Service Status Check
 ```bash
 # Verify all services are running from correct locations
-echo "Validator:" && ssh root@64.247.196.98 -p 9001 "pgrep -f '/opt/basilica/validator'"
-echo "Miner:" && ssh root@51.159.160.71 -p 46088 "pgrep -f '/opt/basilica/miner'"
-echo "Executor:" && ssh shadeform@160.202.129.13 "pgrep -f '/opt/basilica/executor'"
+echo "Validator:" && ssh root@<VALIDATOR_HOST> -p <VALIDATOR_PORT> "pgrep -f '/opt/basilica/validator'"
+echo "Miner:" && ssh root@<MINER_HOST> -p <MINER_PORT> "pgrep -f '/opt/basilica/miner'"
+echo "Executor:" && ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "pgrep -f '/opt/basilica/executor'"
 ```
 
 ### 2. Executor Root Permissions Check
 ```bash
 # Confirm executor is running with root privileges
-ssh shadeform@160.202.129.13 "ps aux | grep -v grep | grep 'root.*executor'"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "ps aux | grep -v grep | grep 'root.*executor'"
 ```
 
 ### 3. Network Connectivity Verification
 ```bash
 # Test gRPC port accessibility
-ssh root@51.159.160.71 -p 46088 "timeout 5 bash -c '</dev/tcp/160.202.129.13/50051' && echo 'Executor gRPC port reachable'"
+ssh root@<MINER_HOST> -p <MINER_PORT> "timeout 5 bash -c '</dev/tcp/<EXECUTOR_HOST>/50051' && echo 'Executor gRPC port reachable'"
 
 # Test SSH connectivity
-ssh root@51.159.160.71 -p 46088 "ssh -i /root/.ssh/miner_executor_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 shadeform@160.202.129.13 'echo \"SSH connectivity verified\"'"
+ssh root@<MINER_HOST> -p <MINER_PORT> "ssh -i /root/.ssh/miner_executor_key -o StrictHostKeyChecking=no -o ConnectTimeout=5 <EXECUTOR_USER>@<EXECUTOR_HOST> 'echo \"SSH connectivity verified\"'"
 ```
 
 ### 4. Health Check Verification
 ```bash
 # Check miner logs for successful health checks
-ssh root@51.159.160.71 -p 46088 "tail -10 /opt/basilica/miner.log | grep -i 'health.*healthy'"
+ssh root@<MINER_HOST> -p <MINER_PORT> "tail -10 /opt/basilica/miner.log | grep -i 'health.*healthy'"
 
 # Check executor logs for health check responses
-ssh shadeform@160.202.129.13 "tail -10 /opt/basilica/executor.log | grep -i 'health check requested'"
+ssh <EXECUTOR_USER>@<EXECUTOR_HOST> "tail -10 /opt/basilica/executor.log | grep -i 'health check requested'"
 ```
 
 ## Best Practices
