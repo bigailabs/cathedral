@@ -22,6 +22,54 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
     let private_key_path = ssh_dir.join("basilica_ed25519");
     let public_key_path = ssh_dir.join("basilica_ed25519.pub");
 
+    // Check if key already exists (check both public and private key)
+    if public_key_path.exists() {
+        println!(
+            "{}",
+            style(format!(
+                "SSH key already exists: {}",
+                public_key_path.display()
+            ))
+            .cyan()
+        );
+        return Ok(public_key_path);
+    }
+
+    // If private key exists but public key doesn't, regenerate the public key
+    if private_key_path.exists() {
+        println!(
+            "{}",
+            style("Found private key without public key, regenerating public key...").cyan()
+        );
+        let output = tokio::process::Command::new("ssh-keygen")
+            .args(["-y", "-f", private_key_path.to_str().unwrap()])
+            .output()
+            .await
+            .map_err(|e| {
+                CliError::Internal(color_eyre::eyre::eyre!(
+                    "Failed to regenerate public key: {}",
+                    e
+                ))
+            })?;
+
+        if output.status.success() {
+            fs::write(&public_key_path, &output.stdout).map_err(|e| {
+                CliError::Internal(color_eyre::eyre::eyre!(
+                    "Failed to write public key: {}",
+                    e
+                ))
+            })?;
+            println!(
+                "{}",
+                style(format!("Regenerated public key: {}", public_key_path.display())).green()
+            );
+            return Ok(public_key_path);
+        }
+        // If regeneration fails, we'll generate a new key pair below
+        // But first remove the orphaned private key to avoid ssh-keygen prompt
+        let _ = fs::remove_file(&private_key_path);
+    }
+
     // Create ~/.ssh if it doesn't exist
     if !ssh_dir.exists() {
         fs::create_dir_all(&ssh_dir).map_err(|e| {
@@ -45,7 +93,7 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
 
     println!(
         "{}",
-        style("No SSH keys found. Generating a new ed25519 key...").cyan()
+        style("Generating a new ed25519 key...").cyan()
     );
 
     let output = tokio::process::Command::new("ssh-keygen")
