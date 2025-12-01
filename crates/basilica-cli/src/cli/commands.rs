@@ -3,7 +3,7 @@ use basilica_sdk::types::RentalState;
 use clap::{Subcommand, ValueEnum, ValueHint};
 use std::path::PathBuf;
 
-use crate::handlers::gpu_rental::TargetType;
+use crate::handlers::gpu_rental::GpuTarget;
 
 /// CLI wrapper for ComputeCategory to implement ValueEnum
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -50,11 +50,11 @@ pub enum Commands {
     /// Provision and start GPU instances
     #[command(alias = "start")]
     Up {
-        /// Target node ID (UUID) or GPU category (e.g., 'h100', 'h200', 'b200') (optional)
-        target: Option<TargetType>,
+        /// GPU category to filter by (e.g., 'h100', 'a100', 'b200') (optional)
+        target: Option<GpuTarget>,
 
         /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to secure-cloud if not specified
+        /// Defaults to showing both if not specified
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
