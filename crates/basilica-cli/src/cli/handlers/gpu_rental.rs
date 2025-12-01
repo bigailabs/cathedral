@@ -777,8 +777,13 @@ pub async fn handle_up(
             handle_secure_cloud_rental_with_offering(api_client, offering, options, config).await
         }
         SelectedOffering::CommunityCloud(node_selection) => {
-            handle_community_cloud_rental_with_selection(api_client, node_selection, options, config)
-                .await
+            handle_community_cloud_rental_with_selection(
+                api_client,
+                node_selection,
+                options,
+                config,
+            )
+            .await
         }
     }
 }

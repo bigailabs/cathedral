@@ -351,9 +351,7 @@ pub async fn resolve_offering_unified(
         }
         Some(ComputeCategory::CommunityCloud) => {
             // Only fetch community cloud
-            let community = api_client
-                .list_available_nodes(Some(community_query))
-                .await;
+            let community = api_client.list_available_nodes(Some(community_query)).await;
             (Err(ApiError::Timeout), community) // Dummy error for secure - will be ignored
         }
         None => {
