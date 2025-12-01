@@ -28,10 +28,23 @@ log() {
     echo "$(date -Iseconds) $1"
 }
 
-# Get WireGuard IP to pod CIDR mapping from K3s node annotations
+# Fetch and cache node data (single kubectl call per run)
+fetch_node_data() {
+    if [ -z "$CACHED_NODE_JSON" ]; then
+        CACHED_NODE_JSON=$(kubectl --kubeconfig="$KUBECONFIG" get nodes -o json 2>/dev/null) || {
+            log "Failed to fetch node data from K8s API"
+            return 1
+        }
+    fi
+    echo "$CACHED_NODE_JSON"
+}
+
+# Get WireGuard IP to pod CIDR mapping from cached node data
 get_node_cidrs() {
-    kubectl --kubeconfig="$KUBECONFIG" get nodes -o json 2>/dev/null | \
-    jq -r '.items[] |
+    local node_json
+    node_json=$(fetch_node_data) || return 1
+
+    echo "$node_json" | jq -r '.items[] |
         select(.metadata.labels["basilica.ai/wireguard"] == "true") |
         select(.spec.podCIDR != null) |
         "\(.status.addresses[] | select(.type == "InternalIP") | .address) \(.spec.podCIDR)"' 2>/dev/null || true
@@ -142,9 +155,9 @@ reconcile_peers() {
 reconcile_flannel() {
     log "Reconciling Flannel VXLAN entries for GPU node pod CIDRs"
 
-    # Get GPU node data including VtepMAC from K8s annotations
+    # Use cached node data (already fetched by reconcile_peers)
     local node_json
-    node_json=$(kubectl --kubeconfig="$KUBECONFIG" get nodes -o json 2>/dev/null) || return 0
+    node_json=$(fetch_node_data) || return 0
 
     # Process each GPU node with WireGuard label
     echo "$node_json" | jq -r '
