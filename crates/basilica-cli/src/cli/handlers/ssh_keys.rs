@@ -9,6 +9,78 @@ use etcetera::{choose_base_strategy, BaseStrategy};
 use std::fs;
 use std::path::PathBuf;
 
+/// Generate a new SSH key for Basilica
+async fn generate_ssh_key() -> Result<PathBuf, CliError> {
+    let strategy = choose_base_strategy().map_err(|e| {
+        CliError::Internal(color_eyre::eyre::eyre!(
+            "Failed to determine home directory: {}",
+            e
+        ))
+    })?;
+    let home = strategy.home_dir();
+    let ssh_dir = home.join(".ssh");
+    let private_key_path = ssh_dir.join("basilica_ed25519");
+    let public_key_path = ssh_dir.join("basilica_ed25519.pub");
+
+    // Create ~/.ssh if it doesn't exist
+    if !ssh_dir.exists() {
+        fs::create_dir_all(&ssh_dir).map_err(|e| {
+            CliError::Internal(color_eyre::eyre::eyre!(
+                "Failed to create ~/.ssh directory: {}",
+                e
+            ))
+        })?;
+        // Set permissions to 700 on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&ssh_dir, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                CliError::Internal(color_eyre::eyre::eyre!(
+                    "Failed to set ~/.ssh permissions: {}",
+                    e
+                ))
+            })?;
+        }
+    }
+
+    println!(
+        "{}",
+        style("No SSH keys found. Generating a new ed25519 key...").cyan()
+    );
+
+    let output = tokio::process::Command::new("ssh-keygen")
+        .args([
+            "-t",
+            "ed25519",
+            "-f",
+            private_key_path.to_str().unwrap(),
+            "-N",
+            "", // Empty passphrase
+            "-C",
+            "basilica",
+        ])
+        .output()
+        .await
+        .map_err(|e| {
+            CliError::Internal(color_eyre::eyre::eyre!("Failed to run ssh-keygen: {}", e))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "ssh-keygen failed: {}",
+            stderr
+        )));
+    }
+
+    println!(
+        "{}",
+        style(format!("Generated SSH key: {}", public_key_path.display())).green()
+    );
+
+    Ok(public_key_path)
+}
+
 /// Find all SSH public keys in ~/.ssh directory
 pub fn find_ssh_public_keys() -> Vec<PathBuf> {
     let strategy = match choose_base_strategy() {
@@ -90,26 +162,19 @@ pub struct SelectedSshKey {
 /// Discover SSH public keys in ~/.ssh and let user select one interactively
 ///
 /// Returns the selected key's path and validated content.
-/// If only one key exists, it's auto-selected without prompting.
+/// Always shows a selector with existing keys plus an option to generate a new key.
 pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
     use dialoguer::Select;
 
     // Find all SSH public keys in ~/.ssh
     let keys = find_ssh_public_keys();
 
-    if keys.is_empty() {
-        return Err(CliError::Internal(color_eyre::eyre::eyre!(
-            "No SSH public keys found in ~/.ssh/\n\
-             Please generate one with: ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519"
-        )));
-    }
-
-    let key_path = if keys.len() == 1 {
-        // Only one key found, use it automatically
-        keys[0].clone()
+    let key_path = if keys.is_empty() {
+        // No keys found, generate one automatically
+        generate_ssh_key().await?
     } else {
-        // Multiple keys found, show interactive selection
-        let options: Vec<String> = keys
+        // Build options: existing keys + generate new option
+        let mut options: Vec<String> = keys
             .iter()
             .map(|path| {
                 path.file_name()
@@ -118,9 +183,11 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
                     .to_string()
             })
             .collect();
+        options.push("Generate new key (basilica_ed25519)".to_string());
+
+        let generate_index = options.len() - 1;
 
         // Run interactive selection in a blocking context
-        let keys_clone = keys.clone();
         let selection = tokio::task::spawn_blocking(move || {
             let theme = ColorfulTheme::default();
             Select::with_theme(&theme)
@@ -133,7 +200,12 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
         .map_err(|e| CliError::Internal(color_eyre::eyre::eyre!("Task join error: {}", e)))?
         .map_err(|e| CliError::Internal(e.into()))?;
 
-        keys_clone[selection].clone()
+        if selection == generate_index {
+            // User chose to generate a new key
+            generate_ssh_key().await?
+        } else {
+            keys[selection].clone()
+        }
     };
 
     // Read and validate SSH public key
@@ -179,22 +251,13 @@ pub async fn handle_add_ssh_key(
             let keys = find_ssh_public_keys();
 
             if keys.is_empty() {
-                return Err(CliError::Internal(color_eyre::eyre::eyre!(
-                    "No SSH public keys found in ~/.ssh/\nPlease specify a key file with --file or generate one with: ssh-keygen -t ed25519"
-                )));
-            } else if keys.len() == 1 {
-                // Only one key found, use it automatically
-                let path = &keys[0];
-                println!(
-                    "{}",
-                    style(format!("Found SSH public key: {}", path.display())).cyan()
-                );
-                path.clone()
+                // No keys found, generate one automatically
+                generate_ssh_key().await?
             } else {
-                // Multiple keys found, show interactive selection
+                // Show interactive selection with existing keys + generate option
                 use dialoguer::Select;
 
-                let options: Vec<String> = keys
+                let mut options: Vec<String> = keys
                     .iter()
                     .map(|path| {
                         path.file_name()
@@ -203,11 +266,11 @@ pub async fn handle_add_ssh_key(
                             .to_string()
                     })
                     .collect();
+                options.push("Generate new key (basilica_ed25519)".to_string());
 
-                println!("{}", style("Found multiple SSH public keys:").cyan());
+                let generate_index = options.len() - 1;
 
                 // Run interactive selection in a blocking context
-                let keys_clone = keys.clone();
                 let selection = tokio::task::spawn_blocking(move || {
                     let theme = ColorfulTheme::default();
                     Select::with_theme(&theme)
@@ -220,7 +283,17 @@ pub async fn handle_add_ssh_key(
                 .map_err(|e| CliError::Internal(color_eyre::eyre::eyre!("Task join error: {}", e)))?
                 .map_err(|e| CliError::Internal(e.into()))?;
 
-                keys_clone[selection].clone()
+                if selection == generate_index {
+                    // User chose to generate a new key
+                    generate_ssh_key().await?
+                } else {
+                    let path = &keys[selection];
+                    println!(
+                        "{}",
+                        style(format!("Selected SSH public key: {}", path.display())).cyan()
+                    );
+                    path.clone()
+                }
             }
         }
     };
