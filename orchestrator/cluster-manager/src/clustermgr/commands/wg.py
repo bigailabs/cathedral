@@ -386,3 +386,182 @@ def reconcile(ctx: click.Context, fix: bool) -> None:
             print_status(s.node_name, "Partial failure", Severity.WARNING)
 
     console.print("\n[green]Reconciliation complete[/green]")
+
+
+@wg.command("keys")
+@click.pass_context
+def keys(ctx: click.Context) -> None:
+    """Show WireGuard key information for rotation planning.
+
+    Displays public key hashes and key age information to help
+    plan quarterly key rotation procedures.
+    """
+    config: Config = ctx.obj
+
+    print_header("WireGuard Key Status")
+
+    result = run_ansible(
+        config,
+        "shell",
+        (
+            "echo \"=== Public Key ===\"; "
+            "cat /etc/wireguard/public.key 2>/dev/null || echo 'N/A'; "
+            "echo \"=== Key File Age ===\"; "
+            "stat -c '%y' /etc/wireguard/private.key 2>/dev/null | cut -d' ' -f1 || echo 'N/A'; "
+            "echo \"=== Backup Exists ===\"; "
+            "test -f /etc/wireguard/private.key.backup && echo 'Yes' || echo 'No'"
+        ),
+        timeout=30,
+    )
+
+    if result.returncode != 0:
+        console.print("[red]Failed to get key information[/red]")
+        ctx.exit(1)
+
+    table = Table()
+    table.add_column("Server", style="cyan")
+    table.add_column("Public Key (truncated)")
+    table.add_column("Key Created")
+    table.add_column("Backup")
+
+    current_server = None
+    pubkey = ""
+    key_date = ""
+    backup = ""
+
+    for line in result.stdout.split("\n"):
+        if " | CHANGED" in line or " | SUCCESS" in line:
+            if current_server:
+                table.add_row(
+                    current_server,
+                    pubkey[:20] + "..." if pubkey and pubkey != "N/A" else "N/A",
+                    key_date,
+                    backup,
+                )
+            current_server = line.split(" | ")[0].strip()
+            pubkey = ""
+            key_date = ""
+            backup = ""
+        elif "=== Public Key ===" in line:
+            continue
+        elif "=== Key File Age ===" in line:
+            continue
+        elif "=== Backup Exists ===" in line:
+            continue
+        elif current_server:
+            text = line.strip()
+            if not pubkey and text and "===" not in text:
+                pubkey = text
+            elif not key_date and text and "===" not in text and pubkey:
+                key_date = text
+            elif not backup and text in ("Yes", "No"):
+                backup = text
+
+    if current_server:
+        table.add_row(
+            current_server,
+            pubkey[:20] + "..." if pubkey and pubkey != "N/A" else "N/A",
+            key_date,
+            backup,
+        )
+
+    console.print(table)
+
+    print_header("Key Rotation Recommendations")
+    console.print("Keys should be rotated quarterly. See NETWORK-MAINTENANCE-PROCEDURES.md")
+    console.print("")
+    console.print("Before rotation:")
+    console.print("  1. Schedule maintenance window")
+    console.print("  2. Generate new keys on all servers")
+    console.print("  3. Coordinate cutover across all servers and GPU nodes")
+    console.print("  4. Update GPU node configs via API")
+    console.print("  5. Verify connectivity after rotation")
+
+
+@wg.command("handshakes")
+@click.option("--stale-threshold", "-t", default=180, help="Seconds before handshake is considered stale")
+@click.pass_context
+def handshakes(ctx: click.Context, stale_threshold: int) -> None:
+    """Check WireGuard handshake ages across all peers.
+
+    Reports peers with stale handshakes that may indicate
+    connectivity issues or need for restart.
+    """
+    config: Config = ctx.obj
+
+    print_header("WireGuard Handshake Status")
+
+    result = run_ansible(
+        config,
+        "shell",
+        "sudo wg show wg0 dump 2>/dev/null | tail -n +2",
+        timeout=30,
+    )
+
+    if result.returncode != 0:
+        console.print("[red]Failed to get handshake information[/red]")
+        ctx.exit(1)
+
+    stale_peers: list[tuple[str, str, int]] = []
+    healthy_count = 0
+    total_count = 0
+    current_server = None
+
+    import time
+    current_time = int(time.time())
+
+    for line in result.stdout.split("\n"):
+        if " | CHANGED" in line or " | SUCCESS" in line:
+            current_server = line.split(" | ")[0].strip()
+            continue
+
+        if not current_server or "\t" not in line:
+            continue
+
+        parts = line.split("\t")
+        if len(parts) >= 5:
+            total_count += 1
+            pubkey = parts[0][:16] + "..."
+            try:
+                last_handshake = int(parts[4])
+                if last_handshake == 0:
+                    stale_peers.append((current_server, pubkey, -1))
+                else:
+                    age = current_time - last_handshake
+                    if age > stale_threshold:
+                        stale_peers.append((current_server, pubkey, age))
+                    else:
+                        healthy_count += 1
+            except (ValueError, IndexError):
+                pass
+
+    console.print(f"Total peers: {total_count}")
+    console.print(f"Healthy: {healthy_count}")
+    console.print(f"Stale (>{stale_threshold}s): {len(stale_peers)}\n")
+
+    if stale_peers:
+        table = Table()
+        table.add_column("Server", style="cyan")
+        table.add_column("Peer")
+        table.add_column("Handshake Age")
+
+        for server, peer, age in stale_peers:
+            if age < 0:
+                age_str = "[red]Never[/red]"
+            else:
+                mins = age // 60
+                secs = age % 60
+                age_str = f"[yellow]{mins}m {secs}s[/yellow]"
+
+            table.add_row(server, peer, age_str)
+
+        console.print(table)
+
+        console.print("\n[yellow]Stale handshakes may indicate:[/yellow]")
+        console.print("  - GPU node is offline")
+        console.print("  - Network path is blocked")
+        console.print("  - WireGuard needs restart")
+        console.print("")
+        console.print("Run 'clustermgr wg restart' to restart WireGuard service")
+    else:
+        console.print("[green]All handshakes are healthy[/green]")
