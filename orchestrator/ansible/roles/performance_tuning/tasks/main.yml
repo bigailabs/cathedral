@@ -65,8 +65,8 @@
 # =============================================================================
 
 - name: Deploy performance sysctl configuration
-  ansible.builtin.copy:
-    src: 99-wireguard-performance.conf
+  ansible.builtin.template:
+    src: 99-wireguard-performance.conf.j2
     dest: /etc/sysctl.d/99-wireguard-performance.conf
     owner: root
     group: root
