@@ -807,3 +807,190 @@ def diagnose(ctx: click.Context) -> None:
         console.print("  - Missing neighbor: ip neigh add <VTEP_IP> lladdr <MAC> dev flannel.1")
         console.print("  - Missing route: ip route add <POD_CIDR> via <VTEP_IP> dev flannel.1 onlink")
         ctx.exit(1)
+
+
+@flannel.command("mac-duplicates")
+@click.pass_context
+def mac_duplicates(ctx: click.Context) -> None:
+    """Check for duplicate VtepMAC addresses across nodes.
+
+    Duplicate MACs cause intermittent connectivity issues because
+    VXLAN traffic gets routed to the wrong node. GPU nodes onboarded
+    before v1.7.0 may have conflicting MACs.
+    """
+    config: Config = ctx.obj
+
+    print_header("Duplicate VtepMAC Detection")
+
+    gpu_nodes = _get_gpu_nodes(config)
+    if not gpu_nodes:
+        console.print("[yellow]No GPU nodes found[/yellow]")
+        return
+
+    # Group nodes by MAC
+    mac_to_nodes: dict[str, list[GPUNodeInfo]] = {}
+    for gpu in gpu_nodes:
+        if gpu.flannel_mac:
+            if gpu.flannel_mac not in mac_to_nodes:
+                mac_to_nodes[gpu.flannel_mac] = []
+            mac_to_nodes[gpu.flannel_mac].append(gpu)
+
+    # Find duplicates
+    duplicates = {mac: nodes for mac, nodes in mac_to_nodes.items() if len(nodes) > 1}
+
+    if not duplicates:
+        console.print(f"[green]No duplicate MACs found among {len(gpu_nodes)} GPU nodes[/green]")
+        return
+
+    console.print(f"[red]Found {len(duplicates)} duplicate MAC(s)![/red]\n")
+
+    for mac, nodes in duplicates.items():
+        print_header(f"Duplicate MAC: {mac}")
+
+        table = Table()
+        table.add_column("Node", style="cyan")
+        table.add_column("WireGuard IP")
+        table.add_column("Pod CIDR")
+
+        for node in nodes:
+            table.add_row(node.name[:30], node.wg_ip, node.pod_cidr)
+
+        console.print(table)
+
+    print_header("Resolution")
+    console.print("For each conflicting node (except one), regenerate the VtepMAC:")
+    console.print("")
+    console.print("  1. Generate deterministic MAC from node name:")
+    console.print("     NODE_NAME=$(hostname)")
+    console.print("     HASH=$(echo -n \"$NODE_NAME\" | sha256sum | cut -c1-10)")
+    console.print("     NEW_MAC=$(printf \"02:%s:%s:%s:%s:%s\" \"${HASH:0:2}\" \"${HASH:2:2}\" \"${HASH:4:2}\" \"${HASH:6:2}\" \"${HASH:8:2}\")")
+    console.print("")
+    console.print("  2. Recreate flannel.1 with new MAC")
+    console.print("  3. Update K8s node annotation")
+    console.print("  4. Update FDB/neighbor entries on K3s servers")
+    console.print("")
+    console.print("See FLANNEL-VXLAN-TROUBLESHOOTING.md for detailed steps")
+
+    ctx.exit(1)
+
+
+@flannel.command("capture")
+@click.option("--interface", "-i", default="flannel.1", help="Interface to capture on")
+@click.option("--count", "-c", default=50, help="Number of packets to capture")
+@click.option("--filter", "-f", "pcap_filter", default="", help="tcpdump filter expression")
+@click.option("--server", "-s", default="k3s_server[0]", help="Server to run capture on")
+@click.pass_context
+def capture(
+    ctx: click.Context,
+    interface: str,
+    count: int,
+    pcap_filter: str,
+    server: str,
+) -> None:
+    """Capture packets on Flannel interface for debugging.
+
+    Runs tcpdump on the specified interface to help diagnose
+    VXLAN encapsulation and routing issues.
+    """
+    config: Config = ctx.obj
+
+    print_header(f"Packet Capture on {interface}")
+
+    console.print(f"Server: {server}")
+    console.print(f"Interface: {interface}")
+    console.print(f"Count: {count} packets")
+    if pcap_filter:
+        console.print(f"Filter: {pcap_filter}")
+
+    console.print("\nCapturing...")
+
+    cmd = f"sudo timeout 30 tcpdump -i {interface} -nn -c {count}"
+    if pcap_filter:
+        cmd += f" {pcap_filter}"
+    cmd += " 2>&1"
+
+    result = run_ansible(
+        config,
+        "shell",
+        cmd,
+        hosts=server,
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        console.print("[red]Capture failed[/red]")
+        if result.stderr:
+            console.print(result.stderr)
+        ctx.exit(1)
+
+    # Parse and display output
+    in_output = False
+    for line in result.stdout.split("\n"):
+        if " | CHANGED" in line or " | SUCCESS" in line:
+            in_output = True
+            continue
+        if in_output and line.strip():
+            # Colorize common patterns
+            text = line.strip()
+            if "ICMP" in text:
+                console.print(f"[cyan]{text}[/cyan]")
+            elif "UDP" in text:
+                console.print(f"[yellow]{text}[/yellow]")
+            elif "ARP" in text:
+                console.print(f"[green]{text}[/green]")
+            elif "packets captured" in text or "packets received" in text:
+                console.print(f"\n[bold]{text}[/bold]")
+            else:
+                console.print(text)
+
+
+@flannel.command("vxlan-capture")
+@click.option("--count", "-c", default=20, help="Number of packets to capture")
+@click.option("--server", "-s", default="k3s_server[0]", help="Server to run capture on")
+@click.pass_context
+def vxlan_capture(
+    ctx: click.Context,
+    count: int,
+    server: str,
+) -> None:
+    """Capture VXLAN encapsulated traffic (UDP 8472).
+
+    Captures VXLAN-encapsulated packets on wg0 interface to verify
+    that traffic is being properly tunneled through WireGuard.
+    """
+    config: Config = ctx.obj
+
+    print_header("VXLAN Encapsulated Traffic Capture")
+
+    console.print(f"Server: {server}")
+    console.print(f"Capturing {count} packets on wg0 (UDP port 8472)")
+
+    console.print("\nCapturing...")
+
+    cmd = f"sudo timeout 30 tcpdump -i wg0 -nn udp port 8472 -c {count} 2>&1"
+
+    result = run_ansible(
+        config,
+        "shell",
+        cmd,
+        hosts=server,
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        console.print("[red]Capture failed[/red]")
+        if result.stderr:
+            console.print(result.stderr)
+        ctx.exit(1)
+
+    in_output = False
+    for line in result.stdout.split("\n"):
+        if " | CHANGED" in line or " | SUCCESS" in line:
+            in_output = True
+            continue
+        if in_output and line.strip():
+            text = line.strip()
+            if "packets captured" in text or "packets received" in text:
+                console.print(f"\n[bold]{text}[/bold]")
+            else:
+                console.print(text)
