@@ -6,11 +6,13 @@ from rich.console import Console
 from clustermgr import __version__
 from clustermgr.commands import (
     audit_pods,
+    bundle,
     cert_check,
     cleanup,
     deployments,
     diagnose,
     envoy,
+    etcd,
     events,
     firewall,
     fix,
@@ -20,6 +22,7 @@ from clustermgr.commands import (
     health,
     latency_matrix,
     logs,
+    maintenance,
     mesh_test,
     mtu,
     namespace,
@@ -27,6 +30,7 @@ from clustermgr.commands import (
     node_pressure,
     pod_troubleshoot,
     resources,
+    scaling,
     topology,
     ud,
     wg,
@@ -136,6 +140,12 @@ main.add_command(cert_check)
 main.add_command(fix)
 main.add_command(cleanup)
 main.add_command(logs)
+main.add_command(bundle)
+
+# Register commands - Maintenance
+main.add_command(maintenance)
+main.add_command(scaling)
+main.add_command(etcd)
 
 # Register commands - UserDeployment Management
 main.add_command(ud)
