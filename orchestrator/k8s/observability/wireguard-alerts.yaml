@@ -146,3 +146,67 @@ spec:
           annotations:
             summary: "Incorrect Flannel route via wg0 on {{ $labels.instance }}"
             description: "Node {{ $labels.instance }} has {{ $value }} pod CIDR routes going via wg0 instead of flannel.1. This breaks VXLAN encapsulation and causes HTTP 503 errors."
+
+    - name: wireguard-reconcile
+      interval: 60s
+      rules:
+        - alert: WireGuardReconcileStale
+          expr: (time() - wireguard_reconcile_last_run_timestamp_seconds) > 600
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "WireGuard reconcile has not run on {{ $labels.instance }}"
+            description: "WireGuard reconcile job has not run in {{ $value | humanizeDuration }} on {{ $labels.instance }}. CronJob may be failing or leader election stuck."
+
+        - alert: WireGuardReconcileFailed
+          expr: wireguard_reconcile_success == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "WireGuard reconcile failing on {{ $labels.instance }}"
+            description: "WireGuard reconcile job is failing on {{ $labels.instance }}. GPU pod traffic may be affected."
+
+        - alert: WireGuardReconcileHighChanges
+          expr: wireguard_reconcile_changes_total > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High WireGuard reconcile change rate on {{ $labels.instance }}"
+            description: "WireGuard reconcile made {{ $value }} changes on {{ $labels.instance }}. May indicate routing instability or frequent node churn."
+
+    - name: vxlan-traffic
+      interval: 30s
+      rules:
+        - alert: VXLANHighErrorRate
+          expr: |
+            rate(vxlan_rx_errors_total[5m]) + rate(vxlan_tx_errors_total[5m]) > 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High VXLAN error rate on {{ $labels.instance }}"
+            description: "Node {{ $labels.instance }} has {{ $value | printf \"%.2f\" }} VXLAN errors/sec. Check flannel.1 interface and MTU settings."
+
+        - alert: VXLANHighDropRate
+          expr: |
+            rate(vxlan_rx_dropped_total[5m]) + rate(vxlan_tx_dropped_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High VXLAN packet drop rate on {{ $labels.instance }}"
+            description: "Node {{ $labels.instance }} is dropping {{ $value | printf \"%.2f\" }} VXLAN packets/sec. May indicate buffer exhaustion or routing issues."
+
+        - alert: VXLANNoTraffic
+          expr: |
+            rate(vxlan_rx_packets_total[10m]) == 0
+            and rate(vxlan_tx_packets_total[10m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "VXLAN asymmetric traffic on {{ $labels.instance }}"
+            description: "Node {{ $labels.instance }} is sending but not receiving VXLAN traffic. Possible return path routing issue."
