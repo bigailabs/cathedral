@@ -33,32 +33,11 @@ pub fn find_ssh_public_keys() -> Vec<PathBuf> {
         }
     }
 
-    // Sort by common key names first (ed25519, rsa, ecdsa), then alphabetically
+    // Sort alphabetically by filename
     keys.sort_by(|a, b| {
         let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-        let a_priority = if a_name.contains("ed25519") {
-            0
-        } else if a_name.contains("rsa") {
-            1
-        } else if a_name.contains("ecdsa") {
-            2
-        } else {
-            3
-        };
-
-        let b_priority = if b_name.contains("ed25519") {
-            0
-        } else if b_name.contains("rsa") {
-            1
-        } else if b_name.contains("ecdsa") {
-            2
-        } else {
-            3
-        };
-
-        a_priority.cmp(&b_priority).then_with(|| a_name.cmp(b_name))
+        a_name.cmp(b_name)
     });
 
     keys
