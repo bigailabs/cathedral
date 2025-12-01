@@ -806,6 +806,7 @@ impl ApiK8sClient for K8sClient {
             },
             "pathPrefix": path_prefix,
             "ttlSeconds": req.ttl_seconds,
+            "public": req.public,
         });
 
         if let Some(ref health_check) = req.health_check {
