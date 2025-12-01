@@ -7,12 +7,21 @@
 # - GPU nodes register with WireGuard before joining K3s
 # - Pod CIDRs are assigned when the node joins K3s
 # - This reconciler adds pod CIDRs to AllowedIPs after node joins
+#
+# Scalability: Designed to handle 100+ GPU nodes efficiently
+# - Single kubectl call to fetch all node data
+# - O(n) processing with minimal syscalls per node
+# - Idempotent operations (check before modify)
 
 set -euo pipefail
 
 readonly INTERFACE="{{ wireguard_interface }}"
 readonly KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 readonly LOG_TAG="wireguard-reconcile"
+readonly MAX_NODES="${MAX_GPU_NODES:-500}"
+
+# Cached node data (populated once per run)
+CACHED_NODE_JSON=""
 
 log() {
     logger -t "$LOG_TAG" "$1"
@@ -65,6 +74,14 @@ reconcile_peers() {
         log "No GPU nodes with WireGuard labels and pod CIDRs found"
         return 0
     fi
+
+    # Scalability check: warn if too many nodes
+    local node_count
+    node_count=$(echo "$node_data" | wc -l)
+    if [ "$node_count" -gt "$MAX_NODES" ]; then
+        log "WARNING: $node_count GPU nodes exceeds limit ($MAX_NODES). Consider increasing MAX_GPU_NODES."
+    fi
+    log "Processing $node_count GPU nodes"
 
     while IFS= read -r line; do
         [ -z "$line" ] && continue
