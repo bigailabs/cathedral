@@ -166,35 +166,96 @@
     comment: "NAT WireGuard to VPC for remote GPU nodes"
   tags: ['wireguard', 'iptables']
 
-# Security hardening: Rate limiting and FORWARD chain restrictions
-# Note: All iptables rules must be added BEFORE saving, and hashlimit requires
-# manual idempotency handling since ansible.builtin.iptables doesn't support it
+# Security hardening: IP allowlisting and optional rate limiting
+# PRODUCTION SAFE CONFIGURATION (2025-11-28):
+# - Rate limiting DISABLED by default
+# - IP allowlisting MANDATORY
+# - Comprehensive cleanup of legacy aggressive rate limits
+#
+# See /docs/runbooks/WIREGUARD-PRODUCTION-HARDENING.md for full details
+
+- name: Remove ALL WireGuard rate limit rules (comprehensive cleanup)
+  ansible.builtin.shell: |
+    # Remove hashlimit rules (all variants)
+    while iptables -D INPUT -p udp --dport {{ wireguard_port }} -m hashlimit -j DROP 2>/dev/null; do :; done
+    # Remove connlimit rules
+    while iptables -D INPUT -p udp --dport {{ wireguard_port }} -m connlimit -j DROP 2>/dev/null; do :; done
+    # Remove recent rules
+    while iptables -D INPUT -p udp --dport {{ wireguard_port }} -m recent -j DROP 2>/dev/null; do :; done
+    echo "All WireGuard rate limit rules removed"
+  changed_when: false
+  tags: ['wireguard', 'security', 'cleanup']
 
 - name: Install iptables hashlimit module dependencies
   ansible.builtin.apt:
     name: xtables-addons-common
     state: present
+  when: wireguard_ratelimit_enabled | default(false)
   tags: ['wireguard', 'security']
 
 - name: Check if WireGuard rate limit rule exists
   ansible.builtin.shell: |
     iptables -C INPUT -p udp --dport {{ wireguard_port }} -m hashlimit \
       --hashlimit-name wireguard_handshake --hashlimit-mode srcip \
-      --hashlimit-above 10/minute --hashlimit-burst 5 \
+      --hashlimit-above {{ wireguard_ratelimit_rate }} --hashlimit-burst {{ wireguard_ratelimit_burst }} \
       -m comment --comment "Rate limit WireGuard handshakes" -j DROP 2>/dev/null
   register: wg_ratelimit_check
   failed_when: false
   changed_when: false
+  when: wireguard_ratelimit_enabled | default(false)
   tags: ['wireguard', 'security']
 
-- name: Rate limit WireGuard handshakes to prevent DoS
+- name: Rate limit WireGuard handshakes (DISABLED by default)
   ansible.builtin.shell: |
     iptables -A INPUT -p udp --dport {{ wireguard_port }} -m hashlimit \
       --hashlimit-name wireguard_handshake --hashlimit-mode srcip \
-      --hashlimit-above 10/minute --hashlimit-burst 5 \
+      --hashlimit-above {{ wireguard_ratelimit_rate }} --hashlimit-burst {{ wireguard_ratelimit_burst }} \
       -m comment --comment "Rate limit WireGuard handshakes" -j DROP
-  when: wg_ratelimit_check.rc != 0
+  when:
+    - wireguard_ratelimit_enabled | default(false)
+    - wg_ratelimit_check.rc != 0
   tags: ['wireguard', 'security']
+
+- name: Remove existing WireGuard INPUT ACCEPT rules (for clean IP allowlist)
+  ansible.builtin.shell: |
+    while iptables -D INPUT -p udp --dport {{ wireguard_port }} -j ACCEPT 2>/dev/null; do :; done
+    echo "Existing ACCEPT rules removed"
+  changed_when: false
+  tags: ['wireguard', 'security', 'allowlist']
+
+- name: Allow WireGuard from authorized sources (IP allowlist)
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: udp
+    destination_port: "{{ wireguard_port }}"
+    source: "{{ item }}"
+    jump: ACCEPT
+    comment: "WireGuard VPN - {{ item }}"
+  loop: "{{ wireguard_allowed_sources }}"
+  when: wireguard_allowed_sources is defined and wireguard_allowed_sources | length > 0
+  tags: ['wireguard', 'security', 'allowlist']
+
+- name: Log unauthorized WireGuard traffic (rate limited)
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: udp
+    destination_port: "{{ wireguard_port }}"
+    jump: LOG
+    log_prefix: "WireGuard-DENY: "
+    log_level: warning
+    limit: 10/min
+  when: wireguard_allowed_sources is defined and wireguard_allowed_sources | length > 0
+  tags: ['wireguard', 'security', 'allowlist']
+
+- name: Drop unauthorized WireGuard traffic (when allowlist active)
+  ansible.builtin.iptables:
+    chain: INPUT
+    protocol: udp
+    destination_port: "{{ wireguard_port }}"
+    jump: DROP
+    comment: "Block unauthorized WireGuard"
+  when: wireguard_allowed_sources is defined and wireguard_allowed_sources | length > 0
+  tags: ['wireguard', 'security', 'allowlist']
 
 - name: Allow established connections from WireGuard network
   ansible.builtin.iptables:
@@ -321,6 +382,65 @@
     enabled: yes
     daemon_reload: "{{ iptables_service.changed }}"
   tags: ['wireguard', 'iptables']
+
+# WireGuard peer reconciliation for GPU nodes
+# This script runs periodically to ensure GPU node peers have their pod CIDRs in AllowedIPs
+- name: Deploy WireGuard peer reconciliation script
+  ansible.builtin.template:
+    src: wireguard-peer-reconcile.sh.j2
+    dest: /usr/local/bin/wireguard-peer-reconcile.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags: ['wireguard', 'reconcile']
+
+- name: Create WireGuard peer reconciliation systemd service
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=WireGuard Peer Reconciliation
+      After=wg-quick@{{ wireguard_interface }}.service k3s.service
+      Requires=wg-quick@{{ wireguard_interface }}.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/wireguard-peer-reconcile.sh
+      StandardOutput=journal
+      StandardError=journal
+    dest: /etc/systemd/system/wireguard-peer-reconcile.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: reconcile_service
+  tags: ['wireguard', 'reconcile']
+
+- name: Create WireGuard peer reconciliation timer
+  ansible.builtin.copy:
+    content: |
+      [Unit]
+      Description=WireGuard Peer Reconciliation Timer
+
+      [Timer]
+      OnBootSec=60
+      OnUnitActiveSec=60
+      RandomizedDelaySec=10
+
+      [Install]
+      WantedBy=timers.target
+    dest: /etc/systemd/system/wireguard-peer-reconcile.timer
+    owner: root
+    group: root
+    mode: '0644'
+  register: reconcile_timer
+  tags: ['wireguard', 'reconcile']
+
+- name: Enable and start WireGuard peer reconciliation timer
+  ansible.builtin.systemd:
+    name: wireguard-peer-reconcile.timer
+    enabled: yes
+    state: started
+    daemon_reload: "{{ reconcile_service.changed or reconcile_timer.changed }}"
+  tags: ['wireguard', 'reconcile']
 
 # WireGuard monitoring setup
 - name: Setup WireGuard Prometheus monitoring
