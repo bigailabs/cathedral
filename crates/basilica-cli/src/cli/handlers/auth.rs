@@ -3,7 +3,7 @@
 use crate::auth::{should_use_device_flow, CallbackServer, DeviceFlow, OAuthFlow, TokenStore};
 use crate::config::CliConfig;
 use crate::error::CliError;
-use crate::output::{banner, compress_path, print_success};
+use crate::output::{banner, print_success};
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use color_eyre::eyre::{eyre, WrapErr};
 use color_eyre::Section;
@@ -17,7 +17,7 @@ pub async fn handle_login(device_code: bool, config: &CliConfig) -> Result<(), C
 /// Handle login with configurable options
 pub async fn handle_login_with_options(
     device_code: bool,
-    config: &CliConfig,
+    _config: &CliConfig,
     show_suggestions: bool,
 ) -> Result<(), CliError> {
     debug!("Starting login process, device_code: {}", device_code);
@@ -94,38 +94,6 @@ pub async fn handle_login_with_options(
 
     print_success("⛪ Login successful!");
     println!();
-
-    // Check and generate SSH keys if they don't exist
-    let spinner = create_spinner("Checking SSH keys...");
-
-    // First check if keys already exist
-    if config.ssh.ssh_keys_exist() {
-        complete_spinner_and_clear(spinner);
-        debug!("SSH keys already exist");
-    } else {
-        // Keys don't exist, generate them
-        spinner.set_message("Generating SSH keys for GPU rentals...");
-
-        match crate::ssh::ensure_ssh_keys_exist(&config.ssh).await {
-            Ok(()) => {
-                complete_spinner_and_clear(spinner);
-                // Show user where keys were generated
-                print_success("🔑 SSH keys generated successfully!");
-                println!("  Location: {}", compress_path(&config.ssh.key_path));
-                println!();
-            }
-            Err(e) => {
-                complete_spinner_error(spinner, "Failed to generate SSH keys");
-                warn!("Failed to generate SSH keys: {}", e);
-                println!();
-                println!("⚠️  SSH keys could not be generated automatically.");
-                println!("   You can generate them manually with:");
-                println!("   ssh-keygen -t ed25519 -f ~/.ssh/basilica_ed25519");
-                println!();
-                // Don't fail the login, just warn
-            }
-        }
-    }
 
     // Show helpful command suggestions only if requested
     if show_suggestions {
