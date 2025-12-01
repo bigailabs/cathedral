@@ -54,14 +54,15 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
 
         if output.status.success() {
             fs::write(&public_key_path, &output.stdout).map_err(|e| {
-                CliError::Internal(color_eyre::eyre::eyre!(
-                    "Failed to write public key: {}",
-                    e
-                ))
+                CliError::Internal(color_eyre::eyre::eyre!("Failed to write public key: {}", e))
             })?;
             println!(
                 "{}",
-                style(format!("Regenerated public key: {}", public_key_path.display())).green()
+                style(format!(
+                    "Regenerated public key: {}",
+                    public_key_path.display()
+                ))
+                .green()
             );
             return Ok(public_key_path);
         }
@@ -91,10 +92,7 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
         }
     }
 
-    println!(
-        "{}",
-        style("Generating a new ed25519 key...").cyan()
-    );
+    println!("{}", style("Generating a new ed25519 key...").cyan());
 
     let output = tokio::process::Command::new("ssh-keygen")
         .args([
