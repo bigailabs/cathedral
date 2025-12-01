@@ -35,40 +35,13 @@ async fn generate_ssh_key() -> Result<PathBuf, CliError> {
         return Ok(public_key_path);
     }
 
-    // If private key exists but public key doesn't, regenerate the public key
+    // If private key exists but public key doesn't, we can't proceed
     if private_key_path.exists() {
-        println!(
-            "{}",
-            style("Found private key without public key, regenerating public key...").cyan()
-        );
-        let output = tokio::process::Command::new("ssh-keygen")
-            .args(["-y", "-f", private_key_path.to_str().unwrap()])
-            .output()
-            .await
-            .map_err(|e| {
-                CliError::Internal(color_eyre::eyre::eyre!(
-                    "Failed to regenerate public key: {}",
-                    e
-                ))
-            })?;
-
-        if output.status.success() {
-            fs::write(&public_key_path, &output.stdout).map_err(|e| {
-                CliError::Internal(color_eyre::eyre::eyre!("Failed to write public key: {}", e))
-            })?;
-            println!(
-                "{}",
-                style(format!(
-                    "Regenerated public key: {}",
-                    public_key_path.display()
-                ))
-                .green()
-            );
-            return Ok(public_key_path);
-        }
-        // If regeneration fails, we'll generate a new key pair below
-        // But first remove the orphaned private key to avoid ssh-keygen prompt
-        let _ = fs::remove_file(&private_key_path);
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "Cannot generate key: {} exists but {} does not",
+            private_key_path.display(),
+            public_key_path.display()
+        )));
     }
 
     // Create ~/.ssh if it doesn't exist
@@ -445,20 +418,9 @@ pub async fn handle_add_ssh_key(
         .await
         .map_err(CliError::Api)?;
 
-    // Display success
+    // Display success - keep it simple, users don't need the details
+    let _ = response; // suppress unused warning
     print_success("SSH key registered successfully!");
-    println!();
-    println!("Name: {}", style(&response.name).cyan());
-    println!("ID: {}", style(&response.id).dim());
-    println!(
-        "Created: {}",
-        response.created_at.format("%Y-%m-%d %H:%M:%S")
-    );
-    println!();
-    println!(
-        "{}",
-        style("This key will be used for secure cloud GPU deployments.").dim()
-    );
 
     Ok(())
 }
