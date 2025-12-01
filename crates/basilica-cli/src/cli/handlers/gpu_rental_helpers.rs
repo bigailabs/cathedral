@@ -301,8 +301,8 @@ struct UnifiedOfferingItem {
 
 /// Resolve GPU offering with unified selection across compute types
 ///
-/// When no target is specified, fetches available offerings from both clouds
-/// and presents a unified selector for the user to choose from.
+/// Fetches available offerings from one or both clouds and presents a unified
+/// selector for the user to choose from.
 ///
 /// # Arguments
 /// * `api_client` - Authenticated API client
@@ -310,6 +310,7 @@ struct UnifiedOfferingItem {
 /// * `gpu_count_filter` - Optional GPU count filter
 /// * `country_filter` - Optional country filter for location-based filtering
 /// * `min_gpu_memory_filter` - Optional minimum GPU memory filter
+/// * `cloud_filter` - Optional cloud filter to restrict to a specific cloud type
 ///
 /// # Returns
 /// Returns `SelectedOffering` enum containing either secure or community cloud data
@@ -319,11 +320,17 @@ pub async fn resolve_offering_unified(
     gpu_count_filter: Option<u32>,
     country_filter: Option<&str>,
     min_gpu_memory_filter: Option<u32>,
+    cloud_filter: Option<ComputeCategory>,
 ) -> Result<SelectedOffering> {
-    let spinner = create_spinner("Fetching available GPUs from all clouds...");
+    let spinner_msg = match cloud_filter {
+        Some(ComputeCategory::SecureCloud) => "Fetching available GPUs from secure cloud...",
+        Some(ComputeCategory::CommunityCloud) => "Fetching available GPUs from community cloud...",
+        None => "Fetching available GPUs from all clouds...",
+    };
+    let spinner = create_spinner(spinner_msg);
 
-    // Fetch offerings from both clouds in parallel with timeout for community cloud
-    let community_future = api_client.list_available_nodes(Some(ListAvailableNodesQuery {
+    // Build community query for reuse
+    let community_query = ListAvailableNodesQuery {
         available: Some(true),
         min_gpu_memory: min_gpu_memory_filter,
         gpu_type: gpu_filter.map(|s| s.to_string()),
@@ -333,11 +340,31 @@ pub async fn resolve_offering_unified(
             region: None,
             country: Some(c.to_string()),
         }),
-    }));
-    let (secure_result, community_result) = tokio::join!(
-        api_client.list_secure_cloud_gpus(),
-        with_validator_timeout(community_future)
-    );
+    };
+
+    // Conditionally fetch based on cloud filter
+    let (secure_result, community_result) = match cloud_filter {
+        Some(ComputeCategory::SecureCloud) => {
+            // Only fetch secure cloud
+            let secure = api_client.list_secure_cloud_gpus().await;
+            (secure, Err(ApiError::Timeout)) // Dummy error for community - will be ignored
+        }
+        Some(ComputeCategory::CommunityCloud) => {
+            // Only fetch community cloud
+            let community = api_client
+                .list_available_nodes(Some(community_query))
+                .await;
+            (Err(ApiError::Timeout), community) // Dummy error for secure - will be ignored
+        }
+        None => {
+            // Fetch both in parallel (current behavior)
+            let community_future = api_client.list_available_nodes(Some(community_query));
+            tokio::join!(
+                api_client.list_secure_cloud_gpus(),
+                with_validator_timeout(community_future)
+            )
+        }
+    };
 
     complete_spinner_and_clear(spinner);
 

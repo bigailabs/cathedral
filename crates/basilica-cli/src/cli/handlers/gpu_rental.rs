@@ -18,72 +18,58 @@ use crate::CliError;
 use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
-    GpuRequirements, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
-    LocationProfile, NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess,
-    StartRentalApiRequest,
+    HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile,
+    NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use color_eyre::eyre::eyre;
 use color_eyre::Section;
 use console::style;
 use reqwest::StatusCode;
-use rust_decimal::prelude::ToPrimitive;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, warn};
-use uuid::Uuid;
 
-/// Represents the target for the `up` command - either an node ID or GPU category
+/// Represents a GPU target for the `up` command
 #[derive(Debug, Clone)]
-pub enum TargetType {
-    /// A specific node ID
-    NodeId(String),
-    /// A GPU category (h100, h200, b200, etc.)
-    GpuCategory(GpuCategory),
-}
+pub struct GpuTarget(pub GpuCategory);
 
-/// Error type for TargetType parsing
+/// Error type for GpuTarget parsing
 #[derive(Debug, Clone)]
-pub struct TargetTypeParseError {
+pub struct GpuTargetParseError {
     value: String,
 }
 
-impl fmt::Display for TargetTypeParseError {
+impl fmt::Display for GpuTargetParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "'{}' is not a valid node ID (UUID) or GPU type (h100, b200, etc...)",
+            "'{}' is not a valid GPU type (h100, a100, b200, etc...)",
             self.value
         )
     }
 }
 
-impl std::error::Error for TargetTypeParseError {}
+impl std::error::Error for GpuTargetParseError {}
 
-impl FromStr for TargetType {
-    type Err = TargetTypeParseError;
+impl FromStr for GpuTarget {
+    type Err = GpuTargetParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        // First check if it's a valid UUID v4 (node ID)
-        if Uuid::parse_str(s).is_ok() {
-            return Ok(TargetType::NodeId(s.to_string()));
-        }
-
-        // Then check if it's a known GPU type
         let gpu_category =
             GpuCategory::from_str(s).expect("GpuCategory::from_str returns Infallible");
 
         match gpu_category {
             GpuCategory::Other(_) => {
-                // Not a valid UUID and not a known GPU type
-                Err(TargetTypeParseError {
+                // Not a known GPU type
+                Err(GpuTargetParseError {
                     value: s.to_string(),
                 })
             }
-            _ => Ok(TargetType::GpuCategory(gpu_category)),
+            _ => Ok(GpuTarget(gpu_category)),
         }
     }
 }
@@ -425,59 +411,6 @@ pub async fn ensure_ssh_key_registered(
     }
 }
 
-/// Interactive selector for GPU offerings
-///
-/// Displays formatted table and lets user choose with arrow keys.
-/// Returns the selected offering.
-fn interactive_offering_selector(
-    offerings: &[basilica_aggregator::models::GpuOffering],
-) -> Result<basilica_aggregator::models::GpuOffering, CliError> {
-    use dialoguer::Select;
-
-    if offerings.is_empty() {
-        return Err(CliError::Internal(eyre!(
-            "No GPU offerings available matching your criteria"
-        )));
-    }
-
-    // Format offerings for display (API already includes markup in hourly_rate_per_gpu)
-    let options: Vec<String> = offerings
-        .iter()
-        .map(|o| {
-            // Calculate total instance price (per-GPU rate × gpu_count)
-            let price_per_gpu = o.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
-            let total_price = price_per_gpu * (o.gpu_count as f64);
-
-            let memory_str = if let Some(mem_per_gpu) = o.gpu_memory_gb_per_gpu {
-                format!("{}GB", mem_per_gpu * o.gpu_count)
-            } else {
-                "N/A".to_string()
-            };
-
-            format!(
-                "{}x {} │ {} │ {} │ ${:.2}/hr",
-                o.gpu_count,
-                o.gpu_type.as_str(),
-                o.region,
-                memory_str,
-                total_price
-            )
-        })
-        .collect();
-
-    // Interactive selection
-    let selection = Select::new()
-        .with_prompt("Select GPU offering")
-        .items(&options)
-        .default(0)
-        .interact()
-        .map_err(|e| {
-            CliError::Internal(eyre!(e).wrap_err("Failed to display offering selector"))
-        })?;
-
-    Ok(offerings[selection].clone())
-}
-
 /// Handle secure cloud rental with a pre-selected offering (from unified selector)
 async fn handle_secure_cloud_rental_with_offering(
     api_client: basilica_sdk::BasilicaClient,
@@ -803,200 +736,51 @@ async fn handle_community_cloud_rental_with_selection(
     Ok(())
 }
 
-/// Handle secure cloud rental workflow
-async fn handle_secure_cloud_rental(
-    api_client: basilica_sdk::BasilicaClient,
-    target: Option<TargetType>,
-    options: UpOptions,
-    config: &CliConfig,
-) -> Result<(), CliError> {
-    // Step 1: Ensure SSH key registered
-    ensure_ssh_key_registered(&api_client).await?;
-
-    // Step 2: List offerings
-    let spinner = create_spinner("Fetching available GPUs...");
-    let offerings = api_client.list_secure_cloud_gpus().await.map_err(|e| {
-        complete_spinner_error(spinner.clone(), "Failed to fetch GPU offerings");
-        CliError::Api(e)
-    })?;
-    complete_spinner_and_clear(spinner);
-
-    // Step 3: Filter offerings if target specified
-    let filtered_offerings: Vec<_> = if let Some(target_type) = target {
-        match target_type {
-            TargetType::GpuCategory(category) => {
-                // Filter by GPU type
-                offerings
-                    .into_iter()
-                    .filter(|o| {
-                        let category_str = category.as_str().to_uppercase();
-                        o.gpu_type.as_str().to_uppercase().contains(&category_str)
-                    })
-                    .collect()
-            }
-            TargetType::NodeId(_) => {
-                return Err(CliError::Internal(eyre!(
-                    "Node ID selection not supported for secure cloud. \
-                     Use GPU category or interactive selector."
-                )));
-            }
-        }
-    } else {
-        offerings
-    };
-
-    if filtered_offerings.is_empty() {
-        print_info("No GPU offerings available matching your criteria");
-        return Ok(());
-    }
-
-    // Step 4: Interactive selector
-    let selected = interactive_offering_selector(&filtered_offerings)?;
-
-    // Step 5: Start rental and handle SSH (reuse unified handler)
-    handle_secure_cloud_rental_with_offering(api_client, selected, options, config).await
-}
-
 /// Handle the `up` command - provision GPU instances
+///
+/// All paths use the unified offering resolver which presents a consistent
+/// selection UI across both secure and community clouds.
 pub async fn handle_up(
-    target: Option<TargetType>,
+    target: Option<GpuTarget>,
     options: UpOptions,
     compute: Option<ComputeCategoryArg>,
     config: &CliConfig,
 ) -> Result<(), CliError> {
     let api_client = create_authenticated_client(config).await?;
 
-    // If no compute flag specified AND no target specified, use unified selection from both clouds
-    if compute.is_none() && target.is_none() {
-        // Ensure SSH key is registered before proceeding (needed for both clouds)
-        ensure_ssh_key_registered(&api_client).await?;
-
-        // Use unified offering resolver to select from both clouds
-        let selected = resolve_offering_unified(
-            &api_client,
-            None, // gpu_filter - no direct option for this in unified path
-            options.gpu_count,
-            options.country.as_deref(),
-            None, // min_gpu_memory - not available in UpOptions
-        )
-        .await
-        .map_err(CliError::Internal)?;
-
-        match selected {
-            SelectedOffering::SecureCloud(offering) => {
-                // Start secure cloud rental with selected offering
-                return handle_secure_cloud_rental_with_offering(
-                    api_client, offering, options, config,
-                )
-                .await;
-            }
-            SelectedOffering::CommunityCloud(node_selection) => {
-                // Start community cloud rental with selected node
-                return handle_community_cloud_rental_with_selection(
-                    api_client,
-                    node_selection,
-                    options,
-                    config,
-                )
-                .await;
-            }
-        }
-    }
-
-    // Determine compute category
-    // - If --compute flag is specified, use that
-    // - If target is a NodeId (without --compute), route to CommunityCloud since NodeId
-    //   is not supported for SecureCloud
-    // - Otherwise default to SecureCloud
-    let compute_category = compute
-        .map(|c| match c {
-            ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
-            ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
-        })
-        .unwrap_or_else(|| {
-            // If target is a NodeId, route to CommunityCloud (SecureCloud doesn't support NodeId)
-            if matches!(target, Some(TargetType::NodeId(_))) {
-                ComputeCategory::CommunityCloud
-            } else {
-                ComputeCategory::SecureCloud
-            }
-        });
-
-    // Branch based on compute type
-    match compute_category {
-        ComputeCategory::SecureCloud => {
-            return handle_secure_cloud_rental(api_client, target, options, config).await;
-        }
-        ComputeCategory::CommunityCloud => {
-            // Fall through to existing community cloud implementation
-        }
-    }
-
-    // Ensure SSH key is registered before proceeding
+    // Ensure SSH key is registered before proceeding (needed for both clouds)
     ensure_ssh_key_registered(&api_client).await?;
 
-    // Parse the target to determine node selection strategy
-    let node_selection = if let Some(target_type) = target {
-        match target_type {
-            TargetType::NodeId(node_id) => {
-                // Direct node ID provided
-                NodeSelection::NodeId { node_id }
-            }
-            TargetType::GpuCategory(gpu_category) => {
-                // GPU category specified - use automatic selection with exact matching
-                let spinner =
-                    create_spinner(&format!("Fetching available {} GPUs...", gpu_category));
-                complete_spinner_and_clear(spinner);
+    // Extract GPU filter from target
+    let gpu_filter_owned = target.as_ref().map(|t| t.0.as_str());
 
-                NodeSelection::ExactGpuConfiguration {
-                    gpu_requirements: GpuRequirements {
-                        min_memory_gb: 0, // Default, no minimum memory requirement
-                        gpu_type: Some(gpu_category.as_str()),
-                        gpu_count: options.gpu_count.unwrap_or(0),
-                    },
-                }
-            }
+    // Convert compute arg to cloud filter
+    let cloud_filter = compute.map(|c| match c {
+        ComputeCategoryArg::SecureCloud => ComputeCategory::SecureCloud,
+        ComputeCategoryArg::CommunityCloud => ComputeCategory::CommunityCloud,
+    });
+
+    // Use unified offering resolver for all paths
+    let selected = resolve_offering_unified(
+        &api_client,
+        gpu_filter_owned.as_deref(),
+        options.gpu_count,
+        options.country.as_deref(),
+        None, // min_gpu_memory - not available in UpOptions
+        cloud_filter,
+    )
+    .await
+    .map_err(CliError::Internal)?;
+
+    match selected {
+        SelectedOffering::SecureCloud(offering) => {
+            handle_secure_cloud_rental_with_offering(api_client, offering, options, config).await
         }
-    } else {
-        // No target specified - use interactive selection
-        let spinner = create_spinner("Fetching available GPUs...");
-
-        // Build query from options
-        let query = ListAvailableNodesQuery {
-            available: Some(true),
-            min_gpu_memory: None,
-            gpu_type: None,
-            min_gpu_count: options.gpu_count,
-            location: options.country.as_ref().map(|country| LocationProfile {
-                city: None,
-                region: None,
-                country: Some(country.clone()),
-            }),
-        };
-
-        let response = api_client.list_available_nodes(Some(query)).await.map_err(
-            |e| -> crate::error::CliError {
-                complete_spinner_error(spinner.clone(), "Failed to fetch nodes");
-                eyre!("API request failed for list available nodes: {}", e).into()
-            },
-        )?;
-
-        complete_spinner_and_clear(spinner);
-
-        // Use interactive selector to choose an node
-        // Compact mode uses grouped selector, otherwise use detailed selector
-        let selector = crate::interactive::InteractiveSelector::new();
-        let use_detailed = !options.compact;
-        selector.select_node(
-            &response.available_nodes,
-            use_detailed,
-            options.detailed,
-            options.gpu_count,
-        )?
-    };
-
-    // Start rental and handle SSH (reuse unified handler)
-    handle_community_cloud_rental_with_selection(api_client, node_selection, options, config).await
+        SelectedOffering::CommunityCloud(node_selection) => {
+            handle_community_cloud_rental_with_selection(api_client, node_selection, options, config)
+                .await
+        }
+    }
 }
 
 /// Handle the `ps` command - list active rentals
