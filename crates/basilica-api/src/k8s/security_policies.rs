@@ -253,8 +253,8 @@ async fn apply_network_policies(client: &Client, namespace: &str) -> Result<()> 
 async fn apply_limit_range(client: &Client, namespace: &str) -> Result<()> {
     let yaml_content = LIMITRANGE_TEMPLATE.replace("TENANT_NAMESPACE", namespace);
 
-    let limit_range: LimitRange = serde_yaml::from_str(&yaml_content)
-        .context("Failed to deserialize LimitRange template")?;
+    let limit_range: LimitRange =
+        serde_yaml::from_str(&yaml_content).context("Failed to deserialize LimitRange template")?;
 
     let api: Api<LimitRange> = Api::namespaced(client.clone(), namespace);
 
