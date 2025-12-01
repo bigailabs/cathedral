@@ -192,8 +192,8 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
         // No keys found, generate one automatically
         generate_ssh_key().await?
     } else {
-        // Build options: existing keys + generate new option
-        let mut options: Vec<String> = keys
+        // Build options from existing keys
+        let options: Vec<String> = keys
             .iter()
             .map(|path| {
                 path.file_name()
@@ -202,9 +202,6 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
                     .to_string()
             })
             .collect();
-        options.push("Generate new key (basilica_ed25519)".to_string());
-
-        let generate_index = options.len() - 1;
 
         // Run interactive selection in a blocking context
         let selection = tokio::task::spawn_blocking(move || {
@@ -219,12 +216,7 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
         .map_err(|e| CliError::Internal(color_eyre::eyre::eyre!("Task join error: {}", e)))?
         .map_err(|e| CliError::Internal(e.into()))?;
 
-        if selection == generate_index {
-            // User chose to generate a new key
-            generate_ssh_key().await?
-        } else {
-            keys[selection].clone()
-        }
+        keys[selection].clone()
     };
 
     // Read and validate SSH public key
@@ -273,10 +265,10 @@ pub async fn handle_add_ssh_key(
                 // No keys found, generate one automatically
                 generate_ssh_key().await?
             } else {
-                // Show interactive selection with existing keys + generate option
+                // Show interactive selection with existing keys
                 use dialoguer::Select;
 
-                let mut options: Vec<String> = keys
+                let options: Vec<String> = keys
                     .iter()
                     .map(|path| {
                         path.file_name()
@@ -285,9 +277,6 @@ pub async fn handle_add_ssh_key(
                             .to_string()
                     })
                     .collect();
-                options.push("Generate new key (basilica_ed25519)".to_string());
-
-                let generate_index = options.len() - 1;
 
                 // Run interactive selection in a blocking context
                 let selection = tokio::task::spawn_blocking(move || {
@@ -302,17 +291,12 @@ pub async fn handle_add_ssh_key(
                 .map_err(|e| CliError::Internal(color_eyre::eyre::eyre!("Task join error: {}", e)))?
                 .map_err(|e| CliError::Internal(e.into()))?;
 
-                if selection == generate_index {
-                    // User chose to generate a new key
-                    generate_ssh_key().await?
-                } else {
-                    let path = &keys[selection];
-                    println!(
-                        "{}",
-                        style(format!("Selected SSH public key: {}", path.display())).cyan()
-                    );
-                    path.clone()
-                }
+                let path = &keys[selection];
+                println!(
+                    "{}",
+                    style(format!("Selected SSH public key: {}", path.display())).cyan()
+                );
+                path.clone()
             }
         }
     };
