@@ -76,6 +76,24 @@ collect_vxlan_metrics() {
         vtep_mac=$(ip link show flannel.1 2>/dev/null | grep -oP 'link/ether \K[0-9a-f:]+' || echo "")
     fi
 
+    # Get VXLAN packet counters from ip -s link
+    local rx_bytes=0 rx_packets=0 rx_errors=0 rx_dropped=0
+    local tx_bytes=0 tx_packets=0 tx_errors=0 tx_dropped=0
+    if ip link show flannel.1 &>/dev/null; then
+        local stats
+        stats=$(ip -s link show flannel.1 2>/dev/null)
+        # Parse RX line: RX: bytes packets errors dropped ...
+        rx_bytes=$(echo "$stats" | awk '/RX:/{getline; print $1}')
+        rx_packets=$(echo "$stats" | awk '/RX:/{getline; print $2}')
+        rx_errors=$(echo "$stats" | awk '/RX:/{getline; print $3}')
+        rx_dropped=$(echo "$stats" | awk '/RX:/{getline; print $4}')
+        # Parse TX line: TX: bytes packets errors dropped ...
+        tx_bytes=$(echo "$stats" | awk '/TX:/{getline; print $1}')
+        tx_packets=$(echo "$stats" | awk '/TX:/{getline; print $2}')
+        tx_errors=$(echo "$stats" | awk '/TX:/{getline; print $3}')
+        tx_dropped=$(echo "$stats" | awk '/TX:/{getline; print $4}')
+    fi
+
     # Write metrics in Prometheus format
     cat > "$temp_file" <<EOF
 # HELP vxlan_fdb_entries_total Number of FDB entries on flannel.1 interface
@@ -97,6 +115,38 @@ flannel_route_via_wg0 $wg0_route_count
 # HELP flannel_vtep_mac_info VTEP MAC address info for duplicate detection
 # TYPE flannel_vtep_mac_info gauge
 flannel_vtep_mac_info{vtep_mac="$vtep_mac"} 1
+
+# HELP vxlan_rx_bytes_total Total bytes received on flannel.1 interface
+# TYPE vxlan_rx_bytes_total counter
+vxlan_rx_bytes_total ${rx_bytes:-0}
+
+# HELP vxlan_rx_packets_total Total packets received on flannel.1 interface
+# TYPE vxlan_rx_packets_total counter
+vxlan_rx_packets_total ${rx_packets:-0}
+
+# HELP vxlan_rx_errors_total Total receive errors on flannel.1 interface
+# TYPE vxlan_rx_errors_total counter
+vxlan_rx_errors_total ${rx_errors:-0}
+
+# HELP vxlan_rx_dropped_total Total dropped receive packets on flannel.1 interface
+# TYPE vxlan_rx_dropped_total counter
+vxlan_rx_dropped_total ${rx_dropped:-0}
+
+# HELP vxlan_tx_bytes_total Total bytes transmitted on flannel.1 interface
+# TYPE vxlan_tx_bytes_total counter
+vxlan_tx_bytes_total ${tx_bytes:-0}
+
+# HELP vxlan_tx_packets_total Total packets transmitted on flannel.1 interface
+# TYPE vxlan_tx_packets_total counter
+vxlan_tx_packets_total ${tx_packets:-0}
+
+# HELP vxlan_tx_errors_total Total transmit errors on flannel.1 interface
+# TYPE vxlan_tx_errors_total counter
+vxlan_tx_errors_total ${tx_errors:-0}
+
+# HELP vxlan_tx_dropped_total Total dropped transmit packets on flannel.1 interface
+# TYPE vxlan_tx_dropped_total counter
+vxlan_tx_dropped_total ${tx_dropped:-0}
 EOF
 
     # Atomic move to avoid partial reads

@@ -12,6 +12,7 @@
 # - Single kubectl call to fetch all node data
 # - O(n) processing with minimal syscalls per node
 # - Idempotent operations (check before modify)
+# - Flock-based locking prevents concurrent execution
 
 set -euo pipefail
 
@@ -19,6 +20,8 @@ readonly INTERFACE="{{ wireguard_interface }}"
 readonly KUBECONFIG="${KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
 readonly LOG_TAG="wireguard-reconcile"
 readonly MAX_NODES="${MAX_GPU_NODES:-500}"
+readonly LOCK_FILE="/var/run/wireguard-reconcile.lock"
+readonly LOCK_TIMEOUT="${LOCK_TIMEOUT:-60}"
 
 # Cached node data (populated once per run)
 CACHED_NODE_JSON=""
@@ -26,6 +29,15 @@ CACHED_NODE_JSON=""
 log() {
     logger -t "$LOG_TAG" "$1"
     echo "$(date -Iseconds) $1"
+}
+
+acquire_lock() {
+    exec 200>"$LOCK_FILE"
+    if ! flock -w "$LOCK_TIMEOUT" 200; then
+        log "ERROR: Failed to acquire lock after ${LOCK_TIMEOUT}s, another instance running"
+        exit 1
+    fi
+    trap 'flock -u 200' EXIT
 }
 
 # Fetch and cache node data (single kubectl call per run)
@@ -210,6 +222,8 @@ reconcile_flannel() {
 }
 
 main() {
+    acquire_lock
+
     if [ ! -f "$KUBECONFIG" ]; then
         log "Kubeconfig not found at $KUBECONFIG, skipping reconciliation"
         exit 0
