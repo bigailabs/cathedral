@@ -98,3 +98,61 @@ data:
       targets = prometheus.exporter.unix.system.targets
       forward_to = [prometheus.remote_write.default.receiver]
     }
+
+    // WireGuard metrics from K3s server nodes
+    // Exporter runs on port 9586 on each server
+    prometheus.scrape "wireguard" {
+      targets = [
+        {
+          __address__ = "10.200.0.1:9586",
+          job = "wireguard",
+          instance = "server1",
+          node_type = "k3s-server",
+        },
+        {
+          __address__ = "10.200.0.2:9586",
+          job = "wireguard",
+          instance = "server2",
+          node_type = "k3s-server",
+        },
+        {
+          __address__ = "10.200.0.3:9586",
+          job = "wireguard",
+          instance = "server3",
+          node_type = "k3s-server",
+        },
+      ]
+      forward_to = [prometheus.remote_write.default.receiver]
+      scrape_interval = "30s"
+      scrape_timeout = "10s"
+    }
+
+    // Kubelet metrics for GPU node health monitoring
+    discovery.kubernetes "nodes" {
+      role = "node"
+    }
+
+    discovery.relabel "kubelet" {
+      targets = discovery.kubernetes.nodes.targets
+      rule {
+        source_labels = ["__meta_kubernetes_node_name"]
+        target_label = "node"
+      }
+      rule {
+        source_labels = ["__meta_kubernetes_node_address_InternalIP"]
+        regex = "(.*)"
+        replacement = "$1:10250"
+        target_label = "__address__"
+      }
+    }
+
+    prometheus.scrape "kubelet" {
+      targets = discovery.relabel.kubelet.output
+      forward_to = [prometheus.remote_write.default.receiver]
+      scrape_interval = "30s"
+      scheme = "https"
+      tls_config {
+        insecure_skip_verify = true
+      }
+      bearer_token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+    }
