@@ -35,27 +35,18 @@ pub async fn balance_validation_middleware(
                         Decimal::from_f64_retain(MIN_BALANCE_USD).unwrap_or(Decimal::ZERO);
 
                     if available_balance < min_balance {
-                        if state.config.billing.enforce_balance_checks {
-                            tracing::warn!(
-                                    "ENFORCED: Blocking rental for user {} with insufficient balance: {} < {}",
-                                    auth_context.user_id,
-                                    available_balance,
-                                    min_balance
-                                );
-                            return Err(ApiError::InsufficientBalance {
-                                    message: "Your account balance is below the minimum required to create rentals".to_string(),
-                                    current_balance: balance_response.available_balance.clone(),
-                                    required: MIN_BALANCE_USD.to_string(),
-                                }
-                                .into_response());
-                        } else {
-                            tracing::warn!(
-                                    "SHADOW MODE: User {} has insufficient balance ({} < {}) but rental is allowed to proceed. Enforcement disabled.",
-                                    auth_context.user_id,
-                                    available_balance,
-                                    min_balance
-                                );
+                        tracing::warn!(
+                            "Blocking rental for user {} with insufficient balance: {} < {}",
+                            auth_context.user_id,
+                            available_balance,
+                            min_balance
+                        );
+                        return Err(ApiError::InsufficientBalance {
+                            message: "Your account balance is below the minimum required to create rentals".to_string(),
+                            current_balance: balance_response.available_balance.clone(),
+                            required: MIN_BALANCE_USD.to_string(),
                         }
+                        .into_response());
                     } else {
                         tracing::debug!(
                             "User {} has sufficient balance: {} >= {}",

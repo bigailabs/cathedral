@@ -347,63 +347,51 @@ pub async fn start_rental(
             })),
         };
 
-        match billing_client.track_rental(track_request).await {
-            Ok(_) => {
+        if let Err(e) = billing_client.track_rental(track_request).await {
+            error!("Failed to register rental with billing service: {}", e);
+
+            // Rollback: remove ownership record and terminate rental
+            if let Err(archive_err) = archive_rental_ownership(
+                &state.db,
+                &validator_response.rental_id,
+                Some("Failed to register with billing service - automatic rollback"),
+            )
+            .await
+            {
+                error!(
+                    "Failed to archive ownership for rental {} during rollback: {}",
+                    validator_response.rental_id, archive_err
+                );
+            }
+
+            let rollback_request = TerminateRentalRequest {
+                reason: Some(
+                    "Failed to register with billing service - automatic rollback".to_string(),
+                ),
+            };
+
+            if let Err(rollback_err) = state
+                .validator_client
+                .terminate_rental(&validator_response.rental_id, rollback_request)
+                .await
+            {
+                error!(
+                    "CRITICAL: Failed to rollback rental {} after billing registration failure: {}. Manual cleanup required.",
+                    validator_response.rental_id, rollback_err
+                );
+            } else {
                 info!(
-                    "Successfully registered rental {} with billing service",
+                    "Successfully rolled back rental {} after billing registration failure",
                     validator_response.rental_id
                 );
             }
-            Err(e) => {
-                let error_msg = format!("Failed to register rental with billing service: {}", e);
-                error!("{}", error_msg);
 
-                if state.config.billing.enforce_balance_checks {
-                    // Rollback: remove ownership record and terminate rental
-                    if let Err(archive_err) = archive_rental_ownership(
-                        &state.db,
-                        &validator_response.rental_id,
-                        Some("Failed to register with billing service - automatic rollback"),
-                    )
-                    .await
-                    {
-                        error!(
-                            "Failed to archive ownership for rental {} during rollback: {}",
-                            validator_response.rental_id, archive_err
-                        );
-                    }
-
-                    let rollback_request = TerminateRentalRequest {
-                        reason: Some(
-                            "Failed to register with billing service - automatic rollback"
-                                .to_string(),
-                        ),
-                    };
-
-                    if let Err(rollback_err) = state
-                        .validator_client
-                        .terminate_rental(&validator_response.rental_id, rollback_request)
-                        .await
-                    {
-                        error!(
-                            "CRITICAL: Failed to rollback rental {} after billing registration failure: {}. Manual cleanup required.",
-                            validator_response.rental_id, rollback_err
-                        );
-                    } else {
-                        info!(
-                            "Successfully rolled back rental {} after billing registration failure",
-                            validator_response.rental_id
-                        );
-                    }
-
-                    return Err(crate::error::ApiError::Internal {
-                        message: format!(
-                            "Failed to create rental: billing service unavailable - {}",
-                            e
-                        ),
-                    });
-                }
-            }
+            return Err(crate::error::ApiError::Internal {
+                message: format!(
+                    "Failed to create rental: billing service unavailable - {}",
+                    e
+                ),
+            });
         }
     }
 
