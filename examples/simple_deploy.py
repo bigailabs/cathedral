@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 """
-Deploy a persistent counter to Basilica in 25 lines.
+Deploy a persistent counter to Basilica in 10 lines.
+
+This example shows the simplest way to deploy an application using
+the Basilica SDK's high-level deploy() method.
 
 Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 simple_deploy.py
 """
-import os, requests
+from basilica import BasilicaClient
 
-r = requests.post(
-    "https://api.basilica.ai/deployments",
-    headers={"Authorization": f"Bearer {os.environ['BASILICA_API_TOKEN']}"},
-    json={
-        "instance_name": "counter",
-        "image": "python:3.11-alpine",
-        "port": 8000,
-        "replicas": 1,
-        "public": True,
-        "ttl_seconds": 600,
-        "storage": {"persistent": {"enabled": True, "backend": "r2", "bucket": "", "mountPath": "/data"}},
-        "command": ["python", "-c", """
+client = BasilicaClient()
+
+deployment = client.deploy(
+    name="counter",
+    source="""
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-class H(BaseHTTPRequestHandler):
+
+class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         f = Path('/data/count')
         n = int(f.read_text()) + 1 if f.exists() else 1
@@ -30,8 +27,12 @@ class H(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(f'Visit #{n}'.encode())
-HTTPServer(('', 8000), H).serve_forever()
-"""],
-    },
+
+HTTPServer(('', 8000), Handler).serve_forever()
+""",
+    port=8000,
+    storage=True,
+    ttl_seconds=600,
 )
-print(f"Live at: {r.json().get('url')}")
+
+print(f"Live at: {deployment.url}")
