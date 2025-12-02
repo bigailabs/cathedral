@@ -188,7 +188,8 @@ impl RentalRepository for SqlRentalRepository {
             r#"
             UPDATE billing.rentals
             SET status = $2, resource_spec = $3,
-                updated_at = $4, end_time = $5, metadata = $6, total_cost = $7
+                updated_at = $4, end_time = $5, metadata = $6,
+                total_cost = $7, base_price_per_gpu = $8
             WHERE rental_id = $1
             "#,
         )
@@ -203,6 +204,7 @@ impl RentalRepository for SqlRentalRepository {
         } else {
             Some(total_cost)
         })
+        .bind(rental.base_price_per_gpu)
         .execute(self.connection.pool())
         .await
         .map_err(|e| BillingError::DatabaseError {
@@ -350,7 +352,8 @@ impl SqlRentalRepository {
             r#"
             UPDATE billing.rentals
             SET status = $2, resource_spec = $3,
-                updated_at = $4, end_time = $5, metadata = $6, total_cost = $7
+                updated_at = $4, end_time = $5, metadata = $6,
+                total_cost = $7, base_price_per_gpu = $8
             WHERE rental_id = $1
             "#,
         )
@@ -365,6 +368,7 @@ impl SqlRentalRepository {
         } else {
             Some(total_cost)
         })
+        .bind(rental.base_price_per_gpu)
         .execute(&mut **tx)
         .await
         .map_err(|e| BillingError::DatabaseError {

@@ -371,8 +371,25 @@ impl EventHandlers for BillingEventHandlers {
                 id: rental_id.to_string(),
             })?;
 
-        let new_cost = CreditBalance::from_decimal(cost_data.total_cost);
-        rental.actual_cost = new_cost;
+        let new_price = cost_data.price_per_gpu;
+        if new_price <= Decimal::ZERO {
+            return Err(BillingError::ValidationError {
+                field: "price_per_gpu".to_string(),
+                message: "price_per_gpu must be greater than zero".to_string(),
+            });
+        }
+
+        let old_price = rental.base_price_per_gpu;
+
+        if new_price == old_price {
+            info!(
+                "Cost update for rental {} ignored: price unchanged at {}",
+                rental_id, new_price
+            );
+            return Ok(());
+        }
+
+        rental.base_price_per_gpu = new_price;
 
         self.rental_repository.update_rental(&rental).await?;
 
@@ -381,15 +398,18 @@ impl EventHandlers for BillingEventHandlers {
             &rental_id.to_string(),
             rental.user_id.as_uuid().ok(),
             serde_json::json!({
-                "total_cost": cost_data.total_cost,
-                "hourly_rate": cost_data.hourly_rate,
-                "duration_hours": cost_data.duration_hours,
+                "old_price_per_gpu": old_price.to_string(),
+                "new_price_per_gpu": new_price.to_string(),
+                "reason": cost_data.reason,
                 "timestamp": event.timestamp,
             }),
         )
         .await?;
 
-        info!("Updated cost for rental {} to {}", rental_id, new_cost);
+        info!(
+            "Updated price for rental {} from {} to {}",
+            rental_id, old_price, new_price
+        );
 
         Ok(())
     }
