@@ -483,7 +483,6 @@ pub async fn stop_secure_cloud_rental(
         let finalize_request = FinalizeRentalRequest {
             rental_id: rental_id.clone(),
             end_time: Some(end_timestamp),
-            final_cost: String::new(), // Let billing service use tracked cost
             termination_reason: "user_requested".to_string(),
         };
 

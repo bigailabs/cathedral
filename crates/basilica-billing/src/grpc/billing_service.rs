@@ -689,32 +689,14 @@ impl BillingService for BillingServiceImpl {
                 rental.cloud_type, rental_id, rental.actual_cost
             );
 
-            // Calculate final cost based on duration and pricing
             let duration = end_time - rental.started_at;
-            let hours = rust_decimal::Decimal::from(duration.num_seconds())
-                / rust_decimal::Decimal::from(3600);
-            let calculated_cost =
-                rental.base_price_per_gpu * rust_decimal::Decimal::from(rental.gpu_count) * hours;
-
-            let final_cost_decimal = if req.final_cost.is_empty() {
-                // Use actual_cost if set, otherwise calculate from duration
-                if rental.actual_cost.as_decimal() > rust_decimal::Decimal::ZERO {
-                    rental.actual_cost.as_decimal()
-                } else {
-                    calculated_cost
-                }
-            } else {
-                req.final_cost
-                    .parse::<rust_decimal::Decimal>()
-                    .map_err(|e| Status::invalid_argument(format!("Invalid final_cost: {}", e)))?
-            };
+            let final_cost_decimal = rental.actual_cost.as_decimal();
 
             // Update rental status to completed
             let mut rental = rental.clone();
             rental.state = crate::domain::types::RentalState::Completed;
             rental.last_updated = end_time;
             rental.ended_at = Some(end_time);
-            rental.actual_cost = CreditBalance::from_decimal(final_cost_decimal);
 
             self.rental_repository
                 .update_rental(&rental)

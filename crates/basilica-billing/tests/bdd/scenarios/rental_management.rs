@@ -334,7 +334,6 @@ async fn test_finalize_rental_charges_correct_amount() {
 
     let finalize_request = FinalizeRentalRequest {
         rental_id: track_response.tracking_id.clone(),
-        final_cost: "25.0".to_string(),
         end_time: None,
         termination_reason: String::new(),
     };

@@ -202,7 +202,6 @@ async fn test_event_timestamps_ordered() {
 
     let finalize_request = FinalizeRentalRequest {
         rental_id: track_response.tracking_id.clone(),
-        final_cost: "14.0".to_string(),
         end_time: None,
         termination_reason: String::new(),
     };

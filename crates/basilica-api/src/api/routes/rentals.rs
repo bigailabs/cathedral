@@ -435,7 +435,6 @@ pub async fn stop_rental(
         let finalize_request = FinalizeRentalRequest {
             rental_id: owned_rental.rental_id.clone(),
             end_time: Some(end_timestamp),
-            final_cost: String::new(), // Let billing service calculate from tracked usage
             termination_reason: request
                 .reason
                 .clone()
