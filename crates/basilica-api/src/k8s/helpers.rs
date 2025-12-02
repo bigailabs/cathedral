@@ -265,6 +265,10 @@ pub struct NodeLabelParams<'a> {
     pub cuda_version: &'a str,
 }
 
+fn parse_cuda_major_version(version: &str) -> Option<u32> {
+    version.split('.').next()?.parse().ok()
+}
+
 fn sanitize_label_value(value: &str) -> String {
     value
         .chars()
@@ -309,6 +313,9 @@ pub fn build_node_labels(params: NodeLabelParams) -> std::collections::HashMap<S
         "basilica.ai/cuda-version".to_string(),
         params.cuda_version.to_string(),
     );
+    if let Some(major) = parse_cuda_major_version(params.cuda_version) {
+        labels.insert("basilica.ai/cuda-major".to_string(), major.to_string());
+    }
     labels.insert("basilica.ai/workloads-only".to_string(), "true".to_string());
     labels
 }
@@ -335,5 +342,36 @@ mod tests {
     #[test]
     fn test_sanitize_label_value_spaces() {
         assert_eq!(sanitize_label_value("NVIDIA RTX A4000"), "NVIDIA-RTX-A4000");
+    }
+
+    #[test]
+    fn test_parse_cuda_major_version() {
+        assert_eq!(parse_cuda_major_version("12.2"), Some(12));
+        assert_eq!(parse_cuda_major_version("11.8"), Some(11));
+        assert_eq!(parse_cuda_major_version("12"), Some(12));
+        assert_eq!(parse_cuda_major_version(""), None);
+        assert_eq!(parse_cuda_major_version("invalid"), None);
+    }
+
+    #[test]
+    fn test_build_node_labels_includes_cuda_major() {
+        let params = NodeLabelParams {
+            node_id: "node-1",
+            datacenter_id: "dc-1",
+            gpu_model: "A100",
+            gpu_count: 2,
+            gpu_memory_gb: 80,
+            driver_version: "535.104.12",
+            cuda_version: "12.2",
+        };
+        let labels = build_node_labels(params);
+        assert_eq!(
+            labels.get("basilica.ai/cuda-major"),
+            Some(&"12".to_string())
+        );
+        assert_eq!(
+            labels.get("basilica.ai/cuda-version"),
+            Some(&"12.2".to_string())
+        );
     }
 }
