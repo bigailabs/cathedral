@@ -375,15 +375,28 @@ pub async fn start_secure_cloud_rental(
     };
 
     if let Some(ref billing_client) = state.billing_client {
-        billing_client
-            .track_rental(track_request)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to register with billing: {}", e);
-                ApiError::Internal {
-                    message: "Failed to register rental".to_string(),
-                }
-            })?;
+        if let Err(e) = billing_client.track_rental(track_request).await {
+            tracing::error!("Failed to register with billing: {}", e);
+
+            // Rollback: delete the deployed instance since billing registration failed
+            // This prevents orphaned instances running without billing tracking
+            if let Err(rollback_err) = state.aggregator_service.delete_deployment(&rental_id).await
+            {
+                tracing::error!(
+                    "CRITICAL: Failed to rollback deployment {} after billing failure: {}. Manual cleanup required.",
+                    rental_id, rollback_err
+                );
+            } else {
+                tracing::info!(
+                    "Successfully rolled back deployment {} after billing registration failure",
+                    rental_id
+                );
+            }
+
+            return Err(ApiError::Internal {
+                message: "Failed to register rental with billing service".to_string(),
+            });
+        }
     }
 
     // 5. Calculate hourly cost (total per-instance price with markup)
@@ -441,7 +454,23 @@ pub async fn stop_secure_cloud_rental(
     let duration = stop_time.signed_duration_since(rental.1);
     let duration_hours = duration.num_seconds() as f64 / 3600.0;
 
-    // 2. Finalize rental in billing service (get accumulated cost)
+    // 2. Delete deployment via aggregator FIRST (rental_id IS the deployment_id)
+    // This must happen before billing finalization to ensure consistent state -
+    // if the provider API fails (e.g., instance not fully started), we don't
+    // want billing to mark the rental as completed.
+    state
+        .aggregator_service
+        .delete_deployment(&rental_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete deployment: {}", e);
+            ApiError::Internal {
+                message: "Failed to stop instance".to_string(),
+            }
+        })?;
+
+    // 3. Finalize rental in billing service (get accumulated cost)
+    // Only runs if deletion succeeded above
     let total_cost = if let Some(billing_client) = &state.billing_client {
         use basilica_protocol::billing::FinalizeRentalRequest;
         use prost_types::Timestamp;
@@ -472,18 +501,6 @@ pub async fn stop_secure_cloud_rental(
         tracing::warn!("Billing client not available, cannot get final cost");
         0.0
     };
-
-    // 3. Delete deployment via aggregator (rental_id IS the deployment_id)
-    state
-        .aggregator_service
-        .delete_deployment(&rental_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete deployment: {}", e);
-            ApiError::Internal {
-                message: "Failed to stop instance".to_string(),
-            }
-        })?;
 
     // 4. Archive rental to terminated_secure_cloud_rentals table
     if let Err(e) =

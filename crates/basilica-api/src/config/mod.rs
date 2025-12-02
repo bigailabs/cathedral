@@ -108,15 +108,6 @@ pub struct BillingServiceConfig {
 
     /// Billing service gRPC endpoint
     pub endpoint: String,
-
-    /// Enforce balance checks (block rentals when insufficient balance)
-    /// When false, balance checks are performed and logged but rentals proceed regardless
-    #[serde(default = "default_enforce_balance_checks")]
-    pub enforce_balance_checks: bool,
-}
-
-fn default_enforce_balance_checks() -> bool {
-    false
 }
 
 impl Default for BillingServiceConfig {
@@ -124,7 +115,6 @@ impl Default for BillingServiceConfig {
         Self {
             enabled: true,
             endpoint: "http://localhost:50051".to_string(),
-            enforce_balance_checks: default_enforce_balance_checks(),
         }
     }
 }
@@ -389,31 +379,17 @@ mod tests {
         let config = BillingServiceConfig::default();
         assert!(config.enabled);
         assert_eq!(config.endpoint, "http://localhost:50051");
-        assert!(!config.enforce_balance_checks);
     }
 
     #[test]
-    fn test_billing_config_shadow_mode() {
+    fn test_billing_config_custom_endpoint() {
         let toml_str = r#"
             enabled = true
             endpoint = "https://billing.basilica.ai:50051"
-            enforce_balance_checks = false
         "#;
         let config: BillingServiceConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
-        assert!(!config.enforce_balance_checks);
-    }
-
-    #[test]
-    fn test_billing_config_enforcement_mode() {
-        let toml_str = r#"
-            enabled = true
-            endpoint = "https://billing.basilica.ai:50051"
-            enforce_balance_checks = true
-        "#;
-        let config: BillingServiceConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.enabled);
-        assert!(config.enforce_balance_checks);
+        assert_eq!(config.endpoint, "https://billing.basilica.ai:50051");
     }
 
     #[test]
@@ -424,6 +400,5 @@ mod tests {
         "#;
         let config: BillingServiceConfig = toml::from_str(toml_str).unwrap();
         assert!(!config.enabled);
-        assert!(!config.enforce_balance_checks);
     }
 }
