@@ -40,11 +40,22 @@
   when: coredns_patch is changed
   tags: ['k3s', 'post', 'coredns']
 
-- name: Scale CoreDNS to ensure redundancy
+- name: Scale CoreDNS to ensure redundancy and local availability
   ansible.builtin.command:
-    cmd: kubectl -n kube-system scale deployment coredns --replicas=2
+    cmd: kubectl -n kube-system scale deployment coredns --replicas=3
   register: coredns_scale
   changed_when: "'scaled' in coredns_scale.stdout"
+  tags: ['k3s', 'post', 'coredns']
+
+# Set internalTrafficPolicy to Local for GPU node DNS reliability
+# When WireGuard is enabled, cross-node pod traffic may be unreliable.
+# Setting Local ensures pods use the CoreDNS instance on their own node,
+# avoiding cross-node traffic through WireGuard.
+- name: Patch kube-dns service to use local traffic policy
+  ansible.builtin.command:
+    cmd: kubectl -n kube-system patch svc kube-dns -p '{"spec":{"internalTrafficPolicy":"Local"}}'
+  register: dns_svc_patch
+  changed_when: "'patched' in dns_svc_patch.stdout"
   tags: ['k3s', 'post', 'coredns']
 
 - name: Verify CoreDNS pods are running on preferred nodes
