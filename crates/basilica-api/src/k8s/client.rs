@@ -660,6 +660,28 @@ impl ApiK8sClient for K8sClient {
             }
             Err(kube::Error::Api(ae)) if ae.code == 409 => {
                 if name.starts_with("u-") {
+                    // Ensure PSS labels are applied to existing namespace
+                    let pss_labels = json!({
+                        "metadata": {
+                            "labels": {
+                                "pod-security.kubernetes.io/enforce": "privileged",
+                                "pod-security.kubernetes.io/audit": "restricted",
+                                "pod-security.kubernetes.io/warn": "restricted"
+                            }
+                        }
+                    });
+
+                    if let Err(e) = api
+                        .patch(name, &PatchParams::default(), &Patch::Merge(&pss_labels))
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            namespace = %name,
+                            "Failed to apply PSS labels to existing namespace"
+                        );
+                    }
+
                     helpers::create_reference_grant_for_namespace(&self.client, name).await?;
                     helpers::copy_default_storage_secret(&self.client, name).await?;
 
