@@ -45,6 +45,8 @@ uv run clustermgr wg reconcile           # Check pod CIDR reconciliation
 uv run clustermgr wg reconcile --fix     # Fix missing pod CIDRs
 uv run clustermgr wg keys                # Show key info for rotation planning
 uv run clustermgr wg handshakes          # Check handshake ages
+uv run clustermgr wg timer               # Check systemd reconciliation timer
+uv run clustermgr wg cronjob             # Check K8s reconciliation CronJob
 
 # Flannel VXLAN diagnostics (HTTP 503 troubleshooting)
 uv run clustermgr flannel status         # Show flannel.1 interface status
@@ -56,6 +58,19 @@ uv run clustermgr flannel diagnose       # Comprehensive Flannel health check
 uv run clustermgr flannel mac-duplicates # Check for duplicate VtepMACs
 uv run clustermgr flannel capture        # Packet capture on flannel.1
 uv run clustermgr flannel vxlan-capture  # Capture VXLAN traffic (UDP 8472)
+uv run clustermgr flannel gpu-check      # Check flannel.1 on GPU nodes directly
+uv run clustermgr flannel gpu-recover -n <node>  # Recover GPU node Flannel connectivity
+
+# DNS diagnostics for GPU nodes
+uv run clustermgr dns status             # Show CoreDNS pods and kube-dns service
+uv run clustermgr dns iptables           # Check Flannel MASQUERADE fix rules
+uv run clustermgr dns test               # Test DNS resolution from GPU node pod
+uv run clustermgr dns test -d google.com # Test specific domain
+uv run clustermgr dns diagnose           # Comprehensive DNS diagnostics
+uv run clustermgr dns fix --all          # Apply all DNS fixes
+uv run clustermgr dns fix --iptables     # Fix Flannel MASQUERADE rules only
+uv run clustermgr dns fix --traffic-policy  # Set internalTrafficPolicy to Local
+uv run clustermgr dns fix --scale-coredns   # Scale CoreDNS to 3 replicas
 
 # Network topology discovery
 uv run clustermgr topology              # Full topology view
@@ -86,6 +101,10 @@ uv run clustermgr ud inspect myapp -n u-alice  # Deep inspection
 uv run clustermgr ud logs myapp -n u-alice     # Stream pod logs
 uv run clustermgr ud events myapp -n u-alice   # Show K8s events
 uv run clustermgr ud restart myapp -n u-alice  # Restart pods
+uv run clustermgr ud endpoints          # Check public endpoint reachability
+uv run clustermgr ud endpoints -u       # Show only unreachable endpoints
+uv run clustermgr ud endpoints -t 10    # With 10s timeout
+uv run clustermgr ud troubleshoot myapp # Diagnose 503 errors (full path check)
 
 # Gateway API troubleshooting
 uv run clustermgr gateway routes        # List HTTPRoutes with status
@@ -209,6 +228,8 @@ uv run clustermgr bundle -n u-alice    # Focus on specific namespace
 | `wg reconcile` | Check/fix pod CIDR in AllowedIPs for GPU nodes |
 | `wg keys` | Show key info for rotation planning |
 | `wg handshakes` | Check handshake ages across all peers |
+| `wg timer` | Check systemd reconciliation timer status |
+| `wg cronjob` | Check K8s reconciliation CronJob status |
 
 ### Network - Flannel VXLAN
 
@@ -223,6 +244,18 @@ uv run clustermgr bundle -n u-alice    # Focus on specific namespace
 | `flannel mac-duplicates` | Check for duplicate VtepMAC addresses |
 | `flannel capture` | Capture packets on flannel.1 for debugging |
 | `flannel vxlan-capture` | Capture VXLAN encapsulated traffic (UDP 8472) |
+| `flannel gpu-check` | Check flannel.1 status directly on GPU nodes via SSH |
+| `flannel gpu-recover` | Recover Flannel connectivity for a GPU node |
+
+### Network - DNS (GPU Nodes)
+
+| Command | Description |
+|---------|-------------|
+| `dns status` | Show CoreDNS pod distribution and kube-dns service config |
+| `dns iptables` | Check Flannel MASQUERADE fix rules on k3s servers |
+| `dns test` | Test DNS resolution from a GPU node pod |
+| `dns diagnose` | Comprehensive DNS diagnostics for GPU nodes |
+| `dns fix` | Apply DNS fixes (iptables, traffic policy, CoreDNS scaling) |
 
 ### Network - General
 
@@ -274,6 +307,8 @@ uv run clustermgr bundle -n u-alice    # Focus on specific namespace
 | `ud logs` | Stream logs from UserDeployment pods |
 | `ud events` | Show K8s events for a UserDeployment |
 | `ud restart` | Restart pods for a UserDeployment |
+| `ud endpoints` | Check public endpoint reachability for active deployments |
+| `ud troubleshoot` | Diagnose 503 errors - checks full request path |
 
 ### Gateway API
 
@@ -402,38 +437,44 @@ See [docs/READONLY-KUBECONFIG-GUIDE.md](docs/READONLY-KUBECONFIG-GUIDE.md) for c
 When UserDeployments receive HTTP 503 errors, use this diagnostic workflow:
 
 ```bash
-# 1. Check Flannel VXLAN health
+# 1. Check flannel.1 status DIRECTLY on GPU nodes (most common root cause)
+uv run clustermgr flannel gpu-check
+
+# 2. If GPU node shows UNHEALTHY, recover it
+uv run clustermgr flannel gpu-recover --node <name> --restart-k3s
+
+# 3. Check Flannel VXLAN health on K3s servers
 uv run clustermgr flannel diagnose
 
-# 2. Check for duplicate VtepMACs
+# 4. Check for duplicate VtepMACs
 uv run clustermgr flannel mac-duplicates
 
-# 3. Verify FDB entries for GPU nodes
+# 5. Verify FDB entries for GPU nodes
 uv run clustermgr flannel fdb
 
-# 4. Check neighbor/ARP entries
+# 6. Check neighbor/ARP entries
 uv run clustermgr flannel neighbors
 
-# 5. Verify routes to GPU node pod CIDRs
+# 7. Verify routes to GPU node pod CIDRs
 uv run clustermgr flannel routes
 
-# 6. Test connectivity to GPU nodes
+# 8. Test connectivity to GPU nodes
 uv run clustermgr flannel test
 
-# 7. Check Envoy pod status
+# 9. Check Envoy pod status
 uv run clustermgr envoy pods
 
-# 8. Test HTTP connectivity to user pods
+# 10. Test HTTP connectivity to user pods
 uv run clustermgr envoy test
 
-# 9. Check Envoy logs for errors
+# 11. Check Envoy logs for errors
 uv run clustermgr envoy logs -s 5
 
-# 10. Auto-fix detected issues
+# 12. Auto-fix detected issues (includes GPU node recovery)
 uv run clustermgr fix --dry-run
 uv run clustermgr fix
 
-# 11. If escalating, collect diagnostic bundle
+# 13. If escalating, collect diagnostic bundle
 uv run clustermgr bundle
 ```
 
@@ -525,6 +566,9 @@ src/clustermgr/
 
 ## Related Runbooks
 
+- `docs/runbooks/GPU-NODE-FLANNEL-INTERFACE-RECOVERY.md` - GPU node flannel.1 recovery procedure
+- `docs/runbooks/GPU-NODE-DNS-RESOLUTION-FIX.md` - GPU node DNS resolution fix (Flannel MASQUERADE)
+- `docs/runbooks/WIREGUARD-FLANNEL-RECONCILIATION.md` - WireGuard and Flannel reconciliation architecture
 - `docs/runbooks/FLANNEL-VXLAN-TROUBLESHOOTING.md` - Detailed VXLAN issue resolution
 - `docs/runbooks/HTTP-503-DIAGNOSIS.md` - HTTP 503 error diagnosis workflow
 - `docs/runbooks/NETWORK-SCALING-GUIDE.md` - Cluster scaling procedures

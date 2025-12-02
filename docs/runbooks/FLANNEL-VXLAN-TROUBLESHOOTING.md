@@ -409,13 +409,17 @@ ip route get $(echo $POD_CIDR | sed 's|/24|.1|')
 
 ---
 
-## Issue 6: VXLAN Interface Not Created
+## Issue 6: VXLAN Interface Not Created or DOWN
+
+> **For GPU nodes specifically**, see the detailed runbook: [GPU-NODE-FLANNEL-INTERFACE-RECOVERY.md](./GPU-NODE-FLANNEL-INTERFACE-RECOVERY.md)
 
 ### Symptoms
 
-- flannel.1 interface missing
+- flannel.1 interface missing or DOWN
 - K3s agent not starting properly
 - No pod networking at all
+- HTTP 503 for pods on the affected node
+- Syslog shows: `flannel.1: Link DOWN` or `flannel.1: Lost carrier`
 
 ### Diagnosis
 
@@ -428,9 +432,14 @@ journalctl -u k3s-agent -n 100 | grep -i flannel
 
 # Check flannel subnet file
 cat /run/flannel/subnet.env
+
+# Check syslog for flannel events
+grep -i flannel /var/log/syslog | tail -30
 ```
 
 ### Resolution
+
+**Step 1: Restart K3s agent on the affected node**
 
 ```bash
 # Restart K3s agent to recreate interface
@@ -444,6 +453,30 @@ done
 
 # Verify
 ip -d link show flannel.1
+```
+
+**Step 2: For GPU nodes - Update FDB/routes on K3s servers**
+
+After K3s agent restart on a GPU node, you MUST update the network entries on all K3s servers:
+
+```bash
+# Get node details
+NODE_NAME="<node-name>"
+VTEP_MAC=$(kubectl get node $NODE_NAME -o jsonpath='{.metadata.annotations.flannel\.alpha\.coreos\.com/backend-data}' | jq -r '.VtepMAC')
+WG_IP=$(kubectl get node $NODE_NAME -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
+POD_CIDR=$(kubectl get node $NODE_NAME -o jsonpath='{.spec.podCIDR}')
+VTEP_IP=$(echo $POD_CIDR | sed 's|/24||')
+
+# On each K3s server, update FDB, route, and neighbor
+bridge fdb replace $VTEP_MAC dev flannel.1 dst $WG_IP self permanent
+ip route replace $POD_CIDR via $VTEP_IP dev flannel.1 onlink
+ip neigh replace $VTEP_IP lladdr $VTEP_MAC dev flannel.1 nud permanent
+```
+
+**Or trigger reconciliation CronJob:**
+
+```bash
+kubectl create job --from=cronjob/wireguard-reconcile wireguard-reconcile-manual-$(date +%s) -n kube-system
 ```
 
 ---

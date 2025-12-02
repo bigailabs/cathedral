@@ -390,40 +390,162 @@ clustermgr flannel vxlan-capture
 clustermgr flannel vxlan-capture -c 50
 ```
 
+---
+
+### flannel gpu-check
+
+**What it does:** Checks flannel.1 interface status directly on GPU nodes via SSH.
+
+**How it works:**
+1. Gets GPU node list from K8s API with WireGuard labels
+2. Resolves public IP from WireGuard peer endpoints
+3. SSH to each GPU node and checks:
+   - Whether flannel.1 interface exists
+   - Interface state (UP/DOWN)
+   - Current MAC address
+   - Number of Flannel routes
+4. Reports health status for each node
+
+**When to use:** First diagnostic step for HTTP 503 errors. Missing/DOWN flannel.1 on GPU nodes is the most common root cause.
+
+```bash
+# Check all GPU nodes
+clustermgr flannel gpu-check
+
+# Check specific node
+clustermgr flannel gpu-check --node 8a2fbf46
+
+# Use kubectl debug instead of SSH
+clustermgr flannel gpu-check --use-debug
+```
+
+**Output:**
+```
+=== GPU Node Flannel Status Check ===
+Method: SSH
+Checking 2 GPU node(s)...
+
+| Node       | Public IP   | flannel.1 | State | MAC         | Routes | Status  |
+|------------|-------------|-----------|-------|-------------|--------|---------|
+| 8a2fbf46-… | 149.36.0.57 | Yes       | UP    | 26:8d:8b... | 9      | HEALTHY |
+| fa09143c-… | 149.36.1.… | No        | DOWN  | MISSING     | 0      | UNHEALTHY |
+```
+
+**What to look for:**
+- All GPU nodes should show HEALTHY
+- flannel.1 should exist and be UP
+- Routes > 0 indicates Flannel is working
+- UNHEALTHY nodes need recovery
+
+---
+
+### flannel gpu-recover
+
+**What it does:** Recovers Flannel connectivity for a specific GPU node.
+
+**How it works:**
+1. (Optional with `--restart-k3s`) SSH to GPU node and restart K3s agent
+2. Wait for flannel.1 interface to initialize
+3. Fetch updated MAC from K8s node annotations
+4. Add/update FDB entries on all K3s servers
+5. Add/update neighbor entries on all K3s servers
+6. Add/update routes on all K3s servers
+7. Verify VXLAN connectivity via ping
+
+**When to use:** After identifying an unhealthy GPU node with `flannel gpu-check`.
+
+```bash
+# Update network state on K3s servers only (use after manually restarting K3s agent)
+clustermgr flannel gpu-recover --node 8a2fbf46
+
+# Full recovery: restart K3s agent + update network state
+clustermgr flannel gpu-recover --node 8a2fbf46 --restart-k3s
+
+# Preview what would be done
+clustermgr --dry-run flannel gpu-recover --node 8a2fbf46 --restart-k3s
+```
+
+**Output:**
+```
+=== GPU Node Recovery: 8a2fbf46 ===
+Node: 8a2fbf46-3b34-42c3-b62d-4d9b66ea9a1a
+Public IP: 149.36.0.57
+WireGuard IP: 10.200.3.54
+Pod CIDR: 10.42.17.0/24
+Flannel MAC: 26:8d:8b:ab:c4:3a
+
+=== Step 1: Restart K3s Agent on GPU Node ===
+SSH: shadeform@149.36.0.57
+Running: sudo systemctl restart k3s-agent
+K3s agent restarted successfully
+Waiting 15 seconds for flannel.1 to initialize...
+
+=== Step 2: Update FDB Entries ===
+Command: bridge fdb replace 26:8d:8b:ab:c4:3a dev flannel.1 dst 10.200.3.54 self permanent
+FDB entries updated on all K3s servers
+
+=== Step 3: Update Neighbor Entries ===
+Command: ip neigh replace 10.42.17.0 lladdr 26:8d:8b:ab:c4:3a dev flannel.1 nud permanent
+Neighbor entries updated on all K3s servers
+
+=== Step 4: Update Routes ===
+Command: ip route replace 10.42.17.0/24 via 10.42.17.0 dev flannel.1 onlink
+Routes updated on all K3s servers
+
+=== Step 5: Verify Connectivity ===
+VTEP 10.42.17.0 is reachable
+
+=== Recovery Complete ===
+GPU node 8a2fbf46-3b34-42c3-b62d-4d9b66ea9a1a network state has been updated.
+```
+
+**Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-n, --node` | (required) | GPU node name (can be partial match) |
+| `--restart-k3s` | false | SSH to GPU node and restart K3s agent first |
+
 ## Troubleshooting Workflow
 
 Complete workflow for HTTP 503 debugging:
 
 ```bash
-# 1. Quick health check
+# 1. Check GPU nodes directly (most common root cause)
+clustermgr flannel gpu-check
+
+# 2. If GPU node shows UNHEALTHY, recover it
+clustermgr flannel gpu-recover --node <name> --restart-k3s
+
+# 3. Quick health check on K3s servers
 clustermgr flannel diagnose
 
-# 2. If issues found, check details
+# 4. If issues found, check details
 clustermgr flannel fdb
 clustermgr flannel neighbors
 clustermgr flannel routes
 
-# 3. Test connectivity
+# 5. Test connectivity
 clustermgr flannel test
 
-# 4. Check for duplicate MACs
+# 6. Check for duplicate MACs
 clustermgr flannel mac-duplicates
 
-# 5. Auto-fix if possible
+# 7. Auto-fix if possible (includes GPU node recovery)
 clustermgr fix --dry-run
 clustermgr fix
 
-# 6. Deep debugging if needed
+# 8. Deep debugging if needed
 clustermgr flannel capture -f "host 10.42.15.0"
 ```
 
 ## Related Commands
 
-- `fix` - Auto-fix missing FDB/neighbor/route entries
+- `fix` - Auto-fix missing FDB/neighbor/route entries (includes GPU node recovery)
 - `wg status` - WireGuard connectivity (underlying transport)
 - `envoy test` - Test HTTP connectivity through Envoy
 
 ## Related Runbooks
 
+- `docs/runbooks/GPU-NODE-FLANNEL-INTERFACE-RECOVERY.md` - GPU node flannel.1 recovery procedure
 - `docs/runbooks/FLANNEL-VXLAN-TROUBLESHOOTING.md` - Detailed troubleshooting guide
 - `docs/runbooks/HTTP-503-DIAGNOSIS.md` - HTTP 503 diagnosis workflow

@@ -301,6 +301,28 @@ systemctl restart wireguard-peer-reconcile.service
 ip route get $POD_IP
 ```
 
+### Category 4b: Missing flannel.1 Interface on GPU Node
+
+**Symptoms:**
+
+- Timeout connecting to pod IP on specific GPU node
+- WireGuard tunnel is UP (ping to WG IP works)
+- VXLAN/VTEP ping fails (ping to 10.42.x.0 fails)
+- Syslog on GPU node shows: `flannel.1: Link DOWN`
+
+**Resolution:**
+See [GPU-NODE-FLANNEL-INTERFACE-RECOVERY.md](./GPU-NODE-FLANNEL-INTERFACE-RECOVERY.md)
+
+Quick fix:
+
+```bash
+# SSH to GPU node and restart K3s agent
+ssh <user>@<gpu-node-ip> 'sudo systemctl restart k3s-agent'
+
+# Then update FDB/routes on K3s servers or trigger reconciliation
+kubectl create job --from=cronjob/wireguard-reconcile wireguard-reconcile-manual-$(date +%s) -n kube-system
+```
+
 ### Category 5: WireGuard Tunnel Down
 
 **Symptoms:**
