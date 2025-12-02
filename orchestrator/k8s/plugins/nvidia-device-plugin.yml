@@ -6,7 +6,8 @@
 #   2. NVIDIA Container Toolkit installed and configured
 #   3. Node labeled with basilica.ai/node-type=gpu
 #
-# Based on: https://github.com/NVIDIA/k8s-device-plugin v0.17.0
+# Based on: https://github.com/NVIDIA/k8s-device-plugin v0.18.0
+# Updated from v0.17.0 to v0.18.0 to fix CVE-2025-23266, CVE-2025-23267
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -15,7 +16,7 @@ metadata:
   namespace: kube-system
   labels:
     app.kubernetes.io/name: nvidia-device-plugin
-    app.kubernetes.io/version: "0.17.0"
+    app.kubernetes.io/version: "0.18.0"
     app.kubernetes.io/component: device-plugin
     app.kubernetes.io/part-of: basilica
 spec:
@@ -51,7 +52,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
       - name: nvidia-device-plugin-ctr
-        image: nvcr.io/nvidia/k8s-device-plugin:v0.17.0
+        image: nvcr.io/nvidia/k8s-device-plugin:v0.18.0
         env:
         - name: FAIL_ON_INIT_ERROR
           value: "false"
