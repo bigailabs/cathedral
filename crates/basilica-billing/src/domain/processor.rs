@@ -257,9 +257,10 @@ pub struct StatusChangeData {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CostUpdateData {
-    pub total_cost: Decimal,
-    pub hourly_rate: Option<Decimal>,
-    pub duration_hours: Option<Decimal>,
+    /// New price per GPU per hour
+    pub price_per_gpu: Decimal,
+    /// Optional reason/context for the price change
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
