@@ -473,8 +473,10 @@ def _check_flannel_issues(config: Config) -> list[RemediationStep]:
     # Import flannel functions
     try:
         from clustermgr.commands.flannel import (
+            _check_gpu_node_flannel_via_ssh,
             _get_fdb_entries,
             _get_flannel_routes,
+            _get_gpu_node_ssh_info,
             _get_gpu_nodes,
             _get_neighbor_entries,
         )
@@ -484,6 +486,39 @@ def _check_flannel_issues(config: Config) -> list[RemediationStep]:
     gpu_nodes = _get_gpu_nodes(config)
     if not gpu_nodes:
         return steps
+
+    # Check for missing/DOWN flannel.1 on GPU nodes (root cause of HTTP 503)
+    gpu_ssh_info = _get_gpu_node_ssh_info(config)
+    for gpu in gpu_ssh_info:
+        if not gpu.get("public_ip"):
+            continue
+
+        status = _check_gpu_node_flannel_via_ssh(
+            gpu["public_ip"],
+            gpu.get("ssh_user", "shadeform"),
+        )
+
+        if not status.get("reachable", False):
+            continue
+
+        if not status.get("exists", False) or status.get("state") != "UP":
+            steps.append(
+                RemediationStep(
+                    name=f"Recover flannel.1 on {gpu['name'][:20]}",
+                    description="GPU node flannel.1 is missing/DOWN - restart K3s and update routes",
+                    command=[
+                        "clustermgr",
+                        "flannel",
+                        "gpu-recover",
+                        "--node",
+                        gpu["name"],
+                        "--restart-k3s",
+                        "-y",
+                    ],
+                    impact=6,
+                    reversible=False,
+                )
+            )
 
     # Check for missing FDB entries
     fdb_entries = _get_fdb_entries(config)

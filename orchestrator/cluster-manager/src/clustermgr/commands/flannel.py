@@ -10,7 +10,9 @@ Key components inspected:
 - Routes through flannel.1 for pod CIDRs
 """
 
+import json
 import re
+import subprocess
 from dataclasses import dataclass
 
 import click
@@ -119,7 +121,6 @@ def _get_gpu_nodes(config: Config) -> list[GPUNodeInfo]:
         backend_data = annotations.get("flannel.alpha.coreos.com/backend-data", "{}")
         flannel_mac = ""
         try:
-            import json
             bd = json.loads(backend_data)
             flannel_mac = bd.get("VtepMAC", "")
         except (json.JSONDecodeError, TypeError):
@@ -994,3 +995,515 @@ def vxlan_capture(
                 console.print(f"\n[bold]{text}[/bold]")
             else:
                 console.print(text)
+
+
+@dataclass
+class GPUNodeFlannelStatus:
+    """Flannel status on a GPU node."""
+
+    node_name: str
+    public_ip: str
+    wg_ip: str
+    pod_cidr: str
+    flannel_exists: bool
+    flannel_state: str
+    flannel_mac: str
+    has_flannel_routes: bool
+    route_count: int
+    reachable: bool
+    ssh_user: str
+
+
+def _get_wg_peer_endpoints(config: Config) -> dict[str, str]:
+    """Get WireGuard peer endpoints (public IPs) from K3s servers."""
+    result = run_ansible(
+        config,
+        "shell",
+        "sudo wg show wg0 endpoints 2>/dev/null | head -20",
+        hosts="k3s_server[0]",
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return {}
+
+    endpoints: dict[str, str] = {}
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        # Skip empty lines and ansible header lines
+        if not line or " | CHANGED" in line or " | SUCCESS" in line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and "=" in parts[0]:
+            pubkey = parts[0]
+            endpoint = parts[1].split(":")[0]  # Remove port
+            endpoints[pubkey] = endpoint
+
+    return endpoints
+
+
+def _get_wg_peer_pubkeys(config: Config) -> dict[str, str]:
+    """Get WireGuard public keys for nodes based on allowed IPs."""
+    result = run_ansible(
+        config,
+        "shell",
+        "sudo wg show wg0 allowed-ips 2>/dev/null | head -20",
+        hosts="k3s_server[0]",
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return {}
+
+    ip_to_pubkey: dict[str, str] = {}
+    for line in result.stdout.split("\n"):
+        line = line.strip()
+        if not line or " | " in line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            pubkey = parts[0]
+            for allowed_ip in parts[1:]:
+                ip = allowed_ip.split("/")[0]
+                ip_to_pubkey[ip] = pubkey
+
+    return ip_to_pubkey
+
+
+def _get_gpu_node_ssh_info(config: Config) -> list[dict[str, str]]:
+    """Get GPU node SSH connection info from K8s annotations and WireGuard peers."""
+    result = run_kubectl(
+        config,
+        ["get", "nodes", "-l", "basilica.ai/wireguard=true", "-o", "json"],
+    )
+    if result.returncode != 0:
+        return []
+
+    data = parse_json_output(result.stdout)
+
+    # Get WireGuard peer info for public IPs
+    ip_to_pubkey = _get_wg_peer_pubkeys(config)
+    pubkey_to_endpoint = _get_wg_peer_endpoints(config)
+
+    nodes = []
+
+    for item in data.get("items", []):
+        metadata = item.get("metadata", {})
+        annotations = metadata.get("annotations", {})
+        status = item.get("status", {})
+        spec = item.get("spec", {})
+
+        name = metadata.get("name", "")
+        if not name:
+            continue
+
+        wg_ip = ""
+        for addr in status.get("addresses", []):
+            if addr.get("type") == "InternalIP":
+                wg_ip = addr.get("address", "")
+                break
+
+        # Try to find public IP from WireGuard endpoint
+        public_ip = annotations.get("basilica.ai/public-ip", "")
+        if not public_ip and wg_ip:
+            pubkey = ip_to_pubkey.get(wg_ip, "")
+            if pubkey:
+                public_ip = pubkey_to_endpoint.get(pubkey, "")
+
+        ssh_user = annotations.get("basilica.ai/ssh-user", "shadeform")
+        pod_cidr = spec.get("podCIDR", "")
+
+        backend_data = annotations.get("flannel.alpha.coreos.com/backend-data", "{}")
+        flannel_mac = ""
+        try:
+            bd = json.loads(backend_data)
+            flannel_mac = bd.get("VtepMAC", "")
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        nodes.append({
+            "name": name,
+            "public_ip": public_ip,
+            "wg_ip": wg_ip,
+            "pod_cidr": pod_cidr,
+            "flannel_mac": flannel_mac,
+            "ssh_user": ssh_user,
+        })
+
+    return nodes
+
+
+def _check_gpu_node_flannel_via_debug(
+    config: Config,
+    node_name: str,
+) -> dict[str, str | bool | int]:
+    """Check flannel.1 status on GPU node via kubectl debug."""
+    cmd = (
+        "ip link show flannel.1 2>/dev/null && "
+        "ip route show | grep -c 'dev flannel.1' || echo '0'"
+    )
+
+    result = run_kubectl(
+        config,
+        [
+            "debug",
+            f"node/{node_name}",
+            "-it",
+            "--image=nicolaka/netshoot:latest",
+            "--",
+            "sh",
+            "-c",
+            cmd,
+        ],
+        timeout=60,
+    )
+
+    output = result.stdout
+    exists = "flannel.1" in output and "does not exist" not in output
+    state = "UP" if exists and ("state UNKNOWN" in output or ",UP" in output) else "DOWN"
+
+    mac_match = re.search(r"link/ether\s+([0-9a-f:]+)", output)
+    mac = mac_match.group(1) if mac_match else ""
+
+    lines = output.strip().split("\n")
+    route_count = 0
+    for line in lines:
+        if line.strip().isdigit():
+            route_count = int(line.strip())
+            break
+
+    return {
+        "exists": exists,
+        "state": state,
+        "mac": mac,
+        "route_count": route_count,
+    }
+
+
+def _check_gpu_node_flannel_via_ssh(
+    public_ip: str,
+    ssh_user: str,
+) -> dict[str, str | bool | int]:
+    """Check flannel.1 status on GPU node via SSH."""
+    cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=10",
+        "-o", "BatchMode=yes",
+        f"{ssh_user}@{public_ip}",
+        "ip link show flannel.1 2>/dev/null && "
+        "ip route show | grep -c 'dev flannel.1' || echo '0'",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        output = result.stdout
+        exists = "flannel.1" in output and "does not exist" not in output
+        state = "UP" if exists and ("state UNKNOWN" in output or ",UP" in output) else "DOWN"
+
+        mac_match = re.search(r"link/ether\s+([0-9a-f:]+)", output)
+        mac = mac_match.group(1) if mac_match else ""
+
+        lines = output.strip().split("\n")
+        route_count = 0
+        for line in lines:
+            if line.strip().isdigit():
+                route_count = int(line.strip())
+                break
+
+        return {
+            "exists": exists,
+            "state": state,
+            "mac": mac,
+            "route_count": route_count,
+            "reachable": True,
+        }
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return {
+            "exists": False,
+            "state": "UNKNOWN",
+            "mac": "",
+            "route_count": 0,
+            "reachable": False,
+        }
+
+
+@flannel.command("gpu-check")
+@click.option("--node", "-n", help="Specific GPU node to check")
+@click.option("--use-ssh/--use-debug", default=True, help="Use SSH (default) or kubectl debug")
+@click.pass_context
+def gpu_check(ctx: click.Context, node: str | None, use_ssh: bool) -> None:
+    """Check flannel.1 interface status directly on GPU nodes.
+
+    This command queries GPU nodes directly (via SSH or kubectl debug)
+    to verify the flannel.1 VXLAN interface is present and UP.
+
+    A missing or DOWN flannel.1 interface on a GPU node causes HTTP 503
+    errors for all UserDeployments on that node.
+
+    \b
+    Resolution if flannel.1 is missing:
+      1. SSH to GPU node: ssh <user>@<ip>
+      2. Restart K3s agent: sudo systemctl restart k3s-agent
+      3. Update FDB/routes: clustermgr flannel gpu-recover --node <name>
+    """
+    config: Config = ctx.obj
+
+    print_header("GPU Node Flannel Status Check")
+
+    gpu_nodes = _get_gpu_node_ssh_info(config)
+    if node:
+        gpu_nodes = [n for n in gpu_nodes if node in n["name"]]
+
+    if not gpu_nodes:
+        console.print("[yellow]No GPU nodes found[/yellow]")
+        return
+
+    method = "SSH" if use_ssh else "kubectl debug"
+    console.print(f"Method: {method}")
+    console.print(f"Checking {len(gpu_nodes)} GPU node(s)...\n")
+
+    table = Table()
+    table.add_column("Node", style="cyan")
+    table.add_column("Public IP")
+    table.add_column("flannel.1")
+    table.add_column("State")
+    table.add_column("MAC")
+    table.add_column("Routes")
+    table.add_column("Status")
+
+    issues_found = False
+
+    for gpu in gpu_nodes:
+        if use_ssh and gpu["public_ip"]:
+            status = _check_gpu_node_flannel_via_ssh(
+                gpu["public_ip"],
+                gpu["ssh_user"],
+            )
+        else:
+            status = _check_gpu_node_flannel_via_debug(config, gpu["name"])
+
+        if not status.get("reachable", True):
+            table.add_row(
+                gpu["name"][:30],
+                gpu["public_ip"] or "-",
+                "[dim]?[/dim]",
+                "[dim]?[/dim]",
+                "[dim]?[/dim]",
+                "[dim]?[/dim]",
+                "[red]UNREACHABLE[/red]",
+            )
+            issues_found = True
+            continue
+
+        exists = status.get("exists", False)
+        state = status.get("state", "DOWN")
+        mac = status.get("mac", "")
+        route_count = status.get("route_count", 0)
+
+        exists_str = "[green]Yes[/green]" if exists else "[red]No[/red]"
+        state_str = "[green]UP[/green]" if state == "UP" else "[red]DOWN[/red]"
+
+        mac_ok = mac and (mac == gpu["flannel_mac"] or not gpu["flannel_mac"])
+        mac_str = f"[green]{mac}[/green]" if mac_ok else f"[red]{mac or 'MISSING'}[/red]"
+
+        routes_str = f"[green]{route_count}[/green]" if route_count > 0 else "[red]0[/red]"
+
+        if exists and state == "UP" and route_count > 0:
+            status_str = "[green]HEALTHY[/green]"
+        else:
+            status_str = "[red]UNHEALTHY[/red]"
+            issues_found = True
+
+        table.add_row(
+            gpu["name"][:30],
+            gpu["public_ip"] or "-",
+            exists_str,
+            state_str,
+            mac_str,
+            routes_str,
+            status_str,
+        )
+
+    console.print(table)
+
+    if issues_found:
+        print_header("Remediation")
+        console.print("For nodes with missing/DOWN flannel.1:")
+        console.print("  1. SSH to node and restart K3s agent:")
+        console.print("     ssh <user>@<ip> 'sudo systemctl restart k3s-agent'")
+        console.print("  2. Update FDB/routes on K3s servers:")
+        console.print("     clustermgr flannel gpu-recover --node <name>")
+        console.print("")
+        console.print("Or use the automated recovery command:")
+        console.print("  clustermgr flannel gpu-recover --node <name> --restart-k3s")
+        ctx.exit(1)
+
+
+@flannel.command("gpu-recover")
+@click.option("--node", "-n", required=True, help="GPU node name to recover")
+@click.option("--restart-k3s", is_flag=True, help="Also restart K3s agent on GPU node via SSH")
+@click.pass_context
+def gpu_recover(ctx: click.Context, node: str, restart_k3s: bool) -> None:
+    """Recover Flannel connectivity for a specific GPU node.
+
+    This command updates FDB entries, neighbor entries, and routes on
+    all K3s servers for the specified GPU node. Use this after restarting
+    the K3s agent on the GPU node to restore VXLAN connectivity.
+
+    With --restart-k3s, this command will also SSH to the GPU node and
+    restart the K3s agent before updating the K3s server network state.
+
+    \b
+    What this command does:
+      1. (Optional) SSH to GPU node and restart K3s agent
+      2. Wait for flannel.1 interface to come up
+      3. Fetch updated MAC address from K8s node annotations
+      4. Add/update FDB entries on all K3s servers
+      5. Add/update neighbor entries on all K3s servers
+      6. Add/update routes on all K3s servers
+      7. Verify VXLAN connectivity
+    """
+    config: Config = ctx.obj
+
+    print_header(f"GPU Node Recovery: {node}")
+
+    gpu_nodes = _get_gpu_node_ssh_info(config)
+    target = next((n for n in gpu_nodes if node in n["name"]), None)
+
+    if not target:
+        console.print(f"[red]GPU node '{node}' not found[/red]")
+        console.print("\nAvailable GPU nodes:")
+        for n in gpu_nodes:
+            console.print(f"  - {n['name']}")
+        ctx.exit(1)
+
+    console.print(f"Node: {target['name']}")
+    console.print(f"Public IP: {target['public_ip'] or 'N/A'}")
+    console.print(f"WireGuard IP: {target['wg_ip']}")
+    console.print(f"Pod CIDR: {target['pod_cidr']}")
+    console.print(f"Flannel MAC: {target['flannel_mac'] or 'N/A'}")
+
+    if config.dry_run:
+        console.print("\n[yellow][DRY RUN] No changes will be made.[/yellow]")
+
+    if restart_k3s:
+        print_header("Step 1: Restart K3s Agent on GPU Node")
+
+        if not target["public_ip"]:
+            console.print("[red]Cannot restart K3s: No public IP for SSH[/red]")
+            ctx.exit(1)
+
+        if config.dry_run:
+            console.print(f"Would SSH to {target['ssh_user']}@{target['public_ip']}")
+            console.print("Would run: sudo systemctl restart k3s-agent")
+        else:
+            cmd = [
+                "ssh",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                f"{target['ssh_user']}@{target['public_ip']}",
+                "sudo systemctl restart k3s-agent",
+            ]
+            console.print(f"SSH: {target['ssh_user']}@{target['public_ip']}")
+            console.print("Running: sudo systemctl restart k3s-agent")
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                if result.returncode == 0:
+                    console.print("[green]K3s agent restarted successfully[/green]")
+                else:
+                    console.print(f"[red]Failed: {result.stderr}[/red]")
+                    ctx.exit(1)
+            except subprocess.TimeoutExpired:
+                console.print("[red]SSH timeout[/red]")
+                ctx.exit(1)
+
+            console.print("Waiting 15 seconds for flannel.1 to initialize...")
+            import time
+            time.sleep(15)
+
+            console.print("Refreshing node info from K8s...")
+            gpu_nodes = _get_gpu_node_ssh_info(config)
+            target = next((n for n in gpu_nodes if node in n["name"]), target)
+            console.print(f"Updated Flannel MAC: {target['flannel_mac'] or 'N/A'}")
+
+    if not target["flannel_mac"]:
+        console.print("[red]Cannot proceed: No Flannel MAC in K8s annotations[/red]")
+        console.print("The K3s agent may not have fully initialized.")
+        console.print("Try again in a few seconds or check node status.")
+        ctx.exit(1)
+
+    if not target["pod_cidr"]:
+        console.print("[red]Cannot proceed: No Pod CIDR assigned[/red]")
+        ctx.exit(1)
+
+    vtep_ip = target["pod_cidr"].replace("/24", "").rsplit(".", 1)[0] + ".0"
+
+    step_num = 2 if restart_k3s else 1
+    print_header(f"Step {step_num}: Update FDB Entries")
+
+    fdb_cmd = f"bridge fdb replace {target['flannel_mac']} dev flannel.1 dst {target['wg_ip']} self permanent"
+    console.print(f"Command: {fdb_cmd}")
+
+    if not config.dry_run:
+        result = run_ansible(config, "shell", fdb_cmd, timeout=30)
+        if result.returncode == 0:
+            console.print("[green]FDB entries updated on all K3s servers[/green]")
+        else:
+            console.print(f"[yellow]Warning: {result.stderr}[/yellow]")
+
+    step_num += 1
+    print_header(f"Step {step_num}: Update Neighbor Entries")
+
+    neigh_cmd = f"ip neigh replace {vtep_ip} lladdr {target['flannel_mac']} dev flannel.1 nud permanent"
+    console.print(f"Command: {neigh_cmd}")
+
+    if not config.dry_run:
+        result = run_ansible(config, "shell", neigh_cmd, timeout=30)
+        if result.returncode == 0:
+            console.print("[green]Neighbor entries updated on all K3s servers[/green]")
+        else:
+            console.print(f"[yellow]Warning: {result.stderr}[/yellow]")
+
+    step_num += 1
+    print_header(f"Step {step_num}: Update Routes")
+
+    route_cmd = f"ip route replace {target['pod_cidr']} via {vtep_ip} dev flannel.1 onlink"
+    console.print(f"Command: {route_cmd}")
+
+    if not config.dry_run:
+        result = run_ansible(config, "shell", route_cmd, timeout=30)
+        if result.returncode == 0:
+            console.print("[green]Routes updated on all K3s servers[/green]")
+        else:
+            console.print(f"[yellow]Warning: {result.stderr}[/yellow]")
+
+    step_num += 1
+    print_header(f"Step {step_num}: Verify Connectivity")
+
+    if config.dry_run:
+        console.print(f"Would ping VTEP IP: {vtep_ip}")
+    else:
+        result = run_ansible(
+            config,
+            "shell",
+            f"ping -c 2 -W 3 {vtep_ip}",
+            hosts="k3s_server[0]",
+            timeout=30,
+        )
+
+        if "0% packet loss" in result.stdout:
+            console.print(f"[green]VTEP {vtep_ip} is reachable[/green]")
+        else:
+            console.print(f"[yellow]VTEP {vtep_ip} may not be reachable yet[/yellow]")
+            console.print("Wait a few seconds and test with:")
+            console.print(f"  clustermgr flannel test --gpu-node {target['name'][:20]}")
+
+    print_header("Recovery Complete")
+    console.print(f"GPU node {target['name']} network state has been updated.")
+    console.print("\nTo verify user deployments are accessible:")
+    console.print("  curl https://<instance-id>.deployments.basilica.ai/")
