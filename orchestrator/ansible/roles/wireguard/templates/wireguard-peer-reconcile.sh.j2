@@ -8,6 +8,10 @@
 # - Pod CIDRs are assigned when the node joins K3s
 # - This reconciler adds pod CIDRs to AllowedIPs after node joins
 #
+# NOTE: Flannel VXLAN reconciliation (routes, FDB, neighbors) is handled
+# separately by the K8s CronJob (wireguard-reconcile) to maintain single
+# responsibility and avoid duplicate logic.
+#
 # Scalability: Designed to handle 100+ GPU nodes efficiently
 # - Single kubectl call to fetch all node data
 # - O(n) processing with minimal syscalls per node
@@ -62,18 +66,12 @@ get_node_cidrs() {
         "\(.status.addresses[] | select(.type == "InternalIP") | .address) \(.spec.podCIDR)"' 2>/dev/null || true
 }
 
-# Get current WireGuard peers and their AllowedIPs
-get_current_peers() {
-    wg show "$INTERFACE" dump 2>/dev/null | tail -n +2 | while read -r pubkey _ endpoint allowed_ips _; do
-        echo "$pubkey $allowed_ips"
-    done
-}
-
 # Check if a CIDR is already in AllowedIPs
+# AllowedIPs can be space-separated (wg show allowed-ips) or comma-separated (wg show dump)
 cidr_in_allowed() {
     local allowed_ips="$1"
     local cidr="$2"
-    echo "$allowed_ips" | tr ',' '\n' | grep -qF "$cidr"
+    echo "$allowed_ips" | tr ', ' '\n' | grep -qF "$cidr"
 }
 
 # Find public key for a WireGuard IP
@@ -88,7 +86,7 @@ find_pubkey_by_ip() {
 }
 
 reconcile_peers() {
-    log "Starting peer reconciliation"
+    log "Starting WireGuard AllowedIPs reconciliation"
     local changes=0
 
     # Get GPU node WireGuard IPs and their pod CIDRs
@@ -126,9 +124,9 @@ reconcile_peers() {
             continue
         fi
 
-        # Get current AllowedIPs for this peer
+        # Get current AllowedIPs for this peer (all fields after pubkey)
         local current_allowed
-        current_allowed=$(wg show "$INTERFACE" allowed-ips 2>/dev/null | grep "^$pubkey" | awk '{print $2}')
+        current_allowed=$(wg show "$INTERFACE" allowed-ips 2>/dev/null | grep "^$pubkey" | awk '{$1=""; print substr($0,2)}')
 
         if [ -z "$current_allowed" ]; then
             log "  Cannot get AllowedIPs for peer $pubkey"
@@ -140,8 +138,10 @@ reconcile_peers() {
             continue
         fi
 
-        # Add pod CIDR to AllowedIPs
-        local new_allowed="${current_allowed},${pod_cidr}"
+        # Add pod CIDR to AllowedIPs (convert space-separated to comma-separated for wg set)
+        local current_csv
+        current_csv=$(echo "$current_allowed" | tr ' ' ',')
+        local new_allowed="${current_csv},${pod_cidr}"
         log "  Adding pod CIDR $pod_cidr to peer ${pubkey:0:8}... (WG IP: $wg_ip)"
 
         if wg set "$INTERFACE" peer "$pubkey" allowed-ips "$new_allowed" 2>/dev/null; then
@@ -154,71 +154,9 @@ reconcile_peers() {
 
     if [ $changes -gt 0 ]; then
         log "Reconciliation complete: $changes peers updated"
-        # Save config to persist changes
-        wg-quick save "$INTERFACE" 2>/dev/null || true
     else
         log "Reconciliation complete: no changes needed"
     fi
-
-    # Ensure Flannel VXLAN entries are correct for GPU nodes
-    reconcile_flannel
-}
-
-reconcile_flannel() {
-    log "Reconciling Flannel VXLAN entries for GPU node pod CIDRs"
-
-    # Use cached node data (already fetched by reconcile_peers)
-    local node_json
-    node_json=$(fetch_node_data) || return 0
-
-    # Process each GPU node with WireGuard label
-    echo "$node_json" | jq -r '
-        .items[] |
-        select(.metadata.labels["basilica.ai/wireguard"] == "true") |
-        select(.spec.podCIDR != null) |
-        "\(.status.addresses[] | select(.type == "InternalIP") | .address) \(.spec.podCIDR) \(.metadata.annotations["flannel.alpha.coreos.com/backend-data"] | fromjson | .VtepMAC // "unknown")"
-    ' 2>/dev/null | while IFS= read -r line; do
-        [ -z "$line" ] && continue
-
-        local wg_ip pod_cidr vtep_mac
-        wg_ip=$(echo "$line" | awk '{print $1}')
-        pod_cidr=$(echo "$line" | awk '{print $2}')
-        vtep_mac=$(echo "$line" | awk '{print $3}')
-
-        [ -z "$wg_ip" ] || [ -z "$pod_cidr" ] || [ "$vtep_mac" = "unknown" ] && continue
-
-        # Extract the VTEP IP (first IP of pod CIDR, e.g., 10.42.17.0 for 10.42.17.0/24)
-        local vtep_ip
-        vtep_ip=$(echo "$pod_cidr" | sed 's|/.*||')
-
-        # Ensure Flannel route exists via flannel.1 (not wg0)
-        if ip route show "$pod_cidr" 2>/dev/null | grep -q "dev $INTERFACE"; then
-            log "  Removing incorrect wg0 route for $pod_cidr"
-            ip route del "$pod_cidr" dev "$INTERFACE" 2>/dev/null || true
-        fi
-
-        if ! ip route show "$pod_cidr" 2>/dev/null | grep -q "dev flannel.1"; then
-            log "  Adding Flannel route for $pod_cidr via flannel.1"
-            ip route add "$pod_cidr" via "$vtep_ip" dev flannel.1 onlink 2>/dev/null || \
-            ip route replace "$pod_cidr" via "$vtep_ip" dev flannel.1 onlink 2>/dev/null || true
-        fi
-
-        # Ensure FDB entry points to GPU node WireGuard IP
-        local current_fdb
-        current_fdb=$(bridge fdb show dev flannel.1 2>/dev/null | grep "$vtep_mac" | grep -oP 'dst \K[0-9.]+' | head -1)
-        if [ "$current_fdb" != "$wg_ip" ]; then
-            log "  Updating FDB entry for $vtep_mac -> $wg_ip"
-            bridge fdb replace "$vtep_mac" dev flannel.1 dst "$wg_ip" self permanent 2>/dev/null || true
-        fi
-
-        # Ensure neighbor entry for VTEP IP
-        local current_neigh
-        current_neigh=$(ip neigh show dev flannel.1 2>/dev/null | grep "^$vtep_ip " | grep -oP 'lladdr \K[0-9a-f:]+')
-        if [ "$current_neigh" != "$vtep_mac" ]; then
-            log "  Updating neighbor entry for $vtep_ip -> $vtep_mac"
-            ip neigh replace "$vtep_ip" lladdr "$vtep_mac" dev flannel.1 nud permanent 2>/dev/null || true
-        fi
-    done
 }
 
 main() {

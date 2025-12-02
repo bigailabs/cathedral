@@ -166,6 +166,19 @@
     comment: "NAT WireGuard to VPC for remote GPU nodes"
   tags: ['wireguard', 'iptables']
 
+# MASQUERADE VPC traffic going out to WireGuard peers
+# This allows k3s-agents (on VPC network) to reach GPU nodes (on WireGuard network)
+# via the k3s-servers which act as WireGuard gateways.
+- name: Add MASQUERADE rule for VPC traffic to WireGuard
+  ansible.builtin.iptables:
+    table: nat
+    chain: POSTROUTING
+    source: "10.101.0.0/16"
+    out_interface: "{{ wireguard_interface }}"
+    jump: MASQUERADE
+    comment: "NAT VPC to WireGuard for agent connectivity"
+  tags: ['wireguard', 'iptables']
+
 # Security hardening: IP allowlisting and optional rate limiting
 # PRODUCTION SAFE CONFIGURATION (2025-11-28):
 # - Rate limiting DISABLED by default
@@ -285,6 +298,25 @@
     comment: "Allow WireGuard to Flannel pods"
   tags: ['wireguard', 'security']
 
+# Fix for DNS resolution on GPU nodes:
+# When GPU node pods send traffic to other cluster pods, packets traverse:
+# GPU pod -> wg0 -> k3s-server -> flannel.1 -> destination pod
+# Without this rule, Flannel's MASQUERADE changes source IP to server's cni0 IP,
+# breaking return traffic. This rule skips MASQUERADE for forwarded pod-to-pod traffic.
+- name: Skip MASQUERADE for forwarded pod-to-pod traffic (DNS fix)
+  ansible.builtin.shell: |
+    # Check if rule already exists
+    if iptables -t nat -C FLANNEL-POSTRTG -s 10.42.0.0/16 -d 10.42.0.0/16 -j RETURN -m comment --comment "flannel skip forwarded pod traffic" 2>/dev/null; then
+      echo "Rule already exists"
+      exit 0
+    fi
+    # Insert at position 1 (before MASQUERADE rules)
+    iptables -t nat -I FLANNEL-POSTRTG 1 -s 10.42.0.0/16 -d 10.42.0.0/16 -j RETURN -m comment --comment "flannel skip forwarded pod traffic"
+    echo "Rule added"
+  register: flannel_masq_fix
+  changed_when: "'Rule added' in flannel_masq_fix.stdout"
+  tags: ['wireguard', 'security', 'dns-fix']
+
 - name: Allow WireGuard peers to Flannel VXLAN port
   ansible.builtin.iptables:
     chain: FORWARD
@@ -306,10 +338,22 @@
   tags: ['wireguard', 'security']
 
 # Kernel hardening for network security
-- name: Enable reverse path filtering
+- name: Enable reverse path filtering (strict mode for general interfaces)
   ansible.posix.sysctl:
     name: net.ipv4.conf.all.rp_filter
     value: '1'
+    sysctl_set: yes
+    state: present
+    reload: yes
+  tags: ['wireguard', 'security', 'sysctl']
+
+# WireGuard interface uses loose mode (2) for asymmetric routing with Flannel
+# Packets arrive on wg0 from GPU nodes but may egress via flannel.1 for VXLAN
+# Strict rp_filter would drop these packets; loose mode allows if any route exists
+- name: Set loose reverse path filtering on WireGuard interface
+  ansible.posix.sysctl:
+    name: "net.ipv4.conf.{{ wireguard_interface }}.rp_filter"
+    value: '2'
     sysctl_set: yes
     state: present
     reload: yes
@@ -400,7 +444,10 @@
       [Unit]
       Description=WireGuard Peer Reconciliation
       After=wg-quick@{{ wireguard_interface }}.service k3s.service
-      Requires=wg-quick@{{ wireguard_interface }}.service
+      # Use Wants instead of Requires - the script checks for wg0 interface itself
+      # and will exit gracefully if not available. This prevents failures when
+      # wg-quick service shows "failed" but the interface is actually up.
+      Wants=wg-quick@{{ wireguard_interface }}.service
 
       [Service]
       Type=oneshot
