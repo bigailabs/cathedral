@@ -77,7 +77,7 @@
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.7.0"
+readonly SCRIPT_VERSION="1.8.0"
 readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
@@ -122,6 +122,11 @@ main() {
 
     log "Joining K3s cluster..."
     join_k3s_cluster
+
+    if [ "${WIREGUARD_ENABLED}" = "true" ]; then
+        log "Verifying flannel.1 VXLAN interface..."
+        verify_flannel_interface
+    fi
 
     log "Successfully joined Basilica GPU cluster!"
     log "Check node status: kubectl get nodes ${K3S_NODE_NAME}"
@@ -943,6 +948,53 @@ EOF
     else
         log "  WARNING: WireGuard watchdog failed to start"
     fi
+}
+
+verify_flannel_interface() {
+    # Verify that flannel.1 VXLAN interface is created by K3s agent
+    # This is critical for pod-to-pod networking across the WireGuard tunnel
+    # If flannel.1 is missing, user deployments will get HTTP 503 errors
+    local max_retries=30
+    local retry=0
+
+    log "  Waiting for flannel.1 interface to be created by K3s agent..."
+
+    while [[ $retry -lt $max_retries ]]; do
+        if ip link show flannel.1 &>/dev/null; then
+            local flannel_state
+            flannel_state=$(ip -o link show flannel.1 | awk '{print $9}')
+            local flannel_mtu
+            flannel_mtu=$(ip -o link show flannel.1 | grep -oP 'mtu \K\d+')
+            local vtep_mac
+            vtep_mac=$(ip link show flannel.1 | grep -oP 'link/ether \K[0-9a-f:]+' || echo "unknown")
+
+            log "  flannel.1 interface detected:"
+            log "    State: ${flannel_state}"
+            log "    MTU: ${flannel_mtu}"
+            log "    VtepMAC: ${vtep_mac}"
+
+            # Verify interface is UP
+            if [[ "$flannel_state" == "UP" ]] || [[ "$flannel_state" == "UNKNOWN" ]]; then
+                log "  flannel.1 verification successful"
+                return 0
+            fi
+
+            log "  WARNING: flannel.1 exists but state is ${flannel_state}, waiting..."
+        fi
+
+        sleep 2
+        retry=$((retry + 1))
+    done
+
+    # flannel.1 not created within timeout
+    log "  ERROR: flannel.1 interface not created within ${max_retries} retries"
+    log "  This indicates K3s agent failed to initialize VXLAN networking"
+    log "  Troubleshooting steps:"
+    log "    1. Check K3s agent logs: journalctl -u k3s-agent -n 100"
+    log "    2. Verify WireGuard connectivity: wg show"
+    log "    3. Restart K3s agent: sudo systemctl restart k3s-agent"
+    log "  WARNING: Without flannel.1, pod networking will not work correctly"
+    return 1
 }
 
 join_k3s_cluster() {
