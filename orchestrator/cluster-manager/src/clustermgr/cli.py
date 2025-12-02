@@ -11,6 +11,7 @@ from clustermgr.commands import (
     cleanup,
     deployments,
     diagnose,
+    dns,
     envoy,
     etcd,
     events,
@@ -123,6 +124,7 @@ main.add_command(events)
 main.add_command(topology)
 main.add_command(wg)
 main.add_command(flannel)
+main.add_command(dns)
 main.add_command(firewall)
 main.add_command(mtu)
 main.add_command(mesh_test)

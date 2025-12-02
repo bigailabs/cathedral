@@ -6,6 +6,7 @@ from clustermgr.commands.cert_check import cert_check
 from clustermgr.commands.cleanup import cleanup
 from clustermgr.commands.deployments import deployments
 from clustermgr.commands.diagnose import diagnose
+from clustermgr.commands.dns import dns
 from clustermgr.commands.envoy import envoy
 from clustermgr.commands.etcd import etcd
 from clustermgr.commands.events import events
@@ -38,6 +39,7 @@ __all__ = [
     "cleanup",
     "deployments",
     "diagnose",
+    "dns",
     "envoy",
     "etcd",
     "events",
