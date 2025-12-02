@@ -34,6 +34,7 @@ from basilica._basilica import (
     ListRentalsQuery,
     # Deployment types
     EnvVar,
+    GpuRequirementsSpec,
     ResourceRequirements,
     ReplicaStatus,
     PodInfo,
@@ -86,6 +87,7 @@ __all__ = [
     "ListRentalsQuery",
     # Deployment types
     "EnvVar",
+    "GpuRequirementsSpec",
     "ResourceRequirements",
     "ReplicaStatus",
     "PodInfo",
@@ -353,6 +355,10 @@ class BasilicaClient:
         env: Optional[Dict[str, str]] = None,
         cpu: str = "500m",
         memory: str = "512Mi",
+        gpu_count: Optional[int] = None,
+        gpu_models: Optional[List[str]] = None,
+        min_cuda_version: Optional[str] = None,
+        min_gpu_memory_gb: Optional[int] = None,
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, Any]] = None
@@ -370,6 +376,10 @@ class BasilicaClient:
             env: Environment variables as dict
             cpu: CPU resource request (default: "500m")
             memory: Memory resource request (default: "512Mi")
+            gpu_count: Number of GPUs required (1-8)
+            gpu_models: List of acceptable GPU models (e.g., ["A100", "H100"])
+            min_cuda_version: Minimum CUDA version required (e.g., "12.0")
+            min_gpu_memory_gb: Minimum GPU memory in GB (1-256)
             ttl_seconds: Optional time-to-live in seconds
             public: Create public URL (default: True)
             storage: Optional storage specification. Can be:
@@ -383,6 +393,15 @@ class BasilicaClient:
             Simple storage (recommended):
             >>> client.create_deployment(..., storage="/data")
 
+            GPU deployment:
+            >>> client.create_deployment(
+            ...     instance_name="pytorch-train",
+            ...     image="pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
+            ...     cpu="4", memory="32Gi",
+            ...     gpu_count=1, gpu_models=["A100", "H100"],
+            ...     min_cuda_version="12.0", min_gpu_memory_gb=40
+            ... )
+
             Custom backend:
             >>> custom_storage = StorageSpec(
             ...     persistent=PersistentStorageSpec(
@@ -394,7 +413,16 @@ class BasilicaClient:
             ... )
             >>> client.create_deployment(..., storage=custom_storage)
         """
-        resources = ResourceRequirements(cpu=cpu, memory=memory) if cpu or memory else None
+        gpu_spec = None
+        if gpu_count is not None and gpu_models is not None:
+            gpu_spec = GpuRequirementsSpec(
+                count=gpu_count,
+                model=gpu_models,
+                min_cuda_version=min_cuda_version,
+                min_gpu_memory_gb=min_gpu_memory_gb
+            )
+
+        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec) if cpu or memory or gpu_spec else None
 
         storage_spec = None
         if storage is not None:
