@@ -13,9 +13,6 @@ rules:
 - apiGroups: [""]
   resources: ["nodes"]
   verbs: ["get", "list", "watch"]
-- apiGroups: ["coordination.k8s.io"]
-  resources: ["leases"]
-  verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -65,93 +62,28 @@ spec:
           - key: node-role.kubernetes.io/master
             operator: Exists
             effect: NoSchedule
-          affinity:
-            podAntiAffinity:
-              requiredDuringSchedulingIgnoredDuringExecution:
-              - labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/name: wireguard-reconcile
-                topologyKey: kubernetes.io/hostname
+          - key: basilica.ai/control-plane-only
+            operator: Exists
+            effect: NoSchedule
           initContainers:
-          - name: leader-election
+          - name: copy-kubectl
             image: bitnami/kubectl:latest
-            command:
-            - /bin/bash
-            - -c
-            - |
-              set -euo pipefail
-              LEASE_NAME="wireguard-reconcile-leader"
-              LEASE_NS="kube-system"
-              NODE_NAME="${HOSTNAME}"
-              LEASE_DURATION=60
-
-              acquire_lease() {
-                  local now
-                  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-                  local renew_time
-                  renew_time=$(date -u -d "+${LEASE_DURATION} seconds" +"%Y-%m-%dT%H:%M:%SZ")
-
-                  if ! kubectl get lease "$LEASE_NAME" -n "$LEASE_NS" &>/dev/null; then
-                      kubectl create -f - <<EOF
-              apiVersion: coordination.k8s.io/v1
-              kind: Lease
-              metadata:
-                name: $LEASE_NAME
-                namespace: $LEASE_NS
-              spec:
-                holderIdentity: $NODE_NAME
-                leaseDurationSeconds: $LEASE_DURATION
-                acquireTime: "$now"
-                renewTime: "$now"
-              EOF
-                      echo "Created lease, we are the leader"
-                      exit 0
-                  fi
-
-                  local holder
-                  holder=$(kubectl get lease "$LEASE_NAME" -n "$LEASE_NS" -o jsonpath='{.spec.holderIdentity}')
-                  local last_renew
-                  last_renew=$(kubectl get lease "$LEASE_NAME" -n "$LEASE_NS" -o jsonpath='{.spec.renewTime}')
-
-                  if [ "$holder" = "$NODE_NAME" ]; then
-                      kubectl patch lease "$LEASE_NAME" -n "$LEASE_NS" --type=merge -p "{\"spec\":{\"renewTime\":\"$now\"}}"
-                      echo "We hold the lease, renewed"
-                      exit 0
-                  fi
-
-                  local last_renew_epoch
-                  last_renew_epoch=$(date -d "$last_renew" +%s 2>/dev/null || echo 0)
-                  local now_epoch
-                  now_epoch=$(date +%s)
-                  local age=$((now_epoch - last_renew_epoch))
-
-                  if [ $age -gt $LEASE_DURATION ]; then
-                      kubectl patch lease "$LEASE_NAME" -n "$LEASE_NS" --type=merge \
-                        -p "{\"spec\":{\"holderIdentity\":\"$NODE_NAME\",\"acquireTime\":\"$now\",\"renewTime\":\"$now\"}}"
-                      echo "Lease expired, acquired leadership"
-                      exit 0
-                  fi
-
-                  echo "Another node ($holder) holds the lease (age: ${age}s), skipping"
-                  exit 1
-              }
-
-              acquire_lease
-            resources:
-              requests:
-                cpu: 10m
-                memory: 32Mi
-              limits:
-                cpu: 50m
-                memory: 64Mi
+            command: ["cp", "/opt/bitnami/kubectl/bin/kubectl", "/shared/kubectl"]
+            volumeMounts:
+            - name: shared-bin
+              mountPath: /shared
           containers:
           - name: reconcile
-            image: bitnami/kubectl:latest
+            image: nicolaka/netshoot:latest
             securityContext:
+              runAsUser: 0
               privileged: true
               capabilities:
                 add:
                 - NET_ADMIN
+            env:
+            - name: PATH
+              value: "/shared:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             command:
             - /bin/bash
             - -c
@@ -190,7 +122,7 @@ spec:
                   log "Reconciling Flannel VXLAN entries for GPU nodes"
 
                   local node_json
-                  node_json=$(kubectl get nodes -o json 2>/dev/null) || {
+                  node_json=$(/shared/kubectl get nodes -o json 2>/dev/null) || {
                       log "ERROR: Failed to fetch node data"
                       return 1
                   }
@@ -227,7 +159,7 @@ spec:
                       fi
 
                       local current_fdb
-                      current_fdb=$(bridge fdb show dev flannel.1 2>/dev/null | grep "$vtep_mac" | grep -oP 'dst \K[0-9.]+' | head -1)
+                      current_fdb=$(bridge fdb show dev flannel.1 2>/dev/null | grep "$vtep_mac" | awk '{for(i=1;i<=NF;i++) if($i=="dst") print $(i+1)}' | head -1)
                       if [ "$current_fdb" != "$wg_ip" ]; then
                           log "  Updating FDB entry for $vtep_mac -> $wg_ip"
                           bridge fdb replace "$vtep_mac" dev flannel.1 dst "$wg_ip" self permanent 2>/dev/null || true
@@ -235,7 +167,7 @@ spec:
                       fi
 
                       local current_neigh
-                      current_neigh=$(ip neigh show dev flannel.1 2>/dev/null | grep "^$vtep_ip " | grep -oP 'lladdr \K[0-9a-f:]+')
+                      current_neigh=$(ip neigh show dev flannel.1 2>/dev/null | grep "^$vtep_ip " | awk '{for(i=1;i<=NF;i++) if($i=="lladdr") print $(i+1)}')
                       if [ "$current_neigh" != "$vtep_mac" ]; then
                           log "  Updating neighbor entry for $vtep_ip -> $vtep_mac"
                           ip neigh replace "$vtep_ip" lladdr "$vtep_mac" dev flannel.1 nud permanent 2>/dev/null || true
@@ -246,7 +178,7 @@ spec:
                   echo "$changes"
               }
 
-              log "Starting WireGuard reconciliation"
+              log "Starting WireGuard reconciliation on $(hostname)"
 
               if ! ip link show wg0 &>/dev/null; then
                   log "ERROR: WireGuard interface wg0 not available"
@@ -263,6 +195,8 @@ spec:
               log "Reconciliation complete: $changes changes"
               write_heartbeat_metric 1 "$changes"
             volumeMounts:
+            - name: shared-bin
+              mountPath: /shared
             - name: host-run
               mountPath: /var/run
             - name: metrics
@@ -275,6 +209,8 @@ spec:
                 cpu: 200m
                 memory: 128Mi
           volumes:
+          - name: shared-bin
+            emptyDir: {}
           - name: host-run
             hostPath:
               path: /var/run
