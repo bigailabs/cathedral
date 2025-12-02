@@ -11,6 +11,8 @@
 # PREREQUISITES:
 #   - Ubuntu 20.04+ or compatible Linux distribution
 #   - NVIDIA drivers installed (nvidia-smi working)
+#   - NVIDIA Container Toolkit installed (nvidia-ctk or nvidia-container-runtime)
+#   - containerd configured for NVIDIA runtime (nvidia-ctk runtime configure --runtime=containerd)
 #   - Root/sudo access
 #   - curl and jq installed
 #   - Internet connectivity to api.basilica.ai and get.k3s.io
@@ -61,23 +63,26 @@
 #
 # TROUBLESHOOTING:
 #   - "nvidia-smi not found": Install NVIDIA drivers first
+#   - "NVIDIA Container Toolkit not detected": See installation instructions in error message
+#   - "containerd may not be configured": Run nvidia-ctk runtime configure --runtime=containerd
 #   - "Cannot reach Basilica API": Check firewall/network connectivity
 #   - "Registration failed": Verify your API key and datacenter ID
 #   - "K3s agent failed to start": Check logs with: journalctl -u k3s-agent -n 50
+#   - "GPU not detected by K8s": Check NVIDIA device plugin: kubectl get pods -n kube-system | grep nvidia
 #
 # UNINSTALL:
 #   To remove this node from the cluster:
 #   1. Run: /usr/local/bin/k3s-agent-uninstall.sh
 #   2. Revoke the node token via API or dashboard
 #
-# VERSION: 1.6.0
+# VERSION: 1.9.0
 # AUTHOR: Basilica Network
 # LICENSE: MIT
 #
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.8.0"
+readonly SCRIPT_VERSION="1.9.0"
 readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
@@ -98,6 +103,7 @@ main() {
 
     check_root
     check_nvidia_driver
+    check_nvidia_container_toolkit
     check_connectivity
 
     log "Detecting GPU hardware..."
@@ -148,6 +154,51 @@ check_nvidia_driver() {
     fi
 
     log "NVIDIA driver detected"
+}
+
+check_nvidia_container_toolkit() {
+    # Check for nvidia-container-runtime or nvidia-ctk (NVIDIA Container Toolkit)
+    # Required for containers to access GPUs via nvidia.com/gpu extended resource
+    local toolkit_found=false
+
+    if command -v nvidia-container-runtime &> /dev/null; then
+        toolkit_found=true
+        log "NVIDIA Container Runtime detected"
+    fi
+
+    if command -v nvidia-ctk &> /dev/null; then
+        toolkit_found=true
+        log "NVIDIA Container Toolkit (nvidia-ctk) detected"
+    fi
+
+    if [ "$toolkit_found" = false ]; then
+        log "WARNING: NVIDIA Container Toolkit not detected."
+        log "GPU containers require NVIDIA Container Toolkit to access GPUs."
+        log ""
+        log "To install on Ubuntu/Debian:"
+        log "  distribution=\$(. /etc/os-release;echo \$ID\$VERSION_ID)"
+        log "  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+        log "  curl -s -L https://nvidia.github.io/libnvidia-container/\$distribution/libnvidia-container.list | \\"
+        log "    sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \\"
+        log "    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+        log "  sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit"
+        log ""
+        log "After installation, configure containerd:"
+        log "  sudo nvidia-ctk runtime configure --runtime=containerd"
+        log "  sudo systemctl restart containerd"
+        log ""
+        die "NVIDIA Container Toolkit is required. Install it and re-run this script."
+    fi
+
+    # Verify containerd is configured for NVIDIA runtime
+    if [ -f /etc/containerd/config.toml ]; then
+        if grep -q "nvidia-container-runtime\|nvidia" /etc/containerd/config.toml 2>/dev/null; then
+            log "containerd configured for NVIDIA runtime"
+        else
+            log "WARNING: containerd may not be configured for NVIDIA runtime."
+            log "Run: sudo nvidia-ctk runtime configure --runtime=containerd && sudo systemctl restart containerd"
+        fi
+    fi
 }
 
 check_connectivity() {
