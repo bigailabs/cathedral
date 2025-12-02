@@ -1,69 +1,163 @@
 """
 Basilica SDK for Python
 
-A Python SDK for interacting with the Basilica GPU rental network.
+Deploy and manage containerized applications on the Basilica GPU cloud.
+
+Quick Start:
+    >>> from basilica import BasilicaClient
+    >>> client = BasilicaClient()
+    >>>
+    >>> # Deploy a Python app from a file
+    >>> deployment = client.deploy("my-api", source="app.py", port=8000)
+    >>> print(f"Live at: {deployment.url}")
+    >>>
+    >>> # Or deploy from inline code
+    >>> deployment = client.deploy(
+    ...     name="hello",
+    ...     source="print('Hello, World!')",
+    ... )
+
+Authentication:
+    Set the BASILICA_API_TOKEN environment variable:
+        export BASILICA_API_TOKEN="basilica_..."
+
+    Or pass directly:
+        client = BasilicaClient(api_key="basilica_...")
+
+    Create a token using: basilica tokens create
 """
 
 import os
-from typing import Optional, Dict, Any, List, Union
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from basilica._basilica import (
+    # Core client binding
     BasilicaClient as _BasilicaClient,
     # Helper functions
-    node_by_id,
     node_by_gpu,
+    node_by_id,
     # Response types
-    HealthCheckResponse,
-    RentalResponse,
-    RentalStatusWithSshResponse,
-    RentalStatus,
-    SshAccess,
-    NodeDetails,
-    GpuSpec,
-    CpuSpec,
-    AvailableNode,
     AvailabilityInfo,
+    AvailableNode,
+    CpuSpec,
+    GpuSpec,
+    HealthCheckResponse,
+    NodeDetails,
+    RentalResponse,
+    RentalStatus,
+    RentalStatusWithSshResponse,
+    SshAccess,
     # Request types
-    StartRentalApiRequest,
-    NodeSelection,
     GpuRequirements,
-    PortMappingRequest,
-    ResourceRequirementsRequest,
-    VolumeMountRequest,
     ListAvailableNodesQuery,
     ListRentalsQuery,
+    NodeSelection,
+    PortMappingRequest,
+    ResourceRequirementsRequest,
+    StartRentalApiRequest,
+    VolumeMountRequest,
     # Deployment types
-    EnvVar,
-    GpuRequirementsSpec,
-    ResourceRequirements,
-    ReplicaStatus,
-    PodInfo,
-    StorageBackend,
-    PersistentStorageSpec,
-    StorageSpec,
     CreateDeploymentRequest,
+    DeleteDeploymentResponse,
+    DeploymentListResponse,
     DeploymentResponse,
     DeploymentSummary,
-    DeploymentListResponse,
-    DeleteDeploymentResponse,
+    EnvVar,
+    PersistentStorageSpec,
+    PodInfo,
+    ReplicaStatus,
+    ResourceRequirements,
+    StorageBackend,
+    StorageSpec,
     # Constants from Rust
     DEFAULT_API_URL,
-    DEFAULT_TIMEOUT_SECS,
     DEFAULT_CONTAINER_IMAGE,
-    DEFAULT_GPU_TYPE,
+    DEFAULT_CPU_CORES,
     DEFAULT_GPU_COUNT,
     DEFAULT_GPU_MIN_MEMORY_GB,
-    DEFAULT_CPU_CORES,
+    DEFAULT_GPU_TYPE,
     DEFAULT_MEMORY_MB,
     DEFAULT_STORAGE_MB,
+    DEFAULT_TIMEOUT_SECS,
 )
+
+# GpuRequirementsSpec may not be available in older binaries
+try:
+    from basilica._basilica import GpuRequirementsSpec
+except ImportError:
+    # Fallback: define a compatible class
+    from dataclasses import dataclass
+    from typing import Optional, List
+
+    @dataclass
+    class GpuRequirementsSpec:
+        """GPU requirements specification for deployments."""
+        count: int
+        model: Optional[List[str]] = None
+        min_cuda_version: Optional[str] = None
+        min_gpu_memory_gb: Optional[int] = None
+
+        def __init__(
+            self,
+            count: int,
+            model: Optional[List[str]] = None,
+            min_cuda_version: Optional[str] = None,
+            min_gpu_memory_gb: Optional[int] = None
+        ):
+            self.count = count
+            self.model = model or []
+            self.min_cuda_version = min_cuda_version
+            self.min_gpu_memory_gb = min_gpu_memory_gb
+
+# Import new modules
+from .deployment import Deployment, DeploymentStatus
+from .exceptions import (
+    AuthenticationError,
+    AuthorizationError,
+    BasilicaError,
+    DeploymentError,
+    DeploymentFailed,
+    DeploymentNotFound,
+    DeploymentTimeout,
+    NetworkError,
+    RateLimitError,
+    ResourceError,
+    SourceError,
+    StorageError,
+    ValidationError,
+)
+from .source import SourcePackager
 
 # Default command is a list in Python
 DEFAULT_COMMAND = ["/bin/bash"]
 
-__version__ = "0.1.0"
+# Default Python image for source deployments
+DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
+
+__version__ = "0.2.0"
 __all__ = [
+    # Main client
     "BasilicaClient",
+    # High-level types
+    "Deployment",
+    "DeploymentStatus",
+    "SourcePackager",
+    # Exceptions
+    "BasilicaError",
+    "AuthenticationError",
+    "AuthorizationError",
+    "ValidationError",
+    "DeploymentError",
+    "DeploymentNotFound",
+    "DeploymentTimeout",
+    "DeploymentFailed",
+    "ResourceError",
+    "StorageError",
+    "NetworkError",
+    "RateLimitError",
+    "SourceError",
     # Helper functions
     "node_by_id",
     "node_by_gpu",
@@ -104,13 +198,37 @@ __all__ = [
 
 class BasilicaClient:
     """
-    Client for interacting with the Basilica API.
+    Client for deploying and managing applications on Basilica.
 
-    Example:
-        >>> # Create token: basilica tokens create
-        >>> client = BasilicaClient("https://api.basilica.ai", api_key="basilica_...")
-        >>> health = client.health_check()
-        >>> print(health["status"])
+    The BasilicaClient provides both high-level and low-level APIs for
+    working with the Basilica GPU cloud platform.
+
+    High-Level API (Recommended):
+        Use deploy() for simple, one-line deployments:
+
+        >>> client = BasilicaClient()
+        >>> deployment = client.deploy("my-app", source="app.py", port=8000)
+        >>> print(deployment.url)
+
+    Low-Level API:
+        Use create_deployment() for full control:
+
+        >>> response = client.create_deployment(
+        ...     instance_name="my-app",
+        ...     image="python:3.11-slim",
+        ...     command=["python", "app.py"],
+        ...     port=8000,
+        ... )
+
+    Authentication:
+        The client requires an API token. Provide it via:
+        1. Environment variable: export BASILICA_API_TOKEN="basilica_..."
+        2. Direct parameter: BasilicaClient(api_key="basilica_...")
+
+        Create a token using: basilica tokens create
+
+    Attributes:
+        base_url: The API endpoint URL
     """
 
     def __init__(
@@ -119,27 +237,265 @@ class BasilicaClient:
         api_key: Optional[str] = None
     ):
         """
-        Initialize a new Basilica client.
+        Initialize the Basilica client.
 
         Args:
-            base_url: The base URL of the Basilica API (default: from BASILICA_API_URL env or DEFAULT_API_URL)
-            api_key: Optional authentication token (default: from BASILICA_API_TOKEN env)
-                Create token using: basilica tokens create
+            base_url: API endpoint URL. Defaults to BASILICA_API_URL env var
+                     or https://api.basilica.ai
+            api_key: Authentication token. Defaults to BASILICA_API_TOKEN env var.
+                    Create one using: basilica tokens create
+
+        Raises:
+            AuthenticationError: If no API key is provided or found in environment
+
+        Example:
+            >>> # Auto-detect from environment
+            >>> client = BasilicaClient()
+
+            >>> # Explicit configuration
+            >>> client = BasilicaClient(
+            ...     base_url="https://api.basilica.ai",
+            ...     api_key="basilica_..."
+            ... )
         """
-        # Auto-detect base_url if not provided
         if base_url is None:
             base_url = os.environ.get("BASILICA_API_URL", DEFAULT_API_URL)
 
-        # Pass api_key directly to Rust binding
-        # The Rust binding will check BASILICA_API_TOKEN env var if api_key is None
+        self._base_url = base_url
         self._client = _BasilicaClient(base_url, api_key)
+
+    @property
+    def base_url(self) -> str:
+        """The API endpoint URL."""
+        return self._base_url
+
+    def deploy(
+        self,
+        name: str,
+        source: Optional[Union[str, Path]] = None,
+        image: str = DEFAULT_PYTHON_IMAGE,
+        port: int = 8000,
+        env: Optional[Dict[str, str]] = None,
+        cpu: str = "500m",
+        memory: str = "512Mi",
+        storage: Union[bool, str] = False,
+        gpu_count: Optional[int] = None,
+        gpu_models: Optional[List[str]] = None,
+        min_cuda_version: Optional[str] = None,
+        min_gpu_memory_gb: Optional[int] = None,
+        replicas: int = 1,
+        ttl_seconds: Optional[int] = None,
+        public: bool = True,
+        timeout: int = 300,
+        pip_packages: Optional[List[str]] = None,
+    ) -> Deployment:
+        """
+        Deploy an application to Basilica.
+
+        This is the recommended high-level method for deploying applications.
+        It handles source code packaging, waits for the deployment to be ready,
+        and returns a Deployment object with convenient methods.
+
+        Args:
+            name: Deployment name (DNS-safe: lowercase, numbers, hyphens).
+                  Example: "my-api", "pytorch-trainer"
+            source: Python source code to deploy. Can be:
+                   - A file path: "app.py" or "/path/to/app.py"
+                   - Inline code: "print('Hello!')"
+                   - None: Just deploy the image without custom code
+            image: Container image. Default: python:3.11-slim
+                  For GPU: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
+            port: Port your application listens on. Default: 8000
+            env: Environment variables as a dict.
+                 Example: {"API_KEY": "secret", "DEBUG": "true"}
+            cpu: CPU allocation. Default: "500m" (0.5 cores)
+                 Examples: "1", "2", "500m", "2000m"
+            memory: Memory allocation. Default: "512Mi"
+                   Examples: "512Mi", "1Gi", "4Gi"
+            storage: Persistent storage configuration:
+                    - False: No storage (default)
+                    - True: Enable storage at /data
+                    - "/custom/path": Enable storage at custom path
+            gpu_count: Number of GPUs (1-8). Enables GPU scheduling.
+            gpu_models: Acceptable GPU models. Example: ["A100", "H100"]
+            min_cuda_version: Minimum CUDA version. Example: "12.0"
+            min_gpu_memory_gb: Minimum GPU VRAM in GB. Example: 40
+            replicas: Number of instances. Default: 1
+            ttl_seconds: Auto-delete after N seconds. None = never.
+            public: Create public URL. Default: True
+            timeout: Seconds to wait for deployment. Default: 300
+            pip_packages: Additional pip packages to install.
+                         Auto-detected for FastAPI apps if not specified.
+
+        Returns:
+            Deployment: A deployment object with url, logs(), delete(), etc.
+
+        Raises:
+            ValidationError: If parameters are invalid
+            DeploymentTimeout: If deployment doesn't become ready within timeout
+            DeploymentFailed: If deployment fails to start
+            SourceError: If source file cannot be read
+            NetworkError: If API is unreachable
+
+        Example:
+            Deploy from a file:
+            >>> deployment = client.deploy(
+            ...     name="my-api",
+            ...     source="api.py",
+            ...     port=8000,
+            ...     storage=True,
+            ... )
+            >>> print(f"Live at: {deployment.url}")
+
+            Deploy inline code:
+            >>> deployment = client.deploy(
+            ...     name="hello",
+            ...     source="from http.server import HTTPServer, BaseHTTPRequestHandler; HTTPServer(('', 8000), BaseHTTPRequestHandler).serve_forever()",
+            ...     port=8000,
+            ... )
+
+            GPU deployment:
+            >>> deployment = client.deploy(
+            ...     name="pytorch-train",
+            ...     source="train.py",
+            ...     image="pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
+            ...     gpu_count=1,
+            ...     gpu_models=["A100", "H100"],
+            ...     memory="16Gi",
+            ...     storage=True,
+            ... )
+
+            Deploy just an image (no source):
+            >>> deployment = client.deploy(
+            ...     name="nginx",
+            ...     image="nginxinc/nginx-unprivileged:alpine",
+            ...     port=8080,
+            ... )
+        """
+        # Build command from source if provided
+        command = None
+        if source is not None:
+            packager = SourcePackager(source)
+            command = packager.build_command(pip_packages=pip_packages)
+
+        # Build storage spec
+        storage_spec = None
+        if storage:
+            mount_path = storage if isinstance(storage, str) else "/data"
+            storage_spec = StorageSpec(
+                persistent=PersistentStorageSpec(
+                    enabled=True,
+                    backend=StorageBackend.R2,
+                    bucket="",
+                    credentials_secret=None,
+                    sync_interval_ms=1000,
+                    cache_size_mb=1024,
+                    mount_path=mount_path
+                )
+            )
+
+        # Build GPU spec if requested
+        gpu_spec = None
+        if gpu_count is not None:
+            gpu_spec = GpuRequirementsSpec(
+                count=gpu_count,
+                model=gpu_models or [],
+                min_cuda_version=min_cuda_version,
+                min_gpu_memory_gb=min_gpu_memory_gb,
+            )
+
+        # Build resources
+        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec)
+
+        # Create the deployment request
+        request = CreateDeploymentRequest(
+            instance_name=name,
+            image=image,
+            replicas=replicas,
+            port=port,
+            command=command,
+            args=None,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds,
+            public=public,
+            storage=storage_spec
+        )
+
+        # Create deployment via API
+        response = self._client.create_deployment(request)
+
+        # Create Deployment facade
+        deployment = Deployment._from_response(self, response)
+
+        # Wait for deployment to be ready
+        deployment.wait_until_ready(timeout=timeout)
+
+        # Refresh to get final URL and state
+        deployment.refresh()
+
+        return deployment
+
+    def get(self, name: str) -> Deployment:
+        """
+        Get an existing deployment by name.
+
+        Args:
+            name: The deployment instance name
+
+        Returns:
+            Deployment: A deployment object
+
+        Raises:
+            DeploymentNotFound: If deployment doesn't exist
+
+        Example:
+            >>> deployment = client.get("my-api")
+            >>> print(deployment.url)
+            >>> print(deployment.logs(tail=50))
+        """
+        try:
+            response = self.get_deployment(name)
+            return Deployment._from_response(self, response)
+        except (KeyError, Exception) as e:
+            error_msg = str(e)
+            if "not found" in error_msg.lower() or "Not found" in error_msg:
+                raise DeploymentNotFound(name) from None
+            raise
+
+    def list(self) -> List[Deployment]:
+        """
+        List all deployments.
+
+        Returns:
+            List of Deployment objects
+
+        Example:
+            >>> for deployment in client.list():
+            ...     print(f"{deployment.name}: {deployment.state}")
+        """
+        response = self.list_deployments()
+        deployments = []
+        for summary in response.deployments:
+            # Get full deployment details for each
+            try:
+                full_response = self.get_deployment(summary.instance_name)
+                deployments.append(Deployment._from_response(self, full_response))
+            except Exception:
+                # Skip deployments we can't fetch
+                pass
+        return deployments
+
+    # -------------------------------------------------------------------------
+    # Low-Level API Methods (for advanced use cases)
+    # -------------------------------------------------------------------------
 
     def health_check(self) -> HealthCheckResponse:
         """
-        Check the health of the API.
+        Check API health status.
 
         Returns:
-            HealthCheckResponse: Typed response with status, version, and validator info
+            HealthCheckResponse with status, version, and validator info
         """
         return self._client.health_check()
 
@@ -151,27 +507,27 @@ class BasilicaClient:
         min_gpu_memory: Optional[int] = None
     ) -> List[AvailableNode]:
         """
-        List available nodes.
+        List available compute nodes.
 
         Args:
             available: Filter by availability
-            gpu_type: Filter by GPU type
-            min_gpu_count: Filter by minimum GPU count
-            min_gpu_memory: Filter by minimum GPU memory in GB
+            gpu_type: Filter by GPU type (e.g., "A100", "H100")
+            min_gpu_count: Minimum number of GPUs
+            min_gpu_memory: Minimum GPU memory in GB
 
         Returns:
-            List[AvailableNode]: List of typed node objects with details
+            List of AvailableNode objects
         """
-        if any([available is not None, gpu_type is not None, min_gpu_count is not None, min_gpu_memory is not None]):
+        query = None
+        if any([available is not None, gpu_type is not None,
+                min_gpu_count is not None, min_gpu_memory is not None]):
             query = ListAvailableNodesQuery(
                 available=available,
                 gpu_type=gpu_type,
                 min_gpu_count=min_gpu_count,
                 min_gpu_memory=min_gpu_memory
             )
-            return self._client.list_nodes(query)
-        else:
-            return self._client.list_nodes(None)
+        return self._client.list_nodes(query)
 
     def start_rental(
         self,
@@ -185,82 +541,60 @@ class BasilicaClient:
         no_ssh: bool = False
     ) -> RentalResponse:
         """
-        Start a new rental.
+        Start a new GPU rental.
+
+        For SSH access, ensure you have an SSH key at ~/.ssh/basilica_ed25519.pub
 
         Args:
-            container_image: Docker image to run (default: DEFAULT_CONTAINER_IMAGE)
-            node_id: Optional specific node to use
-            gpu_type: GPU type to request (default: DEFAULT_GPU_TYPE)
-            ssh_pubkey_path: Path to SSH public key file (e.g., "~/.ssh/id_rsa.pub").
-                If None, defaults to ~/.ssh/basilica_ed25519.pub
+            container_image: Docker image to run
+            node_id: Specific node to use (optional)
+            gpu_type: GPU type to request
+            ssh_pubkey_path: Path to SSH public key file
             environment: Environment variables
             ports: Port mappings
-            command: Command to run (default: ["/bin/bash"])
+            command: Command to run
             no_ssh: Disable SSH access
 
         Returns:
-            RentalResponse: Typed response with rental details
+            RentalResponse with rental details
         """
-        # Set defaults from constants
         if container_image is None:
             container_image = DEFAULT_CONTAINER_IMAGE
 
         if gpu_type is None:
             gpu_type = DEFAULT_GPU_TYPE
 
-        ssh_public_key = None  # This will hold the actual key content
+        ssh_public_key = None
         if not no_ssh:
-            # Determine which SSH key file to use
             if ssh_pubkey_path is not None:
-                # User provided a custom path
                 ssh_key_path = os.path.expanduser(ssh_pubkey_path)
             else:
-                # Use default path
                 ssh_key_path = os.path.expanduser("~/.ssh/basilica_ed25519.pub")
 
-            # Read the SSH key from the file
             if os.path.exists(ssh_key_path):
                 with open(ssh_key_path) as f:
                     ssh_public_key = f.read().strip()
-            else:
-                # If user specified a path that doesn't exist, raise an error
-                if ssh_pubkey_path is not None:
-                    raise FileNotFoundError(f"SSH public key file not found: {ssh_key_path}")
-                # Otherwise, leave as None (no SSH key available)
+            elif ssh_pubkey_path is not None:
+                raise FileNotFoundError(f"SSH public key file not found: {ssh_key_path}")
 
-        # Always use default resources internally
         resources = {
             "gpu_count": DEFAULT_GPU_COUNT,
-            "gpu_types": [gpu_type] if gpu_type else [],  # Array of GPU types
+            "gpu_types": [gpu_type] if gpu_type else [],
             "cpu_cores": DEFAULT_CPU_CORES,
             "memory_mb": DEFAULT_MEMORY_MB,
             "storage_mb": DEFAULT_STORAGE_MB
         }
 
-        # Build node_selection based on whether node_id is provided
         if node_id:
             node_selection = node_by_id(node_id)
         else:
-            # Use GPU requirements for auto-selection with defaults
-            gpu_count_val = DEFAULT_GPU_COUNT
-            min_memory_gb_val = DEFAULT_GPU_MIN_MEMORY_GB
-
-            # Get GPU type from gpu_types array if available
-            gpu_types = resources.get("gpu_types", [])
-            gpu_type_val = None
-            if gpu_types and len(gpu_types) > 0:
-                gpu_type_val = gpu_types[0]
-            elif gpu_type:
-                gpu_type_val = gpu_type
-
             gpu_requirements = GpuRequirements(
-                gpu_count=gpu_count_val,
-                min_memory_gb=min_memory_gb_val,
-                gpu_type=gpu_type_val
+                gpu_count=DEFAULT_GPU_COUNT,
+                min_memory_gb=DEFAULT_GPU_MIN_MEMORY_GB,
+                gpu_type=gpu_type
             )
             node_selection = node_by_gpu(gpu_requirements)
 
-        # Convert ports to PortMappingRequest objects
         port_mappings = []
         if ports:
             for port in ports:
@@ -270,7 +604,6 @@ class BasilicaClient:
                     protocol=port.get("protocol", "tcp")
                 ))
 
-        # Create ResourceRequirementsRequest with defaults
         resource_req = ResourceRequirementsRequest(
             cpu_cores=resources.get("cpu_cores", DEFAULT_CPU_CORES),
             memory_mb=resources.get("memory_mb", DEFAULT_MEMORY_MB),
@@ -278,9 +611,6 @@ class BasilicaClient:
             gpu_count=resources.get("gpu_count", DEFAULT_GPU_COUNT),
             gpu_types=resources.get("gpu_types", [])
         )
-
-        # Volume mounts are always empty now
-        volume_mounts = []
 
         request = StartRentalApiRequest(
             node_selection=node_selection,
@@ -290,31 +620,18 @@ class BasilicaClient:
             ports=port_mappings,
             resources=resource_req,
             command=command if command is not None else DEFAULT_COMMAND,
-            volumes=volume_mounts,
+            volumes=[],
             no_ssh=no_ssh
         )
 
         return self._client.start_rental(request)
 
     def get_rental(self, rental_id: str) -> RentalStatusWithSshResponse:
-        """
-        Get rental status.
-
-        Args:
-            rental_id: The rental ID
-
-        Returns:
-            RentalStatusWithSshResponse: Typed response with status and SSH details
-        """
+        """Get rental status by ID."""
         return self._client.get_rental(rental_id)
 
     def stop_rental(self, rental_id: str) -> None:
-        """
-        Stop a rental.
-
-        Args:
-            rental_id: The rental ID
-        """
+        """Stop a rental by ID."""
         self._client.stop_rental(rental_id)
 
     def list_rentals(
@@ -323,26 +640,15 @@ class BasilicaClient:
         gpu_type: Optional[str] = None,
         min_gpu_count: Optional[int] = None
     ) -> Dict[str, Any]:
-        """
-        List rentals.
-
-        Args:
-            status: Filter by status (e.g., "active", "provisioning")
-            gpu_type: Filter by GPU type
-            min_gpu_count: Filter by minimum GPU count
-
-        Returns:
-            List of rentals
-        """
+        """List rentals with optional filters."""
+        query = None
         if any([status is not None, gpu_type is not None, min_gpu_count is not None]):
             query = ListRentalsQuery(
                 status=status,
                 gpu_type=gpu_type,
                 min_gpu_count=min_gpu_count
             )
-            return self._client.list_rentals(query)
-        else:
-            return self._client.list_rentals(None)
+        return self._client.list_rentals(query)
 
     def create_deployment(
         self,
@@ -361,68 +667,46 @@ class BasilicaClient:
         min_gpu_memory_gb: Optional[int] = None,
         ttl_seconds: Optional[int] = None,
         public: bool = True,
-        storage: Optional[Union[str, Any]] = None
+        storage: Optional[Union[str, StorageSpec]] = None
     ) -> DeploymentResponse:
         """
-        Create a new deployment.
+        Create a deployment (low-level API).
+
+        For most use cases, prefer the high-level deploy() method.
 
         Args:
-            instance_name: Name for the deployment (DNS-safe: lowercase, numbers, hyphens)
-            image: Container image to deploy
-            replicas: Number of replicas (default: 1)
-            port: Container port to expose (default: 80)
-            command: Optional command override
-            args: Optional command arguments
-            env: Environment variables as dict
-            cpu: CPU resource request (default: "500m")
-            memory: Memory resource request (default: "512Mi")
-            gpu_count: Number of GPUs required (1-8)
-            gpu_models: List of acceptable GPU models (e.g., ["A100", "H100"])
-            min_cuda_version: Minimum CUDA version required (e.g., "12.0")
-            min_gpu_memory_gb: Minimum GPU memory in GB (1-256)
-            ttl_seconds: Optional time-to-live in seconds
-            public: Create public URL (default: True)
-            storage: Optional storage specification. Can be:
-                    - str: Mount path (e.g. "/data") - uses default R2 backend
-                    - StorageSpec: Custom storage configuration with your own backend
+            instance_name: Deployment name (DNS-safe)
+            image: Container image
+            replicas: Number of replicas
+            port: Container port
+            command: Container command
+            args: Command arguments
+            env: Environment variables
+            cpu: CPU allocation
+            memory: Memory allocation
+            gpu_count: Number of GPUs
+            gpu_models: Acceptable GPU models
+            min_cuda_version: Minimum CUDA version
+            min_gpu_memory_gb: Minimum GPU memory
+            ttl_seconds: Auto-delete timeout
+            public: Create public URL
+            storage: Storage path or StorageSpec
 
         Returns:
-            DeploymentResponse: Typed response with deployment details
-
-        Example:
-            Simple storage (recommended):
-            >>> client.create_deployment(..., storage="/data")
-
-            GPU deployment:
-            >>> client.create_deployment(
-            ...     instance_name="pytorch-train",
-            ...     image="pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
-            ...     cpu="4", memory="32Gi",
-            ...     gpu_count=1, gpu_models=["A100", "H100"],
-            ...     min_cuda_version="12.0", min_gpu_memory_gb=40
-            ... )
-
-            Custom backend:
-            >>> custom_storage = StorageSpec(
-            ...     persistent=PersistentStorageSpec(
-            ...         enabled=True,
-            ...         backend=StorageBackend.S3,
-            ...         bucket="my-bucket",
-            ...         mount_path="/data"
-            ...     )
-            ... )
-            >>> client.create_deployment(..., storage=custom_storage)
+            DeploymentResponse with deployment details
         """
+        # Build GPU spec if requested
         gpu_spec = None
-        if gpu_count is not None and gpu_models is not None:
+        if gpu_count is not None:
             gpu_spec = GpuRequirementsSpec(
                 count=gpu_count,
-                model=gpu_models,
+                model=gpu_models or [],
                 min_cuda_version=min_cuda_version,
-                min_gpu_memory_gb=min_gpu_memory_gb
+                min_gpu_memory_gb=min_gpu_memory_gb,
             )
 
-        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec) if cpu or memory or gpu_spec else None
+        # Build resources
+        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec)
 
         storage_spec = None
         if storage is not None:
@@ -458,36 +742,15 @@ class BasilicaClient:
         return self._client.create_deployment(request)
 
     def get_deployment(self, instance_name: str) -> DeploymentResponse:
-        """
-        Get deployment status by instance name.
-
-        Args:
-            instance_name: The deployment instance name
-
-        Returns:
-            DeploymentResponse: Typed response with deployment details
-        """
+        """Get deployment status by name."""
         return self._client.get_deployment(instance_name)
 
     def delete_deployment(self, instance_name: str) -> DeleteDeploymentResponse:
-        """
-        Delete a deployment.
-
-        Args:
-            instance_name: The deployment instance name
-
-        Returns:
-            DeleteDeploymentResponse: Typed response with deletion status
-        """
+        """Delete a deployment by name."""
         return self._client.delete_deployment(instance_name)
 
     def list_deployments(self) -> DeploymentListResponse:
-        """
-        List all deployments for the authenticated user.
-
-        Returns:
-            DeploymentListResponse: Typed response with list of deployments
-        """
+        """List all deployments."""
         return self._client.list_deployments()
 
     def get_deployment_logs(
@@ -496,50 +759,13 @@ class BasilicaClient:
         follow: bool = False,
         tail: Optional[int] = None
     ) -> str:
-        """
-        Get logs from a deployment.
-
-        Args:
-            instance_name: The deployment instance name
-            follow: Whether to follow logs (stream continuously)
-            tail: Optional number of lines to return from the end
-
-        Returns:
-            str: Log contents
-
-        Example:
-            >>> logs = client.get_deployment_logs("my-app", tail=100)
-            >>> print(logs)
-        """
+        """Get deployment logs."""
         return self._client.get_deployment_logs(instance_name, follow, tail)
 
-    def get_balance(self):
-        """
-        Get account balance.
-
-        Returns:
-            Balance information with available and total amounts
-
-        Example:
-            >>> balance = client.get_balance()
-            >>> print(f"Available: ${balance['available']}")
-        """
+    def get_balance(self) -> Dict[str, Any]:
+        """Get account balance."""
         return self._client.get_balance()
 
-    def list_usage_history(self, limit: int = 50, offset: int = 0):
-        """
-        List usage history for cost tracking.
-
-        Args:
-            limit: Maximum number of records to return (default: 50)
-            offset: Number of records to skip (default: 0)
-
-        Returns:
-            Usage history with rental records and costs
-
-        Example:
-            >>> usage = client.list_usage_history(limit=30)
-            >>> for rental in usage['rentals']:
-            ...     print(f"{rental['rental_id']}: ${rental['current_cost']}")
-        """
+    def list_usage_history(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Get usage history for billing."""
         return self._client.list_usage_history(limit, offset)
