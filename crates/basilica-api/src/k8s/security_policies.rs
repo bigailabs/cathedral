@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use k8s_openapi::api::core::v1::ServiceAccount;
+use k8s_openapi::api::core::v1::{LimitRange, ServiceAccount};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
 use kube::api::{Api, PostParams};
@@ -11,6 +11,7 @@ const NETPOL_DEFAULT_DENY_TEMPLATE: &str = include_str!("policies/netpol-default
 const NETPOL_ALLOW_DNS_TEMPLATE: &str = include_str!("policies/netpol-allow-dns.yaml");
 const NETPOL_ALLOW_INTERNET_TEMPLATE: &str = include_str!("policies/netpol-allow-internet.yaml");
 const NETPOL_ALLOW_INGRESS_TEMPLATE: &str = include_str!("policies/netpol-allow-ingress.yaml");
+const LIMITRANGE_TEMPLATE: &str = include_str!("policies/limitrange-template.yaml");
 
 fn validate_namespace(namespace: &str) -> Result<()> {
     if namespace.len() > 63 || namespace.is_empty() {
@@ -57,12 +58,16 @@ pub async fn apply_user_namespace_security_policies(
         .await
         .context("Failed to apply NetworkPolicies")?;
 
+    apply_limit_range(client, namespace)
+        .await
+        .context("Failed to apply LimitRange")?;
+
     tracing::info!(
         target: "security_audit",
         event_type = "security_policy_application_completed",
         severity = "info",
         namespace = %namespace,
-        policies_applied = "RBAC,NetworkPolicies",
+        policies_applied = "RBAC,NetworkPolicies,LimitRange",
         "Security policies successfully applied to user namespace"
     );
 
@@ -245,6 +250,42 @@ async fn apply_network_policies(client: &Client, namespace: &str) -> Result<()> 
     Ok(())
 }
 
+async fn apply_limit_range(client: &Client, namespace: &str) -> Result<()> {
+    let yaml_content = LIMITRANGE_TEMPLATE.replace("TENANT_NAMESPACE", namespace);
+
+    let limit_range: LimitRange =
+        serde_yaml::from_str(&yaml_content).context("Failed to deserialize LimitRange template")?;
+
+    let api: Api<LimitRange> = Api::namespaced(client.clone(), namespace);
+
+    match api.create(&PostParams::default(), &limit_range).await {
+        Ok(_) => {
+            tracing::debug!(
+                namespace = %namespace,
+                resource_type = "LimitRange",
+                "Created LimitRange"
+            );
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 409 => {
+            tracing::debug!(
+                namespace = %namespace,
+                resource_type = "LimitRange",
+                "LimitRange already exists"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                namespace = %namespace,
+                resource_type = "LimitRange",
+                "Failed to create LimitRange, continuing anyway"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +320,18 @@ mod tests {
         assert!(!NETPOL_ALLOW_DNS_TEMPLATE.is_empty());
         assert!(!NETPOL_ALLOW_INTERNET_TEMPLATE.is_empty());
         assert!(!NETPOL_ALLOW_INGRESS_TEMPLATE.is_empty());
+        assert!(!LIMITRANGE_TEMPLATE.is_empty());
+    }
+
+    #[test]
+    fn test_limitrange_template_replacement() {
+        let namespace = "u-gpu-user";
+        let yaml_content = LIMITRANGE_TEMPLATE.replace("TENANT_NAMESPACE", namespace);
+
+        assert!(yaml_content.contains("namespace: u-gpu-user"));
+        assert!(!yaml_content.contains("TENANT_NAMESPACE"));
+        assert!(yaml_content.contains("cpu: \"128\""));
+        assert!(yaml_content.contains("memory: 512Gi"));
     }
 
     #[test]

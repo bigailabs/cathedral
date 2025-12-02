@@ -45,6 +45,8 @@ pub struct UserDeploymentSpec {
     #[serde(default)]
     #[schemars(length(max = 50))]
     pub priority: Option<String>,
+    #[serde(default)]
+    pub public: bool,
 }
 
 fn default_enable_billing() -> bool {
@@ -243,6 +245,7 @@ impl UserDeploymentSpec {
             queue_name: None,
             suspended: false,
             priority: None,
+            public: false,
         }
     }
 
@@ -298,6 +301,11 @@ impl UserDeploymentSpec {
 
     pub fn disable_billing(mut self) -> Self {
         self.enable_billing = false;
+        self
+    }
+
+    pub fn with_public(mut self, public: bool) -> Self {
+        self.public = public;
         self
     }
 }

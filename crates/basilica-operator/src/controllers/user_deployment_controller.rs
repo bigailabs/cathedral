@@ -405,6 +405,12 @@ pub fn render_deployment(
         "basilica.ai/user-id".to_string(),
         sanitize_user_id(&spec.user_id),
     );
+    if spec.public {
+        labels.insert(
+            "basilica.ai/http-accessible".to_string(),
+            "true".to_string(),
+        );
+    }
 
     let resources = if let Some(ref res) = spec.resources {
         build_resources(&res.cpu, &res.memory, res.gpus.as_ref())

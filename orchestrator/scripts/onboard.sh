@@ -77,7 +77,7 @@
 set -euo pipefail
 
 readonly BASILICA_API_URL="${BASILICA_API_URL:-https://api.basilica.ai}"
-readonly SCRIPT_VERSION="1.6.0"
+readonly SCRIPT_VERSION="1.8.0"
 readonly WIREGUARD_INTERFACE="wg0"
 
 : "${BASILICA_DATACENTER_ID:?ERROR: BASILICA_DATACENTER_ID not set}"
@@ -113,12 +113,20 @@ main() {
         log "Setting up WireGuard VPN..."
         setup_wireguard
 
+        log "Configuring RPS/RFS for network optimization..."
+        setup_rps_rfs
+
         log "Deploying WireGuard watchdog..."
         deploy_wireguard_watchdog
     fi
 
     log "Joining K3s cluster..."
     join_k3s_cluster
+
+    if [ "${WIREGUARD_ENABLED}" = "true" ]; then
+        log "Verifying flannel.1 VXLAN interface..."
+        verify_flannel_interface
+    fi
 
     log "Successfully joined Basilica GPU cluster!"
     log "Check node status: kubectl get nodes ${K3S_NODE_NAME}"
@@ -424,13 +432,15 @@ EOF
         vpc_subnet=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].vpc_subnet")
         route_pod_network=$(echo "$WG_PEERS_JSON" | jq -r ".[$i].route_pod_network")
 
-        # Build AllowedIPs: WireGuard IP + VPC subnet + pod network (if designated)
+        # Build AllowedIPs: WireGuard IP + VPC subnet + pod network
         # NOTE: Service network (10.43.0.0/16) should NOT be routed via WireGuard
         # because ClusterIP services are virtual IPs handled locally by kube-proxy
-        local allowed_ips="${wireguard_ip}/32,${vpc_subnet}"
-        if [ "$route_pod_network" = "true" ]; then
-            allowed_ips="${allowed_ips},10.42.0.0/16"
-        fi
+        #
+        # IMPORTANT: Pod network (10.42.0.0/16) is added to ALL peers for HA
+        # WireGuard uses longest-prefix matching, so traffic will route to
+        # whichever peer has an active handshake. This prevents single point
+        # of failure if server1's WireGuard connection fails.
+        local allowed_ips="${wireguard_ip}/32,${vpc_subnet},10.42.0.0/16"
 
         log "  Adding peer: ${endpoint} (WG: ${wireguard_ip}, VPC: ${vpc_subnet})"
 
@@ -475,6 +485,81 @@ EOF
     wg show ${WIREGUARD_INTERFACE}
 }
 
+setup_rps_rfs() {
+    # RPS/RFS (Receive Packet Steering / Receive Flow Steering)
+    # Distributes network packet processing across all CPUs
+    # Critical for high-throughput distributed training (PyTorch DDP, Horovod, NCCL)
+
+    local iface="${WIREGUARD_INTERFACE}"
+    local cpu_count
+    cpu_count=$(nproc)
+
+    if [ "$cpu_count" -le 1 ]; then
+        log "  Single CPU detected, RPS not beneficial. Skipping."
+        return 0
+    fi
+
+    # Check if interface exists
+    if [ ! -d "/sys/class/net/$iface" ]; then
+        log "  WARNING: Interface $iface not found, skipping RPS/RFS"
+        return 0
+    fi
+
+    # Calculate RPS mask (bitmask for all CPUs)
+    local rps_mask
+    rps_mask=$(printf '%x' $((2**cpu_count - 1)))
+
+    log "  Configuring RPS/RFS for $iface with $cpu_count CPUs (mask: $rps_mask)"
+
+    # Apply RPS to all receive queues
+    for rx_queue in /sys/class/net/$iface/queues/rx-*; do
+        if [ -d "$rx_queue" ]; then
+            echo "$rps_mask" > "$rx_queue/rps_cpus" 2>/dev/null || true
+        fi
+    done
+
+    # Enable RFS (Receive Flow Steering) for connection affinity
+    local rfs_entries=32768
+    echo "$rfs_entries" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+
+    # Configure RFS flow count per queue
+    local rfs_flow_cnt=$((rfs_entries / cpu_count))
+    for rx_queue in /sys/class/net/$iface/queues/rx-*; do
+        if [ -f "$rx_queue/rps_flow_cnt" ]; then
+            echo "$rfs_flow_cnt" > "$rx_queue/rps_flow_cnt" 2>/dev/null || true
+        fi
+    done
+
+    # Enable XPS (Transmit Packet Steering) if available
+    for tx_queue in /sys/class/net/$iface/queues/tx-*; do
+        if [ -f "$tx_queue/xps_cpus" ]; then
+            echo "$rps_mask" > "$tx_queue/xps_cpus" 2>/dev/null || true
+        fi
+    done
+
+    log "  RPS/RFS/XPS configuration complete"
+
+    # Create systemd service to reapply on boot
+    cat > /etc/systemd/system/wireguard-rps.service <<EOF
+[Unit]
+Description=Apply RPS/RFS to WireGuard interface
+After=wg-quick@${iface}.service
+Requires=wg-quick@${iface}.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'RPS_MASK=\$(printf "%%x" \$((2**\$(nproc) - 1))); for q in /sys/class/net/${iface}/queues/rx-*/rps_cpus; do echo \$RPS_MASK > \$q 2>/dev/null || true; done; echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable wireguard-rps.service
+    log "  RPS/RFS systemd service installed"
+}
+
 deploy_wireguard_watchdog() {
     log "Deploying WireGuard watchdog service..."
 
@@ -501,11 +586,13 @@ deploy_wireguard_watchdog() {
     # - Graduated recovery (syncconf -> reload -> restart)
     # - Startup jitter to prevent fleet synchronization
     # - Interface state polling
+    # - K8s node tainting on failure
     cat > /usr/local/bin/wireguard-watchdog.sh <<'WATCHDOG_SCRIPT'
 #!/bin/bash
 # WireGuard Connectivity Watchdog
 # Monitors connectivity to K3s servers and restarts WireGuard if all are unreachable
 # Implements: parallel pings, handshake verification, graduated recovery, startup jitter
+# K8s integration: taints node during WireGuard failures to prevent pod scheduling
 #
 # Deployed by Basilica onboard.sh - Do not edit manually
 
@@ -520,15 +607,84 @@ PING_TIMEOUT="${WATCHDOG_PING_TIMEOUT:-3}"
 STARTUP_JITTER="${WATCHDOG_STARTUP_JITTER:-5}"
 HANDSHAKE_MAX_AGE="${WATCHDOG_HANDSHAKE_MAX_AGE:-150}"
 
+# K8s tainting configuration
+K8S_TAINTING="${WATCHDOG_K8S_TAINTING:-true}"
+TAINT_KEY="${WATCHDOG_TAINT_KEY:-basilica.ai/wireguard-failure}"
+TAINT_VALUE="${WATCHDOG_TAINT_VALUE:-true}"
+TAINT_EFFECT="${WATCHDOG_TAINT_EFFECT:-NoExecute}"
+KUBECTL="${WATCHDOG_KUBECTL:-/usr/local/bin/k3s kubectl}"
+
 # Convert space-separated servers to array
 IFS=' ' read -ra SERVER_ARRAY <<< "$SERVERS"
 
 # State
 failure_count=0
+node_tainted=false
 
 log() {
     logger -t wireguard-watchdog "$1"
     echo "$(date -Iseconds) $1"
+}
+
+# Get current node name from K3s agent
+get_node_name() {
+    local node_name
+    node_name=$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo "")
+    if [[ -z "$node_name" ]]; then
+        log "ERROR: Cannot determine node name"
+        return 1
+    fi
+    echo "$node_name"
+}
+
+# Add taint to node to prevent pod scheduling during WireGuard failure
+taint_node() {
+    if [[ "$K8S_TAINTING" != "true" ]]; then
+        return 0
+    fi
+
+    if [[ "$node_tainted" == "true" ]]; then
+        return 0
+    fi
+
+    local node_name
+    node_name=$(get_node_name) || return 1
+
+    log "Adding taint ${TAINT_KEY}=${TAINT_VALUE}:${TAINT_EFFECT} to node ${node_name}"
+
+    if $KUBECTL taint nodes "$node_name" "${TAINT_KEY}=${TAINT_VALUE}:${TAINT_EFFECT}" --overwrite 2>/dev/null; then
+        node_tainted=true
+        log "Node ${node_name} tainted successfully"
+        return 0
+    else
+        log "WARNING: Failed to taint node ${node_name} (may not have API access)"
+        return 1
+    fi
+}
+
+# Remove taint from node when connectivity is restored
+untaint_node() {
+    if [[ "$K8S_TAINTING" != "true" ]]; then
+        return 0
+    fi
+
+    if [[ "$node_tainted" != "true" ]]; then
+        return 0
+    fi
+
+    local node_name
+    node_name=$(get_node_name) || return 1
+
+    log "Removing taint ${TAINT_KEY} from node ${node_name}"
+
+    if $KUBECTL taint nodes "$node_name" "${TAINT_KEY}-" 2>/dev/null; then
+        node_tainted=false
+        log "Node ${node_name} untainted successfully"
+        return 0
+    else
+        log "WARNING: Failed to untaint node ${node_name}"
+        return 1
+    fi
 }
 
 # Check if WireGuard handshake is fresh (not stale)
@@ -684,10 +840,11 @@ recover_wireguard() {
 }
 
 main() {
-    log "Starting WireGuard watchdog v2.0"
+    log "Starting WireGuard watchdog v2.1"
     log "Servers: ${SERVER_ARRAY[*]}"
     log "Config: threshold=$FAILURE_THRESHOLD, interval=${CHECK_INTERVAL}s, ping_timeout=${PING_TIMEOUT}s"
     log "Handshake max age: ${HANDSHAKE_MAX_AGE}s"
+    log "K8s tainting: ${K8S_TAINTING} (${TAINT_KEY}:${TAINT_EFFECT})"
 
     # Apply startup jitter to prevent fleet synchronization
     if [[ $STARTUP_JITTER -gt 0 ]]; then
@@ -700,6 +857,7 @@ main() {
         if check_connectivity; then
             if [[ $failure_count -gt 0 ]]; then
                 log "Connectivity restored (was failing for $failure_count checks)"
+                untaint_node
             fi
             failure_count=0
         else
@@ -707,7 +865,11 @@ main() {
             log "Connectivity check failed ($failure_count/$FAILURE_THRESHOLD)"
 
             if [[ $failure_count -ge $FAILURE_THRESHOLD ]]; then
+                taint_node
                 recover_wireguard
+                if check_connectivity; then
+                    untaint_node
+                fi
                 failure_count=0
                 sleep 10
             fi
@@ -719,7 +881,16 @@ main() {
     done
 }
 
-trap 'log "Received signal, shutting down"; exit 0' SIGTERM SIGINT
+cleanup() {
+    log "Received signal, shutting down"
+    if [[ "$node_tainted" == "true" ]]; then
+        log "Removing taint before shutdown"
+        untaint_node
+    fi
+    exit 0
+}
+
+trap cleanup SIGTERM SIGINT
 
 main
 WATCHDOG_SCRIPT
@@ -731,7 +902,7 @@ WATCHDOG_SCRIPT
 [Unit]
 Description=WireGuard Connectivity Watchdog
 Documentation=https://github.com/basilica-ai/basilica
-After=network-online.target wg-quick@${WIREGUARD_INTERFACE}.service
+After=network-online.target wg-quick@${WIREGUARD_INTERFACE}.service k3s-agent.service
 Wants=network-online.target
 Requires=wg-quick@${WIREGUARD_INTERFACE}.service
 
@@ -745,6 +916,12 @@ Environment="WATCHDOG_CHECK_INTERVAL=30"
 Environment="WATCHDOG_PING_TIMEOUT=3"
 Environment="WATCHDOG_STARTUP_JITTER=5"
 Environment="WATCHDOG_HANDSHAKE_MAX_AGE=150"
+Environment="WATCHDOG_K8S_TAINTING=true"
+Environment="WATCHDOG_TAINT_KEY=basilica.ai/wireguard-failure"
+Environment="WATCHDOG_TAINT_VALUE=true"
+Environment="WATCHDOG_TAINT_EFFECT=NoExecute"
+Environment="WATCHDOG_KUBECTL=/usr/local/bin/k3s kubectl"
+Environment="KUBECONFIG=/var/lib/rancher/k3s/agent/kubelet.kubeconfig"
 ExecStart=/usr/local/bin/wireguard-watchdog.sh
 Restart=always
 RestartSec=30
@@ -752,6 +929,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+ReadOnlyPaths=/var/lib/rancher/k3s/agent
 MemoryMax=50M
 CPUQuota=5%
 
@@ -770,6 +948,53 @@ EOF
     else
         log "  WARNING: WireGuard watchdog failed to start"
     fi
+}
+
+verify_flannel_interface() {
+    # Verify that flannel.1 VXLAN interface is created by K3s agent
+    # This is critical for pod-to-pod networking across the WireGuard tunnel
+    # If flannel.1 is missing, user deployments will get HTTP 503 errors
+    local max_retries=30
+    local retry=0
+
+    log "  Waiting for flannel.1 interface to be created by K3s agent..."
+
+    while [[ $retry -lt $max_retries ]]; do
+        if ip link show flannel.1 &>/dev/null; then
+            local flannel_state
+            flannel_state=$(ip -o link show flannel.1 | awk '{print $9}')
+            local flannel_mtu
+            flannel_mtu=$(ip -o link show flannel.1 | grep -oP 'mtu \K\d+')
+            local vtep_mac
+            vtep_mac=$(ip link show flannel.1 | grep -oP 'link/ether \K[0-9a-f:]+' || echo "unknown")
+
+            log "  flannel.1 interface detected:"
+            log "    State: ${flannel_state}"
+            log "    MTU: ${flannel_mtu}"
+            log "    VtepMAC: ${vtep_mac}"
+
+            # Verify interface is UP
+            if [[ "$flannel_state" == "UP" ]] || [[ "$flannel_state" == "UNKNOWN" ]]; then
+                log "  flannel.1 verification successful"
+                return 0
+            fi
+
+            log "  WARNING: flannel.1 exists but state is ${flannel_state}, waiting..."
+        fi
+
+        sleep 2
+        retry=$((retry + 1))
+    done
+
+    # flannel.1 not created within timeout
+    log "  ERROR: flannel.1 interface not created within ${max_retries} retries"
+    log "  This indicates K3s agent failed to initialize VXLAN networking"
+    log "  Troubleshooting steps:"
+    log "    1. Check K3s agent logs: journalctl -u k3s-agent -n 100"
+    log "    2. Verify WireGuard connectivity: wg show"
+    log "    3. Restart K3s agent: sudo systemctl restart k3s-agent"
+    log "  WARNING: Without flannel.1, pod networking will not work correctly"
+    return 1
 }
 
 join_k3s_cluster() {

@@ -830,6 +830,9 @@ spec:
                 maxLength: 50
                 nullable: true
                 type: string
+              public:
+                default: false
+                type: boolean
               queueName:
                 maxLength: 255
                 nullable: true
