@@ -59,14 +59,26 @@ fn build_env(env: &[crate::crd::basilica_job::EnvVar]) -> Vec<EnvVar> {
         .collect()
 }
 
-fn build_tolerations() -> Vec<Toleration> {
-    vec![Toleration {
+fn build_tolerations(has_gpu: bool) -> Vec<Toleration> {
+    let mut tolerations = vec![Toleration {
         key: Some("basilica.ai/workloads-only".into()),
         operator: Some("Equal".into()),
         value: Some("true".into()),
         effect: Some("NoSchedule".into()),
         ..Default::default()
-    }]
+    }];
+
+    if has_gpu {
+        tolerations.push(Toleration {
+            key: Some("nvidia.com/gpu".into()),
+            operator: Some("Exists".into()),
+            value: None,
+            effect: Some("NoSchedule".into()),
+            ..Default::default()
+        });
+    }
+
+    tolerations
 }
 
 fn build_node_affinity(gpu: &JobGpuSpec) -> Option<Affinity> {
@@ -311,7 +323,7 @@ pub fn render_job(namespace: &str, name: &str, spec: &BasilicaJobSpec) -> anyhow
         } else {
             None
         },
-        tolerations: Some(build_tolerations()),
+        tolerations: Some(build_tolerations(spec.resources.gpus.count > 0)),
         security_context: pod_sc,
         affinity: build_node_affinity(&spec.resources.gpus),
         ..Default::default()
