@@ -57,6 +57,10 @@ wireguard_ratelimit_enabled: false
 wireguard_ratelimit_rate: "200/minute"
 wireguard_ratelimit_burst: 50
 
+# MTU for WireGuard interface
+# AWS uses jumbo frames (9001 MTU), minus WireGuard overhead (80 bytes)
+wireguard_mtu: 8921
+
 # Monitoring configuration
 wireguard_monitoring_enabled: true
 wireguard_exporter_port: 9586

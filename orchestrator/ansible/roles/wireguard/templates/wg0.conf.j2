@@ -12,8 +12,15 @@ ListenPort = {{ wireguard_port }}
 # Private key (generated on this server)
 PrivateKey = {{ wireguard_private_key }}
 
-# Save configuration when peers are added/removed via wg command
-SaveConfig = true
+# Disable automatic route management - routes are handled by Flannel
+# Pod CIDRs should route via flannel.1, not wg0
+Table = off
+
+# Do not save config - peers are managed by reconciliation script
+SaveConfig = false
+
+# MTU optimized for WireGuard over internet (1420 base - 60 overhead)
+MTU = {{ wireguard_mtu | default(8921) }}
 
 # Note: Peers (GPU nodes) are added dynamically when they register
 # via the Basilica API using: wg set wg0 peer <pubkey> allowed-ips <ip>/32
