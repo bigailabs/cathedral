@@ -243,9 +243,6 @@ pub struct FinalizeRentalRequest {
     pub rental_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag = "2")]
     pub end_time: ::core::option::Option<::prost_types::Timestamp>,
-    /// Decimal string
-    #[prost(string, tag = "3")]
-    pub final_cost: ::prost::alloc::string::String,
     #[prost(string, tag = "4")]
     pub termination_reason: ::prost::alloc::string::String,
 }

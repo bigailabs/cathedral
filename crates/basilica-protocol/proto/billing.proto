@@ -163,7 +163,8 @@ message ActiveRental {
 message FinalizeRentalRequest {
     string rental_id = 1;
     google.protobuf.Timestamp end_time = 2;
-    string final_cost = 3; // Decimal string
+    reserved 3;
+    reserved "final_cost";
     string termination_reason = 4;
 }
 
