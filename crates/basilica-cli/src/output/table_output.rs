@@ -76,7 +76,7 @@ pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
         .iter()
         .map(|rental| {
             // Format GPU info from specs
-            let gpu = format_gpu_info(&rental.gpu_specs, true);
+            let gpu = format_gpu_info(&rental.gpu_specs);
 
             // Format CPU info
             let cpu = rental
@@ -154,7 +154,7 @@ fn format_port_mappings(
 }
 
 /// Helper function to format GPU info
-fn format_gpu_info(gpu_specs: &[GpuSpec], detailed: bool) -> String {
+fn format_gpu_info(gpu_specs: &[GpuSpec]) -> String {
     if gpu_specs.is_empty() {
         return "Unknown".to_string();
     }
@@ -166,30 +166,16 @@ fn format_gpu_info(gpu_specs: &[GpuSpec], detailed: bool) -> String {
         .all(|g| g.name == first_gpu.name && g.memory_gb == first_gpu.memory_gb);
 
     if all_same {
-        let gpu_display_name = if detailed {
-            // Detailed mode: show full GPU name
-            first_gpu.name.clone()
-        } else {
-            // Compact mode: show categorized name
-            GpuCategory::from_str(&first_gpu.name).unwrap().to_string()
-        };
-
         if gpu_specs.len() > 1 {
-            format!("{}x {}", gpu_specs.len(), gpu_display_name)
+            format!("{}x {}", gpu_specs.len(), first_gpu.name)
         } else {
-            format!("1x {}", gpu_display_name)
+            format!("1x {}", first_gpu.name)
         }
     } else {
         // List each GPU
         gpu_specs
             .iter()
-            .map(|g| {
-                if detailed {
-                    g.name.clone()
-                } else {
-                    GpuCategory::from_str(&g.name).unwrap().to_string()
-                }
-            })
+            .map(|g| g.name.clone())
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -254,11 +240,11 @@ pub fn display_api_keys(keys: &[ApiKeyInfo]) -> Result<()> {
 }
 
 /// Helper function to format GPU info for an available node
-fn format_node_gpu_info(node: &AvailableNode, show_full_gpu_names: bool) -> String {
+fn format_node_gpu_info(node: &AvailableNode) -> String {
     if node.node.gpu_specs.is_empty() {
         "No GPU".to_string()
     } else {
-        format_gpu_info(&node.node.gpu_specs, show_full_gpu_names)
+        format_gpu_info(&node.node.gpu_specs)
     }
 }
 
@@ -324,7 +310,7 @@ pub fn display_available_nodes_detailed(
     let rows: Vec<NodeRow> = nodes
         .iter()
         .map(|node| NodeRow {
-            gpu_info: format_node_gpu_info(node, true),
+            gpu_info: format_node_gpu_info(node),
             cpu: format!(
                 "{} ({} cores)",
                 node.node.cpu_specs.model, node.node.cpu_specs.cores
