@@ -736,6 +736,47 @@ async fn handle_community_cloud_rental_with_selection(
     Ok(())
 }
 
+/// Validate that no community-cloud-only options are provided for secure cloud rentals
+fn validate_no_community_cloud_options(options: &UpOptions) -> Result<(), CliError> {
+    let mut invalid_args = Vec::new();
+
+    if options.image.is_some() {
+        invalid_args.push("--image");
+    }
+    if !options.env.is_empty() {
+        invalid_args.push("--env");
+    }
+    if !options.ports.is_empty() {
+        invalid_args.push("--ports");
+    }
+    if !options.command.is_empty() {
+        invalid_args.push("--command");
+    }
+    if options.cpu_cores.is_some() {
+        invalid_args.push("--cpu-cores");
+    }
+    if options.memory_mb.is_some() {
+        invalid_args.push("--memory-mb");
+    }
+    if options.storage_mb.is_some() {
+        invalid_args.push("--storage-mb");
+    }
+
+    if !invalid_args.is_empty() {
+        return Err(CliError::Internal(
+            eyre!(
+                "The following options are only supported for community cloud rentals: {}",
+                invalid_args.join(", ")
+            )
+            .suggestion(
+                "Remove these options when using secure cloud, or use --compute community-cloud",
+            )
+            .note("Secure cloud provides bare metal access; these options configure Docker containers"),
+        ));
+    }
+    Ok(())
+}
+
 /// Handle the `up` command - provision GPU instances
 ///
 /// All paths use the unified offering resolver which presents a consistent
@@ -774,6 +815,7 @@ pub async fn handle_up(
 
     match selected {
         SelectedOffering::SecureCloud(offering) => {
+            validate_no_community_cloud_options(&options)?;
             handle_secure_cloud_rental_with_offering(api_client, offering, options, config).await
         }
         SelectedOffering::CommunityCloud(node_selection) => {

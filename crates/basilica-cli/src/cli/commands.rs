@@ -38,8 +38,7 @@ pub enum Commands {
         /// Filter by GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         gpu_type: Option<GpuCategory>,
 
-        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to secure-cloud if not specified
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -53,8 +52,7 @@ pub enum Commands {
         /// GPU category to filter by (e.g., 'h100', 'a100', 'b200') (optional)
         target: Option<GpuTarget>,
 
-        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to showing both if not specified
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -64,8 +62,7 @@ pub enum Commands {
 
     /// List active rentals and their status
     Ps {
-        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to secure-cloud if not specified
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -94,8 +91,7 @@ pub enum Commands {
         /// Rental UUID to terminate (optional)
         target: Option<String>,
 
-        /// Compute source filter: 'secure-cloud' or 'community-cloud'
-        /// When not specified, interactive mode shows all rental types
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -352,11 +348,11 @@ pub struct UpOptions {
     #[arg(long)]
     pub gpu_count: Option<u32>,
 
-    /// Docker image to run
+    /// Docker image to run (community cloud only)
     #[arg(long)]
     pub image: Option<String>,
 
-    /// Environment variables (KEY=VALUE)
+    /// Environment variables (KEY=VALUE) (community cloud only)
     #[arg(long)]
     pub env: Vec<String>,
 
@@ -368,23 +364,23 @@ pub struct UpOptions {
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub ssh_key: Option<PathBuf>,
 
-    /// Port mappings (host:container)
+    /// Port mappings (host:container) (community cloud only)
     #[arg(long)]
     pub ports: Vec<String>,
 
-    /// CPU cores
+    /// CPU cores (community cloud only)
     #[arg(long)]
     pub cpu_cores: Option<f64>,
 
-    /// Memory in MB
+    /// Memory in MB (community cloud only)
     #[arg(long)]
     pub memory_mb: Option<i64>,
 
-    /// Storage in MB
+    /// Storage in MB (community cloud only)
     #[arg(long)]
     pub storage_mb: Option<i64>,
 
-    /// Command to run
+    /// Command to run (community cloud only)
     #[arg(long)]
     pub command: Vec<String>,
 
