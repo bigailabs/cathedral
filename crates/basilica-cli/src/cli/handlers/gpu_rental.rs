@@ -194,23 +194,13 @@ async fn fetch_and_filter_community_cloud(
 }
 
 /// Helper function to display secure cloud GPUs
-fn display_secure_cloud_table(
-    gpus: &[basilica_aggregator::GpuOffering],
-    filters: &ListFilters,
-) -> Result<(), CliError> {
+fn display_secure_cloud_table(gpus: &[basilica_aggregator::GpuOffering]) -> Result<(), CliError> {
     if gpus.is_empty() {
         print_info("No GPUs available matching your criteria");
         return Ok(());
     }
 
-    if filters.compact {
-        table_output::display_secure_cloud_offerings_compact(gpus)?;
-    } else {
-        table_output::display_secure_cloud_offerings_detailed(
-            gpus,
-            filters.detailed, // show_ids
-        )?;
-    }
+    table_output::display_secure_cloud_offerings_detailed(gpus)?;
 
     Ok(())
 }
@@ -219,23 +209,13 @@ fn display_secure_cloud_table(
 fn display_community_cloud_table(
     nodes: &[basilica_sdk::AvailableNode],
     pricing_map: &HashMap<String, String>,
-    filters: &ListFilters,
 ) -> Result<(), CliError> {
     if nodes.is_empty() {
         print_info("No GPUs available matching your criteria");
         return Ok(());
     }
 
-    if filters.compact {
-        table_output::display_available_nodes_compact(nodes, pricing_map)?;
-    } else {
-        table_output::display_available_nodes_detailed(
-            nodes,
-            true,             // show_full_gpu_names
-            filters.detailed, // show_ids
-            pricing_map,
-        )?;
-    }
+    table_output::display_available_nodes_detailed(nodes, pricing_map)?;
 
     Ok(())
 }
@@ -269,7 +249,7 @@ pub async fn handle_ls(
             if json {
                 json_output(&filtered_gpus)?;
             } else {
-                display_secure_cloud_table(&filtered_gpus, &filters)?;
+                display_secure_cloud_table(&filtered_gpus)?;
             }
         }
         Some(ComputeCategory::CommunityCloud) => {
@@ -291,7 +271,7 @@ pub async fn handle_ls(
                 };
                 json_output(&response)?;
             } else {
-                display_community_cloud_table(&nodes, &pricing_map, &filters)?;
+                display_community_cloud_table(&nodes, &pricing_map)?;
             }
         }
         None => {
@@ -339,12 +319,12 @@ pub async fn handle_ls(
                 json_output(&response)?;
             } else {
                 print_cloud_section_header("Community Cloud GPUs", true);
-                display_community_cloud_table(&community_nodes, &pricing_map, &filters)?;
+                display_community_cloud_table(&community_nodes, &pricing_map)?;
 
                 println!();
 
                 print_cloud_section_header("Secure Cloud GPUs", false);
-                display_secure_cloud_table(&secure_gpus, &filters)?;
+                display_secure_cloud_table(&secure_gpus)?;
             }
         }
     }
@@ -870,7 +850,7 @@ pub async fn handle_ps(
                         .collect();
                     community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    table_output::display_rental_history(&community_history, filters.detailed)?;
+                    table_output::display_rental_history(&community_history)?;
 
                     // Calculate total cost for community cloud only
                     let total_cost: rust_decimal::Decimal = community_history
@@ -911,11 +891,7 @@ pub async fn handle_ps(
                 if json {
                     json_output(&rentals_list)?;
                 } else {
-                    table_output::display_rental_items(
-                        &rentals_list.rentals[..],
-                        !filters.compact,
-                        filters.detailed,
-                    )?;
+                    table_output::display_rental_items(&rentals_list.rentals[..])?;
 
                     println!("\nTotal: {} active rentals", rentals_list.rentals.len());
 
@@ -964,7 +940,7 @@ pub async fn handle_ps(
                         .collect();
                     secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    table_output::display_rental_history(&secure_history, filters.detailed)?;
+                    table_output::display_rental_history(&secure_history)?;
 
                     // Calculate total cost for secure cloud only
                     let total_cost: rust_decimal::Decimal = secure_history
@@ -1007,11 +983,7 @@ pub async fn handle_ps(
                         .filter(|r| r.stopped_at.is_none())
                         .collect();
 
-                    table_output::display_secure_cloud_rentals(
-                        &rentals_to_display,
-                        !filters.compact,
-                        filters.detailed,
-                    )?;
+                    table_output::display_secure_cloud_rentals(&rentals_to_display)?;
 
                     println!(
                         "\nTotal: {} active secure cloud rentals",
@@ -1089,7 +1061,7 @@ pub async fn handle_ps(
 
                     // Display community cloud history
                     print_cloud_section_header("Community Cloud Rental History", true);
-                    table_output::display_rental_history(&community_history, filters.detailed)?;
+                    table_output::display_rental_history(&community_history)?;
 
                     let community_total_cost: rust_decimal::Decimal = community_history
                         .iter()
@@ -1113,7 +1085,7 @@ pub async fn handle_ps(
 
                     // Display secure cloud history
                     print_cloud_section_header("Secure Cloud Rental History", false);
-                    table_output::display_rental_history(&secure_history, filters.detailed)?;
+                    table_output::display_rental_history(&secure_history)?;
 
                     let secure_total_cost: rust_decimal::Decimal = secure_history
                         .iter()
@@ -1171,11 +1143,7 @@ pub async fn handle_ps(
                 } else {
                     print_cloud_section_header("Community Cloud Rentals", true);
 
-                    table_output::display_rental_items(
-                        &community_rentals_list.rentals[..],
-                        !filters.compact,
-                        filters.detailed,
-                    )?;
+                    table_output::display_rental_items(&community_rentals_list.rentals[..])?;
 
                     println!(
                         "\nTotal: {} community cloud rentals",
@@ -1192,11 +1160,7 @@ pub async fn handle_ps(
                         .filter(|r| r.stopped_at.is_none())
                         .collect();
 
-                    table_output::display_secure_cloud_rentals(
-                        &secure_rentals_to_display,
-                        !filters.compact,
-                        filters.detailed,
-                    )?;
+                    table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
 
                     println!(
                         "\nTotal: {} secure cloud rentals",
