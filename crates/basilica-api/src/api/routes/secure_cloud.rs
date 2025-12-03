@@ -458,10 +458,7 @@ pub async fn stop_secure_cloud_rental(
     // This must happen before billing finalization to ensure consistent state.
     // If the provider returns NotFound (VM deleted externally), we proceed anyway
     // since the desired outcome (VM gone) is achieved.
-    let was_deleted_externally = match state
-        .aggregator_service
-        .delete_deployment(&rental_id)
-        .await
+    let was_deleted_externally = match state.aggregator_service.delete_deployment(&rental_id).await
     {
         Ok(()) => {
             tracing::info!("Deployment {} deleted successfully", rental_id);
