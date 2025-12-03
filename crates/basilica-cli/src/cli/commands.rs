@@ -331,14 +331,6 @@ pub struct ListFilters {
     /// Filter by country code (e.g., US, UK, DE)
     #[arg(long)]
     pub country: Option<String>,
-
-    /// Use compact view (group by country and GPU type)
-    #[arg(long)]
-    pub compact: bool,
-
-    /// Use detailed view (shows node IDs)
-    #[arg(long)]
-    pub detailed: bool,
 }
 
 /// Options for provisioning instances
@@ -395,14 +387,6 @@ pub struct UpOptions {
     /// Create rental in detached mode (don't auto-connect via SSH)
     #[arg(short = 'd', long)]
     pub detach: bool,
-
-    /// Use compact view (group nodes by GPU type)
-    #[arg(long)]
-    pub compact: bool,
-
-    /// Use detailed view (shows node IDs during selection)
-    #[arg(long)]
-    pub detailed: bool,
 }
 
 /// Filters for listing active rentals
@@ -419,14 +403,6 @@ pub struct PsFilters {
     /// Minimum GPU count
     #[arg(long)]
     pub min_gpu_count: Option<u32>,
-
-    /// Use compact view (minimal columns)
-    #[arg(long)]
-    pub compact: bool,
-
-    /// Use detailed view (shows rental and node IDs)
-    #[arg(long)]
-    pub detailed: bool,
 
     /// Show rental history instead of active rentals
     #[arg(long)]
