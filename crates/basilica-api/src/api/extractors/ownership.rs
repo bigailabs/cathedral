@@ -290,16 +290,24 @@ pub async fn archive_rental_ownership(
 }
 
 /// Archive a secure cloud rental record to terminated_secure_cloud_rentals table (when rental is stopped)
-/// This preserves rental history instead of deleting it
+/// This preserves rental history instead of deleting it.
+///
+/// # Arguments
+/// * `db` - Database connection pool
+/// * `rental_id` - ID of the rental to archive
+/// * `stop_reason` - Human-readable reason for stopping (e.g., "User requested stop")
+/// * `final_status` - Optional status override (e.g., "stopped", "deleted"). If None, preserves original status.
 pub async fn archive_secure_cloud_rental(
     db: &PgPool,
     rental_id: &str,
     stop_reason: Option<&str>,
+    final_status: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     // Use a transaction to ensure atomicity
     let mut tx = db.begin().await?;
 
     // First, copy the rental to terminated_secure_cloud_rentals table
+    // Use COALESCE to optionally override the status when final_status is provided
     sqlx::query(
         r#"
         INSERT INTO terminated_secure_cloud_rentals (
@@ -309,7 +317,7 @@ pub async fn archive_secure_cloud_rental(
         )
         SELECT
             id, user_id, provider, provider_instance_id, offering_id, instance_type,
-            location_code, status, hostname, ssh_key_id, ip_address, connection_info,
+            location_code, COALESCE($3, status), hostname, ssh_key_id, ip_address, connection_info,
             raw_response, error_message, created_at, updated_at, NOW(), $2
         FROM secure_cloud_rentals
         WHERE id = $1
@@ -317,6 +325,7 @@ pub async fn archive_secure_cloud_rental(
     )
     .bind(rental_id)
     .bind(stop_reason)
+    .bind(final_status)
     .execute(&mut *tx)
     .await?;
 

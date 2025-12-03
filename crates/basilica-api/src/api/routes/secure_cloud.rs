@@ -455,22 +455,45 @@ pub async fn stop_secure_cloud_rental(
     let duration_hours = duration.num_seconds() as f64 / 3600.0;
 
     // 2. Delete deployment via aggregator FIRST (rental_id IS the deployment_id)
-    // This must happen before billing finalization to ensure consistent state -
-    // if the provider API fails (e.g., instance not fully started), we don't
-    // want billing to mark the rental as completed.
-    state
+    // This must happen before billing finalization to ensure consistent state.
+    // If the provider returns NotFound (VM deleted externally), we proceed anyway
+    // since the desired outcome (VM gone) is achieved.
+    let was_deleted_externally = match state
         .aggregator_service
         .delete_deployment(&rental_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete deployment: {}", e);
-            ApiError::Internal {
+    {
+        Ok(()) => {
+            tracing::info!("Deployment {} deleted successfully", rental_id);
+            false
+        }
+        Err(basilica_aggregator::AggregatorError::NotFound(msg)) => {
+            tracing::warn!(
+                "Deployment {} not found at provider (deleted externally): {}. Proceeding with billing finalization.",
+                rental_id, msg
+            );
+            true
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete deployment {}: {}", rental_id, e);
+            return Err(ApiError::Internal {
                 message: "Failed to stop instance".to_string(),
-            }
-        })?;
+            });
+        }
+    };
+
+    // Determine termination reason and final status based on how the VM was stopped
+    let (termination_reason, final_status, stop_reason) = if was_deleted_externally {
+        (
+            "vm_deleted_externally",
+            "deleted",
+            "VM deleted externally (user requested stop)",
+        )
+    } else {
+        ("user_requested", "stopped", "User requested stop")
+    };
 
     // 3. Finalize rental in billing service (get accumulated cost)
-    // Only runs if deletion succeeded above
     let total_cost = if let Some(billing_client) = &state.billing_client {
         use basilica_protocol::billing::FinalizeRentalRequest;
         use prost_types::Timestamp;
@@ -483,7 +506,7 @@ pub async fn stop_secure_cloud_rental(
         let finalize_request = FinalizeRentalRequest {
             rental_id: rental_id.clone(),
             end_time: Some(end_timestamp),
-            termination_reason: "user_requested".to_string(),
+            termination_reason: termination_reason.to_string(),
         };
 
         match billing_client.finalize_rental(finalize_request).await {
@@ -503,7 +526,8 @@ pub async fn stop_secure_cloud_rental(
 
     // 4. Archive rental to terminated_secure_cloud_rentals table
     if let Err(e) =
-        archive_secure_cloud_rental(&state.db, &rental_id, Some("User requested stop")).await
+        archive_secure_cloud_rental(&state.db, &rental_id, Some(stop_reason), Some(final_status))
+            .await
     {
         tracing::error!("Failed to archive secure cloud rental: {}", e);
     }

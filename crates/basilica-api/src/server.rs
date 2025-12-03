@@ -206,6 +206,7 @@ async fn process_secure_cloud_health_check(
     rental_id: &str,
     aggregator_service: &basilica_aggregator::service::AggregatorService,
     db: &PgPool,
+    billing_client: Option<&BillingClient>,
 ) {
     match aggregator_service.get_deployment(rental_id).await {
         Ok(deployment) => {
@@ -221,6 +222,7 @@ async fn process_secure_cloud_health_check(
                     db,
                     rental_id,
                     Some("Health check: deployment no longer accessible"),
+                    Some("deleted"),
                 )
                 .await
                 {
@@ -241,13 +243,46 @@ async fn process_secure_cloud_health_check(
         Err(basilica_aggregator::error::AggregatorError::NotFound(_)) => {
             // VM was deleted externally (404 from provider)
             tracing::info!(
-                "VM {} not found at provider (deleted externally), archiving rental",
+                "VM {} not found at provider (deleted externally), finalizing billing and archiving rental",
                 rental_id
             );
+
+            // Finalize billing before archiving
+            if let Some(billing_client) = billing_client {
+                use basilica_protocol::billing::FinalizeRentalRequest;
+                use prost_types::Timestamp;
+
+                let now = chrono::Utc::now();
+                let end_timestamp = Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                };
+
+                let finalize_request = FinalizeRentalRequest {
+                    rental_id: rental_id.to_string(),
+                    end_time: Some(end_timestamp),
+                    termination_reason: "vm_deleted_externally".to_string(),
+                };
+
+                if let Err(e) = billing_client.finalize_rental(finalize_request).await {
+                    tracing::error!(
+                        "Failed to finalize billing for externally deleted rental {}: {}",
+                        rental_id,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "Finalized billing for externally deleted rental {}",
+                        rental_id
+                    );
+                }
+            }
+
             if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
                 db,
                 rental_id,
                 Some("Health check: VM not found at provider (deleted externally)"),
+                Some("deleted"),
             )
             .await
             {
@@ -711,6 +746,7 @@ impl Server {
         // Start Secure Cloud health check task
         let health_check_aggregator_service = state.aggregator_service.clone();
         let health_check_db = state.db.clone();
+        let health_check_billing_client = state.billing_client.clone();
         let health_check_interval = config.rental_health_check_interval();
 
         tokio::spawn(async move {
@@ -731,6 +767,7 @@ impl Server {
                                 rental_id,
                                 &health_check_aggregator_service,
                                 &health_check_db,
+                                health_check_billing_client.as_ref().map(|c| c.as_ref()),
                             )
                             .await;
                         }

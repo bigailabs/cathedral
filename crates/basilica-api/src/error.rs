@@ -84,6 +84,10 @@ pub enum ApiError {
     #[error("{message}")]
     NotFound { message: String },
 
+    /// Deployment not found (may have been deleted externally)
+    #[error("Deployment not found: {0}")]
+    DeploymentNotFound(String),
+
     /// Bad request with message
     #[error("Bad request: {message}")]
     BadRequest { message: String },
@@ -171,6 +175,7 @@ impl ApiError {
             ApiError::Internal { .. } => "BASILICA_API_INTERNAL_ERROR",
             ApiError::ServiceUnavailable => "BASILICA_API_SERVICE_UNAVAILABLE",
             ApiError::NotFound { .. } => "BASILICA_API_NOT_FOUND",
+            ApiError::DeploymentNotFound(_) => "BASILICA_API_DEPLOYMENT_NOT_FOUND",
             ApiError::BadRequest { .. } => "BASILICA_API_BAD_REQUEST",
             ApiError::Conflict { .. } => "BASILICA_API_CONFLICT",
             ApiError::ConfigMapSizeLimitExceeded { .. } => "BASILICA_API_CONFIGMAP_SIZE_LIMIT",
@@ -213,6 +218,7 @@ impl ApiError {
                 | ApiError::RateLimitExceeded
                 | ApiError::InvalidRequest { .. }
                 | ApiError::NotFound { .. }
+                | ApiError::DeploymentNotFound(_)
                 | ApiError::BadRequest { .. }
                 | ApiError::Conflict { .. }
                 | ApiError::InvalidTtlFormat(_)
@@ -256,6 +262,7 @@ impl IntoResponse for ApiError {
             ApiError::Internal { .. } => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             ApiError::ServiceUnavailable => (StatusCode::SERVICE_UNAVAILABLE, self.to_string()),
             ApiError::NotFound { .. } => (StatusCode::NOT_FOUND, self.to_string()),
+            ApiError::DeploymentNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::BadRequest { .. } => (StatusCode::BAD_REQUEST, self.to_string()),
             ApiError::Conflict { .. } => (StatusCode::CONFLICT, self.to_string()),
             ApiError::ConfigMapSizeLimitExceeded { .. } => {
