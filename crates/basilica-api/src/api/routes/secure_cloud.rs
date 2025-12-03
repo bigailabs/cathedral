@@ -484,7 +484,7 @@ pub async fn stop_secure_cloud_rental(
         (
             "vm_deleted_externally",
             "deleted",
-            "VM deleted externally (user requested stop)",
+            "VM not found at provider (already deleted externally)",
         )
     } else {
         ("user_requested", "stopped", "User requested stop")
