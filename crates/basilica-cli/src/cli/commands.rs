@@ -38,8 +38,7 @@ pub enum Commands {
         /// Filter by GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         gpu_type: Option<GpuCategory>,
 
-        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to secure-cloud if not specified
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -53,8 +52,7 @@ pub enum Commands {
         /// GPU category to filter by (e.g., 'h100', 'a100', 'b200') (optional)
         target: Option<GpuTarget>,
 
-        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to showing both if not specified
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -64,8 +62,7 @@ pub enum Commands {
 
     /// List active rentals and their status
     Ps {
-        /// Compute source: 'secure-cloud' (datacenter) or 'community-cloud' (miners)
-        /// Defaults to secure-cloud if not specified
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -94,8 +91,7 @@ pub enum Commands {
         /// Rental UUID to terminate (optional)
         target: Option<String>,
 
-        /// Compute source filter: 'secure-cloud' or 'community-cloud'
-        /// When not specified, interactive mode shows all rental types
+        /// Compute source: 'secure-cloud' or 'community-cloud'
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
