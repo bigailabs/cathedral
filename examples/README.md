@@ -1,246 +1,163 @@
-# Basilica Examples
+# Basilica SDK Examples
 
-Production-ready examples demonstrating how to deploy containerized applications on the Basilica platform.
+Production-ready examples demonstrating deployment patterns on Basilica.
 
 ## Prerequisites
 
-1. **API Token**: Generate a Basilica API token
-
-   ```bash
-   basilica tokens create my-token
-   export BASILICA_API_TOKEN="basilica_..."
-   ```
-
-2. **Python SDK** (for Python examples)
-
-   ```bash
-   pip install basilica-sdk requests
-   ```
-
-3. **curl and jq** (for shell examples)
-
-   ```bash
-   # macOS
-   brew install curl jq
-
-   # Ubuntu/Debian
-   apt-get install curl jq
-   ```
-
-## Examples
-
-### 1. Tweet-worthy: Persistent Counter in 25 Lines
-
-**File**: `simple_deploy.py`
-
-Deploy a counter app with persistent storage and public URL - the simplest possible example.
-
 ```bash
-python3 simple_deploy.py
-# Output: Live at: https://xxx.deployments.basilica.ai
-# Visit the URL - counter increments and persists!
+# 1. Get an API token
+basilica tokens create my-token
+export BASILICA_API_TOKEN="basilica_..."
+
+# 2. Install Python SDK
+pip install basilica-sdk
 ```
 
-### 2. Quick Start - Complete Lifecycle
+## Core Examples (01-04)
 
-**File**: `quickstart_complete.py`
+Simple, self-contained examples using `client.deploy()`:
 
-A minimal example showing the complete lifecycle: create, wait, test, cleanup.
+| Example | Description | Run |
+|---------|-------------|-----|
+| `01_hello_world.py` | Basic HTTP server | `python3 01_hello_world.py` |
+| `02_with_storage.py` | Persistent counter at /data | `python3 02_with_storage.py` |
+| `03_fastapi.py` | FastAPI with pip packages | `python3 03_fastapi.py` |
+| `04_gpu.py` | PyTorch + CUDA | `python3 04_gpu.py` |
 
-```bash
-python3 quickstart_complete.py
+## Decorator Examples (05)
+
+Using `@basilica.deployment` decorator:
+
+| Example | Description | Run |
+|---------|-------------|-----|
+| `05_decorator_hello.py` | Basic decorator usage | `python3 05_decorator_hello.py` |
+| `05_decorator_storage.py` | With Volume mount | `python3 05_decorator_storage.py` |
+| `05_decorator_fastapi.py` | FastAPI + uvicorn | `python3 05_decorator_fastapi.py` |
+| `05_decorator_gpu.py` | GPU decorator | `python3 05_decorator_gpu.py` |
+
+## Advanced Examples (06-10)
+
+| Example | Description | Run |
+|---------|-------------|-----|
+| `06_vllm_qwen.py` | vLLM with Qwen model | `python3 06_vllm_qwen.py` |
+| `07_sglang_model.py` | SGLang inference server | `python3 07_sglang_model.py` |
+| `08_external_file.py` | Deploy from external .py file | `python3 08_external_file.py` |
+| `09_container_image.py` | Deploy pre-built container (nginx) | `python3 09_container_image.py` |
+| `10_custom_docker/` | Multi-file project with custom Docker | See directory README |
+
+## Deployment Options
+
+### 1. Inline Source Code
+Best for small scripts and quick prototypes.
+```python
+deployment = client.deploy(name="hello", source="print('Hello')", port=8000)
 ```
 
-### 3. Container Deployment with SDK
-
-**File**: `deploy_container.py`
-
-Demonstrates SDK-based deployment with replicas, status monitoring, and cleanup.
-
-```bash
-python3 deploy_container.py
+### 2. External File
+Best for single-file applications.
+```python
+deployment = client.deploy(name="api", source="app.py", port=8000)
 ```
 
-**Features**:
-
-- Create nginx deployment with 2 replicas
-- Monitor replica readiness
-- Create Python HTTP server deployment
-- List all deployments
-- Clean up resources
-
-### 4. Public Deployment with Storage
-
-**File**: `public_storage_deployment.py`
-
-Deploy a FastAPI application with public URL and persistent FUSE storage.
-
-```bash
-python3 public_storage_deployment.py
+### 3. Pre-built Container Image
+Best for existing Docker images (nginx, redis, etc.).
+```python
+deployment = client.deploy(name="nginx", image="nginxinc/nginx-unprivileged:alpine", port=8080)
 ```
 
-**Features**:
-
-- Automatic public HTTPS URL
-- Persistent storage at `/data`
-- Storage read/write/list operations
-- Background sync to object storage
-
-### 5. Shell/curl Deployment
-
-**File**: `curl_deployment.sh`
-
-Direct API usage with curl for scripting and automation.
-
+### 4. Custom Docker Image (Multi-file Projects)
+Best for complex applications with multiple files/modules.
 ```bash
-./curl_deployment.sh
+# Build and push your image
+docker build -t ghcr.io/user/my-api:latest .
+docker push ghcr.io/user/my-api:latest
+```
+```python
+deployment = client.deploy(name="my-api", image="ghcr.io/user/my-api:latest", port=8000)
+```
+See `10_custom_docker/` for complete example.
+
+## API Patterns
+
+### Basic Deploy
+```python
+from basilica import BasilicaClient
+
+client = BasilicaClient()
+deployment = client.deploy(
+    name="hello",
+    source="app.py",
+    port=8000,
+)
+print(deployment.url)
 ```
 
-**Features**:
+### Decorator Deploy
+```python
+import basilica
 
-- Raw REST API calls
-- JSON payload construction
-- Status polling
-- Storage operations
+@basilica.deployment(name="api", port=8000, pip_packages=["fastapi", "uvicorn"])
+def serve():
+    from fastapi import FastAPI
+    import uvicorn
+    app = FastAPI()
+    @app.get("/")
+    def root():
+        return {"status": "ok"}
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
-### 6. GPU Deployment with PyTorch
-
-**File**: `gpu_deployment.py`
-
-Deploy GPU-accelerated PyTorch workloads.
-
-```bash
-# Default: RTX A4000
-python3 gpu_deployment.py
-
-# Custom GPU requirements
-export GPU_MODEL="NVIDIA-RTX-A4000"
-export GPU_COUNT="1"
-export MIN_VRAM_GB="12"
-python3 gpu_deployment.py
+deployment = serve()
+print(deployment.url)
 ```
 
-**Features**:
+### With Volume
+```python
+import basilica
 
-- GPU selection (RTX A4000 available)
-- CUDA/cuDNN detection
-- Matrix multiplication benchmarks
-- Model checkpoint save/load
+cache = basilica.Volume.from_name("my-cache", create_if_missing=True)
 
-**Available GPU**:
-
-| Model | VRAM | CUDA |
-|-------|------|------|
-| NVIDIA RTX A4000 | 14GB | 12.8 |
-
-## API Reference
-
-### Create Deployment
-
-```bash
-POST /deployments
-```
-
-```json
-{
-  "instance_name": "my-app",
-  "image": "python:3.11-slim",
-  "replicas": 1,
-  "port": 8000,
-  "command": ["python", "-m", "http.server", "8000"],
-  "cpu": "500m",
-  "memory": "512Mi",
-  "ttl_seconds": 3600,
-  "public": true,
-  "storage": "/data"
-}
+@basilica.deployment(name="app", volumes={"/cache": cache})
+def serve():
+    ...
 ```
 
 ### GPU Deployment
-
-```json
-{
-  "instance_name": "gpu-app",
-  "image": "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
-  "resources": {
-    "cpu": "2",
-    "memory": "8Gi",
-    "gpus": {
-      "count": 1,
-      "model": ["NVIDIA-RTX-A4000"],
-      "min_gpu_memory_gb": 12,
-      "min_cuda_version": "12.0"
-    }
-  }
-}
-```
-
-### Get Status
-
-```bash
-GET /deployments/{instance_name}
-```
-
-### Delete
-
-```bash
-DELETE /deployments/{instance_name}
-```
-
-## Storage
-
-Storage is mounted as a FUSE filesystem backed by object storage (R2/S3).
-
-**Features**:
-
-- POSIX file API (`open`, `read`, `write`)
-- Background sync (1s interval)
-- Data persists across restarts
-- Per-user isolation
-
-**Usage**:
-
 ```python
-# SDK - simple path
-client.create_deployment(..., storage="/data")
+@basilica.deployment(
+    name="pytorch",
+    image="pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime",
+    gpu="NVIDIA-RTX-A4000",
+    gpu_count=1,
+    memory="8Gi",
+)
+def serve():
+    ...
+```
 
-# API - full spec
-"storage": {
-    "persistent": {
-        "enabled": true,
-        "backend": "r2",
-        "mountPath": "/data"
-    }
-}
+## Available GPUs
+
+| Model | VRAM | CUDA |
+|-------|------|------|
+| NVIDIA RTX A4000 | 16GB | 12.8 |
+
+## Container Requirements
+
+Basilica runs containers as non-root (UID 1000). When building custom images:
+```dockerfile
+RUN useradd -m -u 1000 appuser
+USER appuser
 ```
 
 ## Troubleshooting
 
-### Deployment Stuck in Pending
+**Deployment pending**: Check image name, reduce resources, or verify GPU availability.
 
-1. Check image name and registry access
-2. Reduce CPU/memory if cluster is constrained
-3. For GPU: verify node availability
+**502/503 errors**: Wait 10-15s for HTTP server startup, verify port matches.
 
-### Storage Not Accessible
+**Storage not ready**: Check for `.fuse_ready` marker, wait 30-60s after deploy.
 
-1. Wait for storage initialization (30-60s after deployment ready)
-2. Check for `.fuse_ready` marker file in mount path
+**GPU not detected**: Use CUDA image, verify `torch.cuda.is_available()`.
 
-### Public URL Returns 502/503
+## Legacy Examples
 
-1. Wait for HTTP server to start (15-30s after ready)
-2. Verify port matches deployment config
-3. Check application logs
-
-### GPU Not Detected
-
-1. Use CUDA-enabled image (`pytorch/pytorch:*-cuda*`)
-2. Verify GPU availability via API
-3. Check container logs for CUDA errors
-
-## Resources
-
-- [Architecture Documentation](../docs/architecture/)
-- [Python SDK](../crates/basilica-sdk-python/)
-- [Rust SDK](../crates/basilica-sdk/)
+Verbose examples with more detailed patterns are archived in `legacy/`.
