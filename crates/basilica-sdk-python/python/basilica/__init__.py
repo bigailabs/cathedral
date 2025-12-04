@@ -129,6 +129,9 @@ from .exceptions import (
     ValidationError,
 )
 from .source import SourcePackager
+from .decorators import deployment, DeployedFunction
+from .volume import Volume
+from .spec import DeploymentSpec
 
 # Default command is a list in Python
 DEFAULT_COMMAND = ["/bin/bash"]
@@ -140,6 +143,11 @@ __version__ = "0.2.0"
 __all__ = [
     # Main client
     "BasilicaClient",
+    # Decorator API
+    "deployment",
+    "DeployedFunction",
+    "Volume",
+    "DeploymentSpec",
     # High-level types
     "Deployment",
     "DeploymentStatus",

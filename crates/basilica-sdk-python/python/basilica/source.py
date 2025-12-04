@@ -207,7 +207,8 @@ class SourcePackager:
             parts.append(f"pip install -q {packages_str}")
 
         # Build the python command with heredoc
-        python_cmd = "python"
+        # Use python3 for broader compatibility (some images don't have python symlink)
+        python_cmd = "python3"
         if python_args:
             python_cmd += " " + " ".join(python_args)
 
@@ -256,10 +257,11 @@ class SourcePackager:
 
         # Write code to file and run with uvicorn
         # This approach is more reliable than heredoc for complex apps
+        # Use python3 for broader compatibility
         script = (
             f"pip install -q {packages_str} && "
             f"cat > /tmp/app.py <<'PYCODE'\n{self.code}\nPYCODE\n && "
-            f"python /tmp/app.py"
+            f"python3 /tmp/app.py"
         )
 
         return ["bash", "-c", script]
