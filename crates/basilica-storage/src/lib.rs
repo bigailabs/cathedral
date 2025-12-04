@@ -42,8 +42,8 @@ pub use credentials::{
 };
 #[cfg(feature = "fuse")]
 pub use daemon::{
-    MountError, MountInfo, MountManager, MountStatus, NamespaceWatcher, WatcherError,
-    DEFAULT_BASE_PATH,
+    MountError, MountInfo, MountManager, MountStatus, NamespaceMetrics, NamespaceMetricsSnapshot,
+    NamespaceWatcher, PerNamespaceMetricsStore, WatcherError, DEFAULT_BASE_PATH,
 };
 pub use error::{Result, StorageError};
 #[cfg(feature = "fuse")]

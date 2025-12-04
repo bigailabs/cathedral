@@ -3,7 +3,9 @@
 //! Provides endpoints for mount lifecycle management, health checks, and metrics.
 
 use crate::credentials::CredentialProvider;
-use crate::daemon::{MountError, MountManager, MountStatus};
+use crate::daemon::{
+    MountError, MountManager, MountStatus, NamespaceMetricsSnapshot, PerNamespaceMetricsStore,
+};
 use crate::metrics::StorageMetrics;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -19,6 +21,7 @@ use tracing::info;
 pub struct DaemonHttpState<P: CredentialProvider + 'static> {
     pub mount_manager: Arc<MountManager<P>>,
     pub metrics: Arc<StorageMetrics>,
+    pub namespace_metrics: PerNamespaceMetricsStore,
 }
 
 /// HTTP server for multi-tenant FUSE daemon.
@@ -27,11 +30,16 @@ pub struct DaemonHttpServer<P: CredentialProvider + 'static> {
 }
 
 impl<P: CredentialProvider + Send + Sync + 'static> DaemonHttpServer<P> {
-    pub fn new(mount_manager: Arc<MountManager<P>>, metrics: Arc<StorageMetrics>) -> Self {
+    pub fn new(
+        mount_manager: Arc<MountManager<P>>,
+        metrics: Arc<StorageMetrics>,
+        namespace_metrics: PerNamespaceMetricsStore,
+    ) -> Self {
         Self {
             state: Arc::new(DaemonHttpState {
                 mount_manager,
                 metrics,
+                namespace_metrics,
             }),
         }
     }
@@ -52,6 +60,10 @@ impl<P: CredentialProvider + Send + Sync + 'static> DaemonHttpServer<P> {
             .route("/health", get(health_handler))
             .route("/ready", get(ready_handler::<P>))
             .route("/metrics", get(metrics_handler::<P>))
+            .route(
+                "/metrics/namespace/{namespace}",
+                get(namespace_metrics_handler::<P>),
+            )
             .route("/mounts", get(list_mounts_handler::<P>))
             .route("/mounts/{namespace}", get(get_mount_handler::<P>))
             .route("/mounts/{namespace}", post(mount_handler::<P>))
@@ -188,6 +200,65 @@ async fn metrics_handler<P: CredentialProvider + Send + Sync + 'static>(
     )
 }
 
+/// Validates namespace format: must start with "u-" and contain only alphanumeric chars and hyphens.
+fn validate_namespace(namespace: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !namespace.starts_with("u-") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Namespace must start with 'u-' prefix".to_string(),
+                code: "INVALID_NAMESPACE",
+            }),
+        ));
+    }
+
+    let suffix = &namespace[2..];
+    if suffix.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Namespace suffix cannot be empty".to_string(),
+                code: "INVALID_NAMESPACE",
+            }),
+        ));
+    }
+
+    if !suffix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Namespace contains invalid characters".to_string(),
+                code: "INVALID_NAMESPACE",
+            }),
+        ));
+    }
+
+    Ok(())
+}
+
+async fn namespace_metrics_handler<P: CredentialProvider + Send + Sync + 'static>(
+    State(state): State<Arc<DaemonHttpState<P>>>,
+    Path(namespace): Path<String>,
+) -> Result<Json<NamespaceMetricsSnapshot>, (StatusCode, Json<ErrorResponse>)> {
+    validate_namespace(&namespace)?;
+
+    match state.namespace_metrics.get(&namespace) {
+        Some(metrics) => Ok(Json(NamespaceMetricsSnapshot::from_metrics(
+            &namespace, &metrics,
+        ))),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No metrics found for namespace '{}'", namespace),
+                code: "METRICS_NOT_FOUND",
+            }),
+        )),
+    }
+}
+
 async fn list_mounts_handler<P: CredentialProvider + Send + Sync + 'static>(
     State(state): State<Arc<DaemonHttpState<P>>>,
 ) -> Json<MountListResponse> {
@@ -236,6 +307,8 @@ async fn mount_handler<P: CredentialProvider + Send + Sync + 'static>(
     State(state): State<Arc<DaemonHttpState<P>>>,
     Path(namespace): Path<String>,
 ) -> Result<(StatusCode, Json<SuccessResponse>), (StatusCode, Json<ErrorResponse>)> {
+    validate_namespace(&namespace)?;
+
     tracing::info!(
         target: "security_audit",
         event_type = "mount_api_request",
@@ -296,6 +369,8 @@ async fn unmount_handler<P: CredentialProvider + Send + Sync + 'static>(
     State(state): State<Arc<DaemonHttpState<P>>>,
     Path(namespace): Path<String>,
 ) -> Result<Json<SuccessResponse>, (StatusCode, Json<ErrorResponse>)> {
+    validate_namespace(&namespace)?;
+
     tracing::info!(
         target: "security_audit",
         event_type = "unmount_api_request",
@@ -367,5 +442,46 @@ mod tests {
     async fn test_health_handler() {
         let response = health_handler().await;
         assert_eq!(response.0.status, "healthy");
+    }
+
+    #[test]
+    fn test_validate_namespace_valid() {
+        assert!(validate_namespace("u-test").is_ok());
+        assert!(validate_namespace("u-test123").is_ok());
+        assert!(validate_namespace("u-test-user").is_ok());
+        assert!(validate_namespace("u-123").is_ok());
+        assert!(validate_namespace("u-a-b-c").is_ok());
+    }
+
+    #[test]
+    fn test_validate_namespace_missing_prefix() {
+        let result = validate_namespace("test");
+        assert!(result.is_err());
+        let (status, json) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json.0.code, "INVALID_NAMESPACE");
+    }
+
+    #[test]
+    fn test_validate_namespace_empty_suffix() {
+        let result = validate_namespace("u-");
+        assert!(result.is_err());
+        let (status, json) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json.0.code, "INVALID_NAMESPACE");
+    }
+
+    #[test]
+    fn test_validate_namespace_invalid_chars() {
+        let result = validate_namespace("u-test_user");
+        assert!(result.is_err());
+        let (_, json) = result.unwrap_err();
+        assert_eq!(json.0.code, "INVALID_NAMESPACE");
+
+        let result = validate_namespace("u-test.user");
+        assert!(result.is_err());
+
+        let result = validate_namespace("u-test/user");
+        assert!(result.is_err());
     }
 }

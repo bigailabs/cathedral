@@ -40,6 +40,9 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 
+# Concurrent data structures
+dashmap = "5.5"
+
 # Rate limiting and quotas
 governor = "0.6"
 
