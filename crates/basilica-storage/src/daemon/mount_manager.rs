@@ -433,15 +433,75 @@ async fn handle_unmount(
 }
 
 /// Create mount directory with restrictive permissions.
+/// Handles stale FUSE mounts by unmounting and recreating the directory.
 fn create_mount_directory(path: &PathBuf) -> Result<(), MountError> {
-    if !path.exists() {
-        std::fs::create_dir_all(path).map_err(|e| {
-            MountError::DirectoryError(format!(
-                "Failed to create directory '{}': {}",
-                path.display(),
-                e
-            ))
-        })?;
+    // First, try to detect and clean up stale mounts
+    // Note: path.exists() may return false for stale mounts, so we check accessibility
+    match std::fs::read_dir(path) {
+        Ok(_) => {
+            // Directory exists and is accessible - can reuse it
+            tracing::debug!(path = %path.display(), "Mount directory exists and is accessible");
+        }
+        Err(e) => {
+            let os_err = e.raw_os_error();
+            if os_err == Some(107) || os_err == Some(5) {
+                // ENOTCONN (107) or EIO (5) - stale mount
+                tracing::warn!(
+                    path = %path.display(),
+                    "Detected stale FUSE mount, attempting cleanup"
+                );
+                cleanup_stale_mount(path)?;
+                // Create fresh directory after cleanup
+                std::fs::create_dir_all(path).map_err(|e| {
+                    MountError::DirectoryError(format!(
+                        "Failed to create directory '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+            } else if os_err == Some(2) {
+                // ENOENT - directory doesn't exist, create it
+                std::fs::create_dir_all(path).map_err(|e| {
+                    MountError::DirectoryError(format!(
+                        "Failed to create directory '{}': {}",
+                        path.display(),
+                        e
+                    ))
+                })?;
+            } else {
+                // Other error - try to create anyway
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    os_error = ?os_err,
+                    "Unexpected error checking mount directory, attempting create"
+                );
+                if let Err(create_err) = std::fs::create_dir_all(path) {
+                    // If creation fails with EEXIST, the directory exists but was inaccessible
+                    // This could be a stale mount - try cleanup
+                    if create_err.raw_os_error() == Some(17) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "Directory exists but inaccessible, attempting stale mount cleanup"
+                        );
+                        cleanup_stale_mount(path)?;
+                        std::fs::create_dir_all(path).map_err(|e| {
+                            MountError::DirectoryError(format!(
+                                "Failed to create directory '{}': {}",
+                                path.display(),
+                                e
+                            ))
+                        })?;
+                    } else {
+                        return Err(MountError::DirectoryError(format!(
+                            "Failed to create directory '{}': {}",
+                            path.display(),
+                            create_err
+                        )));
+                    }
+                }
+            }
+        }
     }
 
     // Set restrictive permissions (0700 = rwx------)
@@ -465,6 +525,59 @@ fn create_mount_directory(path: &PathBuf) -> Result<(), MountError> {
                 e
             ))
         })?;
+    }
+
+    Ok(())
+}
+
+/// Clean up a stale FUSE mount by lazy unmounting and removing the directory.
+fn cleanup_stale_mount(path: &PathBuf) -> Result<(), MountError> {
+    // Try lazy unmount first (fusermount -uz)
+    let unmount_result = std::process::Command::new("fusermount")
+        .args(["-uz", &path.to_string_lossy()])
+        .output();
+
+    match unmount_result {
+        Ok(output) => {
+            if output.status.success() {
+                tracing::info!(
+                    path = %path.display(),
+                    "Successfully unmounted stale FUSE mount"
+                );
+            } else {
+                tracing::debug!(
+                    path = %path.display(),
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "fusermount returned non-zero (mount may already be gone)"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                path = %path.display(),
+                error = %e,
+                "fusermount command failed, trying umount"
+            );
+            // Fallback to umount -l
+            let _ = std::process::Command::new("umount")
+                .args(["-l", &path.to_string_lossy()])
+                .output();
+        }
+    }
+
+    // Remove the directory if it still exists
+    if path.exists() {
+        std::fs::remove_dir(path).map_err(|e| {
+            MountError::DirectoryError(format!(
+                "Failed to remove stale mount directory '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        tracing::info!(
+            path = %path.display(),
+            "Removed stale mount directory"
+        );
     }
 
     Ok(())

@@ -1,11 +1,11 @@
 use super::cache::{PageCache, PAGE_SIZE};
-use super::dirty_tracker::DirtyPageTracker;
+use super::dirty_tracker::DirtyFileTracker;
 use super::sync_worker::SyncWorker;
 use crate::backend::StorageBackend;
 use crate::metrics::StorageMetrics;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyWrite, Request,
+    ReplyEntry, ReplyStatfs, ReplyWrite, Request,
 };
 use libc::ENOENT;
 use parking_lot::RwLock as ParkingLotRwLock;
@@ -68,7 +68,7 @@ pub struct BasilicaFS {
     path_to_ino: Arc<ParkingLotRwLock<HashMap<String, u64>>>,
     next_ino: Arc<ParkingLotRwLock<u64>>,
 
-    dirty_tracker: Arc<DirtyPageTracker>,
+    dirty_tracker: Arc<DirtyFileTracker>,
     sync_worker: Arc<SyncWorker>,
     fuse_runtime: std::sync::Mutex<Option<Runtime>>,
     runtime_handle: Handle,
@@ -90,14 +90,14 @@ impl BasilicaFS {
         metrics: Arc<StorageMetrics>,
     ) -> Self {
         let cache = Arc::new(TokioRwLock::new(PageCache::new(cache_size_mb)));
-        let dirty_tracker = Arc::new(DirtyPageTracker::new());
+        let dirty_tracker = Arc::new(DirtyFileTracker::new());
 
+        // SyncWorker now gets dirty state directly from PageCache
         let sync_worker = Arc::new(SyncWorker::new(
             namespace.clone(),
             experiment_id.clone(),
             storage.clone(),
             cache.clone(),
-            dirty_tracker.clone(),
             sync_interval_ms,
         ));
 
@@ -415,9 +415,8 @@ impl Filesystem for BasilicaFS {
                 }
             }
 
-            self.dirty_tracker
-                .mark_dirty(&path, offset as u64, data.len())
-                .await;
+            // Track file as modified (dirty state is managed in PageCache)
+            self.dirty_tracker.mark_modified(&path).await;
 
             reply.written(data.len() as u32);
         });
@@ -981,7 +980,8 @@ impl Filesystem for BasilicaFS {
                         if let Err(e) = cache.truncate(&path, s).await {
                             error!("Failed to truncate cache: {}", e);
                         }
-                        dirty_tracker.mark_dirty(&path, 0, 1).await;
+                        // Track file as modified (dirty state is managed in PageCache)
+                        dirty_tracker.mark_modified(&path).await;
                     });
                 }
 
@@ -1011,7 +1011,8 @@ impl Filesystem for BasilicaFS {
                     let runtime_handle = self.runtime_handle.clone();
 
                     runtime_handle.block_on(async {
-                        dirty_tracker.mark_dirty(&path, 0, 1).await;
+                        // Track file as modified (dirty state is managed in PageCache)
+                        dirty_tracker.mark_modified(&path).await;
                     });
                 }
 
@@ -1049,6 +1050,35 @@ impl Filesystem for BasilicaFS {
                 }
             }
         });
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        let used = self.used_bytes.load(Ordering::Relaxed);
+        let total = self.quota_bytes;
+        let free = total.saturating_sub(used);
+
+        const BLOCK_SIZE: u64 = 4096;
+        let blocks_total = total / BLOCK_SIZE;
+        let blocks_free = free / BLOCK_SIZE;
+        let blocks_avail = blocks_free;
+
+        debug!(
+            "statfs: total={}GB, used={}MB, free={}GB",
+            total / (1024 * 1024 * 1024),
+            used / (1024 * 1024),
+            free / (1024 * 1024 * 1024)
+        );
+
+        reply.statfs(
+            blocks_total,
+            blocks_free,
+            blocks_avail,
+            0,
+            0,
+            BLOCK_SIZE as u32,
+            255,
+            BLOCK_SIZE as u32,
+        );
     }
 }
 
@@ -1217,6 +1247,10 @@ impl fuser::Filesystem for SharedBasilicaFS {
 
     fn fsync(&mut self, req: &Request<'_>, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
         self.inner.lock().fsync(req, ino, fh, datasync, reply)
+    }
+
+    fn statfs(&mut self, req: &Request<'_>, ino: u64, reply: ReplyStatfs) {
+        self.inner.lock().statfs(req, ino, reply)
     }
 }
 
