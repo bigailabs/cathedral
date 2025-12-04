@@ -12,7 +12,11 @@ pub mod dirty_tracker;
 pub mod filesystem;
 pub mod sync_worker;
 
-pub use cache::{DirtyFile, FileCache, FileMetadata, FileSnapshot, Page, PageCache, PageState, PAGE_SIZE};
+pub use cache::{
+    DirtyFile, FileCache, FileMetadata, FileSnapshot, Page, PageCache, PageState, PAGE_SIZE,
+};
 pub use dirty_tracker::{DirtyFileTracker, DirtyPageTracker};
 pub use filesystem::{BasilicaFS, SharedBasilicaFS};
-pub use sync_worker::{SyncStats, SyncWorker, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_QUIET_PERIOD_MS};
+pub use sync_worker::{
+    SyncStats, SyncWorker, DEFAULT_MAX_CONCURRENT_UPLOADS, DEFAULT_QUIET_PERIOD_MS,
+};

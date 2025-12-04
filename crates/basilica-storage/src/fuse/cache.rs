@@ -549,7 +549,8 @@ impl PageCache {
                     if page.state == PageState::Clean {
                         if let Some(removed) = file.pages.remove(&offset) {
                             freed += removed.data.len();
-                            self.current_size = self.current_size.saturating_sub(removed.data.len());
+                            self.current_size =
+                                self.current_size.saturating_sub(removed.data.len());
                         }
                     }
                 }

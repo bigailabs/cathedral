@@ -255,7 +255,10 @@ impl SyncWorker {
                 false
             }
             Err(_) => {
-                warn!("Timeout syncing {} after {}s", path, STORAGE_OP_TIMEOUT_SECS);
+                warn!(
+                    "Timeout syncing {} after {}s",
+                    path, STORAGE_OP_TIMEOUT_SECS
+                );
                 false
             }
         };
@@ -325,7 +328,11 @@ impl SyncWorker {
             info!("All dirty files flushed successfully");
             Ok(())
         } else {
-            let msg = format!("Failed to flush {} files: {}", failures.len(), failures.join(", "));
+            let msg = format!(
+                "Failed to flush {} files: {}",
+                failures.len(),
+                failures.join(", ")
+            );
             error!("{}", msg);
             Err(msg)
         }
@@ -429,7 +436,12 @@ mod tests {
 
         // Write some data to cache
         let data = b"Hello, World!";
-        cache.write().await.write("/test.txt", 0, data).await.unwrap();
+        cache
+            .write()
+            .await
+            .write("/test.txt", 0, data)
+            .await
+            .unwrap();
 
         // Create sync worker with zero quiet period for immediate sync
         let worker = SyncWorker::with_options(
@@ -466,7 +478,12 @@ mod tests {
         let cache = Arc::new(RwLock::new(PageCache::new(10)));
 
         // Write some data
-        cache.write().await.write("/test.txt", 0, b"hello").await.unwrap();
+        cache
+            .write()
+            .await
+            .write("/test.txt", 0, b"hello")
+            .await
+            .unwrap();
 
         // Create worker with 200ms quiet period
         let worker = SyncWorker::with_options(
@@ -504,7 +521,12 @@ mod tests {
         for i in 0..5 {
             let path = format!("/file-{}.txt", i);
             let data = format!("content-{}", i);
-            cache.write().await.write(&path, 0, data.as_bytes()).await.unwrap();
+            cache
+                .write()
+                .await
+                .write(&path, 0, data.as_bytes())
+                .await
+                .unwrap();
         }
 
         // Create worker (don't start)
@@ -536,7 +558,12 @@ mod tests {
         let storage = Arc::new(MockStorage::new());
         let cache = Arc::new(RwLock::new(PageCache::new(10)));
 
-        cache.write().await.write("/test.txt", 0, b"hello").await.unwrap();
+        cache
+            .write()
+            .await
+            .write("/test.txt", 0, b"hello")
+            .await
+            .unwrap();
 
         // Verify page is dirty
         assert!(cache.read().await.has_dirty_pages().await);
@@ -580,7 +607,12 @@ mod tests {
         assert!(!stats.has_dirty_pages);
 
         // Write some data
-        cache.write().await.write("/test.txt", 0, b"hello").await.unwrap();
+        cache
+            .write()
+            .await
+            .write("/test.txt", 0, b"hello")
+            .await
+            .unwrap();
 
         let stats = worker.get_stats().await;
         assert!(stats.has_dirty_pages);
