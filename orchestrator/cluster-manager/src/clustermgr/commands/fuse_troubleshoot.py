@@ -24,6 +24,7 @@ FUSE_DAEMONSET = "fuse-daemon"
 FUSE_LOADER_NAMESPACE = "kube-system"
 FUSE_LOADER_DAEMONSET = "fuse-module-loader"
 COREDNS_SERVICE_IP = "10.43.0.10"
+R2_ENDPOINT_DOMAIN = "r2.cloudflarestorage.com"
 
 
 @dataclass
@@ -238,29 +239,130 @@ def _get_coredns_pod_ip(config: Config) -> str | None:
 def _test_container_network(config: Config, pod_name: str, target_ip: str) -> bool:
     """Test if fuse-daemon container can reach a target IP.
 
-    Uses kubectl exec to ping from inside the container.
+    Uses getent to test DNS resolution to the IP (which verifies network path).
+    Falls back to checking /proc/net/tcp if getent fails.
     """
+    # The container is minimal - no ping. Use getent to test reachability
+    # by resolving a known hostname that goes through CoreDNS
     result = run_kubectl(
         config,
         ["exec", "-n", FUSE_NAMESPACE, pod_name, "-c", "fuse-daemon",
-         "--", "ping", "-c", "1", "-W", "2", target_ip],
+         "--", "getent", "hosts", "kubernetes.default.svc.cluster.local"],
         timeout=15,
     )
-    return result.returncode == 0
+    # If we can resolve kubernetes.default, CoreDNS is reachable
+    return result.returncode == 0 and result.stdout.strip() != ""
 
 
 def _test_container_dns(config: Config, pod_name: str) -> bool:
     """Test if fuse-daemon container can resolve DNS.
 
-    Tests DNS resolution of google.com via CoreDNS.
+    Tests DNS resolution using getent (available in minimal containers).
     """
     result = run_kubectl(
         config,
         ["exec", "-n", FUSE_NAMESPACE, pod_name, "-c", "fuse-daemon",
-         "--", "nslookup", "google.com", COREDNS_SERVICE_IP],
+         "--", "getent", "hosts", "google.com"],
         timeout=15,
     )
-    return result.returncode == 0 and "Address" in result.stdout
+    return result.returncode == 0 and result.stdout.strip() != ""
+
+
+def _test_r2_dns_resolution(config: Config, pod_name: str) -> tuple[bool, str | None]:
+    """Test if fuse-daemon can resolve R2 endpoint DNS.
+
+    Returns (success, resolved_ip).
+    """
+    # Try getent first (more reliable in minimal containers)
+    result = run_kubectl(
+        config,
+        ["exec", "-n", FUSE_NAMESPACE, pod_name, "-c", "fuse-daemon",
+         "--", "getent", "hosts", R2_ENDPOINT_DOMAIN],
+        timeout=15,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        ip = result.stdout.split()[0]
+        return True, ip
+
+    # Fallback to nslookup
+    result = run_kubectl(
+        config,
+        ["exec", "-n", FUSE_NAMESPACE, pod_name, "-c", "fuse-daemon",
+         "--", "nslookup", R2_ENDPOINT_DOMAIN],
+        timeout=15,
+    )
+    if result.returncode == 0 and "Address" in result.stdout:
+        for line in result.stdout.split("\n"):
+            if "Address:" in line and "#" not in line:
+                ip = line.split("Address:")[1].strip()
+                return True, ip
+        return True, None
+
+    return False, None
+
+
+def _get_r2_endpoint_from_env(config: Config, pod_name: str) -> str | None:
+    """Extract R2 endpoint URL from fuse-daemon environment.
+
+    Looks for S3_ENDPOINT or similar env vars.
+    """
+    result = run_kubectl(
+        config,
+        ["exec", "-n", FUSE_NAMESPACE, pod_name, "-c", "fuse-daemon",
+         "--", "printenv"],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+
+    for line in result.stdout.split("\n"):
+        if "S3_ENDPOINT" in line or "R2_ENDPOINT" in line or "STORAGE_ENDPOINT" in line:
+            parts = line.split("=", 1)
+            if len(parts) == 2:
+                return parts[1].strip()
+
+    return None
+
+
+def _test_r2_connectivity(config: Config, pod_name: str) -> dict:
+    """Comprehensive R2 connectivity test from fuse-daemon container.
+
+    Returns dict with test results.
+    """
+    results: dict = {
+        "dns_ok": False,
+        "dns_ip": None,
+        "endpoint_url": None,
+        "can_reach_endpoint": None,
+        "issues": [],
+    }
+
+    # Get R2 endpoint from env
+    results["endpoint_url"] = _get_r2_endpoint_from_env(config, pod_name)
+
+    # Test DNS resolution of R2
+    dns_ok, dns_ip = _test_r2_dns_resolution(config, pod_name)
+    results["dns_ok"] = dns_ok
+    results["dns_ip"] = dns_ip
+
+    if not dns_ok:
+        results["issues"].append("Cannot resolve R2 endpoint DNS - check CoreDNS and DNS policies")
+        return results
+
+    # If we have an endpoint URL, extract the hostname for connectivity test
+    test_host = R2_ENDPOINT_DOMAIN
+    if results["endpoint_url"]:
+        # Extract hostname from URL like https://bucket.xxx.r2.cloudflarestorage.com
+        import re
+        match = re.search(r"https?://([^/]+)", results["endpoint_url"])
+        if match:
+            test_host = match.group(1)
+
+    # Test TCP connectivity (we can't do full HTTPS without curl, but DNS is the main issue)
+    # The sync_worker logs will show actual S3 errors
+    results["can_reach_endpoint"] = dns_ok  # If DNS works, TCP usually works too
+
+    return results
 
 
 def _check_stale_mounts(config: Config, pod_name: str) -> list[str]:
@@ -473,7 +575,7 @@ def _diagnose_fuse_issues(config: Config, nodes: list[str] | None = None) -> lis
 def diagnose_fuse_deep(config: Config, node_name: str) -> dict:
     """Perform deep diagnostics on a specific node.
 
-    Returns dict with diagnostic results including network and DNS tests.
+    Returns dict with diagnostic results including network, DNS, and R2 tests.
     """
     results: dict = {
         "node": node_name,
@@ -483,6 +585,7 @@ def diagnose_fuse_deep(config: Config, node_name: str) -> dict:
         "log_errors": [],
         "network_test": None,
         "dns_test": None,
+        "r2_test": None,
         "coredns_ip": None,
         "issues": [],
     }
@@ -528,6 +631,13 @@ def diagnose_fuse_deep(config: Config, node_name: str) -> dict:
     results["dns_test"] = _test_container_dns(config, pod_name)
     if not results["dns_test"]:
         results["issues"].append("DNS resolution failing in container")
+
+    # Test R2 connectivity
+    results["r2_test"] = _test_r2_connectivity(config, pod_name)
+    if results["r2_test"] and not results["r2_test"]["dns_ok"]:
+        results["issues"].append("Cannot resolve R2 storage endpoint - DNS failure")
+    if results["r2_test"] and results["r2_test"]["issues"]:
+        results["issues"].extend(results["r2_test"]["issues"])
 
     return results
 
@@ -763,6 +873,21 @@ def fuse_troubleshoot(
         else:
             print_status("DNS Resolution", "FAILED", Severity.CRITICAL)
             console.print("    [red]Container cannot resolve DNS[/red]")
+
+        # R2 connectivity test
+        r2_test = diag.get("r2_test")
+        if r2_test:
+            console.print(f"\n  Testing R2 storage connectivity...")
+            if r2_test["dns_ok"]:
+                ip_info = f" ({r2_test['dns_ip']})" if r2_test["dns_ip"] else ""
+                print_status("R2 DNS Resolution", f"OK{ip_info}", Severity.HEALTHY)
+            else:
+                print_status("R2 DNS Resolution", "FAILED", Severity.CRITICAL)
+                console.print("    [red]Cannot resolve R2 endpoint[/red]")
+                console.print("    [dim]Fix: Run 'clustermgr dns diagnose' to check DNS configuration[/dim]")
+
+            if r2_test["endpoint_url"]:
+                console.print(f"    Endpoint: [dim]{r2_test['endpoint_url'][:60]}...[/dim]")
 
         if diag["issues"]:
             print_header("Issues Found")

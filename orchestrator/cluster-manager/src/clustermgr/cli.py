@@ -33,6 +33,7 @@ from clustermgr.commands import (
     pod_troubleshoot,
     resources,
     scaling,
+    storage,
     topology,
     ud,
     wg,
@@ -134,6 +135,7 @@ main.add_command(latency_matrix)
 main.add_command(pod_troubleshoot)
 main.add_command(node_pressure)
 main.add_command(fuse_troubleshoot)
+main.add_command(storage)
 
 # Register commands - Security
 main.add_command(audit_pods)

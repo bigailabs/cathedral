@@ -67,6 +67,152 @@ class FlannelRuleStatus:
     packet_count: int
 
 
+@dataclass
+class CoreDNSDeploymentType:
+    """CoreDNS deployment type information."""
+
+    is_daemonset: bool
+    is_deployment: bool
+    desired: int
+    ready: int
+
+
+@dataclass
+class NodeDNSEndpoint:
+    """DNS endpoint availability per node."""
+
+    node_name: str
+    has_local_endpoint: bool
+    endpoint_ip: str | None
+    is_ready: bool
+
+
+def _get_nodes_without_local_dns(config: Config) -> list[str]:
+    """Get nodes that have no local CoreDNS endpoint.
+
+    When internalTrafficPolicy=Local, nodes without local endpoints
+    will have DNS failures due to iptables DROP rules.
+    """
+    # Get all node names
+    nodes_result = run_kubectl(
+        config,
+        ["get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"],
+        timeout=15,
+    )
+    if nodes_result.returncode != 0:
+        return []
+    all_nodes = set(nodes_result.stdout.strip().split())
+
+    # Get nodes that have CoreDNS pods
+    pods = _get_coredns_pods(config)
+    nodes_with_coredns = {p.node for p in pods if p.ready}
+
+    return sorted(all_nodes - nodes_with_coredns)
+
+
+def _get_node_dns_endpoints(config: Config) -> list[NodeDNSEndpoint]:
+    """Get DNS endpoint status per node.
+
+    Checks EndpointSlice to see which nodes have local DNS endpoints.
+    """
+    # Get EndpointSlice for kube-dns
+    result = run_kubectl(
+        config,
+        ["get", "endpointslices", "-n", "kube-system", "-l", "kubernetes.io/service-name=kube-dns", "-o", "json"],
+        timeout=15,
+    )
+    if result.returncode != 0:
+        return []
+
+    data = parse_json_output(result.stdout)
+
+    # Build map of node -> endpoint info
+    node_endpoints: dict[str, NodeDNSEndpoint] = {}
+
+    for item in data.get("items", []):
+        for endpoint in item.get("endpoints", []):
+            node_name = endpoint.get("nodeName", "")
+            if not node_name:
+                continue
+
+            addresses = endpoint.get("addresses", [])
+            is_ready = endpoint.get("conditions", {}).get("ready", False)
+
+            node_endpoints[node_name] = NodeDNSEndpoint(
+                node_name=node_name,
+                has_local_endpoint=True,
+                endpoint_ip=addresses[0] if addresses else None,
+                is_ready=is_ready,
+            )
+
+    # Get all nodes and mark those without endpoints
+    nodes_result = run_kubectl(
+        config,
+        ["get", "nodes", "-o", "jsonpath={.items[*].metadata.name}"],
+        timeout=15,
+    )
+    if nodes_result.returncode == 0:
+        all_nodes = nodes_result.stdout.strip().split()
+        for node in all_nodes:
+            if node not in node_endpoints:
+                node_endpoints[node] = NodeDNSEndpoint(
+                    node_name=node,
+                    has_local_endpoint=False,
+                    endpoint_ip=None,
+                    is_ready=False,
+                )
+
+    return sorted(node_endpoints.values(), key=lambda x: x.node_name)
+
+
+def _get_coredns_deployment_type(config: Config) -> CoreDNSDeploymentType:
+    """Detect whether CoreDNS is deployed as DaemonSet or Deployment."""
+    # Check for DaemonSet first
+    ds_result = run_kubectl(
+        config,
+        ["get", "daemonset", "coredns", "-n", "kube-system", "-o",
+         "jsonpath={.status.desiredNumberScheduled}/{.status.numberReady}"],
+        timeout=15,
+    )
+    if ds_result.returncode == 0 and "/" in ds_result.stdout:
+        parts = ds_result.stdout.strip().split("/")
+        if len(parts) == 2:
+            desired = int(parts[0]) if parts[0] else 0
+            ready = int(parts[1]) if parts[1] else 0
+            return CoreDNSDeploymentType(
+                is_daemonset=True,
+                is_deployment=False,
+                desired=desired,
+                ready=ready,
+            )
+
+    # Check for Deployment
+    deploy_result = run_kubectl(
+        config,
+        ["get", "deployment", "coredns", "-n", "kube-system", "-o",
+         "jsonpath={.spec.replicas}/{.status.readyReplicas}"],
+        timeout=15,
+    )
+    if deploy_result.returncode == 0 and "/" in deploy_result.stdout:
+        parts = deploy_result.stdout.strip().split("/")
+        if len(parts) == 2:
+            desired = int(parts[0]) if parts[0] else 0
+            ready = int(parts[1]) if parts[1] else 0
+            return CoreDNSDeploymentType(
+                is_daemonset=False,
+                is_deployment=True,
+                desired=desired,
+                ready=ready,
+            )
+
+    return CoreDNSDeploymentType(
+        is_daemonset=False,
+        is_deployment=False,
+        desired=0,
+        ready=0,
+    )
+
+
 def _get_gpu_node_names(config: Config) -> set[str]:
     """Get names of GPU nodes (WireGuard-connected)."""
     result = run_kubectl(
@@ -224,6 +370,22 @@ def status(ctx: click.Context) -> None:
     """
     config: Config = ctx.obj
 
+    print_header("CoreDNS Deployment")
+
+    deploy_type = _get_coredns_deployment_type(config)
+    if deploy_type.is_daemonset:
+        type_str = "[green]DaemonSet[/green]"
+        health_ok = deploy_type.ready == deploy_type.desired and deploy_type.desired > 0
+    elif deploy_type.is_deployment:
+        type_str = "[yellow]Deployment[/yellow]"
+        health_ok = deploy_type.ready == deploy_type.desired and deploy_type.desired > 0
+    else:
+        type_str = "[red]Not Found[/red]"
+        health_ok = False
+
+    health_str = f"[green]{deploy_type.ready}/{deploy_type.desired}[/green]" if health_ok else f"[red]{deploy_type.ready}/{deploy_type.desired}[/red]"
+    console.print(f"Type: {type_str}  Ready: {health_str}")
+
     print_header("CoreDNS Pod Status")
 
     pods = _get_coredns_pods(config)
@@ -325,6 +487,66 @@ def iptables_status(ctx: click.Context) -> None:
     else:
         console.print("\n[red]Some servers are missing the Flannel fix rule[/red]")
         console.print("Run 'clustermgr dns fix --iptables' to apply")
+
+
+@dns.command("endpoints")
+@click.pass_context
+def endpoints(ctx: click.Context) -> None:
+    """Show DNS endpoint availability per node.
+
+    Critical for diagnosing internalTrafficPolicy: Local issues.
+    Nodes without local endpoints will have DNS failures.
+    """
+    config: Config = ctx.obj
+
+    print_header("DNS Endpoints Per Node")
+
+    svc_status = _get_dns_service_status(config)
+    if svc_status:
+        policy = svc_status.internal_traffic_policy
+        policy_color = "green" if policy == "Local" else "yellow"
+        console.print(f"kube-dns internalTrafficPolicy: [{policy_color}]{policy}[/{policy_color}]")
+
+        if policy == "Local":
+            console.print("[dim]With Local policy, nodes without local endpoints will have DNS failures[/dim]\n")
+
+    endpoints = _get_node_dns_endpoints(config)
+    if not endpoints:
+        console.print("[red]Failed to get DNS endpoints[/red]")
+        ctx.exit(1)
+
+    table = Table()
+    table.add_column("Node", style="cyan")
+    table.add_column("Local Endpoint")
+    table.add_column("Endpoint IP")
+    table.add_column("Ready")
+
+    nodes_without_dns = 0
+    for ep in endpoints:
+        if ep.has_local_endpoint:
+            endpoint_str = "[green]Yes[/green]"
+            ip_str = ep.endpoint_ip or "-"
+            ready_str = "[green]Yes[/green]" if ep.is_ready else "[yellow]No[/yellow]"
+        else:
+            endpoint_str = "[red]NO[/red]"
+            ip_str = "-"
+            ready_str = "[red]-[/red]"
+            nodes_without_dns += 1
+
+        table.add_row(ep.node_name[:40], endpoint_str, ip_str, ready_str)
+
+    console.print(table)
+
+    if nodes_without_dns > 0 and svc_status and svc_status.internal_traffic_policy == "Local":
+        console.print(f"\n[red]WARNING: {nodes_without_dns} node(s) have NO local DNS endpoint![/red]")
+        console.print("[red]Pods on these nodes will fail DNS resolution due to iptables DROP rules.[/red]")
+        console.print("\n[bold]Remediation options:[/bold]")
+        console.print("  1. Deploy CoreDNS as DaemonSet (recommended): kubectl apply -f orchestrator/k8s/core/coredns-daemonset.yaml")
+        console.print("  2. Scale CoreDNS Deployment and add affinity rules")
+        console.print("\nRun 'clustermgr dns diagnose' for full analysis")
+    elif nodes_without_dns > 0:
+        console.print(f"\n[yellow]{nodes_without_dns} node(s) have no local DNS endpoint[/yellow]")
+        console.print("[dim]This is only a problem if internalTrafficPolicy is set to Local[/dim]")
 
 
 @dns.command("test")
@@ -520,20 +742,38 @@ def diagnose(ctx: click.Context) -> None:
                 if not has_local:
                     issues.append(("CoreDNS", f"GPU node {gpu[:20]} has no local CoreDNS", Severity.WARNING))
 
-    # Check 2: kube-dns service
+    # Check 2: kube-dns service and local endpoint coverage
     console.print("Checking kube-dns service...")
     svc_status = _get_dns_service_status(config)
     if not svc_status:
         issues.append(("kube-dns", "Service not found", Severity.CRITICAL))
-    elif svc_status.internal_traffic_policy != "Local":
-        issues.append(("kube-dns", f"internalTrafficPolicy is '{svc_status.internal_traffic_policy}', should be 'Local'", Severity.WARNING))
+    else:
+        if svc_status.internal_traffic_policy != "Local":
+            issues.append(("kube-dns", f"internalTrafficPolicy is '{svc_status.internal_traffic_policy}', should be 'Local'", Severity.WARNING))
 
-    # Check 3: Flannel iptables rules
-    console.print("Checking Flannel iptables rules...")
-    flannel_statuses = _check_flannel_rules(config)
-    for s in flannel_statuses:
-        if not s.has_fix_rule:
-            issues.append(("Flannel", f"Server {s.server} missing MASQUERADE fix rule", Severity.CRITICAL))
+        # CRITICAL: Check for nodes without local DNS endpoints when using Local policy
+        if svc_status.internal_traffic_policy == "Local":
+            nodes_without_dns = _get_nodes_without_local_dns(config)
+            if nodes_without_dns:
+                issue_desc = f"{len(nodes_without_dns)} node(s) have NO local DNS endpoint: {', '.join(nodes_without_dns[:3])}"
+                if len(nodes_without_dns) > 3:
+                    issue_desc += f" (+{len(nodes_without_dns) - 3} more)"
+                issues.append(("kube-dns", issue_desc, Severity.CRITICAL))
+                issues.append(("kube-dns", "Pods on these nodes will fail DNS - deploy CoreDNS as DaemonSet", Severity.CRITICAL))
+
+    # Check 3: Flannel iptables rules (only relevant for Deployment mode)
+    # With DaemonSet + internalTrafficPolicy: Local, DNS never crosses nodes
+    deploy_type = _get_coredns_deployment_type(config)
+    flannel_statuses: list[FlannelRuleStatus] = []
+    if deploy_type.is_daemonset and svc_status and svc_status.internal_traffic_policy == "Local":
+        console.print("Skipping Flannel check (DaemonSet + Local policy = local DNS only)")
+    else:
+        console.print("Checking Flannel iptables rules...")
+        flannel_statuses = _check_flannel_rules(config)
+        for s in flannel_statuses:
+            if not s.has_fix_rule:
+                # Only warn, not critical, since the fix rule was optional
+                issues.append(("Flannel", f"Server {s.server} missing MASQUERADE fix rule (optional with DaemonSet)", Severity.WARNING))
 
     # Check 4: Conntrack (informational)
     console.print("Checking conntrack entries...")
@@ -577,21 +817,21 @@ def diagnose(ctx: click.Context) -> None:
         console.print("Or apply individually:")
         console.print("  clustermgr dns fix --iptables      # Fix Flannel MASQUERADE rules")
         console.print("  clustermgr dns fix --traffic-policy # Set internalTrafficPolicy to Local")
-        console.print("  clustermgr dns fix --scale-coredns  # Scale CoreDNS to 3 replicas")
+        console.print("  clustermgr dns fix --verify-coredns  # Verify CoreDNS health")
         ctx.exit(1)
 
 
 @dns.command("fix")
 @click.option("--iptables", is_flag=True, help="Fix Flannel MASQUERADE iptables rules")
 @click.option("--traffic-policy", is_flag=True, help="Set kube-dns internalTrafficPolicy to Local")
-@click.option("--scale-coredns", is_flag=True, help="Scale CoreDNS to 3 replicas")
+@click.option("--verify-coredns", is_flag=True, help="Verify CoreDNS health (DaemonSet or Deployment)")
 @click.option("--all", "fix_all", is_flag=True, help="Apply all fixes")
 @click.pass_context
 def fix_dns(
     ctx: click.Context,
     iptables: bool,
     traffic_policy: bool,
-    scale_coredns: bool,
+    verify_coredns: bool,
     fix_all: bool,
 ) -> None:
     """Apply DNS fixes for GPU nodes.
@@ -599,16 +839,16 @@ def fix_dns(
     Applies fixes documented in GPU-NODE-DNS-RESOLUTION-FIX.md:
     - Flannel iptables MASQUERADE skip rule
     - kube-dns internalTrafficPolicy: Local
-    - CoreDNS scaling for local availability
+    - CoreDNS health verification (DaemonSet or Deployment)
     """
     config: Config = ctx.obj
 
     if fix_all:
-        iptables = traffic_policy = scale_coredns = True
+        iptables = traffic_policy = verify_coredns = True
 
-    if not any([iptables, traffic_policy, scale_coredns]):
+    if not any([iptables, traffic_policy, verify_coredns]):
         console.print("[yellow]No fix option specified. Use --all or specific options.[/yellow]")
-        console.print("Options: --iptables, --traffic-policy, --scale-coredns, --all")
+        console.print("Options: --iptables, --traffic-policy, --verify-coredns, --all")
         return
 
     print_header("Applying DNS Fixes")
@@ -619,8 +859,8 @@ def fix_dns(
             console.print("  - Add iptables RETURN rule to FLANNEL-POSTRTG on all k3s servers")
         if traffic_policy:
             console.print("  - Patch kube-dns service with internalTrafficPolicy: Local")
-        if scale_coredns:
-            console.print("  - Scale CoreDNS deployment to 3 replicas")
+        if verify_coredns:
+            console.print("  - Verify CoreDNS health and node coverage")
         return
 
     if not config.no_confirm:
@@ -629,8 +869,8 @@ def fix_dns(
             fixes.append("Flannel iptables rules")
         if traffic_policy:
             fixes.append("kube-dns traffic policy")
-        if scale_coredns:
-            fixes.append("CoreDNS scaling")
+        if verify_coredns:
+            fixes.append("CoreDNS verification")
 
         if not confirm(f"Apply fixes: {', '.join(fixes)}?"):
             console.print("Aborted.")
@@ -675,35 +915,41 @@ fi
         else:
             print_status("kube-dns", f"Failed: {result.stderr}", Severity.CRITICAL)
 
-    # Fix 3: Scale CoreDNS
-    if scale_coredns:
-        console.print("\n[bold]Fix 3: CoreDNS scaling[/bold]")
+    # Fix 3: Verify CoreDNS health
+    if verify_coredns:
+        console.print("\n[bold]Fix 3: CoreDNS health verification[/bold]")
 
-        result = run_kubectl(
-            config,
-            ["scale", "deployment", "coredns", "-n", "kube-system", "--replicas=3"],
-            timeout=30,
-        )
+        deploy_type = _get_coredns_deployment_type(config)
+        pods = _get_coredns_pods(config)
+        ready_pods = len([p for p in pods if p.ready])
+        gpu_pods = len([p for p in pods if p.is_gpu_node and p.ready])
 
-        if result.returncode == 0:
-            print_status("CoreDNS", "Scaled to 3 replicas", Severity.HEALTHY)
-
-            # Wait for pods to be ready
-            console.print("  Waiting for pods to be ready...")
-            import time
-            for _ in range(6):
-                time.sleep(5)
-                pods = _get_coredns_pods(config)
-                ready = len([p for p in pods if p.ready])
-                if ready >= 3:
-                    break
-
-            pods = _get_coredns_pods(config)
-            ready = len([p for p in pods if p.ready])
-            gpu_pods = len([p for p in pods if p.is_gpu_node and p.ready])
-            console.print(f"  Ready: {ready}/3, On GPU nodes: {gpu_pods}")
+        if deploy_type.is_daemonset:
+            console.print(f"  Deployment type: DaemonSet")
+            health_ok = deploy_type.ready == deploy_type.desired and deploy_type.desired > 0
+            if health_ok:
+                print_status("CoreDNS", f"DaemonSet healthy: {deploy_type.ready}/{deploy_type.desired} nodes", Severity.HEALTHY)
+            else:
+                print_status("CoreDNS", f"DaemonSet degraded: {deploy_type.ready}/{deploy_type.desired} nodes", Severity.WARNING)
+        elif deploy_type.is_deployment:
+            console.print(f"  Deployment type: Deployment (legacy)")
+            if deploy_type.ready < 3:
+                console.print("  Scaling Deployment to 3 replicas...")
+                result = run_kubectl(
+                    config,
+                    ["scale", "deployment", "coredns", "-n", "kube-system", "--replicas=3"],
+                    timeout=30,
+                )
+                if result.returncode == 0:
+                    print_status("CoreDNS", "Scaled to 3 replicas", Severity.HEALTHY)
+                else:
+                    print_status("CoreDNS", f"Failed to scale: {result.stderr}", Severity.CRITICAL)
+            else:
+                print_status("CoreDNS", f"Deployment healthy: {deploy_type.ready}/{deploy_type.desired}", Severity.HEALTHY)
         else:
-            print_status("CoreDNS", f"Failed: {result.stderr}", Severity.CRITICAL)
+            print_status("CoreDNS", "Not found - neither DaemonSet nor Deployment", Severity.CRITICAL)
+
+        console.print(f"  Total ready pods: {ready_pods}, On GPU nodes: {gpu_pods}")
 
     console.print("\n[green]DNS fixes applied[/green]")
     console.print("Run 'clustermgr dns diagnose' to verify")
