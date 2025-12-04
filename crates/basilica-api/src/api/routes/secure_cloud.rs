@@ -312,6 +312,17 @@ pub async fn start_secure_cloud_rental(
             message: format!("Offering {} not found", request.offering_id),
         })?;
 
+    // 2.5. Validate user has sufficient balance before creating rental
+    if let Some(billing_client) = &state.billing_client {
+        let hourly_cost = offering.hourly_rate_per_gpu * Decimal::from(offering.gpu_count.max(1));
+        crate::api::middleware::validate_balance_for_rental(
+            billing_client,
+            &auth.user_id,
+            hourly_cost,
+        )
+        .await?;
+    }
+
     // 3. Deploy via aggregator (which creates the rental/deployment record)
     let deployment = state
         .aggregator_service

@@ -1,82 +1,64 @@
-use crate::{api::middleware::AuthContext, error::ApiError, server::AppState};
-use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
+use crate::error::ApiError;
+use basilica_billing::BillingClient;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
-const MIN_BALANCE_USD: f64 = 10.0;
-
-pub async fn balance_validation_middleware(
-    State(state): State<AppState>,
-    req: Request<Body>,
-    next: Next,
-) -> Result<Response, Response> {
-    let auth_context = req
-        .extensions()
-        .get::<AuthContext>()
-        .ok_or_else(|| {
-            ApiError::Internal {
-                message: "Auth context not found in request extensions".to_string(),
-            }
-            .into_response()
-        })?
-        .clone();
-
-    if let Some(billing_client) = &state.billing_client {
-        match billing_client.get_balance(&auth_context.user_id).await {
-            Ok(balance_response) => match Decimal::from_str(&balance_response.available_balance) {
-                Ok(available_balance) => {
-                    let min_balance =
-                        Decimal::from_f64_retain(MIN_BALANCE_USD).unwrap_or(Decimal::ZERO);
-
-                    if available_balance < min_balance {
-                        tracing::warn!(
-                            "Blocking rental for user {} with insufficient balance: {} < {}",
-                            auth_context.user_id,
-                            available_balance,
-                            min_balance
-                        );
-                        return Err(ApiError::InsufficientBalance {
-                            message: "Your account balance is below the minimum required to create rentals".to_string(),
-                            current_balance: balance_response.available_balance.clone(),
-                            required: MIN_BALANCE_USD.to_string(),
-                        }
-                        .into_response());
-                    } else {
-                        tracing::debug!(
-                            "User {} has sufficient balance: {} >= {}",
-                            auth_context.user_id,
-                            available_balance,
-                            min_balance
-                        );
-                    }
-                }
-                Err(e) => {
+/// Validates that a user has sufficient balance to start a rental.
+///
+/// # Arguments
+/// * `billing_client` - Client for billing service
+/// * `user_id` - The user's ID
+/// * `hourly_cost` - The total hourly cost of the rental (GPU price × GPU count)
+///
+/// # Returns
+/// * `Ok(())` if the user has sufficient balance to cover at least 1 hour
+/// * `Err(ApiError::InsufficientBalance)` if balance is too low
+/// * `Err(ApiError::Internal)` if the billing service fails or balance cannot be parsed
+pub async fn validate_balance_for_rental(
+    billing_client: &BillingClient,
+    user_id: &str,
+    hourly_cost: Decimal,
+) -> Result<(), ApiError> {
+    match billing_client.get_balance(user_id).await {
+        Ok(balance_response) => match Decimal::from_str(&balance_response.available_balance) {
+            Ok(available_balance) => {
+                if available_balance < hourly_cost {
                     tracing::warn!(
-                        "Failed to parse balance as Decimal: {}. Allowing request to proceed.",
-                        e
+                        "Blocking rental for user {} with insufficient balance: {} < {}",
+                        user_id,
+                        available_balance,
+                        hourly_cost
                     );
+                    return Err(ApiError::InsufficientBalance {
+                        message: format!(
+                            "Insufficient balance to cover 1 hour of rental (${:.2}/hr)",
+                            hourly_cost
+                        ),
+                        current_balance: balance_response.available_balance.clone(),
+                        required: format!("{:.2}", hourly_cost),
+                    });
                 }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "Balance check failed for user {}: {}. Allowing request to proceed (graceful degradation).",
-                    auth_context.user_id,
-                    e
-                );
-            }
-        }
-    } else {
-        tracing::debug!(
-            "Billing client not available. Skipping balance validation for user {}.",
-            auth_context.user_id
-        );
-    }
 
-    Ok(next.run(req).await)
+                tracing::debug!(
+                    "User {} has sufficient balance: {} >= {}",
+                    user_id,
+                    available_balance,
+                    hourly_cost
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse balance as Decimal: {}", e);
+                Err(ApiError::Internal {
+                    message: "Failed to parse balance".to_string(),
+                })
+            }
+        },
+        Err(e) => {
+            tracing::error!("Balance check failed for user {}: {}", user_id, e);
+            Err(ApiError::Internal {
+                message: "Balance check failed".to_string(),
+            })
+        }
+    }
 }
