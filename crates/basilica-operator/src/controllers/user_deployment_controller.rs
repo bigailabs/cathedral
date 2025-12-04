@@ -296,7 +296,8 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
 fn build_health_probes(
     port: u32,
     health_check: &Option<crate::crd::user_deployment::HealthCheckConfig>,
-) -> (Option<Probe>, Option<Probe>) {
+    is_gpu_workload: bool,
+) -> (Option<Probe>, Option<Probe>, Option<Probe>) {
     match health_check {
         Some(config) => {
             let liveness_probe = config.liveness.as_ref().map(|probe_cfg| Probe {
@@ -325,9 +326,27 @@ fn build_health_probes(
                 ..Default::default()
             });
 
-            (liveness_probe, readiness_probe)
+            (liveness_probe, readiness_probe, None)
         }
         None => {
+            // For GPU workloads, use startup probe to allow slow model loading
+            // Startup probe: 10s period * 60 failures = 600s (10 min) max startup time
+            let startup_probe = if is_gpu_workload {
+                Some(Probe {
+                    tcp_socket: Some(TCPSocketAction {
+                        port: IntOrString::Int(port as i32),
+                        ..Default::default()
+                    }),
+                    initial_delay_seconds: Some(10),
+                    period_seconds: Some(10),
+                    timeout_seconds: Some(5),
+                    failure_threshold: Some(60),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+
             let liveness_probe = Some(Probe {
                 tcp_socket: Some(TCPSocketAction {
                     port: IntOrString::Int(port as i32),
@@ -352,7 +371,7 @@ fn build_health_probes(
                 ..Default::default()
             });
 
-            (liveness_probe, readiness_probe)
+            (liveness_probe, readiness_probe, startup_probe)
         }
     }
 }
@@ -447,7 +466,13 @@ pub fn render_deployment(
 ) -> anyhow::Result<Deployment> {
     let (pod_sc, container_sc) = build_security_contexts();
     let (mut volumes, mut volume_mounts) = build_writable_volumes();
-    let (liveness_probe, readiness_probe) = build_health_probes(spec.port, &spec.health_check);
+    let is_gpu_workload = spec
+        .resources
+        .as_ref()
+        .and_then(|r| r.gpus.as_ref())
+        .is_some();
+    let (liveness_probe, readiness_probe, startup_probe) =
+        build_health_probes(spec.port, &spec.health_check, is_gpu_workload);
 
     let storage_config = spec
         .storage
@@ -547,6 +572,7 @@ pub fn render_deployment(
         volume_mounts: Some(volume_mounts),
         liveness_probe,
         readiness_probe,
+        startup_probe,
         ..Default::default()
     };
 
