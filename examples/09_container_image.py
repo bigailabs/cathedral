@@ -12,7 +12,6 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 09_container_image.py
 """
-import time
 import requests
 from basilica import BasilicaClient
 
@@ -37,9 +36,9 @@ print(f"Instance: {deployment.name}")
 print(f"State:    {deployment.state}")
 print(f"URL:      {deployment.url}")
 
-# Test
+# Test the deployment
+# Note: client.deploy() already waits for readiness via wait_until_ready()
 print("\nTesting nginx...")
-time.sleep(5)
 try:
     r = requests.get(deployment.url, timeout=10)
     print(f"  Status: {r.status_code}")
