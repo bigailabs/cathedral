@@ -52,6 +52,13 @@ pub trait K8sClient: Send + Sync {
         status: crate::crd::user_deployment::UserDeploymentStatus,
     ) -> Result<()>;
 
+    async fn patch_user_deployment_status_ssa(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()>;
+
     async fn create_node_profile(
         &self,
         ns: &str,
@@ -282,6 +289,15 @@ impl K8sClient for MockK8sClient {
             .ok_or_else(|| anyhow!("UserDeployment not found: {}/{}", ns, name))?;
         ud.status = Some(status);
         Ok(())
+    }
+
+    async fn patch_user_deployment_status_ssa(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()> {
+        self.update_user_deployment_status(ns, name, status).await
     }
 
     async fn create_node_profile(
@@ -843,6 +859,30 @@ impl K8sClient for KubeClient {
         let api: kube::Api<UserDeployment> = self.api(ns);
         let patch = serde_json::json!({"status": status});
         api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
+
+    async fn patch_user_deployment_status_ssa(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<UserDeployment> = self.api(ns);
+        let patch = serde_json::json!({
+            "apiVersion": "basilica.ai/v1",
+            "kind": "UserDeployment",
+            "metadata": {
+                "name": name,
+                "namespace": ns
+            },
+            "status": status
+        });
+        let params = PatchParams::apply("basilica-operator-status").force();
+        api.patch_status(name, &params, &Patch::Apply(&patch))
             .await
             .map(|_| ())
             .map_err(|e| anyhow!(e))
