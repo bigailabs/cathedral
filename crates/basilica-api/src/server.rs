@@ -201,6 +201,145 @@ async fn process_secure_cloud_billing(billing_client: &BillingClient, db: &PgPoo
     }
 }
 
+/// Process credit exhaustion check for active rentals.
+/// Polls billing service for rental status and terminates rentals when credits are exhausted.
+/// Reuses the same stop logic as user-initiated stops to ensure consistency.
+async fn process_credit_exhaustion_check(
+    billing_client: &BillingClient,
+    validator_client: &ValidatorClient,
+    aggregator_service: &basilica_aggregator::service::AggregatorService,
+    db: &PgPool,
+) {
+    use basilica_protocol::billing::RentalStatus as BillingRentalStatus;
+
+    // Query all active community cloud rentals
+    let community_rentals: Vec<(String,)> =
+        match sqlx::query_as("SELECT rental_id FROM user_rentals")
+            .fetch_all(db)
+            .await
+        {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::error!("Failed to query community rentals for credit check: {}", e);
+                return;
+            }
+        };
+
+    // Query all active secure cloud rentals
+    let secure_rentals: Vec<(String,)> =
+        match sqlx::query_as("SELECT id FROM secure_cloud_rentals WHERE status = 'running'")
+            .fetch_all(db)
+            .await
+        {
+            Ok(records) => records,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to query secure cloud rentals for credit check: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+    // Check community cloud rentals
+    for (rental_id,) in community_rentals {
+        match billing_client.get_rental_status(&rental_id).await {
+            Ok(response) => {
+                if response.status == BillingRentalStatus::FailedInsufficientCredits as i32 {
+                    tracing::info!(
+                        "Rental {} failed due to insufficient credits, terminating",
+                        rental_id
+                    );
+
+                    // Use the shared stop logic to terminate infrastructure and archive
+                    // Skip billing finalize since billing already handled it when detecting insufficient credits
+                    match api::routes::rentals::stop_community_rental_internal(
+                        validator_client,
+                        Some(billing_client),
+                        db,
+                        &rental_id,
+                        "insufficient_credits",
+                        BillingRentalStatus::FailedInsufficientCredits,
+                        true, // Skip billing finalize - already done by billing service
+                    )
+                    .await
+                    {
+                        Ok(_total_cost) => {
+                            tracing::info!(
+                                "Successfully stopped rental {} due to credit exhaustion",
+                                rental_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to stop rental {} due to credit exhaustion: {}",
+                                rental_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to get billing status for rental {}: {}",
+                    rental_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Check secure cloud rentals
+    for (rental_id,) in secure_rentals {
+        match billing_client.get_rental_status(&rental_id).await {
+            Ok(response) => {
+                if response.status == BillingRentalStatus::FailedInsufficientCredits as i32 {
+                    tracing::info!(
+                        "Secure cloud rental {} failed due to insufficient credits, terminating",
+                        rental_id
+                    );
+
+                    // Use the shared stop logic to delete deployment and archive
+                    // Skip billing finalize since billing already handled it when detecting insufficient credits
+                    match api::routes::secure_cloud::stop_secure_cloud_rental_internal(
+                        aggregator_service,
+                        Some(billing_client),
+                        db,
+                        &rental_id,
+                        "insufficient_credits",
+                        BillingRentalStatus::FailedInsufficientCredits,
+                        true, // Skip billing finalize - already done by billing service
+                    )
+                    .await
+                    {
+                        Ok(_total_cost) => {
+                            tracing::info!(
+                                "Successfully stopped secure cloud rental {} due to credit exhaustion",
+                                rental_id
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to stop secure cloud rental {} due to credit exhaustion: {}",
+                                rental_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to get billing status for secure cloud rental {}: {}",
+                    rental_id,
+                    e
+                );
+            }
+        }
+    }
+}
+
 /// Process health check for a single secure cloud rental
 async fn process_secure_cloud_health_check(
     rental_id: &str,
@@ -249,7 +388,7 @@ async fn process_secure_cloud_health_check(
 
             // Finalize billing before archiving
             if let Some(billing_client) = billing_client {
-                use basilica_protocol::billing::FinalizeRentalRequest;
+                use basilica_protocol::billing::{FinalizeRentalRequest, RentalStatus};
                 use prost_types::Timestamp;
 
                 let now = chrono::Utc::now();
@@ -262,6 +401,7 @@ async fn process_secure_cloud_health_check(
                     rental_id: rental_id.to_string(),
                     end_time: Some(end_timestamp),
                     termination_reason: "vm_deleted_externally".to_string(),
+                    target_status: RentalStatus::Stopped.into(),
                 };
 
                 if let Err(e) = billing_client.finalize_rental(finalize_request).await {
@@ -813,6 +953,34 @@ impl Server {
             );
         } else {
             tracing::info!("Secure Cloud billing task not started (billing service disabled)");
+        }
+
+        // Start credit exhaustion check task (polls billing for insufficient credits)
+        if let Some(billing_client) = state.billing_client.clone() {
+            let credit_check_db = state.db.clone();
+            let credit_check_validator = state.validator_client.clone();
+            let credit_check_aggregator = state.aggregator_service.clone();
+            let credit_check_billing = billing_client.clone();
+            let credit_check_interval = std::time::Duration::from_secs(30);
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(credit_check_interval);
+                loop {
+                    interval.tick().await;
+                    process_credit_exhaustion_check(
+                        &credit_check_billing,
+                        &credit_check_validator,
+                        &credit_check_aggregator,
+                        &credit_check_db,
+                    )
+                    .await;
+                }
+            });
+
+            tracing::info!(
+                "Started credit exhaustion check task (interval: {} seconds)",
+                credit_check_interval.as_secs()
+            );
         }
 
         // Start node token cleanup task
