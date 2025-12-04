@@ -155,6 +155,12 @@
       run_once: true
       tags: ["fuse", "core"]
 
+    - name: Deploy NVIDIA Device Plugin DaemonSet
+      ansible.builtin.command: kubectl apply -f /opt/basilica/k8s/plugins/nvidia-device-plugin.yml
+      changed_when: true
+      run_once: true
+      tags: ["gpu", "nvidia", "core"]
+
     - name: Apply CRDs
       ansible.builtin.command: kubectl apply -f /opt/basilica/basilica-crds.yaml
       changed_when: true

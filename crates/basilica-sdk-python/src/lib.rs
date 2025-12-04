@@ -428,6 +428,7 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Deployment types
     m.add_class::<types::EnvVar>()?;
+    m.add_class::<types::GpuRequirementsSpec>()?;
     m.add_class::<types::ResourceRequirements>()?;
     m.add_class::<types::ReplicaStatus>()?;
     m.add_class::<types::PodInfo>()?;

@@ -813,6 +813,27 @@ impl ApiK8sClient for K8sClient {
             .map(|(k, v)| json!({"name": k, "value": v}))
             .collect();
 
+        let mut resources_obj = json!({
+            "cpu": req.resources.as_ref().map(|r| r.cpu.clone()).unwrap_or_else(|| "500m".to_string()),
+            "memory": req.resources.as_ref().map(|r| r.memory.clone()).unwrap_or_else(|| "512Mi".to_string()),
+        });
+
+        if let Some(ref resources) = req.resources {
+            if let Some(ref gpus) = resources.gpus {
+                let mut gpu_obj = json!({
+                    "count": gpus.count,
+                    "model": gpus.model,
+                });
+                if let Some(ref cuda) = gpus.min_cuda_version {
+                    gpu_obj["minCudaVersion"] = json!(cuda);
+                }
+                if let Some(vram) = gpus.min_gpu_memory_gb {
+                    gpu_obj["minGpuMemoryGb"] = json!(vram);
+                }
+                resources_obj["gpus"] = gpu_obj;
+            }
+        }
+
         let mut spec = json!({
             "userId": user_id,
             "instanceName": instance_name,
@@ -822,10 +843,7 @@ impl ApiK8sClient for K8sClient {
             "command": req.command,
             "args": req.args,
             "env": env_objs,
-            "resources": {
-                "cpu": req.resources.as_ref().map(|r| r.cpu.clone()).unwrap_or_else(|| "500m".to_string()),
-                "memory": req.resources.as_ref().map(|r| r.memory.clone()).unwrap_or_else(|| "512Mi".to_string()),
-            },
+            "resources": resources_obj,
             "pathPrefix": path_prefix,
             "ttlSeconds": req.ttl_seconds,
             "public": req.public,

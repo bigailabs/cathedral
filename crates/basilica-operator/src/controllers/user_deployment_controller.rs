@@ -5,7 +5,7 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, HTTPGetAction, HostPathVolumeSource, PodSecurityContext, PodSpec,
     PodTemplateSpec, Probe, ResourceRequirements, SecurityContext, Service, ServicePort,
-    ServiceSpec, TCPSocketAction, Toleration, Volume, VolumeMount,
+    ServiceSpec, TCPSocketAction, Toleration, TopologySpreadConstraint, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
     NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::controllers::storage_utils;
-use crate::crd::user_deployment::{EnvVar as CrdEnvVar, UserDeployment, UserDeploymentStatus};
+use crate::crd::user_deployment::{
+    EnvVar as CrdEnvVar, TopologySpreadConfig, UserDeployment, UserDeploymentStatus,
+};
 use crate::k8s_client::K8sClient;
 use anyhow::Result;
 use tracing::{debug, error};
@@ -99,6 +101,30 @@ fn to_quantity(s: &str) -> Quantity {
     Quantity(s.to_string())
 }
 
+fn parse_cuda_major_version(version: &str) -> Option<u32> {
+    version.split('.').next()?.parse().ok()
+}
+
+fn scale_cpu_quantity(cpu: &str, ratio: f32) -> Quantity {
+    if (ratio - 1.0).abs() < f32::EPSILON {
+        return Quantity(cpu.to_string());
+    }
+
+    if let Some(millis_str) = cpu.strip_suffix('m') {
+        if let Ok(millis) = millis_str.parse::<f64>() {
+            let scaled = (millis * ratio as f64).ceil() as u64;
+            return Quantity(format!("{}m", scaled));
+        }
+    }
+
+    if let Ok(cores) = cpu.parse::<f64>() {
+        let millis = (cores * 1000.0 * ratio as f64).ceil() as u64;
+        return Quantity(format!("{}m", millis));
+    }
+
+    Quantity(cpu.to_string())
+}
+
 fn sanitize_user_id(user_id: &str) -> String {
     let mut out = String::new();
     for ch in user_id.chars() {
@@ -127,8 +153,9 @@ fn build_resources(
     cpu: &str,
     memory: &str,
     gpu: Option<&crate::crd::user_deployment::GpuSpec>,
+    cpu_request_ratio: f32,
 ) -> ResourceRequirements {
-    build_resources_with_storage(cpu, memory, gpu, None)
+    build_resources_with_storage(cpu, memory, gpu, None, cpu_request_ratio)
 }
 
 fn build_resources_with_storage(
@@ -136,12 +163,18 @@ fn build_resources_with_storage(
     memory: &str,
     gpu: Option<&crate::crd::user_deployment::GpuSpec>,
     ephemeral_storage: Option<&str>,
+    cpu_request_ratio: f32,
 ) -> ResourceRequirements {
     let mut limits = BTreeMap::new();
     let mut requests = BTreeMap::new();
+
     limits.insert("cpu".to_string(), to_quantity(cpu));
     limits.insert("memory".to_string(), to_quantity(memory));
-    requests.insert("cpu".to_string(), to_quantity(cpu));
+
+    requests.insert(
+        "cpu".to_string(),
+        scale_cpu_quantity(cpu, cpu_request_ratio),
+    );
     requests.insert("memory".to_string(), to_quantity(memory));
 
     if let Some(storage) = ephemeral_storage {
@@ -178,14 +211,55 @@ fn build_node_selector() -> BTreeMap<String, String> {
     selector
 }
 
-fn build_tolerations() -> Vec<Toleration> {
-    vec![Toleration {
+fn build_tolerations(has_gpu: bool) -> Vec<Toleration> {
+    let mut tolerations = vec![Toleration {
         key: Some("basilica.ai/workloads-only".into()),
         operator: Some("Equal".into()),
         value: Some("true".into()),
         effect: Some("NoSchedule".into()),
         ..Default::default()
-    }]
+    }];
+
+    if has_gpu {
+        tolerations.push(Toleration {
+            key: Some("nvidia.com/gpu".into()),
+            operator: Some("Exists".into()),
+            value: None,
+            effect: Some("NoSchedule".into()),
+            ..Default::default()
+        });
+    }
+
+    tolerations
+}
+
+fn build_topology_spread(
+    instance_name: &str,
+    replicas: u32,
+    config: Option<&TopologySpreadConfig>,
+) -> Option<Vec<TopologySpreadConstraint>> {
+    if replicas <= 1 {
+        return None;
+    }
+
+    let max_skew = config.map(|c| c.max_skew).unwrap_or(1);
+    let when_unsatisfiable = config
+        .map(|c| c.when_unsatisfiable.clone())
+        .unwrap_or_else(|| "ScheduleAnyway".to_string());
+
+    Some(vec![TopologySpreadConstraint {
+        max_skew,
+        topology_key: "kubernetes.io/hostname".to_string(),
+        when_unsatisfiable,
+        label_selector: Some(LabelSelector {
+            match_labels: Some(BTreeMap::from([(
+                "app".to_string(),
+                instance_name.to_string(),
+            )])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }])
 }
 
 fn build_writable_volumes() -> (
@@ -222,7 +296,8 @@ fn build_security_contexts() -> (Option<PodSecurityContext>, Option<SecurityCont
 fn build_health_probes(
     port: u32,
     health_check: &Option<crate::crd::user_deployment::HealthCheckConfig>,
-) -> (Option<Probe>, Option<Probe>) {
+    is_gpu_workload: bool,
+) -> (Option<Probe>, Option<Probe>, Option<Probe>) {
     match health_check {
         Some(config) => {
             let liveness_probe = config.liveness.as_ref().map(|probe_cfg| Probe {
@@ -251,9 +326,27 @@ fn build_health_probes(
                 ..Default::default()
             });
 
-            (liveness_probe, readiness_probe)
+            (liveness_probe, readiness_probe, None)
         }
         None => {
+            // For GPU workloads, use startup probe to allow slow model loading
+            // Startup probe: 10s period * 60 failures = 600s (10 min) max startup time
+            let startup_probe = if is_gpu_workload {
+                Some(Probe {
+                    tcp_socket: Some(TCPSocketAction {
+                        port: IntOrString::Int(port as i32),
+                        ..Default::default()
+                    }),
+                    initial_delay_seconds: Some(10),
+                    period_seconds: Some(10),
+                    timeout_seconds: Some(5),
+                    failure_threshold: Some(60),
+                    ..Default::default()
+                })
+            } else {
+                None
+            };
+
             let liveness_probe = Some(Probe {
                 tcp_socket: Some(TCPSocketAction {
                     port: IntOrString::Int(port as i32),
@@ -278,7 +371,7 @@ fn build_health_probes(
                 ..Default::default()
             });
 
-            (liveness_probe, readiness_probe)
+            (liveness_probe, readiness_probe, startup_probe)
         }
     }
 }
@@ -324,12 +417,16 @@ fn build_node_affinity(gpu: &crate::crd::user_deployment::GpuSpec) -> Option<Aff
         },
     ];
 
-    if let Some(_cuda_version) = &gpu.min_cuda_version {
-        match_expressions.push(NodeSelectorRequirement {
-            key: "basilica.ai/cuda-version".to_string(),
-            operator: "Exists".to_string(),
-            values: None,
-        });
+    if let Some(min_cuda) = &gpu.min_cuda_version {
+        if let Some(min_major) = parse_cuda_major_version(min_cuda) {
+            let acceptable_versions: Vec<String> =
+                (min_major..=20).map(|n| n.to_string()).collect();
+            match_expressions.push(NodeSelectorRequirement {
+                key: "basilica.ai/cuda-major".to_string(),
+                operator: "In".to_string(),
+                values: Some(acceptable_versions),
+            });
+        }
     }
 
     if let Some(min_vram) = gpu.min_gpu_memory_gb {
@@ -369,7 +466,13 @@ pub fn render_deployment(
 ) -> anyhow::Result<Deployment> {
     let (pod_sc, container_sc) = build_security_contexts();
     let (mut volumes, mut volume_mounts) = build_writable_volumes();
-    let (liveness_probe, readiness_probe) = build_health_probes(spec.port, &spec.health_check);
+    let is_gpu_workload = spec
+        .resources
+        .as_ref()
+        .and_then(|r| r.gpus.as_ref())
+        .is_some();
+    let (liveness_probe, readiness_probe, startup_probe) =
+        build_health_probes(spec.port, &spec.health_check, is_gpu_workload);
 
     let storage_config = spec
         .storage
@@ -413,9 +516,14 @@ pub fn render_deployment(
     }
 
     let resources = if let Some(ref res) = spec.resources {
-        build_resources(&res.cpu, &res.memory, res.gpus.as_ref())
+        build_resources(
+            &res.cpu,
+            &res.memory,
+            res.gpus.as_ref(),
+            res.cpu_request_ratio,
+        )
     } else {
-        build_resources("100m", "128Mi", None)
+        build_resources("100m", "128Mi", None, 1.0)
     };
 
     let (container_command, container_args) = if let Some(storage) = storage_config {
@@ -464,6 +572,7 @@ pub fn render_deployment(
         volume_mounts: Some(volume_mounts),
         liveness_probe,
         readiness_probe,
+        startup_probe,
         ..Default::default()
     };
 
@@ -479,8 +588,13 @@ pub fn render_deployment(
             security_context: pod_sc,
             termination_grace_period_seconds: Some(120),
             node_selector: Some(build_node_selector()),
-            tolerations: Some(build_tolerations()),
+            tolerations: Some(build_tolerations(gpu_config.is_some())),
             affinity: node_affinity,
+            topology_spread_constraints: build_topology_spread(
+                instance_name,
+                spec.replicas,
+                spec.topology_spread.as_ref(),
+            ),
             restart_policy: Some("Always".into()),
             automount_service_account_token: Some(false),
             volumes: Some(volumes),
@@ -797,6 +911,7 @@ mod tests {
             cpu: "500m".to_string(),
             memory: "512Mi".to_string(),
             gpus: None,
+            cpu_request_ratio: 1.0,
         });
 
         let deployment = render_deployment("my-app", "u-user123", &spec).unwrap();
@@ -1011,13 +1126,25 @@ mod tests {
     }
 
     #[test]
-    fn test_tolerations() {
-        let tolerations = build_tolerations();
+    fn test_tolerations_without_gpu() {
+        let tolerations = build_tolerations(false);
         assert_eq!(tolerations.len(), 1);
         assert_eq!(
             tolerations[0].key.as_deref(),
             Some("basilica.ai/workloads-only")
         );
+    }
+
+    #[test]
+    fn test_tolerations_with_gpu() {
+        let tolerations = build_tolerations(true);
+        assert_eq!(tolerations.len(), 2);
+        assert_eq!(
+            tolerations[0].key.as_deref(),
+            Some("basilica.ai/workloads-only")
+        );
+        assert_eq!(tolerations[1].key.as_deref(), Some("nvidia.com/gpu"));
+        assert_eq!(tolerations[1].operator.as_deref(), Some("Exists"));
         assert_eq!(tolerations[0].operator.as_deref(), Some("Equal"));
         assert_eq!(tolerations[0].value.as_deref(), Some("true"));
         assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
@@ -1066,6 +1193,7 @@ mod tests {
                 min_cuda_version: Some("12.2".to_string()),
                 min_gpu_memory_gb: Some(40),
             }),
+            cpu_request_ratio: 1.0,
         });
 
         let deployment = render_deployment("gpu-app", "u-user123", &spec).unwrap();
@@ -1102,10 +1230,14 @@ mod tests {
 
         let cuda_expr = exprs
             .iter()
-            .find(|e| e.key == "basilica.ai/cuda-version")
+            .find(|e| e.key == "basilica.ai/cuda-major")
             .unwrap();
-        assert_eq!(cuda_expr.operator, "Exists");
-        assert!(cuda_expr.values.is_none());
+        assert_eq!(cuda_expr.operator, "In");
+        let cuda_values = cuda_expr.values.as_ref().unwrap();
+        assert!(cuda_values.contains(&"12".to_string()));
+        assert!(cuda_values.contains(&"13".to_string()));
+        assert!(cuda_values.contains(&"20".to_string()));
+        assert!(!cuda_values.contains(&"11".to_string()));
 
         let gpu_memory_expr = exprs
             .iter()
@@ -1287,6 +1419,7 @@ mod tests {
                 min_cuda_version: None,
                 min_gpu_memory_gb: None,
             }),
+            cpu_request_ratio: 1.0,
         });
 
         let deployment = render_deployment("minimal-gpu-app", "u-user123", &spec).unwrap();
@@ -1312,7 +1445,7 @@ mod tests {
 
         let cuda_expr = expressions
             .iter()
-            .find(|e| e.key == "basilica.ai/cuda-version");
+            .find(|e| e.key == "basilica.ai/cuda-major");
         assert!(cuda_expr.is_none());
 
         let gpu_memory_expr = expressions
@@ -1344,5 +1477,143 @@ mod tests {
         let resources = container.resources.as_ref().unwrap();
         let limits = resources.limits.as_ref().unwrap();
         assert_eq!(limits.get("nvidia.com/gpu").unwrap().0, "1");
+    }
+
+    #[test]
+    fn test_scale_cpu_quantity() {
+        assert_eq!(scale_cpu_quantity("1000m", 0.75).0, "750m");
+        assert_eq!(scale_cpu_quantity("2000m", 0.75).0, "1500m");
+        assert_eq!(scale_cpu_quantity("4", 0.75).0, "3000m");
+        assert_eq!(scale_cpu_quantity("2", 0.5).0, "1000m");
+        assert_eq!(scale_cpu_quantity("500m", 1.0).0, "500m");
+        assert_eq!(scale_cpu_quantity("333m", 0.75).0, "250m");
+    }
+
+    #[test]
+    fn test_burstable_cpu_resources() {
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "burstable-app".to_string(),
+            "nginx:latest".to_string(),
+            1,
+            80,
+            "/deployments/burstable-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "2000m".to_string(),
+            memory: "4Gi".to_string(),
+            gpus: None,
+            cpu_request_ratio: 0.75,
+        });
+
+        let deployment = render_deployment("burstable-app", "u-user123", &spec).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+        let container = &pod_spec.containers[0];
+        let resources = container.resources.as_ref().unwrap();
+
+        let limits = resources.limits.as_ref().unwrap();
+        let requests = resources.requests.as_ref().unwrap();
+
+        assert_eq!(limits.get("cpu").unwrap().0, "2000m");
+        assert_eq!(limits.get("memory").unwrap().0, "4Gi");
+
+        assert_eq!(requests.get("cpu").unwrap().0, "1500m");
+        assert_eq!(requests.get("memory").unwrap().0, "4Gi");
+    }
+
+    #[test]
+    fn test_topology_spread_not_applied_for_single_replica() {
+        let result = build_topology_spread("my-app", 1, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_topology_spread_applied_for_multi_replica() {
+        let result = build_topology_spread("my-app", 3, None);
+        assert!(result.is_some());
+
+        let constraints = result.unwrap();
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].max_skew, 1);
+        assert_eq!(constraints[0].topology_key, "kubernetes.io/hostname");
+        assert_eq!(constraints[0].when_unsatisfiable, "ScheduleAnyway");
+
+        let label_selector = constraints[0].label_selector.as_ref().unwrap();
+        let match_labels = label_selector.match_labels.as_ref().unwrap();
+        assert_eq!(match_labels.get("app"), Some(&"my-app".to_string()));
+    }
+
+    #[test]
+    fn test_topology_spread_with_custom_config() {
+        let config = TopologySpreadConfig {
+            max_skew: 2,
+            when_unsatisfiable: "DoNotSchedule".to_string(),
+        };
+
+        let result = build_topology_spread("my-app", 3, Some(&config));
+        assert!(result.is_some());
+
+        let constraints = result.unwrap();
+        assert_eq!(constraints[0].max_skew, 2);
+        assert_eq!(constraints[0].when_unsatisfiable, "DoNotSchedule");
+    }
+
+    #[test]
+    fn test_deployment_with_topology_spread() {
+        use crate::crd::user_deployment::TopologySpreadConfig;
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "spread-app".to_string(),
+            "nginx:latest".to_string(),
+            3,
+            80,
+            "/deployments/spread-app".to_string(),
+        )
+        .with_topology_spread(TopologySpreadConfig {
+            max_skew: 1,
+            when_unsatisfiable: "ScheduleAnyway".to_string(),
+        });
+
+        let deployment = render_deployment("spread-app", "u-user123", &spec).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        assert!(pod_spec.topology_spread_constraints.is_some());
+        let constraints = pod_spec.topology_spread_constraints.unwrap();
+        assert_eq!(constraints.len(), 1);
+        assert_eq!(constraints[0].max_skew, 1);
+    }
+
+    #[test]
+    fn test_deployment_with_gpu_has_gpu_toleration() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "gpu-app".to_string(),
+            "pytorch/pytorch:latest".to_string(),
+            1,
+            8080,
+            "/deployments/gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "4000m".to_string(),
+            memory: "16Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 1,
+                model: vec!["A100".to_string()],
+                min_cuda_version: None,
+                min_gpu_memory_gb: None,
+            }),
+            cpu_request_ratio: 1.0,
+        });
+
+        let deployment = render_deployment("gpu-app", "u-user123", &spec).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+        let tolerations = pod_spec.tolerations.unwrap();
+
+        assert!(tolerations
+            .iter()
+            .any(|t| t.key.as_deref() == Some("nvidia.com/gpu")));
     }
 }

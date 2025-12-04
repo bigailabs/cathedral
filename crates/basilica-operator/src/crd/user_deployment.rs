@@ -47,6 +47,8 @@ pub struct UserDeploymentSpec {
     pub priority: Option<String>,
     #[serde(default)]
     pub public: bool,
+    #[serde(default)]
+    pub topology_spread: Option<TopologySpreadConfig>,
 }
 
 fn default_enable_billing() -> bool {
@@ -60,6 +62,28 @@ pub struct EnvVar {
     pub value: String,
 }
 
+fn default_cpu_request_ratio() -> f32 {
+    1.0
+}
+
+fn default_max_skew() -> i32 {
+    1
+}
+
+fn default_when_unsatisfiable() -> String {
+    "ScheduleAnyway".to_string()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologySpreadConfig {
+    #[serde(default = "default_max_skew")]
+    #[schemars(range(min = 1, max = 10))]
+    pub max_skew: i32,
+    #[serde(default = "default_when_unsatisfiable")]
+    pub when_unsatisfiable: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceRequirements {
@@ -67,6 +91,9 @@ pub struct ResourceRequirements {
     pub memory: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpus: Option<GpuSpec>,
+    #[serde(default = "default_cpu_request_ratio")]
+    #[schemars(range(min = 0.5, max = 1.0))]
+    pub cpu_request_ratio: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Hash)]
@@ -246,6 +273,7 @@ impl UserDeploymentSpec {
             suspended: false,
             priority: None,
             public: false,
+            topology_spread: None,
         }
     }
 
@@ -306,6 +334,11 @@ impl UserDeploymentSpec {
 
     pub fn with_public(mut self, public: bool) -> Self {
         self.public = public;
+        self
+    }
+
+    pub fn with_topology_spread(mut self, topology_spread: TopologySpreadConfig) -> Self {
+        self.topology_spread = Some(topology_spread);
         self
     }
 }
@@ -486,6 +519,7 @@ mod tests {
             cpu: "500m".to_string(),
             memory: "512Mi".to_string(),
             gpus: None,
+            cpu_request_ratio: 1.0,
         };
 
         let spec = UserDeploymentSpec::new(
@@ -503,6 +537,7 @@ mod tests {
         assert_eq!(res.cpu, "500m");
         assert_eq!(res.memory, "512Mi");
         assert!(res.gpus.is_none());
+        assert!((res.cpu_request_ratio - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -518,6 +553,7 @@ mod tests {
             cpu: "8".to_string(),
             memory: "32Gi".to_string(),
             gpus: Some(gpu_spec.clone()),
+            cpu_request_ratio: 0.75,
         };
 
         let spec = UserDeploymentSpec::new(
@@ -538,6 +574,7 @@ mod tests {
         assert_eq!(gpus.model.len(), 2);
         assert_eq!(gpus.min_cuda_version, Some("12.0".to_string()));
         assert_eq!(gpus.min_gpu_memory_gb, Some(80));
+        assert!((res.cpu_request_ratio - 0.75).abs() < f32::EPSILON);
     }
 
     #[test]

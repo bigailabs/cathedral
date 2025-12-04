@@ -28,6 +28,7 @@ from clustermgr.commands.node_pressure import node_pressure
 from clustermgr.commands.pod_troubleshoot import pod_troubleshoot
 from clustermgr.commands.resources import resources
 from clustermgr.commands.scaling import scaling
+from clustermgr.commands.storage import storage
 from clustermgr.commands.topology import topology
 from clustermgr.commands.ud import ud
 from clustermgr.commands.wg import wg
@@ -61,6 +62,7 @@ __all__ = [
     "pod_troubleshoot",
     "resources",
     "scaling",
+    "storage",
     "topology",
     "ud",
     "wg",

@@ -642,7 +642,8 @@ use basilica_sdk::types::{
     DeleteDeploymentResponse as SdkDeleteDeploymentResponse,
     DeploymentListResponse as SdkDeploymentListResponse,
     DeploymentResponse as SdkDeploymentResponse, DeploymentSummary as SdkDeploymentSummary,
-    EnvVar as SdkEnvVar, PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
+    EnvVar as SdkEnvVar, GpuRequirementsSpec as SdkGpuRequirementsSpec,
+    PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
     ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
     StorageBackend as SdkStorageBackend, StorageSpec as SdkStorageSpec,
 };
@@ -685,6 +686,63 @@ impl From<SdkEnvVar> for EnvVar {
     }
 }
 
+/// GPU requirements specification for container deployments
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct GpuRequirementsSpec {
+    #[pyo3(get, set)]
+    pub count: u32,
+    #[pyo3(get, set)]
+    pub model: Vec<String>,
+    #[pyo3(get, set)]
+    pub min_cuda_version: Option<String>,
+    #[pyo3(get, set)]
+    pub min_gpu_memory_gb: Option<u32>,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl GpuRequirementsSpec {
+    #[new]
+    #[pyo3(signature = (count, model, min_cuda_version=None, min_gpu_memory_gb=None))]
+    fn new(
+        count: u32,
+        model: Vec<String>,
+        min_cuda_version: Option<String>,
+        min_gpu_memory_gb: Option<u32>,
+    ) -> Self {
+        Self {
+            count,
+            model,
+            min_cuda_version,
+            min_gpu_memory_gb,
+        }
+    }
+}
+
+impl From<GpuRequirementsSpec> for SdkGpuRequirementsSpec {
+    fn from(gpu: GpuRequirementsSpec) -> Self {
+        Self {
+            count: gpu.count,
+            model: gpu.model,
+            min_cuda_version: gpu.min_cuda_version,
+            min_gpu_memory_gb: gpu.min_gpu_memory_gb,
+        }
+    }
+}
+
+impl From<SdkGpuRequirementsSpec> for GpuRequirementsSpec {
+    fn from(gpu: SdkGpuRequirementsSpec) -> Self {
+        Self {
+            count: gpu.count,
+            model: gpu.model,
+            min_cuda_version: gpu.min_cuda_version,
+            min_gpu_memory_gb: gpu.min_gpu_memory_gb,
+        }
+    }
+}
+
 /// Resource requirements for container deployments
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass]
@@ -694,14 +752,17 @@ pub struct ResourceRequirements {
     pub cpu: String,
     #[pyo3(get, set)]
     pub memory: String,
+    #[pyo3(get, set)]
+    pub gpus: Option<GpuRequirementsSpec>,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl ResourceRequirements {
     #[new]
-    fn new(cpu: String, memory: String) -> Self {
-        Self { cpu, memory }
+    #[pyo3(signature = (cpu, memory, gpus=None))]
+    fn new(cpu: String, memory: String, gpus: Option<GpuRequirementsSpec>) -> Self {
+        Self { cpu, memory, gpus }
     }
 }
 
@@ -710,7 +771,7 @@ impl From<ResourceRequirements> for SdkResourceRequirements {
         Self {
             cpu: res.cpu,
             memory: res.memory,
-            gpus: None,
+            gpus: res.gpus.map(|g| g.into()),
         }
     }
 }
@@ -720,6 +781,7 @@ impl From<SdkResourceRequirements> for ResourceRequirements {
         Self {
             cpu: res.cpu,
             memory: res.memory,
+            gpus: res.gpus.map(|g| g.into()),
         }
     }
 }

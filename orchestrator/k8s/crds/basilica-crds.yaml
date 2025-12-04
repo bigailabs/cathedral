@@ -846,6 +846,12 @@ spec:
                 properties:
                   cpu:
                     type: string
+                  cpuRequestRatio:
+                    default: 1.0
+                    format: float
+                    maximum: 1.0
+                    minimum: 0.5
+                    type: number
                   gpus:
                     nullable: true
                     properties:
@@ -932,6 +938,19 @@ spec:
               suspended:
                 default: false
                 type: boolean
+              topologySpread:
+                nullable: true
+                properties:
+                  maxSkew:
+                    default: 1
+                    format: int32
+                    maximum: 10.0
+                    minimum: 1.0
+                    type: integer
+                  whenUnsatisfiable:
+                    default: ScheduleAnyway
+                    type: string
+                type: object
               ttlSeconds:
                 format: uint32
                 minimum: 0.0

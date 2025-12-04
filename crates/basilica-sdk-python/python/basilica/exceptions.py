@@ -1,0 +1,390 @@
+"""
+Basilica SDK Exception Hierarchy
+
+This module provides a comprehensive exception hierarchy for the Basilica SDK,
+offering clear and actionable error messages for common failure scenarios.
+
+Exception Hierarchy:
+    BasilicaError (base)
+    ├── AuthenticationError     - Token/API key issues
+    ├── AuthorizationError      - Permission denied
+    ├── ValidationError         - Invalid input parameters
+    ├── DeploymentError         - Deployment lifecycle errors
+    │   ├── DeploymentNotFound  - Deployment doesn't exist
+    │   ├── DeploymentTimeout   - Deployment didn't become ready
+    │   └── DeploymentFailed    - Deployment entered failed state
+    ├── ResourceError           - GPU/node availability issues
+    ├── StorageError            - Storage configuration errors
+    └── NetworkError            - Connection/API communication issues
+
+Example:
+    >>> from basilica.exceptions import DeploymentTimeout
+    >>> try:
+    ...     deployment = client.deploy("my-app", source="app.py")
+    ... except DeploymentTimeout as e:
+    ...     print(f"Deployment timed out after {e.timeout_seconds}s")
+    ...     print(f"Last state: {e.last_state}")
+"""
+
+from typing import Optional
+
+
+class BasilicaError(Exception):
+    """
+    Base exception for all Basilica SDK errors.
+
+    All Basilica-specific exceptions inherit from this class, making it easy
+    to catch all SDK errors with a single except clause.
+
+    Attributes:
+        message: Human-readable error description
+        code: Optional error code from the API
+        retryable: Whether the operation might succeed if retried
+
+    Example:
+        >>> try:
+        ...     client.deploy(...)
+        ... except BasilicaError as e:
+        ...     print(f"Basilica error: {e}")
+    """
+
+    def __init__(
+        self,
+        message: str,
+        code: Optional[str] = None,
+        retryable: bool = False
+    ):
+        self.message = message
+        self.code = code
+        self.retryable = retryable
+        super().__init__(message)
+
+    def __str__(self) -> str:
+        if self.code:
+            return f"[{self.code}] {self.message}"
+        return self.message
+
+
+class AuthenticationError(BasilicaError):
+    """
+    Raised when API authentication fails.
+
+    This typically occurs when:
+    - No API token is provided
+    - The API token is invalid or expired
+    - The BASILICA_API_TOKEN environment variable is not set
+
+    Example:
+        >>> # No token set
+        >>> client = BasilicaClient()
+        AuthenticationError: No API token provided. Set BASILICA_API_TOKEN or pass api_key parameter.
+
+    Resolution:
+        Create a token using: basilica tokens create
+        Then either:
+        - Set environment variable: export BASILICA_API_TOKEN="basilica_..."
+        - Pass directly: BasilicaClient(api_key="basilica_...")
+    """
+
+    def __init__(self, message: str = "Authentication failed"):
+        super().__init__(
+            message=message,
+            code="AUTH_FAILED",
+            retryable=False
+        )
+
+
+class AuthorizationError(BasilicaError):
+    """
+    Raised when the authenticated user lacks permission for an operation.
+
+    This occurs when:
+    - Attempting to access another user's deployment
+    - API token lacks required scopes
+    - Account has been suspended
+
+    Example:
+        >>> client.get_deployment("someone-elses-deployment")
+        AuthorizationError: Access denied to deployment 'someone-elses-deployment'
+    """
+
+    def __init__(self, message: str = "Permission denied", resource: Optional[str] = None):
+        self.resource = resource
+        if resource and "denied" not in message.lower():
+            message = f"Access denied to {resource}: {message}"
+        super().__init__(
+            message=message,
+            code="FORBIDDEN",
+            retryable=False
+        )
+
+
+class ValidationError(BasilicaError):
+    """
+    Raised when input parameters fail validation.
+
+    This occurs when:
+    - Instance name contains invalid characters
+    - Port number is out of range
+    - Resource values are invalid (e.g., negative CPU)
+    - Required parameters are missing
+
+    Attributes:
+        field: The field that failed validation (if known)
+        value: The invalid value that was provided
+
+    Example:
+        >>> client.deploy(name="My App!")  # Invalid characters
+        ValidationError: Instance name 'My App!' is invalid. Use lowercase letters, numbers, and hyphens only.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        field: Optional[str] = None,
+        value: Optional[str] = None
+    ):
+        self.field = field
+        self.value = value
+        super().__init__(
+            message=message,
+            code="VALIDATION_ERROR",
+            retryable=False
+        )
+
+
+class DeploymentError(BasilicaError):
+    """
+    Base exception for deployment-related errors.
+
+    This is the parent class for all deployment lifecycle errors.
+    Catch this to handle any deployment issue.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        instance_name: Optional[str] = None,
+        code: str = "DEPLOYMENT_ERROR",
+        retryable: bool = False
+    ):
+        self.instance_name = instance_name
+        super().__init__(message=message, code=code, retryable=retryable)
+
+
+class DeploymentNotFound(DeploymentError):
+    """
+    Raised when a deployment cannot be found.
+
+    This occurs when:
+    - The deployment was deleted
+    - The instance name is incorrect
+    - The deployment belongs to another user
+
+    Example:
+        >>> client.get_deployment("nonexistent")
+        DeploymentNotFound: Deployment 'nonexistent' not found
+    """
+
+    def __init__(self, instance_name: str):
+        super().__init__(
+            message=f"Deployment '{instance_name}' not found",
+            instance_name=instance_name,
+            code="NOT_FOUND",
+            retryable=False
+        )
+
+
+class DeploymentTimeout(DeploymentError):
+    """
+    Raised when a deployment fails to become ready within the timeout.
+
+    Attributes:
+        timeout_seconds: The timeout that was exceeded
+        last_state: The last observed deployment state
+        replicas_ready: Number of replicas that were ready
+        replicas_desired: Total number of replicas desired
+
+    Example:
+        >>> client.deploy("my-app", source="app.py", timeout=60)
+        DeploymentTimeout: Deployment 'my-app' not ready after 60s (state: Pending, replicas: 0/1)
+    """
+
+    def __init__(
+        self,
+        instance_name: str,
+        timeout_seconds: int,
+        last_state: str = "Unknown",
+        replicas_ready: int = 0,
+        replicas_desired: int = 1
+    ):
+        self.timeout_seconds = timeout_seconds
+        self.last_state = last_state
+        self.replicas_ready = replicas_ready
+        self.replicas_desired = replicas_desired
+
+        super().__init__(
+            message=(
+                f"Deployment '{instance_name}' not ready after {timeout_seconds}s "
+                f"(state: {last_state}, replicas: {replicas_ready}/{replicas_desired})"
+            ),
+            instance_name=instance_name,
+            code="TIMEOUT",
+            retryable=True
+        )
+
+
+class DeploymentFailed(DeploymentError):
+    """
+    Raised when a deployment enters a failed state.
+
+    This occurs when:
+    - Container image cannot be pulled
+    - Container crashes on startup
+    - Resource limits are exceeded
+    - Health checks fail
+
+    Attributes:
+        reason: The reason for failure (if available)
+
+    Example:
+        >>> client.deploy("my-app", image="nonexistent:image")
+        DeploymentFailed: Deployment 'my-app' failed: ImagePullBackOff
+    """
+
+    def __init__(self, instance_name: str, reason: Optional[str] = None):
+        self.reason = reason
+        message = f"Deployment '{instance_name}' failed"
+        if reason:
+            message = f"{message}: {reason}"
+
+        super().__init__(
+            message=message,
+            instance_name=instance_name,
+            code="FAILED",
+            retryable=False
+        )
+
+
+class ResourceError(BasilicaError):
+    """
+    Raised when requested resources are unavailable.
+
+    This occurs when:
+    - No GPU nodes match the requirements
+    - Cluster capacity is exhausted
+    - Requested GPU model is not available
+
+    Attributes:
+        resource_type: The type of resource that's unavailable (e.g., "GPU", "node")
+
+    Example:
+        >>> client.deploy("my-app", gpu_count=8, gpu_models=["H100"])
+        ResourceError: No nodes available with 8x H100 GPUs
+    """
+
+    def __init__(self, message: str, resource_type: Optional[str] = None):
+        self.resource_type = resource_type
+        super().__init__(
+            message=message,
+            code="RESOURCE_UNAVAILABLE",
+            retryable=True
+        )
+
+
+class StorageError(BasilicaError):
+    """
+    Raised when storage configuration or operations fail.
+
+    This occurs when:
+    - Invalid storage backend specified
+    - Storage credentials are invalid
+    - Mount path is not allowed
+
+    Example:
+        >>> client.deploy("my-app", storage="/etc/passwd")
+        StorageError: Mount path '/etc/passwd' is not allowed
+    """
+
+    def __init__(self, message: str):
+        super().__init__(
+            message=message,
+            code="STORAGE_ERROR",
+            retryable=False
+        )
+
+
+class NetworkError(BasilicaError):
+    """
+    Raised when API communication fails.
+
+    This occurs when:
+    - API server is unreachable
+    - Request times out
+    - Network connection is lost
+
+    Attributes:
+        original_error: The underlying network error
+
+    Example:
+        >>> client.deploy("my-app", source="app.py")
+        NetworkError: Failed to connect to api.basilica.ai: Connection refused
+    """
+
+    def __init__(self, message: str, original_error: Optional[Exception] = None):
+        self.original_error = original_error
+        super().__init__(
+            message=message,
+            code="NETWORK_ERROR",
+            retryable=True
+        )
+
+
+class RateLimitError(BasilicaError):
+    """
+    Raised when API rate limits are exceeded.
+
+    Attributes:
+        retry_after: Seconds to wait before retrying (if provided by API)
+
+    Example:
+        >>> for i in range(1000):
+        ...     client.list_deployments()
+        RateLimitError: Rate limit exceeded. Retry after 60 seconds.
+    """
+
+    def __init__(self, message: str = "Rate limit exceeded", retry_after: Optional[int] = None):
+        self.retry_after = retry_after
+        if retry_after:
+            message = f"{message}. Retry after {retry_after} seconds."
+        super().__init__(
+            message=message,
+            code="RATE_LIMITED",
+            retryable=True
+        )
+
+
+class SourceError(BasilicaError):
+    """
+    Raised when source code handling fails.
+
+    This occurs when:
+    - Source file does not exist
+    - File cannot be read
+    - Source code is empty
+
+    Attributes:
+        source_path: The path that was provided (if any)
+
+    Example:
+        >>> client.deploy("my-app", source="nonexistent.py")
+        SourceError: Source file 'nonexistent.py' not found
+    """
+
+    def __init__(self, message: str, source_path: Optional[str] = None):
+        self.source_path = source_path
+        super().__init__(
+            message=message,
+            code="SOURCE_ERROR",
+            retryable=False
+        )

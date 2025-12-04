@@ -98,14 +98,26 @@ fn build_env(env: &[crate::crd::gpu_rental::EnvVar]) -> Vec<EnvVar> {
         .collect()
 }
 
-fn build_tolerations() -> Vec<Toleration> {
-    vec![Toleration {
+fn build_tolerations(has_gpu: bool) -> Vec<Toleration> {
+    let mut tolerations = vec![Toleration {
         key: Some("basilica.ai/workloads-only".into()),
         operator: Some("Equal".into()),
         value: Some("true".into()),
         effect: Some("NoSchedule".into()),
         ..Default::default()
-    }]
+    }];
+
+    if has_gpu {
+        tolerations.push(Toleration {
+            key: Some("nvidia.com/gpu".into()),
+            operator: Some("Exists".into()),
+            value: None,
+            effect: Some("NoSchedule".into()),
+            ..Default::default()
+        });
+    }
+
+    tolerations
 }
 
 fn build_node_affinity(gpu: &GpuSpec) -> Option<Affinity> {
@@ -400,7 +412,8 @@ pub fn render_rental_pod(
         extra_labels.clone(),
     ));
 
-    let mut tolerations = build_tolerations();
+    let has_gpu = spec.container.resources.gpus.count > 0;
+    let mut tolerations = build_tolerations(has_gpu);
     if spec.exclusive {
         tolerations.push(Toleration {
             key: Some("basilica.ai/rental-exclusive".into()),
