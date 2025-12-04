@@ -163,6 +163,10 @@ pub struct DeploymentResponse {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pods: Option<Vec<PodInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProgressResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +183,20 @@ pub struct PodInfo {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_synced: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentage: Option<f32>,
+    pub current_step: String,
+    pub started_at: String,
+    pub elapsed_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
