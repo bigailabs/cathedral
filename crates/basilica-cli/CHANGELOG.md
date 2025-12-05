@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0]
+
+### Added
+- Secure cloud integration: rent GPUs from secure cloud providers alongside community cloud
+- New `restart` command to restart rental containers
+- Automatic SSH private key detection for rentals
+- SSH keys are automatically registered during `basilica up`
+
+### Changed
+- Simplified `balance` command output to show single balance value instead of separate "available" and "total" fields
+
+### Fixed
+- Fixed duplicate "Fetching available GPUs..." spinner in `basilica ls`
+- Added validation for community-cloud-only options (`--container-image`, `--ports`, `--env`) in `up` command
+
+### Removed
+- Removed `--compact` and `--detailed` view flags for now
+- Removed `validator` and `miner` subcommands
+
 ## [0.6.0-alpha.2]
 
 ### Changed
