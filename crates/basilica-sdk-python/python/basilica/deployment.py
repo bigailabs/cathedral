@@ -14,7 +14,7 @@ Example:
 
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from .exceptions import (
     DeploymentFailed,
@@ -27,6 +27,28 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class ProgressInfo:
+    """
+    Progress information for storage synchronization or other long-running operations.
+
+    Attributes:
+        bytes_synced: Number of bytes synchronized so far (None if unknown)
+        bytes_total: Total bytes to synchronize (None if unknown)
+        percentage: Completion percentage 0-100 (None if unknown)
+        current_step: Human-readable description of current step
+        started_at: ISO 8601 timestamp when the operation started
+        elapsed_seconds: Seconds elapsed since the operation started
+    """
+
+    bytes_synced: Optional[int] = None
+    bytes_total: Optional[int] = None
+    percentage: Optional[float] = None
+    current_step: str = ""
+    started_at: str = ""
+    elapsed_seconds: int = 0
+
+
+@dataclass
 class DeploymentStatus:
     """
     Represents the current status of a deployment.
@@ -36,11 +58,16 @@ class DeploymentStatus:
         replicas_ready: Number of replicas that are ready
         replicas_desired: Total number of desired replicas
         message: Optional status message or error description
+        phase: Granular deployment phase (scheduling, pulling, starting, ready, etc.)
+        progress: Progress information for long-running operations like storage sync
     """
+
     state: str
     replicas_ready: int
     replicas_desired: int
     message: Optional[str] = None
+    phase: Optional[str] = None
+    progress: Optional[ProgressInfo] = None
 
     @property
     def is_ready(self) -> bool:
@@ -54,12 +81,20 @@ class DeploymentStatus:
     @property
     def is_failed(self) -> bool:
         """Check if the deployment has failed."""
-        return self.state == "Failed"
+        return self.state == "Failed" or self.phase == "failed"
 
     @property
     def is_pending(self) -> bool:
         """Check if the deployment is still starting."""
-        return self.state in ("Pending", "Provisioning")
+        return self.state in ("Pending", "Provisioning") or self.phase in (
+            "pending",
+            "scheduling",
+            "pulling",
+            "initializing",
+            "storagesync",
+            "starting",
+            "healthcheck",
+        )
 
 
 class Deployment:
@@ -170,7 +205,7 @@ class Deployment:
         Get the current deployment status from the API.
 
         Returns:
-            DeploymentStatus with current state and replica counts
+            DeploymentStatus with current state, replica counts, phase, and progress
 
         Raises:
             DeploymentNotFound: If the deployment no longer exists
@@ -182,6 +217,10 @@ class Deployment:
             ...     print("Deployment is healthy!")
             >>> elif status.is_failed:
             ...     print(f"Deployment failed: {status.message}")
+            >>> elif status.phase:
+            ...     print(f"Phase: {status.phase}")
+            ...     if status.progress:
+            ...         print(f"Progress: {status.progress.percentage}%")
         """
         response = self._client.get_deployment(self._name)
 
@@ -190,11 +229,25 @@ class Deployment:
         self._replicas_ready = response.replicas.ready
         self._replicas_desired = response.replicas.desired
 
+        # Parse progress if present
+        progress = None
+        if hasattr(response, "progress") and response.progress:
+            progress = ProgressInfo(
+                bytes_synced=getattr(response.progress, "bytes_synced", None),
+                bytes_total=getattr(response.progress, "bytes_total", None),
+                percentage=getattr(response.progress, "percentage", None),
+                current_step=getattr(response.progress, "current_step", ""),
+                started_at=getattr(response.progress, "started_at", ""),
+                elapsed_seconds=getattr(response.progress, "elapsed_seconds", 0),
+            )
+
         return DeploymentStatus(
             state=response.state,
             replicas_ready=response.replicas.ready,
             replicas_desired=response.replicas.desired,
-            message=None,  # API doesn't return message in status
+            message=None,
+            phase=getattr(response, "phase", None),
+            progress=progress,
         )
 
     def logs(self, tail: Optional[int] = None, follow: bool = False) -> str:
@@ -228,17 +281,21 @@ class Deployment:
         timeout: int = 300,
         poll_interval: int = 5,
         raise_on_failure: bool = True,
+        on_progress: Optional[Callable[[DeploymentStatus], None]] = None,
     ) -> DeploymentStatus:
         """
         Wait for the deployment to become ready.
 
         Polls the deployment status until it reaches a ready state,
-        fails, or times out.
+        fails, or times out. Optionally calls a progress callback on each poll.
 
         Args:
             timeout: Maximum seconds to wait (default: 300)
             poll_interval: Seconds between status checks (default: 5)
             raise_on_failure: If True, raises DeploymentFailed on failure state
+            on_progress: Optional callback invoked on each status poll.
+                         Receives the current DeploymentStatus as argument.
+                         Useful for displaying progress bars or status updates.
 
         Returns:
             Final DeploymentStatus when ready or failed
@@ -249,8 +306,17 @@ class Deployment:
             DeploymentNotFound: If deployment is deleted during wait
 
         Example:
+            >>> def show_progress(status):
+            ...     if status.phase:
+            ...         print(f"Phase: {status.phase}")
+            ...     if status.progress and status.progress.percentage:
+            ...         print(f"Progress: {status.progress.percentage:.1f}%")
+            ...
             >>> try:
-            ...     status = deployment.wait_until_ready(timeout=120)
+            ...     status = deployment.wait_until_ready(
+            ...         timeout=120,
+            ...         on_progress=show_progress
+            ...     )
             ...     print(f"Ready! URL: {deployment.url}")
             ... except DeploymentTimeout:
             ...     print("Timed out waiting for deployment")
@@ -261,19 +327,21 @@ class Deployment:
         while elapsed < timeout:
             last_status = self.status()
 
+            if on_progress:
+                on_progress(last_status)
+
             if last_status.is_ready:
                 return last_status
 
             if last_status.is_failed and raise_on_failure:
                 raise DeploymentFailed(
                     instance_name=self._name,
-                    reason=last_status.message
+                    reason=last_status.message,
                 )
 
             time.sleep(poll_interval)
             elapsed += poll_interval
 
-        # Timeout reached
         raise DeploymentTimeout(
             instance_name=self._name,
             timeout_seconds=timeout,

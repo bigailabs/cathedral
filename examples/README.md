@@ -35,7 +35,7 @@ Using `@basilica.deployment` decorator:
 | `05_decorator_fastapi.py` | FastAPI + uvicorn | `python3 05_decorator_fastapi.py` |
 | `05_decorator_gpu.py` | GPU decorator | `python3 05_decorator_gpu.py` |
 
-## Advanced Examples (06-10)
+## Advanced Examples (06-14)
 
 | Example | Description | Run |
 |---------|-------------|-----|
@@ -44,6 +44,10 @@ Using `@basilica.deployment` decorator:
 | `08_external_file.py` | Deploy from external .py file | `python3 08_external_file.py` |
 | `09_container_image.py` | Deploy pre-built container (nginx) | `python3 09_container_image.py` |
 | `10_custom_docker/` | Multi-file project with custom Docker | See directory README |
+| `11_agentgym.py` | AgentGym RL evaluation environments | `python3 11_agentgym.py` |
+| `12_lobe_chat.py` | LobeChat self-hosted AI interface | `python3 12_lobe_chat.py` |
+| `13_lobe_chat_vllm.py` | LobeChat + vLLM (fully private AI stack) | `python3 13_lobe_chat_vllm.py` |
+| `14_streamlit.py` | Streamlit interactive data app | `python3 14_streamlit.py` |
 
 ## Deployment Options
 

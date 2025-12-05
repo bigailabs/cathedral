@@ -19,10 +19,12 @@ use std::sync::Arc;
 
 use crate::controllers::storage_utils;
 use crate::crd::user_deployment::{
-    EnvVar as CrdEnvVar, TopologySpreadConfig, UserDeployment, UserDeploymentStatus,
+    DeploymentPhase, EnvVar as CrdEnvVar, PhaseTransition, ProgressInfo, TopologySpreadConfig,
+    UserDeployment, UserDeploymentStatus,
 };
 use crate::k8s_client::K8sClient;
 use anyhow::Result;
+use k8s_openapi::api::core::v1::Pod;
 use tracing::{debug, error};
 
 fn deployment_needs_update(current: &Deployment, desired: &Deployment) -> bool {
@@ -810,6 +812,7 @@ impl UserDeploymentController {
             .await?;
 
         let (state, replicas_ready) = compute_state_from_pods(&pods, spec.replicas);
+        let (phase, _) = phase_detection::determine_phase(&pods, spec.replicas);
 
         let endpoint = format!("{}.{}:{}", service_name, ns, spec.port);
         let public_url = format!(
@@ -817,13 +820,53 @@ impl UserDeploymentController {
             self.public_ip, self.public_port, spec.path_prefix
         );
 
+        let previous_phase = cr.status.as_ref().and_then(|s| s.phase.as_ref()).cloned();
+
+        let progress = if previous_phase.as_ref() == Some(&phase) {
+            // Phase unchanged - preserve existing timer
+            let phase_start = cr
+                .status
+                .as_ref()
+                .and_then(|s| s.progress.as_ref())
+                .map(|p| p.started_at.as_str());
+            phase_detection::calculate_progress(&phase, phase_start)
+        } else {
+            // New phase - start fresh timer with current timestamp
+            ProgressInfo {
+                current_step: phase_detection::build_progress_message(&phase),
+                started_at: k8s_openapi::chrono::Utc::now().to_rfc3339(),
+                elapsed_seconds: 0,
+                bytes_synced: None,
+                bytes_total: None,
+                percentage: None,
+            }
+        };
+
         let mut status = UserDeploymentStatus::new()
             .with_state(&state)
             .with_deployment_name(deployment_name)
             .with_service_name(service_name)
             .with_replicas(spec.replicas, replicas_ready)
             .with_endpoint(endpoint)
-            .with_public_url(public_url);
+            .with_public_url(public_url)
+            .with_phase(phase.clone())
+            .with_progress(progress);
+
+        // First restore existing phase history, then add new transition (add_phase_transition handles trimming)
+        if let Some(existing_status) = &cr.status {
+            status.phase_history = existing_status.phase_history.clone();
+            if status.phase_history.len() > UserDeploymentStatus::MAX_PHASE_HISTORY {
+                let excess = status.phase_history.len() - UserDeploymentStatus::MAX_PHASE_HISTORY;
+                status.phase_history.drain(0..excess);
+            }
+        }
+
+        if let Some(prev) = &previous_phase {
+            if prev != &phase {
+                let transition = PhaseTransition::new(phase.clone());
+                status.add_phase_transition(transition);
+            }
+        }
 
         if state == "Active" {
             if cr.status.as_ref().map(|s| s.state.as_str()).unwrap_or("") != "Active" {
@@ -889,6 +932,232 @@ fn compute_state_from_pods(
         ("Active".to_string(), running_count)
     } else {
         ("Pending".to_string(), running_count)
+    }
+}
+
+mod phase_detection {
+    use super::*;
+    use k8s_openapi::api::core::v1::PodStatus;
+
+    pub fn determine_phase(pods: &[Pod], desired_replicas: u32) -> (DeploymentPhase, u32) {
+        if pods.is_empty() {
+            return (DeploymentPhase::Pending, 0);
+        }
+
+        let mut ready_count = 0u32;
+        let mut scheduling_count = 0u32;
+        let mut pulling_count = 0u32;
+        let mut starting_count = 0u32;
+        let mut failed_count = 0u32;
+        let mut health_check_count = 0u32;
+
+        for pod in pods {
+            let status = pod.status.as_ref();
+
+            if !is_scheduled(status) {
+                scheduling_count += 1;
+                continue;
+            }
+
+            if is_pulling_image(status) {
+                pulling_count += 1;
+                continue;
+            }
+
+            if has_pending_init_containers(status) {
+                starting_count += 1;
+                continue;
+            }
+
+            if is_failed(status) {
+                failed_count += 1;
+                continue;
+            }
+
+            if is_container_starting(status) {
+                starting_count += 1;
+                continue;
+            }
+
+            if is_ready(status) {
+                ready_count += 1;
+            } else {
+                health_check_count += 1;
+            }
+        }
+
+        let phase = if failed_count > 0 && ready_count == 0 {
+            DeploymentPhase::Failed
+        } else if failed_count > 0 {
+            DeploymentPhase::Degraded
+        } else if ready_count == desired_replicas {
+            DeploymentPhase::Ready
+        } else if scheduling_count > 0 {
+            DeploymentPhase::Scheduling
+        } else if pulling_count > 0 {
+            DeploymentPhase::Pulling
+        } else if starting_count > 0 {
+            DeploymentPhase::Starting
+        } else if health_check_count > 0 {
+            DeploymentPhase::HealthCheck
+        } else {
+            DeploymentPhase::Pending
+        };
+
+        (phase, ready_count)
+    }
+
+    fn is_scheduled(status: Option<&PodStatus>) -> bool {
+        status
+            .and_then(|s| s.conditions.as_ref())
+            .map(|conditions| {
+                conditions
+                    .iter()
+                    .any(|c| c.type_ == "PodScheduled" && c.status == "True")
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_pulling_image(status: Option<&PodStatus>) -> bool {
+        status
+            .and_then(|s| s.container_statuses.as_ref())
+            .map(|statuses| {
+                statuses.iter().any(|cs| {
+                    cs.state
+                        .as_ref()
+                        .and_then(|state| state.waiting.as_ref())
+                        .and_then(|w| w.reason.as_deref())
+                        .map(|reason| {
+                            reason == "Pulling"
+                                || reason == "PullBackOff"
+                                || reason == "ImagePullBackOff"
+                                || reason == "ErrImagePull"
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn has_pending_init_containers(status: Option<&PodStatus>) -> bool {
+        status
+            .and_then(|s| s.init_container_statuses.as_ref())
+            .map(|statuses| {
+                statuses.iter().any(|cs| {
+                    cs.state
+                        .as_ref()
+                        .map(|state| state.running.is_some() || state.waiting.is_some())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_container_starting(status: Option<&PodStatus>) -> bool {
+        status
+            .and_then(|s| s.container_statuses.as_ref())
+            .map(|statuses| {
+                statuses.iter().any(|cs| {
+                    cs.state
+                        .as_ref()
+                        .map(|state| state.running.is_none() && state.terminated.is_none())
+                        .unwrap_or(true)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_failed(status: Option<&PodStatus>) -> bool {
+        let status = match status {
+            Some(s) => s,
+            None => return false,
+        };
+
+        if status.phase.as_deref() == Some("Failed") {
+            return true;
+        }
+
+        status
+            .container_statuses
+            .as_ref()
+            .map(|statuses| {
+                statuses.iter().any(|cs| {
+                    let waiting_failed = cs
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.waiting.as_ref())
+                        .and_then(|w| w.reason.as_deref())
+                        .map(|reason| {
+                            reason == "CrashLoopBackOff"
+                                || reason == "Error"
+                                || reason == "CreateContainerError"
+                                || reason == "CreateContainerConfigError"
+                        })
+                        .unwrap_or(false);
+
+                    let terminated_failed = cs
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.terminated.as_ref())
+                        .and_then(|t| t.reason.as_deref())
+                        .map(|reason| reason == "OOMKilled" || reason == "Error")
+                        .unwrap_or(false);
+
+                    waiting_failed || terminated_failed
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    fn is_ready(status: Option<&PodStatus>) -> bool {
+        status
+            .and_then(|s| s.conditions.as_ref())
+            .map(|conditions| {
+                conditions
+                    .iter()
+                    .any(|c| c.type_ == "Ready" && c.status == "True")
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn build_progress_message(phase: &DeploymentPhase) -> String {
+        match phase {
+            DeploymentPhase::Pending => "Waiting for resources".to_string(),
+            DeploymentPhase::Scheduling => "Waiting for node assignment".to_string(),
+            DeploymentPhase::Pulling => "Pulling container image".to_string(),
+            DeploymentPhase::Initializing => "Initializing containers".to_string(),
+            DeploymentPhase::StorageSync => "Syncing storage".to_string(),
+            DeploymentPhase::Starting => "Starting container".to_string(),
+            DeploymentPhase::HealthCheck => "Waiting for health check".to_string(),
+            DeploymentPhase::Ready => "Deployment ready".to_string(),
+            DeploymentPhase::Degraded => "Deployment degraded".to_string(),
+            DeploymentPhase::Failed => "Deployment failed".to_string(),
+            DeploymentPhase::Suspended => "Deployment suspended".to_string(),
+            DeploymentPhase::Terminating => "Deployment terminating".to_string(),
+        }
+    }
+
+    pub fn calculate_progress(phase: &DeploymentPhase, phase_start: Option<&str>) -> ProgressInfo {
+        let elapsed = phase_start
+            .and_then(|s| k8s_openapi::chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|start| {
+                let now = k8s_openapi::chrono::Utc::now();
+                (now.signed_duration_since(start.with_timezone(&k8s_openapi::chrono::Utc)))
+                    .num_seconds()
+                    .max(0) as u64
+            })
+            .unwrap_or(0);
+
+        let current_step = build_progress_message(phase);
+
+        ProgressInfo {
+            bytes_synced: None,
+            bytes_total: None,
+            percentage: None,
+            current_step,
+            started_at: phase_start.unwrap_or_default().to_string(),
+            elapsed_seconds: elapsed,
+        }
     }
 }
 
@@ -1615,5 +1884,276 @@ mod tests {
         assert!(tolerations
             .iter()
             .any(|t| t.key.as_deref() == Some("nvidia.com/gpu")));
+    }
+
+    mod phase_detection_tests {
+        use super::*;
+        use crate::crd::user_deployment::DeploymentPhase;
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateWaiting, ContainerStatus, Pod, PodCondition, PodStatus,
+        };
+
+        fn make_scheduled_pod() -> Pod {
+            Pod {
+                status: Some(PodStatus {
+                    conditions: Some(vec![PodCondition {
+                        type_: "PodScheduled".to_string(),
+                        status: "True".to_string(),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+
+        fn make_ready_pod() -> Pod {
+            Pod {
+                status: Some(PodStatus {
+                    phase: Some("Running".to_string()),
+                    conditions: Some(vec![
+                        PodCondition {
+                            type_: "PodScheduled".to_string(),
+                            status: "True".to_string(),
+                            ..Default::default()
+                        },
+                        PodCondition {
+                            type_: "Ready".to_string(),
+                            status: "True".to_string(),
+                            ..Default::default()
+                        },
+                    ]),
+                    container_statuses: Some(vec![ContainerStatus {
+                        ready: true,
+                        state: Some(ContainerState {
+                            running: Some(Default::default()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn test_determine_phase_empty_pods() {
+            let pods: Vec<Pod> = vec![];
+            let (phase, ready) = phase_detection::determine_phase(&pods, 2);
+            assert_eq!(phase, DeploymentPhase::Pending);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_scheduling() {
+            let pod = Pod {
+                status: Some(PodStatus {
+                    conditions: Some(vec![PodCondition {
+                        type_: "PodScheduled".to_string(),
+                        status: "False".to_string(),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Scheduling);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_container_creating() {
+            let mut pod = make_scheduled_pod();
+            pod.status.as_mut().unwrap().container_statuses = Some(vec![ContainerStatus {
+                state: Some(ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some("ContainerCreating".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]);
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Starting);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_pulling() {
+            let mut pod = make_scheduled_pod();
+            pod.status.as_mut().unwrap().container_statuses = Some(vec![ContainerStatus {
+                state: Some(ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some("Pulling".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]);
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Pulling);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_image_pull_backoff() {
+            let mut pod = make_scheduled_pod();
+            pod.status.as_mut().unwrap().container_statuses = Some(vec![ContainerStatus {
+                state: Some(ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some("ImagePullBackOff".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]);
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Pulling);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_ready() {
+            let pod = make_ready_pod();
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Ready);
+            assert_eq!(ready, 1);
+        }
+
+        #[test]
+        fn test_determine_phase_all_ready() {
+            let pods = vec![make_ready_pod(), make_ready_pod()];
+            let (phase, ready) = phase_detection::determine_phase(&pods, 2);
+            assert_eq!(phase, DeploymentPhase::Ready);
+            assert_eq!(ready, 2);
+        }
+
+        #[test]
+        fn test_determine_phase_failed() {
+            let pod = Pod {
+                status: Some(PodStatus {
+                    phase: Some("Failed".to_string()),
+                    conditions: Some(vec![PodCondition {
+                        type_: "PodScheduled".to_string(),
+                        status: "True".to_string(),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Failed);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_degraded() {
+            let ready_pod = make_ready_pod();
+            let failed_pod = Pod {
+                status: Some(PodStatus {
+                    phase: Some("Failed".to_string()),
+                    conditions: Some(vec![PodCondition {
+                        type_: "PodScheduled".to_string(),
+                        status: "True".to_string(),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let (phase, ready) = phase_detection::determine_phase(&[ready_pod, failed_pod], 2);
+            assert_eq!(phase, DeploymentPhase::Degraded);
+            assert_eq!(ready, 1);
+        }
+
+        #[test]
+        fn test_determine_phase_health_check() {
+            let mut pod = make_scheduled_pod();
+            pod.status.as_mut().unwrap().phase = Some("Running".to_string());
+            pod.status.as_mut().unwrap().container_statuses = Some(vec![ContainerStatus {
+                ready: false,
+                state: Some(ContainerState {
+                    running: Some(Default::default()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }]);
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::HealthCheck);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_build_progress_message() {
+            assert_eq!(
+                phase_detection::build_progress_message(&DeploymentPhase::Scheduling),
+                "Waiting for node assignment"
+            );
+            assert_eq!(
+                phase_detection::build_progress_message(&DeploymentPhase::Pulling),
+                "Pulling container image"
+            );
+            assert_eq!(
+                phase_detection::build_progress_message(&DeploymentPhase::Ready),
+                "Deployment ready"
+            );
+            assert_eq!(
+                phase_detection::build_progress_message(&DeploymentPhase::Failed),
+                "Deployment failed"
+            );
+        }
+
+        #[test]
+        fn test_deployment_phase_requeue_intervals() {
+            use std::time::Duration;
+
+            assert_eq!(
+                DeploymentPhase::Scheduling.requeue_interval(),
+                Duration::from_secs(5)
+            );
+            assert_eq!(
+                DeploymentPhase::Pulling.requeue_interval(),
+                Duration::from_secs(5)
+            );
+            assert_eq!(
+                DeploymentPhase::Ready.requeue_interval(),
+                Duration::from_secs(120)
+            );
+            assert_eq!(
+                DeploymentPhase::Failed.requeue_interval(),
+                Duration::from_secs(60)
+            );
+            assert_eq!(
+                DeploymentPhase::Degraded.requeue_interval(),
+                Duration::from_secs(30)
+            );
+        }
+
+        #[test]
+        fn test_deployment_phase_to_state_string() {
+            assert_eq!(DeploymentPhase::Ready.to_state_string(), "Active");
+            assert_eq!(DeploymentPhase::Failed.to_state_string(), "Failed");
+            assert_eq!(
+                DeploymentPhase::Terminating.to_state_string(),
+                "Terminating"
+            );
+            assert_eq!(DeploymentPhase::Suspended.to_state_string(), "Suspended");
+            assert_eq!(DeploymentPhase::Pending.to_state_string(), "Pending");
+            assert_eq!(DeploymentPhase::Scheduling.to_state_string(), "Pending");
+            assert_eq!(DeploymentPhase::Pulling.to_state_string(), "Pending");
+        }
     }
 }

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[kube(status = "UserDeploymentStatus")]
 #[kube(printcolumn = r#"{"name":"State", "type":"string", "jsonPath":".status.state"}"#)]
+#[kube(printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#)]
 #[kube(printcolumn = r#"{"name":"Replicas", "type":"string", "jsonPath":".status.replicasReady"}"#)]
 #[kube(printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +233,12 @@ pub struct UserDeploymentStatus {
     pub queue_position: Option<u32>,
     #[serde(default)]
     pub resource_usage: Option<ResourceUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<DeploymentPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProgressInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phase_history: Vec<PhaseTransition>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -243,6 +250,146 @@ pub struct ResourceUsage {
     pub gpu_usage: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_used: Option<u64>,
+}
+
+/// Deployment lifecycle phase for granular progress tracking.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentPhase {
+    #[default]
+    Pending,
+    Scheduling,
+    Pulling,
+    Initializing,
+    StorageSync,
+    Starting,
+    HealthCheck,
+    Ready,
+    Degraded,
+    Failed,
+    Suspended,
+    Terminating,
+}
+
+impl DeploymentPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Scheduling => "scheduling",
+            Self::Pulling => "pulling",
+            Self::Initializing => "initializing",
+            Self::StorageSync => "storage_sync",
+            Self::Starting => "starting",
+            Self::HealthCheck => "health_check",
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Failed => "failed",
+            Self::Suspended => "suspended",
+            Self::Terminating => "terminating",
+        }
+    }
+
+    pub fn requeue_interval(&self) -> std::time::Duration {
+        use std::time::Duration;
+        match self {
+            Self::Scheduling | Self::Pulling | Self::Initializing => Duration::from_secs(5),
+            Self::StorageSync | Self::HealthCheck | Self::Starting => Duration::from_secs(5),
+            Self::Ready | Self::Suspended => Duration::from_secs(120),
+            Self::Degraded => Duration::from_secs(30),
+            Self::Failed => Duration::from_secs(60),
+            Self::Pending | Self::Terminating => Duration::from_secs(10),
+        }
+    }
+
+    pub fn to_state_string(&self) -> String {
+        match self {
+            Self::Ready => "Active".to_string(),
+            Self::Failed => "Failed".to_string(),
+            Self::Terminating => "Terminating".to_string(),
+            Self::Suspended => "Suspended".to_string(),
+            _ => "Pending".to_string(),
+        }
+    }
+}
+
+/// Progress information for phases that support tracking.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_synced: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentage: Option<f32>,
+    #[serde(default)]
+    pub current_step: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub elapsed_seconds: u64,
+}
+
+impl ProgressInfo {
+    pub fn new(current_step: &str) -> Self {
+        Self {
+            bytes_synced: None,
+            bytes_total: None,
+            percentage: None,
+            current_step: current_step.to_string(),
+            started_at: k8s_openapi::chrono::Utc::now().to_rfc3339(),
+            elapsed_seconds: 0,
+        }
+    }
+
+    pub fn with_bytes(mut self, synced: u64, total: Option<u64>) -> Self {
+        self.bytes_synced = Some(synced);
+        self.bytes_total = total;
+        if let Some(t) = total {
+            if t > 0 {
+                self.percentage = Some((synced as f32 / t as f32) * 100.0);
+            }
+        }
+        self
+    }
+
+    pub fn with_elapsed(mut self, seconds: u64) -> Self {
+        self.elapsed_seconds = seconds;
+        self
+    }
+}
+
+/// Record of a phase transition for history tracking.
+#[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PhaseTransition {
+    pub phase: DeploymentPhase,
+    pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl PhaseTransition {
+    pub fn new(phase: DeploymentPhase) -> Self {
+        Self {
+            phase,
+            timestamp: k8s_openapi::chrono::Utc::now().to_rfc3339(),
+            duration_seconds: None,
+            message: None,
+        }
+    }
+
+    pub fn with_message(mut self, message: &str) -> Self {
+        self.message = Some(message.to_string());
+        self
+    }
+
+    pub fn with_duration(mut self, seconds: u64) -> Self {
+        self.duration_seconds = Some(seconds);
+        self
+    }
 }
 
 impl UserDeploymentSpec {
@@ -344,6 +491,8 @@ impl UserDeploymentSpec {
 }
 
 impl UserDeploymentStatus {
+    pub const MAX_PHASE_HISTORY: usize = 5;
+
     pub fn new() -> Self {
         Self {
             state: "Pending".to_string(),
@@ -360,6 +509,9 @@ impl UserDeploymentStatus {
             queued: false,
             queue_position: None,
             resource_usage: None,
+            phase: None,
+            progress: None,
+            phase_history: Vec::new(),
         }
     }
 
@@ -413,6 +565,34 @@ impl UserDeploymentStatus {
     pub fn with_resource_usage(mut self, usage: ResourceUsage) -> Self {
         self.resource_usage = Some(usage);
         self
+    }
+
+    pub fn with_phase(mut self, phase: DeploymentPhase) -> Self {
+        self.state = phase.to_state_string();
+        self.phase = Some(phase);
+        self
+    }
+
+    pub fn with_progress(mut self, progress: ProgressInfo) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    pub fn add_phase_transition(&mut self, transition: PhaseTransition) {
+        self.phase_history.push(transition);
+        if self.phase_history.len() > Self::MAX_PHASE_HISTORY {
+            let excess = self.phase_history.len() - Self::MAX_PHASE_HISTORY;
+            self.phase_history.drain(0..excess);
+        }
+    }
+
+    pub fn with_phase_transition(mut self, transition: PhaseTransition) -> Self {
+        self.add_phase_transition(transition);
+        self
+    }
+
+    pub fn clear_progress(&mut self) {
+        self.progress = None;
     }
 
     pub fn is_pending(&self) -> bool {

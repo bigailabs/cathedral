@@ -112,7 +112,7 @@ except ImportError:
             self.min_gpu_memory_gb = min_gpu_memory_gb
 
 # Import new modules
-from .deployment import Deployment, DeploymentStatus
+from .deployment import Deployment, DeploymentStatus, ProgressInfo
 from .exceptions import (
     AuthenticationError,
     AuthorizationError,
@@ -151,6 +151,7 @@ __all__ = [
     # High-level types
     "Deployment",
     "DeploymentStatus",
+    "ProgressInfo",
     "SourcePackager",
     # Exceptions
     "BasilicaError",

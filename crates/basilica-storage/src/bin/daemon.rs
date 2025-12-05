@@ -286,7 +286,7 @@ async fn run_sidecar_mode(args: Args) -> Result<()> {
 async fn run_daemonset_mode(args: Args) -> Result<()> {
     use basilica_storage::{
         DaemonHttpServer, KubernetesCredentialProvider, MountManager, NamespaceWatcher,
-        StorageMetrics,
+        PerNamespaceMetricsStore, StorageMetrics,
     };
 
     info!(
@@ -335,11 +335,14 @@ async fn run_daemonset_mode(args: Args) -> Result<()> {
         info!("Namespace watcher ready");
     }
 
+    // Create per-namespace metrics store
+    let namespace_metrics = PerNamespaceMetricsStore::new();
+
     // Start HTTP server for mount lifecycle management
     let http_addr = format!("0.0.0.0:{}", args.http_port);
     info!("Starting HTTP server at: {}", http_addr);
 
-    let http_server = DaemonHttpServer::new(watcher_mount_manager, metrics);
+    let http_server = DaemonHttpServer::new(watcher_mount_manager, metrics, namespace_metrics);
 
     // Run HTTP server in a separate task
     let http_handle = tokio::spawn(async move {

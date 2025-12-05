@@ -416,6 +416,8 @@ pub async fn create_deployment(
                             created_at: record.created_at.to_rfc3339(),
                             updated_at: Some(record.updated_at.to_rfc3339()),
                             pods: None,
+                            phase: Some("pending".to_string()),
+                            progress: None,
                         }),
                     ));
                 }
@@ -535,6 +537,8 @@ pub async fn create_deployment(
                     created_at: record.created_at.to_rfc3339(),
                     updated_at: Some(record.updated_at.to_rfc3339()),
                     pods: None,
+                    phase: Some("pending".to_string()),
+                    progress: None,
                 }),
             ))
         }
@@ -776,6 +780,8 @@ impl DeploymentResponse {
             created_at: record.created_at.to_rfc3339(),
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
+            phase: None,
+            progress: None,
         }
     }
 
@@ -794,6 +800,30 @@ impl DeploymentResponse {
             created_at: record.created_at.to_rfc3339(),
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
+            phase: None,
+            progress: None,
+        }
+    }
+
+    pub fn from_record_with_phase(
+        record: &db::DeploymentRecord,
+        desired: u32,
+        ready: u32,
+        phase: Option<String>,
+        progress: Option<super::types::ProgressResponse>,
+    ) -> Self {
+        Self {
+            instance_name: record.instance_name.clone(),
+            user_id: record.user_id.clone(),
+            namespace: record.namespace.clone(),
+            state: record.state.clone(),
+            url: record.public_url.clone(),
+            replicas: super::types::ReplicaStatus { desired, ready },
+            created_at: record.created_at.to_rfc3339(),
+            updated_at: Some(record.updated_at.to_rfc3339()),
+            pods: None,
+            phase,
+            progress,
         }
     }
 }

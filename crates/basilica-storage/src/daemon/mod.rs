@@ -4,7 +4,9 @@
 //! that manages FUSE mounts for multiple user namespaces on a single node.
 
 mod mount_manager;
+mod namespace_metrics;
 mod namespace_watcher;
 
 pub use mount_manager::{MountError, MountInfo, MountManager, MountStatus, DEFAULT_BASE_PATH};
+pub use namespace_metrics::{NamespaceMetrics, NamespaceMetricsSnapshot, PerNamespaceMetricsStore};
 pub use namespace_watcher::{NamespaceWatcher, WatcherError};
