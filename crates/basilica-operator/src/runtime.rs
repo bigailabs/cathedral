@@ -126,8 +126,7 @@ pub async fn run() -> AnyResult<()> {
     );
 
     let client = Client::try_default().await?;
-    let kube_client =
-        RateLimitedKubeClient::new(config.rate_limit.requests_per_second).await?;
+    let kube_client = RateLimitedKubeClient::new(config.rate_limit.requests_per_second).await?;
 
     // Choose billing client based on env var BASILICA_BILLING_URL
     let billing_arc: std::sync::Arc<dyn BillingClient + Send + Sync> =

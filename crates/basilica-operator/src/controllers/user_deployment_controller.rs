@@ -852,18 +852,19 @@ impl UserDeploymentController {
             .with_phase(phase.clone())
             .with_progress(progress);
 
-        if let Some(prev) = &previous_phase {
-            if prev != &phase {
-                let transition = PhaseTransition::new(phase.clone());
-                status.add_phase_transition(transition);
-            }
-        }
-
+        // First restore existing phase history, then add new transition (add_phase_transition handles trimming)
         if let Some(existing_status) = &cr.status {
             status.phase_history = existing_status.phase_history.clone();
             if status.phase_history.len() > UserDeploymentStatus::MAX_PHASE_HISTORY {
                 let excess = status.phase_history.len() - UserDeploymentStatus::MAX_PHASE_HISTORY;
                 status.phase_history.drain(0..excess);
+            }
+        }
+
+        if let Some(prev) = &previous_phase {
+            if prev != &phase {
+                let transition = PhaseTransition::new(phase.clone());
+                status.add_phase_transition(transition);
             }
         }
 

@@ -30,18 +30,10 @@ impl ReconcileConfig {
     /// Load configuration from environment variables.
     /// Falls back to defaults if variables are not set or invalid.
     pub fn from_env() -> Self {
-        let success_interval = parse_duration_env(
-            "BASILICA_OPERATOR_RECONCILE_SUCCESS_SECS",
-            30,
-        );
-        let error_interval = parse_duration_env(
-            "BASILICA_OPERATOR_RECONCILE_ERROR_SECS",
-            10,
-        );
-        let node_profile_interval = parse_duration_env(
-            "BASILICA_OPERATOR_NODE_PROFILE_INTERVAL_SECS",
-            60,
-        );
+        let success_interval = parse_duration_env("BASILICA_OPERATOR_RECONCILE_SUCCESS_SECS", 30);
+        let error_interval = parse_duration_env("BASILICA_OPERATOR_RECONCILE_ERROR_SECS", 10);
+        let node_profile_interval =
+            parse_duration_env("BASILICA_OPERATOR_NODE_PROFILE_INTERVAL_SECS", 60);
 
         Self {
             success_interval,
@@ -74,7 +66,9 @@ impl RateLimitConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(50);
 
-        Self { requests_per_second }
+        Self {
+            requests_per_second,
+        }
     }
 }
 
@@ -122,28 +116,16 @@ impl ProbeConfig {
                 "BASILICA_OPERATOR_GPU_STARTUP_INITIAL_DELAY_SECS",
                 10,
             ),
-            gpu_startup_period: parse_i32_env(
-                "BASILICA_OPERATOR_GPU_STARTUP_PERIOD_SECS",
-                10,
-            ),
-            gpu_startup_timeout: parse_i32_env(
-                "BASILICA_OPERATOR_GPU_STARTUP_TIMEOUT_SECS",
-                5,
-            ),
+            gpu_startup_period: parse_i32_env("BASILICA_OPERATOR_GPU_STARTUP_PERIOD_SECS", 10),
+            gpu_startup_timeout: parse_i32_env("BASILICA_OPERATOR_GPU_STARTUP_TIMEOUT_SECS", 5),
             gpu_startup_failure_threshold: parse_i32_env(
                 "BASILICA_OPERATOR_GPU_STARTUP_FAILURE_THRESHOLD",
                 60,
             ),
-            std_initial_delay: parse_i32_env(
-                "BASILICA_OPERATOR_STD_INITIAL_DELAY_SECS",
-                5,
-            ),
+            std_initial_delay: parse_i32_env("BASILICA_OPERATOR_STD_INITIAL_DELAY_SECS", 5),
             std_period: parse_i32_env("BASILICA_OPERATOR_STD_PERIOD_SECS", 5),
             std_timeout: parse_i32_env("BASILICA_OPERATOR_STD_TIMEOUT_SECS", 3),
-            std_failure_threshold: parse_i32_env(
-                "BASILICA_OPERATOR_STD_FAILURE_THRESHOLD",
-                3,
-            ),
+            std_failure_threshold: parse_i32_env("BASILICA_OPERATOR_STD_FAILURE_THRESHOLD", 3),
         }
     }
 }
@@ -173,14 +155,8 @@ impl TimeoutConfig {
     /// Load configuration from environment variables.
     pub fn from_env() -> Self {
         Self {
-            fuse_mount_timeout_secs: parse_i32_env(
-                "BASILICA_OPERATOR_FUSE_MOUNT_TIMEOUT_SECS",
-                60,
-            ),
-            pod_eviction_grace_secs: parse_i64_env(
-                "BASILICA_OPERATOR_POD_EVICTION_GRACE_SECS",
-                30,
-            ),
+            fuse_mount_timeout_secs: parse_i32_env("BASILICA_OPERATOR_FUSE_MOUNT_TIMEOUT_SECS", 60),
+            pod_eviction_grace_secs: parse_i64_env("BASILICA_OPERATOR_POD_EVICTION_GRACE_SECS", 30),
             metadata_endpoint_timeout_ms: parse_u64_env(
                 "BASILICA_OPERATOR_METADATA_TIMEOUT_MS",
                 500,

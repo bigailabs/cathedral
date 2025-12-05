@@ -1354,7 +1354,9 @@ impl K8sClient for RateLimitedKubeClient {
         status: crate::crd::basilica_job::BasilicaJobStatus,
     ) -> Result<()> {
         self.wait_for_permit().await;
-        self.inner.update_basilica_job_status(ns, name, status).await
+        self.inner
+            .update_basilica_job_status(ns, name, status)
+            .await
     }
 
     async fn create_gpu_rental(&self, ns: &str, obj: &GpuRental) -> Result<GpuRental> {
