@@ -4,19 +4,21 @@
 //! on a per-namespace basis, enabling granular visibility into storage sync progress.
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Metrics for a single namespace's storage operations.
+/// Uses atomic operations for all fields to enable lock-free concurrent access.
 #[derive(Debug)]
 pub struct NamespaceMetrics {
     pub bytes_written: AtomicU64,
     pub bytes_read: AtomicU64,
     pub files_created: AtomicU64,
     pub files_modified: AtomicU64,
-    last_write_at: RwLock<Option<DateTime<Utc>>>,
-    last_read_at: RwLock<Option<DateTime<Utc>>>,
+    /// Unix timestamp in nanoseconds. 0 means no write has occurred.
+    last_write_at_nanos: AtomicI64,
+    /// Unix timestamp in nanoseconds. 0 means no read has occurred.
+    last_read_at_nanos: AtomicI64,
     active_writes: AtomicU64,
     active_reads: AtomicU64,
 }
@@ -34,8 +36,8 @@ impl NamespaceMetrics {
             bytes_read: AtomicU64::new(0),
             files_created: AtomicU64::new(0),
             files_modified: AtomicU64::new(0),
-            last_write_at: RwLock::new(None),
-            last_read_at: RwLock::new(None),
+            last_write_at_nanos: AtomicI64::new(0),
+            last_read_at_nanos: AtomicI64::new(0),
             active_writes: AtomicU64::new(0),
             active_reads: AtomicU64::new(0),
         }
@@ -43,12 +45,14 @@ impl NamespaceMetrics {
 
     pub fn record_write(&self, bytes: u64) {
         self.bytes_written.fetch_add(bytes, Ordering::Relaxed);
-        *self.last_write_at.write() = Some(Utc::now());
+        let now_nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.last_write_at_nanos.store(now_nanos, Ordering::Relaxed);
     }
 
     pub fn record_read(&self, bytes: u64) {
         self.bytes_read.fetch_add(bytes, Ordering::Relaxed);
-        *self.last_read_at.write() = Some(Utc::now());
+        let now_nanos = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        self.last_read_at_nanos.store(now_nanos, Ordering::Relaxed);
     }
 
     pub fn record_file_created(&self) {
@@ -108,11 +112,21 @@ impl NamespaceMetrics {
     }
 
     pub fn get_last_write_at(&self) -> Option<DateTime<Utc>> {
-        *self.last_write_at.read()
+        let nanos = self.last_write_at_nanos.load(Ordering::Relaxed);
+        if nanos == 0 {
+            None
+        } else {
+            Some(DateTime::from_timestamp_nanos(nanos))
+        }
     }
 
     pub fn get_last_read_at(&self) -> Option<DateTime<Utc>> {
-        *self.last_read_at.read()
+        let nanos = self.last_read_at_nanos.load(Ordering::Relaxed);
+        if nanos == 0 {
+            None
+        } else {
+            Some(DateTime::from_timestamp_nanos(nanos))
+        }
     }
 
     pub fn get_active_write_count(&self) -> u64 {
@@ -144,9 +158,6 @@ impl PerNamespaceMetricsStore {
     }
 
     pub fn get_or_create(&self, namespace: &str) -> Arc<NamespaceMetrics> {
-        if let Some(metrics) = self.inner.get(namespace) {
-            return Arc::clone(metrics.value());
-        }
         self.inner
             .entry(namespace.to_owned())
             .or_insert_with(|| Arc::new(NamespaceMetrics::new()))
@@ -300,5 +311,76 @@ mod tests {
         assert_eq!(snapshot.files_created, 1);
         assert!(snapshot.active_writes);
         assert!(!snapshot.active_reads);
+    }
+
+    #[test]
+    fn test_concurrent_metric_updates() {
+        use std::thread;
+
+        let metrics = Arc::new(NamespaceMetrics::new());
+        let mut handles = vec![];
+
+        let thread_count = 10;
+        let ops_per_thread = 10000;
+
+        for _ in 0..thread_count {
+            let m = Arc::clone(&metrics);
+            handles.push(thread::spawn(move || {
+                for _ in 0..ops_per_thread {
+                    m.record_write(100);
+                    m.record_read(50);
+                    m.start_write();
+                    m.end_write();
+                    m.start_read();
+                    m.end_read();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        let expected_writes = 100u64 * ops_per_thread as u64 * thread_count as u64;
+        let expected_reads = 50u64 * ops_per_thread as u64 * thread_count as u64;
+
+        assert_eq!(metrics.get_bytes_written(), expected_writes);
+        assert_eq!(metrics.get_bytes_read(), expected_reads);
+        assert_eq!(metrics.get_active_write_count(), 0);
+        assert_eq!(metrics.get_active_read_count(), 0);
+        assert!(metrics.get_last_write_at().is_some());
+        assert!(metrics.get_last_read_at().is_some());
+    }
+
+    #[test]
+    fn test_concurrent_store_access() {
+        use std::thread;
+
+        let store = Arc::new(PerNamespaceMetricsStore::new());
+        let mut handles = vec![];
+
+        let thread_count = 10;
+        let namespaces_per_thread = 100;
+
+        for t in 0..thread_count {
+            let s = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for n in 0..namespaces_per_thread {
+                    let namespace = format!("u-thread{}-ns{}", t, n);
+                    let metrics = s.get_or_create(&namespace);
+                    metrics.record_write(100);
+
+                    let metrics_again = s.get_or_create(&namespace);
+                    assert_eq!(metrics_again.get_bytes_written(), 100);
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        let total_namespaces = thread_count * namespaces_per_thread;
+        assert_eq!(store.namespace_count(), total_namespaces);
     }
 }
