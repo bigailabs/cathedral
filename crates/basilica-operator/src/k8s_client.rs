@@ -1,11 +1,17 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use governor::{
+    clock::DefaultClock,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
 use kube::ResourceExt;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -1269,6 +1275,330 @@ impl K8sClient for KubeClient {
             Err(kube::Error::Api(ae)) if ae.code == 429 => Ok(false),
             Err(e) => Err(anyhow!(e)),
         }
+    }
+}
+
+/// Rate-limited Kubernetes client wrapper.
+/// Applies a rate limit to all API calls to prevent overwhelming the K8s API server.
+#[derive(Clone)]
+pub struct RateLimitedKubeClient {
+    inner: KubeClient,
+    limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+}
+
+/// Default rate limit: 50 requests per second
+const DEFAULT_RATE_LIMIT_PER_SECOND: u32 = 50;
+
+impl RateLimitedKubeClient {
+    /// Create a new rate-limited client with the specified requests per second limit.
+    pub async fn new(requests_per_second: u32) -> Result<Self> {
+        let inner = KubeClient::try_default().await?;
+        let rate = NonZeroU32::new(requests_per_second).unwrap_or(
+            NonZeroU32::new(DEFAULT_RATE_LIMIT_PER_SECOND).expect("default is non-zero"),
+        );
+        let quota = Quota::per_second(rate);
+        let limiter = Arc::new(RateLimiter::direct(quota));
+        Ok(Self { inner, limiter })
+    }
+
+    /// Create a new rate-limited client with default rate limit (50 req/sec).
+    pub async fn try_default() -> Result<Self> {
+        Self::new(DEFAULT_RATE_LIMIT_PER_SECOND).await
+    }
+
+    /// Create a rate-limited client from an existing KubeClient.
+    pub fn from_client(client: KubeClient, requests_per_second: u32) -> Self {
+        let rate = NonZeroU32::new(requests_per_second).unwrap_or(
+            NonZeroU32::new(DEFAULT_RATE_LIMIT_PER_SECOND).expect("default is non-zero"),
+        );
+        let quota = Quota::per_second(rate);
+        let limiter = Arc::new(RateLimiter::direct(quota));
+        Self {
+            inner: client,
+            limiter,
+        }
+    }
+
+    /// Wait for the rate limiter before proceeding.
+    async fn wait_for_permit(&self) {
+        self.limiter.until_ready().await;
+    }
+
+    /// Get the underlying kube::Client for operations that need direct access.
+    pub fn client(&self) -> &kube::Client {
+        &self.inner.client
+    }
+}
+
+#[async_trait]
+impl K8sClient for RateLimitedKubeClient {
+    async fn create_basilica_job(&self, ns: &str, obj: &BasilicaJob) -> Result<BasilicaJob> {
+        self.wait_for_permit().await;
+        self.inner.create_basilica_job(ns, obj).await
+    }
+
+    async fn get_basilica_job(&self, ns: &str, name: &str) -> Result<BasilicaJob> {
+        self.wait_for_permit().await;
+        self.inner.get_basilica_job(ns, name).await
+    }
+
+    async fn delete_basilica_job(&self, ns: &str, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_basilica_job(ns, name).await
+    }
+
+    async fn update_basilica_job_status(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::basilica_job::BasilicaJobStatus,
+    ) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.update_basilica_job_status(ns, name, status).await
+    }
+
+    async fn create_gpu_rental(&self, ns: &str, obj: &GpuRental) -> Result<GpuRental> {
+        self.wait_for_permit().await;
+        self.inner.create_gpu_rental(ns, obj).await
+    }
+
+    async fn get_gpu_rental(&self, ns: &str, name: &str) -> Result<GpuRental> {
+        self.wait_for_permit().await;
+        self.inner.get_gpu_rental(ns, name).await
+    }
+
+    async fn delete_gpu_rental(&self, ns: &str, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_gpu_rental(ns, name).await
+    }
+
+    async fn update_gpu_rental_status(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::gpu_rental::GpuRentalStatus,
+    ) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.update_gpu_rental_status(ns, name, status).await
+    }
+
+    async fn create_user_deployment(
+        &self,
+        ns: &str,
+        obj: &UserDeployment,
+    ) -> Result<UserDeployment> {
+        self.wait_for_permit().await;
+        self.inner.create_user_deployment(ns, obj).await
+    }
+
+    async fn get_user_deployment(&self, ns: &str, name: &str) -> Result<UserDeployment> {
+        self.wait_for_permit().await;
+        self.inner.get_user_deployment(ns, name).await
+    }
+
+    async fn delete_user_deployment(&self, ns: &str, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_user_deployment(ns, name).await
+    }
+
+    async fn update_user_deployment_status(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner
+            .update_user_deployment_status(ns, name, status)
+            .await
+    }
+
+    async fn patch_user_deployment_status_ssa(
+        &self,
+        ns: &str,
+        name: &str,
+        status: crate::crd::user_deployment::UserDeploymentStatus,
+    ) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner
+            .patch_user_deployment_status_ssa(ns, name, status)
+            .await
+    }
+
+    async fn create_node_profile(
+        &self,
+        ns: &str,
+        obj: &BasilicaNodeProfile,
+    ) -> Result<BasilicaNodeProfile> {
+        self.wait_for_permit().await;
+        self.inner.create_node_profile(ns, obj).await
+    }
+
+    async fn get_node_profile(&self, ns: &str, name: &str) -> Result<BasilicaNodeProfile> {
+        self.wait_for_permit().await;
+        self.inner.get_node_profile(ns, name).await
+    }
+
+    async fn create_pod(&self, ns: &str, pod: &Pod) -> Result<Pod> {
+        self.wait_for_permit().await;
+        self.inner.create_pod(ns, pod).await
+    }
+
+    async fn get_pod(&self, ns: &str, name: &str) -> Result<Pod> {
+        self.wait_for_permit().await;
+        self.inner.get_pod(ns, name).await
+    }
+
+    async fn delete_pod(&self, ns: &str, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_pod(ns, name).await
+    }
+
+    async fn list_pods_with_label(&self, ns: &str, key: &str, value: &str) -> Result<Vec<Pod>> {
+        self.wait_for_permit().await;
+        self.inner.list_pods_with_label(ns, key, value).await
+    }
+
+    async fn create_service(&self, ns: &str, svc: &Service) -> Result<Service> {
+        self.wait_for_permit().await;
+        self.inner.create_service(ns, svc).await
+    }
+
+    async fn get_service(&self, ns: &str, name: &str) -> Result<Service> {
+        self.wait_for_permit().await;
+        self.inner.get_service(ns, name).await
+    }
+
+    async fn delete_service(&self, ns: &str, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_service(ns, name).await
+    }
+
+    async fn list_services_with_label(
+        &self,
+        ns: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<Service>> {
+        self.wait_for_permit().await;
+        self.inner.list_services_with_label(ns, key, value).await
+    }
+
+    async fn create_network_policy(&self, ns: &str, np: &NetworkPolicy) -> Result<NetworkPolicy> {
+        self.wait_for_permit().await;
+        self.inner.create_network_policy(ns, np).await
+    }
+
+    async fn get_network_policy(&self, ns: &str, name: &str) -> Result<NetworkPolicy> {
+        self.wait_for_permit().await;
+        self.inner.get_network_policy(ns, name).await
+    }
+
+    async fn create_pvc(
+        &self,
+        ns: &str,
+        pvc: &PersistentVolumeClaim,
+    ) -> Result<PersistentVolumeClaim> {
+        self.wait_for_permit().await;
+        self.inner.create_pvc(ns, pvc).await
+    }
+
+    async fn create_secret(&self, ns: &str, secret: &Secret) -> Result<Secret> {
+        self.wait_for_permit().await;
+        self.inner.create_secret(ns, secret).await
+    }
+
+    async fn create_job(&self, ns: &str, job: &Job) -> Result<Job> {
+        self.wait_for_permit().await;
+        self.inner.create_job(ns, job).await
+    }
+
+    async fn get_job(&self, ns: &str, name: &str) -> Result<Job> {
+        self.wait_for_permit().await;
+        self.inner.get_job(ns, name).await
+    }
+
+    async fn create_deployment(&self, ns: &str, dep: &Deployment) -> Result<Deployment> {
+        self.wait_for_permit().await;
+        self.inner.create_deployment(ns, dep).await
+    }
+
+    async fn get_deployment(&self, ns: &str, name: &str) -> Result<Deployment> {
+        self.wait_for_permit().await;
+        self.inner.get_deployment(ns, name).await
+    }
+
+    async fn patch_deployment(&self, ns: &str, name: &str, dep: &Deployment) -> Result<Deployment> {
+        self.wait_for_permit().await;
+        self.inner.patch_deployment(ns, name, dep).await
+    }
+
+    async fn patch_service(&self, ns: &str, name: &str, svc: &Service) -> Result<Service> {
+        self.wait_for_permit().await;
+        self.inner.patch_service(ns, name, svc).await
+    }
+
+    async fn patch_network_policy(
+        &self,
+        ns: &str,
+        name: &str,
+        np: &NetworkPolicy,
+    ) -> Result<NetworkPolicy> {
+        self.wait_for_permit().await;
+        self.inner.patch_network_policy(ns, name, np).await
+    }
+
+    async fn create_basilica_queue(&self, ns: &str, obj: &BasilicaQueue) -> Result<BasilicaQueue> {
+        self.wait_for_permit().await;
+        self.inner.create_basilica_queue(ns, obj).await
+    }
+
+    async fn list_basilica_queues(&self, ns: &str) -> Result<Vec<BasilicaQueue>> {
+        self.wait_for_permit().await;
+        self.inner.list_basilica_queues(ns).await
+    }
+
+    async fn cordon_node(&self, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.cordon_node(name).await
+    }
+
+    async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>> {
+        self.wait_for_permit().await;
+        self.inner.list_pods_on_node(node_name).await
+    }
+
+    async fn delete_node(&self, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_node(name).await
+    }
+
+    async fn remove_node_taint(&self, name: &str, taint_key: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.remove_node_taint(name, taint_key).await
+    }
+
+    async fn add_node_labels(
+        &self,
+        name: &str,
+        labels: &std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.add_node_labels(name, labels).await
+    }
+
+    async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool> {
+        self.wait_for_permit().await;
+        self.inner.evict_pod(ns, name, grace_seconds).await
+    }
+
+    async fn create_http_route(
+        &self,
+        ns: &str,
+        obj: &kube::core::DynamicObject,
+    ) -> Result<kube::core::DynamicObject> {
+        self.wait_for_permit().await;
+        self.inner.create_http_route(ns, obj).await
     }
 }
 

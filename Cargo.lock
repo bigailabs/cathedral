@@ -2579,6 +2579,7 @@ dependencies = [
  "axum 0.7.9",
  "chrono",
  "futures",
+ "governor",
  "k8s-openapi",
  "kube",
  "kube-runtime",
