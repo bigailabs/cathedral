@@ -33,45 +33,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from basilica._basilica import (
-    # Core client binding
-    BasilicaClient as _BasilicaClient,
-    # Helper functions
-    node_by_gpu,
-    node_by_id,
-    # Response types
-    AvailabilityInfo,
-    AvailableNode,
-    CpuSpec,
-    GpuSpec,
-    HealthCheckResponse,
-    NodeDetails,
-    RentalResponse,
-    RentalStatus,
-    RentalStatusWithSshResponse,
-    SshAccess,
-    # Request types
-    GpuRequirements,
-    ListAvailableNodesQuery,
-    ListRentalsQuery,
-    NodeSelection,
-    PortMappingRequest,
-    ResourceRequirementsRequest,
-    StartRentalApiRequest,
-    VolumeMountRequest,
-    # Deployment types
-    CreateDeploymentRequest,
-    DeleteDeploymentResponse,
-    DeploymentListResponse,
-    DeploymentResponse,
-    DeploymentSummary,
-    EnvVar,
-    PersistentStorageSpec,
-    PodInfo,
-    ReplicaStatus,
-    ResourceRequirements,
-    StorageBackend,
-    StorageSpec,
-    # Constants from Rust
     DEFAULT_API_URL,
     DEFAULT_CONTAINER_IMAGE,
     DEFAULT_CPU_CORES,
@@ -81,6 +42,43 @@ from basilica._basilica import (
     DEFAULT_MEMORY_MB,
     DEFAULT_STORAGE_MB,
     DEFAULT_TIMEOUT_SECS,
+    AvailabilityInfo,
+    AvailableNode,
+)
+from basilica._basilica import (
+    BasilicaClient as _BasilicaClient,
+)  # Core client binding; Helper functions; Response types; Request types; Deployment types; Constants from Rust
+from basilica._basilica import (
+    CpuSpec,
+    CreateDeploymentRequest,
+    DeleteDeploymentResponse,
+    DeploymentListResponse,
+    DeploymentResponse,
+    DeploymentSummary,
+    EnvVar,
+    GpuRequirements,
+    GpuSpec,
+    HealthCheckResponse,
+    ListAvailableNodesQuery,
+    ListRentalsQuery,
+    NodeDetails,
+    NodeSelection,
+    PersistentStorageSpec,
+    PodInfo,
+    PortMappingRequest,
+    RentalResponse,
+    RentalStatus,
+    RentalStatusWithSshResponse,
+    ReplicaStatus,
+    ResourceRequirements,
+    ResourceRequirementsRequest,
+    SshAccess,
+    StartRentalApiRequest,
+    StorageBackend,
+    StorageSpec,
+    VolumeMountRequest,
+    node_by_gpu,
+    node_by_id,
 )
 
 # GpuRequirementsSpec may not be available in older binaries
@@ -89,11 +87,12 @@ try:
 except ImportError:
     # Fallback: define a compatible class
     from dataclasses import dataclass
-    from typing import Optional, List
+    from typing import List, Optional
 
     @dataclass
     class GpuRequirementsSpec:
         """GPU requirements specification for deployments."""
+
         count: int
         model: Optional[List[str]] = None
         min_cuda_version: Optional[str] = None
@@ -104,12 +103,15 @@ except ImportError:
             count: int,
             model: Optional[List[str]] = None,
             min_cuda_version: Optional[str] = None,
-            min_gpu_memory_gb: Optional[int] = None
+            min_gpu_memory_gb: Optional[int] = None,
         ):
             self.count = count
             self.model = model or []
             self.min_cuda_version = min_cuda_version
             self.min_gpu_memory_gb = min_gpu_memory_gb
+
+
+from .decorators import DeployedFunction, deployment
 
 # Import new modules
 from .deployment import Deployment, DeploymentStatus, ProgressInfo
@@ -129,9 +131,8 @@ from .exceptions import (
     ValidationError,
 )
 from .source import SourcePackager
-from .decorators import deployment, DeployedFunction
-from .volume import Volume
 from .spec import DeploymentSpec
+from .volume import Volume
 
 # Default command is a list in Python
 DEFAULT_COMMAND = ["/bin/bash"]
@@ -139,7 +140,7 @@ DEFAULT_COMMAND = ["/bin/bash"]
 # Default Python image for source deployments
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __all__ = [
     # Main client
     "BasilicaClient",
@@ -240,11 +241,7 @@ class BasilicaClient:
         base_url: The API endpoint URL
     """
 
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None
-    ):
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None):
         """
         Initialize the Basilica client.
 
@@ -399,7 +396,7 @@ class BasilicaClient:
                     credentials_secret=None,
                     sync_interval_ms=1000,
                     cache_size_mb=1024,
-                    mount_path=mount_path
+                    mount_path=mount_path,
                 )
             )
 
@@ -428,7 +425,7 @@ class BasilicaClient:
             resources=resources,
             ttl_seconds=ttl_seconds,
             public=public,
-            storage=storage_spec
+            storage=storage_spec,
         )
 
         # Create deployment via API
@@ -513,7 +510,7 @@ class BasilicaClient:
         available: Optional[bool] = None,
         gpu_type: Optional[str] = None,
         min_gpu_count: Optional[int] = None,
-        min_gpu_memory: Optional[int] = None
+        min_gpu_memory: Optional[int] = None,
     ) -> List[AvailableNode]:
         """
         List available compute nodes.
@@ -528,13 +525,19 @@ class BasilicaClient:
             List of AvailableNode objects
         """
         query = None
-        if any([available is not None, gpu_type is not None,
-                min_gpu_count is not None, min_gpu_memory is not None]):
+        if any(
+            [
+                available is not None,
+                gpu_type is not None,
+                min_gpu_count is not None,
+                min_gpu_memory is not None,
+            ]
+        ):
             query = ListAvailableNodesQuery(
                 available=available,
                 gpu_type=gpu_type,
                 min_gpu_count=min_gpu_count,
-                min_gpu_memory=min_gpu_memory
+                min_gpu_memory=min_gpu_memory,
             )
         return self._client.list_nodes(query)
 
@@ -547,7 +550,7 @@ class BasilicaClient:
         environment: Optional[Dict[str, str]] = None,
         ports: Optional[List[Dict[str, Any]]] = None,
         command: Optional[List[str]] = None,
-        no_ssh: bool = False
+        no_ssh: bool = False,
     ) -> RentalResponse:
         """
         Start a new GPU rental.
@@ -584,14 +587,16 @@ class BasilicaClient:
                 with open(ssh_key_path) as f:
                     ssh_public_key = f.read().strip()
             elif ssh_pubkey_path is not None:
-                raise FileNotFoundError(f"SSH public key file not found: {ssh_key_path}")
+                raise FileNotFoundError(
+                    f"SSH public key file not found: {ssh_key_path}"
+                )
 
         resources = {
             "gpu_count": DEFAULT_GPU_COUNT,
             "gpu_types": [gpu_type] if gpu_type else [],
             "cpu_cores": DEFAULT_CPU_CORES,
             "memory_mb": DEFAULT_MEMORY_MB,
-            "storage_mb": DEFAULT_STORAGE_MB
+            "storage_mb": DEFAULT_STORAGE_MB,
         }
 
         if node_id:
@@ -600,25 +605,27 @@ class BasilicaClient:
             gpu_requirements = GpuRequirements(
                 gpu_count=DEFAULT_GPU_COUNT,
                 min_memory_gb=DEFAULT_GPU_MIN_MEMORY_GB,
-                gpu_type=gpu_type
+                gpu_type=gpu_type,
             )
             node_selection = node_by_gpu(gpu_requirements)
 
         port_mappings = []
         if ports:
             for port in ports:
-                port_mappings.append(PortMappingRequest(
-                    container_port=port.get("container_port", 0),
-                    host_port=port.get("host_port", 0),
-                    protocol=port.get("protocol", "tcp")
-                ))
+                port_mappings.append(
+                    PortMappingRequest(
+                        container_port=port.get("container_port", 0),
+                        host_port=port.get("host_port", 0),
+                        protocol=port.get("protocol", "tcp"),
+                    )
+                )
 
         resource_req = ResourceRequirementsRequest(
             cpu_cores=resources.get("cpu_cores", DEFAULT_CPU_CORES),
             memory_mb=resources.get("memory_mb", DEFAULT_MEMORY_MB),
             storage_mb=resources.get("storage_mb", DEFAULT_STORAGE_MB),
             gpu_count=resources.get("gpu_count", DEFAULT_GPU_COUNT),
-            gpu_types=resources.get("gpu_types", [])
+            gpu_types=resources.get("gpu_types", []),
         )
 
         request = StartRentalApiRequest(
@@ -630,7 +637,7 @@ class BasilicaClient:
             resources=resource_req,
             command=command if command is not None else DEFAULT_COMMAND,
             volumes=[],
-            no_ssh=no_ssh
+            no_ssh=no_ssh,
         )
 
         return self._client.start_rental(request)
@@ -647,15 +654,13 @@ class BasilicaClient:
         self,
         status: Optional[str] = None,
         gpu_type: Optional[str] = None,
-        min_gpu_count: Optional[int] = None
+        min_gpu_count: Optional[int] = None,
     ) -> Dict[str, Any]:
         """List rentals with optional filters."""
         query = None
         if any([status is not None, gpu_type is not None, min_gpu_count is not None]):
             query = ListRentalsQuery(
-                status=status,
-                gpu_type=gpu_type,
-                min_gpu_count=min_gpu_count
+                status=status, gpu_type=gpu_type, min_gpu_count=min_gpu_count
             )
         return self._client.list_rentals(query)
 
@@ -676,7 +681,7 @@ class BasilicaClient:
         min_gpu_memory_gb: Optional[int] = None,
         ttl_seconds: Optional[int] = None,
         public: bool = True,
-        storage: Optional[Union[str, StorageSpec]] = None
+        storage: Optional[Union[str, StorageSpec]] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment (low-level API).
@@ -728,7 +733,7 @@ class BasilicaClient:
                         credentials_secret=None,
                         sync_interval_ms=1000,
                         cache_size_mb=1024,
-                        mount_path=storage
+                        mount_path=storage,
                     )
                 )
             else:
@@ -745,7 +750,7 @@ class BasilicaClient:
             resources=resources,
             ttl_seconds=ttl_seconds,
             public=public,
-            storage=storage_spec
+            storage=storage_spec,
         )
 
         return self._client.create_deployment(request)
@@ -763,10 +768,7 @@ class BasilicaClient:
         return self._client.list_deployments()
 
     def get_deployment_logs(
-        self,
-        instance_name: str,
-        follow: bool = False,
-        tail: Optional[int] = None
+        self, instance_name: str, follow: bool = False, tail: Optional[int] = None
     ) -> str:
         """Get deployment logs."""
         return self._client.get_deployment_logs(instance_name, follow, tail)
