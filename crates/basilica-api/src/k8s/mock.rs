@@ -437,6 +437,20 @@ impl ApiK8sClient for MockK8sClient {
         Ok((2, 2))
     }
 
+    async fn get_user_deployment_phase(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<DeploymentPhaseDto> {
+        Ok(DeploymentPhaseDto {
+            phase: "ready".to_string(),
+            progress: None,
+            phase_history: vec![],
+            replicas_desired: 1,
+            replicas_ready: 1,
+        })
+    }
+
     async fn get_user_deployment_logs(
         &self,
         _ns: &str,
@@ -445,6 +459,46 @@ impl ApiK8sClient for MockK8sClient {
         _since_seconds: Option<u32>,
     ) -> Result<String> {
         Ok("Mock deployment logs\nLine 1\nLine 2\n".to_string())
+    }
+
+    async fn get_user_deployment_events(
+        &self,
+        _ns: &str,
+        _instance_name: &str,
+        _limit: Option<u32>,
+    ) -> Result<Vec<DeploymentEventDto>> {
+        Ok(vec![])
+    }
+
+    async fn secret_exists(&self, _ns: &str, _name: &str) -> Result<bool> {
+        // Mock always returns true - secrets exist
+        Ok(true)
+    }
+
+    async fn get_namespace_resource_quota(&self, _ns: &str) -> Result<Option<ResourceQuotaDto>> {
+        // Mock returns no quota (unlimited)
+        Ok(None)
+    }
+
+    async fn check_cluster_capacity(
+        &self,
+        _cpu_request: &str,
+        _memory_request: &str,
+        _gpu_count: Option<u32>,
+    ) -> Result<ClusterCapacityResult> {
+        // Mock always returns sufficient capacity
+        Ok(ClusterCapacityResult {
+            has_capacity: true,
+            message: None,
+            available_cpu: Some("8000m".to_string()),
+            available_memory: Some("32Gi".to_string()),
+            available_gpus: Some(4),
+        })
+    }
+
+    async fn get_image_pull_secrets(&self, _ns: &str) -> Result<Vec<String>> {
+        // Mock returns empty list (no private registry secrets)
+        Ok(vec![])
     }
 }
 

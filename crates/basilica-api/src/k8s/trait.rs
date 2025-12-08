@@ -89,6 +89,8 @@ pub trait ApiK8sClient {
 
     async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)>;
 
+    async fn get_user_deployment_phase(&self, ns: &str, name: &str) -> Result<DeploymentPhaseDto>;
+
     async fn get_user_deployment_logs(
         &self,
         ns: &str,
@@ -96,4 +98,22 @@ pub trait ApiK8sClient {
         tail: Option<u32>,
         since_seconds: Option<u32>,
     ) -> Result<String>;
+
+    async fn get_user_deployment_events(
+        &self,
+        ns: &str,
+        instance_name: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<DeploymentEventDto>>;
+
+    // Pre-deployment validation methods
+    async fn secret_exists(&self, ns: &str, name: &str) -> Result<bool>;
+    async fn get_namespace_resource_quota(&self, ns: &str) -> Result<Option<ResourceQuotaDto>>;
+    async fn check_cluster_capacity(
+        &self,
+        cpu_request: &str,
+        memory_request: &str,
+        gpu_count: Option<u32>,
+    ) -> Result<ClusterCapacityResult>;
+    async fn get_image_pull_secrets(&self, ns: &str) -> Result<Vec<String>>;
 }
