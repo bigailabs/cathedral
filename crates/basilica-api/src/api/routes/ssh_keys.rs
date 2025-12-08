@@ -9,6 +9,7 @@ use axum::{extract::State, http::StatusCode, Json};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use ssh_key::PublicKey;
 use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
@@ -99,14 +100,9 @@ pub async fn register_ssh_key(
 
     // Basic SSH public key format check
     let trimmed_key = request.public_key.trim();
-    if !trimmed_key.starts_with("ssh-rsa ")
-        && !trimmed_key.starts_with("ssh-ed25519 ")
-        && !trimmed_key.starts_with("ecdsa-sha2-")
-    {
+    if PublicKey::from_openssh(trimmed_key).is_err() {
         return Err(ApiError::BadRequest {
-            message:
-                "Invalid SSH public key format. Expected ssh-rsa, ssh-ed25519, or ecdsa-sha2-*"
-                    .to_string(),
+            message: "Invalid SSH public key format".to_string(),
         });
     }
 
@@ -140,7 +136,7 @@ pub async fn register_ssh_key(
     .bind(&id)
     .bind(&auth_context.user_id)
     .bind(&request.name)
-    .bind(&request.public_key)
+    .bind(trimmed_key)
     .bind(now)
     .bind(now)
     .execute(&state.db)
@@ -163,7 +159,7 @@ pub async fn register_ssh_key(
         id: id.clone(),
         user_id: auth_context.user_id.clone(),
         name: request.name,
-        public_key: request.public_key,
+        public_key: trimmed_key.to_string(),
         created_at: now,
         updated_at: now,
     };

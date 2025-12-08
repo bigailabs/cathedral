@@ -12,6 +12,7 @@ use axum::{
 use basilica_common::utils::validate_docker_image;
 use futures::stream::Stream;
 use serde::Deserialize;
+use ssh_key::PublicKey;
 use tracing::{error, info};
 
 use crate::{
@@ -188,26 +189,6 @@ pub struct ListRentalsQuery {
     pub max_cost_per_hour: Option<f64>,
 }
 
-/// Validate SSH public key
-fn is_valid_ssh_public_key(key: &str) -> bool {
-    if key.trim().is_empty() {
-        return false;
-    }
-
-    // Must start with ssh- prefix (all SSH keys do)
-    if !key.starts_with("ssh-") {
-        return false;
-    }
-
-    // Must have at least 2 parts (algorithm and key data)
-    let parts: Vec<&str> = key.split_whitespace().collect();
-    if parts.len() < 2 {
-        return false;
-    }
-
-    true
-}
-
 /// Start a new rental
 pub async fn start_rental(
     State(state): State<ApiState>,
@@ -239,7 +220,8 @@ pub async fn start_rental(
         "[RENTAL_FLOW] Starting rental for node {} on miner {}", node_id, miner_id
     );
 
-    if !is_valid_ssh_public_key(&request.ssh_public_key) {
+    let ssh_public_key = request.ssh_public_key.trim();
+    if PublicKey::from_openssh(ssh_public_key).is_err() {
         error!(
             miner_uid = miner_uid,
             node_id = %node_id,
@@ -310,7 +292,7 @@ pub async fn start_rental(
                 extra_hosts: std::collections::HashMap::new(),
             },
         },
-        ssh_public_key: request.ssh_public_key,
+        ssh_public_key: ssh_public_key.to_string(),
         metadata: std::collections::HashMap::new(),
     };
 

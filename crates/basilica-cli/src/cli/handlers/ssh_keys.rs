@@ -7,6 +7,7 @@ use basilica_sdk::BasilicaClient;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Confirm, Input};
 use etcetera::{choose_base_strategy, BaseStrategy};
+use ssh_key::PublicKey;
 use std::fs;
 use std::path::PathBuf;
 
@@ -143,31 +144,16 @@ pub fn validate_ssh_public_key(content: &str) -> Result<(), String> {
         return Err("SSH public key is empty".to_string());
     }
 
-    // Check if it starts with a known key type
-    if !trimmed.starts_with("ssh-rsa ")
-        && !trimmed.starts_with("ssh-ed25519 ")
-        && !trimmed.starts_with("ecdsa-sha2-")
-    {
-        return Err(
-            "Invalid SSH public key format. Expected ssh-rsa, ssh-ed25519, or ecdsa-sha2-*"
-                .to_string(),
-        );
-    }
-
-    // Basic structure check (should have at least: key-type key-data)
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(
-            "Invalid SSH public key structure. Expected: <key-type> <key-data> [comment]"
-                .to_string(),
-        );
-    }
-
     // Check if it looks like a private key (common mistake)
     if trimmed.contains("PRIVATE KEY") {
         return Err(
             "This appears to be a private key. Please use the public key file (*.pub)".to_string(),
         );
+    }
+
+    // Check if it starts with a known key type
+    if PublicKey::from_openssh(trimmed).is_err() {
+        return Err("Invalid SSH public key format".to_string());
     }
 
     Ok(())
@@ -237,7 +223,7 @@ pub async fn select_and_read_ssh_key() -> Result<SelectedSshKey, CliError> {
 
     Ok(SelectedSshKey {
         path: key_path,
-        content,
+        content: content.trim().to_string(),
     })
 }
 
@@ -399,7 +385,7 @@ pub async fn handle_add_ssh_key(
 
     // Step 5: Register the new SSH key
     let response = client
-        .register_ssh_key(&name, &public_key)
+        .register_ssh_key(&name, public_key.trim())
         .await
         .map_err(CliError::Api)?;
 

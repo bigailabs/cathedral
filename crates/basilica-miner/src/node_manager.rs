@@ -8,6 +8,7 @@ use basilica_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
 };
 use serde::{Deserialize, Serialize};
+use ssh_key::PublicKey;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -193,12 +194,13 @@ impl NodeManager {
         ssh_public_key: &str,
     ) -> Result<()> {
         // Validate SSH public key format
-        if !self.is_valid_ssh_public_key(ssh_public_key) {
+        let trimmed_key = ssh_public_key.trim();
+        if PublicKey::from_openssh(trimmed_key).is_err() {
             return Err(anyhow::anyhow!("Invalid SSH public key format"));
         }
 
         // Normalize the key with our identifier
-        let normalized_key = Self::normalize_ssh_key(ssh_public_key, validator_hotkey);
+        let normalized_key = Self::normalize_ssh_key(trimmed_key, validator_hotkey);
 
         // Get all nodes
         let nodes = self.list_nodes().await?;
@@ -309,14 +311,6 @@ impl NodeManager {
     pub async fn is_validator_authorized(&self, validator_hotkey: &str) -> bool {
         let current = self.current_assigned_validator.read().await;
         current.as_deref() == Some(validator_hotkey)
-    }
-
-    /// Validate SSH public key format
-    fn is_valid_ssh_public_key(&self, public_key: &str) -> bool {
-        public_key.starts_with("ssh-rsa ")
-            || public_key.starts_with("ssh-ed25519 ")
-            || public_key.starts_with("ecdsa-sha2-")
-            || public_key.starts_with("ssh-dss ")
     }
 
     /// Get the SSH private key path from config with tilde expansion
@@ -441,7 +435,8 @@ mod tests {
         let manager = NodeManager::new(NodeSshConfig::default());
 
         let validator_key = "validator-123";
-        let ssh_key = "ssh-rsa AAAAB3NzaC1yc2E...";
+        // Valid ed25519 test key
+        let ssh_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example";
 
         // Without any nodes, this should succeed but not deploy anywhere
         let result = manager.deploy_validator_keys(validator_key, ssh_key).await;
