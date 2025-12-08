@@ -48,6 +48,7 @@ Using `@basilica.deployment` decorator:
 | `12_lobe_chat.py` | LobeChat self-hosted AI interface | `python3 12_lobe_chat.py` |
 | `13_lobe_chat_vllm.py` | LobeChat + vLLM (fully private AI stack) | `python3 13_lobe_chat_vllm.py` |
 | `14_streamlit.py` | Streamlit interactive data app | `python3 14_streamlit.py` |
+| `15_cli_deploy/` | CLI deploy walkthrough | See directory README |
 
 ## Deployment Options
 

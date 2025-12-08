@@ -151,6 +151,57 @@
   changed_when: false
   tags: ['k3s', 'agent']
 
+- name: Detect NVIDIA GPU presence
+  ansible.builtin.shell: |
+    lspci | grep -i nvidia || echo "no-gpu"
+  register: gpu_detection
+  changed_when: false
+  tags: ['k3s', 'agent', 'gpu']
+
+- name: Apply GPU label to node if NVIDIA GPU detected
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml
+      label nodes {{ ansible_hostname }}
+      nvidia.com/gpu=present
+      --overwrite
+  delegate_to: "{{ first_master }}"
+  when: "'NVIDIA' in gpu_detection.stdout"
+  tags: ['k3s', 'agent', 'gpu']
+
+- name: Apply GPU taint to node if NVIDIA GPU detected
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml
+      taint nodes {{ ansible_hostname }}
+      nvidia.com/gpu:NoSchedule
+      --overwrite
+  delegate_to: "{{ first_master }}"
+  when: "'NVIDIA' in gpu_detection.stdout"
+  tags: ['k3s', 'agent', 'gpu']
+
+- name: Remove GPU label if no NVIDIA GPU detected
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml
+      label nodes {{ ansible_hostname }}
+      nvidia.com/gpu-
+  delegate_to: "{{ first_master }}"
+  when: "'NVIDIA' not in gpu_detection.stdout"
+  failed_when: false
+  tags: ['k3s', 'agent', 'gpu']
+
+- name: Remove GPU taint if no NVIDIA GPU detected
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml
+      taint nodes {{ ansible_hostname }}
+      nvidia.com/gpu:NoSchedule-
+  delegate_to: "{{ first_master }}"
+  when: "'NVIDIA' not in gpu_detection.stdout"
+  failed_when: false
+  tags: ['k3s', 'agent', 'gpu']
+
 - name: Display node status
   ansible.builtin.debug:
     msg: "Agent node {{ ansible_hostname }} is ready and joined to cluster"
