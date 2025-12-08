@@ -271,6 +271,11 @@ impl Args {
                 handlers::balance::handle_check_balance(&client, *json).await?;
             }
 
+            // Deploy command
+            Commands::Deploy(cmd) => {
+                handlers::deploy::handle_deploy(*cmd.clone(), config).await?;
+            }
+
             // Upgrade command is handled in main.rs before entering async runtime
             Commands::Upgrade { .. } => {
                 unreachable!("Upgrade command should be handled in main.rs")

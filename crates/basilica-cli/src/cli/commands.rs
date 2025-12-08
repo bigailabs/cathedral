@@ -194,6 +194,10 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Deploy applications to Basilica
+    #[command(name = "deploy", visible_alias = "d")]
+    Deploy(Box<DeployCommand>),
 }
 
 /// Fund management actions
@@ -277,7 +281,8 @@ impl Commands {
             | Commands::Tokens { .. }
             | Commands::SshKeys { .. }
             | Commands::Fund { .. }
-            | Commands::Balance { .. } => true,
+            | Commands::Balance { .. }
+            | Commands::Deploy(_) => true,
 
             // Authentication commands don't require auth
             Commands::Login { .. } | Commands::Logout | Commands::Upgrade { .. } => false,
@@ -411,4 +416,321 @@ pub struct SshOptions {
     /// Remote port forwarding (remote_port:local_host:local_port)
     #[arg(short = 'R', long)]
     pub remote_forward: Vec<String>,
+}
+
+// ============================================================================
+// Deploy Command Definitions
+// ============================================================================
+
+/// Deploy command with subcommands and options
+#[derive(clap::Parser, Debug, Clone)]
+pub struct DeployCommand {
+    #[command(subcommand)]
+    pub action: Option<DeployAction>,
+
+    /// Source file or Docker image to deploy
+    #[arg(value_name = "SOURCE")]
+    pub source: Option<String>,
+
+    #[command(flatten)]
+    pub naming: NamingOptions,
+
+    #[command(flatten)]
+    pub resources: ResourceOptions,
+
+    #[command(flatten)]
+    pub gpu: GpuOptions,
+
+    #[command(flatten)]
+    pub storage: StorageOptions,
+
+    #[command(flatten)]
+    pub health: HealthCheckOptions,
+
+    #[command(flatten)]
+    pub networking: NetworkingOptions,
+
+    #[command(flatten)]
+    pub lifecycle: LifecycleOptions,
+
+    /// Output as JSON
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Show detailed deployment phases during progress
+    #[arg(long, global = true)]
+    pub show_phases: bool,
+}
+
+/// Naming and identification options
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct NamingOptions {
+    /// Deployment name (auto-generated if not specified)
+    #[arg(short, long)]
+    pub name: Option<String>,
+
+    /// Docker image (default: python:3.11-slim for .py files)
+    #[arg(long)]
+    pub image: Option<String>,
+
+    /// Number of replicas (default: 1)
+    #[arg(long, default_value = "1")]
+    pub replicas: u32,
+}
+
+/// Resource allocation options (limits and requests)
+#[derive(clap::Args, Debug, Clone)]
+pub struct ResourceOptions {
+    /// CPU limit (e.g., "500m", "2")
+    #[arg(long, default_value = "500m")]
+    pub cpu: String,
+
+    /// Memory limit (e.g., "512Mi", "2Gi")
+    #[arg(long, default_value = "512Mi")]
+    pub memory: String,
+
+    /// CPU request (defaults to cpu limit)
+    #[arg(long)]
+    pub cpu_request: Option<String>,
+
+    /// Memory request (defaults to memory limit)
+    #[arg(long)]
+    pub memory_request: Option<String>,
+}
+
+impl Default for ResourceOptions {
+    fn default() -> Self {
+        Self {
+            cpu: "500m".to_string(),
+            memory: "512Mi".to_string(),
+            cpu_request: None,
+            memory_request: None,
+        }
+    }
+}
+
+/// GPU configuration options
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct GpuOptions {
+    /// Number of GPUs (1-8)
+    #[arg(long)]
+    pub gpu: Option<u32>,
+
+    /// GPU model requirements (e.g., "A100", "H100")
+    #[arg(long)]
+    pub gpu_model: Vec<String>,
+
+    /// Minimum CUDA version (e.g., "12.0")
+    #[arg(long)]
+    pub cuda_version: Option<String>,
+
+    /// Minimum GPU memory in GB
+    #[arg(long)]
+    pub gpu_memory_gb: Option<u32>,
+
+    /// GPU vendor (nvidia, amd)
+    #[arg(long)]
+    pub gpu_vendor: Option<String>,
+
+    /// Node selector labels (format: key=value, can be specified multiple times)
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub node_selector: Vec<String>,
+
+    /// Preferred node affinity labels (soft constraint, format: key=value)
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub prefer_node: Vec<String>,
+
+    /// Required node affinity labels (hard constraint, format: key=value)
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub require_node: Vec<String>,
+}
+
+/// Storage configuration options
+#[derive(clap::Args, Debug, Clone)]
+pub struct StorageOptions {
+    /// Enable persistent storage
+    #[arg(long)]
+    pub storage: bool,
+
+    /// Storage mount path (default: /data)
+    #[arg(long, default_value = "/data")]
+    pub storage_path: String,
+
+    /// Storage cache size in MB (default: 2048)
+    #[arg(long, default_value = "2048")]
+    pub storage_cache_mb: usize,
+
+    /// Storage sync interval in ms (default: 1000)
+    #[arg(long, default_value = "1000")]
+    pub storage_sync_ms: u64,
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            storage: false,
+            storage_path: "/data".to_string(),
+            storage_cache_mb: 2048,
+            storage_sync_ms: 1000,
+        }
+    }
+}
+
+/// Health check configuration options
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct HealthCheckOptions {
+    /// HTTP path for liveness probe
+    #[arg(long)]
+    pub liveness_path: Option<String>,
+
+    /// HTTP path for readiness probe
+    #[arg(long)]
+    pub readiness_path: Option<String>,
+
+    /// HTTP path for startup probe (delays liveness/readiness until app is ready)
+    #[arg(long)]
+    pub startup_path: Option<String>,
+
+    /// Shorthand for all probes (same path)
+    #[arg(long)]
+    pub health_path: Option<String>,
+
+    /// Port for health probes (defaults to primary container port)
+    #[arg(long)]
+    pub health_port: Option<u16>,
+
+    /// Initial delay before liveness/readiness probes start (seconds)
+    #[arg(long, default_value = "30")]
+    pub health_initial_delay: u32,
+
+    /// Probe interval (seconds)
+    #[arg(long, default_value = "10")]
+    pub health_period: u32,
+
+    /// Probe timeout (seconds)
+    #[arg(long, default_value = "5")]
+    pub health_timeout: u32,
+
+    /// Failure threshold before restart
+    #[arg(long, default_value = "3")]
+    pub health_failure_threshold: u32,
+
+    /// Startup probe failure threshold (higher for slow-starting apps)
+    #[arg(long, default_value = "30")]
+    pub startup_failure_threshold: u32,
+}
+
+/// Networking options
+#[derive(clap::Args, Debug, Clone)]
+pub struct NetworkingOptions {
+    /// Container ports (format: PORT[:NAME], e.g., 8000:http, 9090:metrics)
+    #[arg(short, long, value_name = "PORT[:NAME]", default_value = "8000")]
+    pub port: Vec<String>,
+
+    /// Create public URL (default: true)
+    #[arg(long, default_value = "true")]
+    pub public: bool,
+
+    /// Environment variables (KEY=VALUE)
+    #[arg(short, long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// Additional pip packages to install
+    #[arg(long, num_args = 1..)]
+    pub pip: Vec<String>,
+}
+
+impl Default for NetworkingOptions {
+    fn default() -> Self {
+        Self {
+            port: vec!["8000".to_string()],
+            public: true,
+            env: vec![],
+            pip: vec![],
+        }
+    }
+}
+
+/// Lifecycle options
+#[derive(clap::Args, Debug, Clone)]
+pub struct LifecycleOptions {
+    /// Time-to-live in seconds (60-604800, auto-delete after expiry)
+    #[arg(long)]
+    pub ttl: Option<u32>,
+
+    /// Deployment timeout in seconds
+    #[arg(long, default_value = "300")]
+    pub timeout: u32,
+
+    /// Don't wait for deployment to be ready
+    #[arg(long)]
+    pub detach: bool,
+
+    /// Termination grace period in seconds
+    #[arg(long, default_value = "30")]
+    pub grace_period: u32,
+
+    /// Skip GPU resource correlation validation (use with caution)
+    #[arg(long)]
+    pub skip_gpu_validation: bool,
+}
+
+impl Default for LifecycleOptions {
+    fn default() -> Self {
+        Self {
+            ttl: None,
+            timeout: 300,
+            detach: false,
+            grace_period: 30,
+            skip_gpu_validation: false,
+        }
+    }
+}
+
+/// Deploy subcommands
+#[derive(Subcommand, Debug, Clone)]
+pub enum DeployAction {
+    /// List all deployments
+    #[command(name = "ls", visible_alias = "list")]
+    List,
+
+    /// Get deployment status
+    #[command(name = "status", visible_alias = "get")]
+    Status {
+        /// Deployment name
+        name: String,
+    },
+
+    /// Stream deployment logs
+    #[command(name = "logs")]
+    Logs {
+        /// Deployment name
+        name: String,
+        /// Follow log output
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show from end
+        #[arg(long)]
+        tail: Option<u32>,
+    },
+
+    /// Delete a deployment
+    #[command(name = "delete", visible_alias = "rm")]
+    Delete {
+        /// Deployment name
+        name: String,
+        /// Skip confirmation
+        #[arg(short, long)]
+        yes: bool,
+    },
+
+    /// Scale deployment replicas
+    #[command(name = "scale")]
+    Scale {
+        /// Deployment name
+        name: String,
+        /// Number of replicas
+        #[arg(long)]
+        replicas: u32,
+    },
 }
