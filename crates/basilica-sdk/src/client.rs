@@ -45,10 +45,11 @@ use crate::{
     types::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
-        DeploymentListResponse, DeploymentResponse, DepositAccountResponse, HealthCheckResponse,
-        HistoricalRentalsResponse, ListAvailableNodesQuery, ListDepositsQuery,
-        ListDepositsResponse, ListRentalsQuery, RegisterSshKeyRequest, RentalStatusWithSshResponse,
-        RentalUsageResponse, SshKeyResponse, UsageHistoryResponse,
+        DeploymentEventsResponse, DeploymentListResponse, DeploymentResponse,
+        DepositAccountResponse, HealthCheckResponse, HistoricalRentalsResponse,
+        ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
+        RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
+        ScaleDeploymentRequest, SshKeyResponse, UsageHistoryResponse,
     },
     StartRentalApiRequest,
 };
@@ -512,6 +513,13 @@ impl BasilicaClient {
     ///     env: None,
     ///     resources: None,
     ///     ttl_seconds: None,
+    ///     public: true,
+    ///     storage: None,
+    ///     health_check: None,
+    ///     enable_billing: true,
+    ///     queue_name: None,
+    ///     suspended: false,
+    ///     priority: None,
     /// };
     ///
     /// let deployment = client.create_deployment(request).await?;
@@ -660,25 +668,92 @@ impl BasilicaClient {
         follow: bool,
         tail: Option<u32>,
     ) -> Result<reqwest::Response> {
-        let mut url = format!("{}/deployments/{}/logs", self.base_url, instance_name);
+        let url = format!("{}/deployments/{}/logs", self.base_url, instance_name);
 
-        let mut params = vec![];
+        let mut params = Vec::new();
         if follow {
-            params.push(format!("follow={}", follow));
+            params.push(("follow", follow.to_string()));
         }
         if let Some(t) = tail {
-            params.push(format!("tail={}", t));
+            params.push(("tail", t.to_string()));
         }
 
+        let mut request = self.http_client.get(&url);
         if !params.is_empty() {
-            url.push('?');
-            url.push_str(&params.join("&"));
+            request = request.query(&params);
         }
-
-        let request = self.http_client.get(&url);
         let request = self.apply_auth(request).await?;
 
         request.send().await.map_err(ApiError::HttpClient)
+    }
+
+    /// Get deployment events
+    ///
+    /// Fetches Kubernetes events related to a deployment's pods.
+    /// Useful for debugging failed or unhealthy deployments.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The deployment instance name
+    /// * `limit` - Optional maximum number of events to return
+    ///
+    /// # Returns
+    ///
+    /// Returns deployment events sorted by timestamp (newest first)
+    pub async fn get_deployment_events(
+        &self,
+        instance_name: &str,
+        limit: Option<u32>,
+    ) -> Result<DeploymentEventsResponse> {
+        let url = format!("{}/deployments/{}/events", self.base_url, instance_name);
+        let mut request = self.http_client.get(&url);
+
+        if let Some(l) = limit {
+            request = request.query(&[("limit", l)]);
+        }
+
+        let request = self.apply_auth(request).await?;
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    /// Scale a deployment to a specific number of replicas
+    ///
+    /// Updates the desired replica count for a deployment.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The deployment instance name
+    /// * `replicas` - The desired number of replicas
+    ///
+    /// # Returns
+    ///
+    /// Returns the updated deployment state
+    ///
+    /// # Errors
+    ///
+    /// * `ApiError::NotFound` - Deployment doesn't exist
+    /// * `ApiError::InvalidRequest` - Invalid replica count
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use basilica_sdk::BasilicaClient;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = BasilicaClient::builder().with_api_key("key").build()?;
+    /// let result = client.scale_deployment("my-app", 3).await?;
+    /// println!("Scaled to {} replicas", result.replicas.desired);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn scale_deployment(
+        &self,
+        instance_name: &str,
+        replicas: u32,
+    ) -> Result<DeploymentResponse> {
+        let path = format!("/deployments/{}/scale", instance_name);
+        let request = ScaleDeploymentRequest { replicas };
+        self.post(&path, &request).await
     }
 
     // ===== Private Helper Methods =====
@@ -1223,6 +1298,7 @@ mod tests {
             ttl_seconds: None,
             public: true,
             storage: None,
+            health_check: None,
             enable_billing: true,
             queue_name: None,
             suspended: false,
@@ -1298,11 +1374,14 @@ mod tests {
             resources: Some(crate::types::ResourceRequirements {
                 cpu: "1000m".to_string(),
                 memory: "1Gi".to_string(),
+                cpu_request: None,
+                memory_request: None,
                 gpus: None,
             }),
             ttl_seconds: None,
             public: true,
             storage: None,
+            health_check: None,
             enable_billing: true,
             queue_name: None,
             suspended: false,
@@ -1350,6 +1429,7 @@ mod tests {
             ttl_seconds: None,
             public: true,
             storage: None,
+            health_check: None,
             enable_billing: true,
             queue_name: None,
             suspended: false,
@@ -1567,6 +1647,7 @@ mod tests {
             ttl_seconds: None,
             public: true,
             storage: None,
+            health_check: None,
             enable_billing: true,
             queue_name: None,
             suspended: false,

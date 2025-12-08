@@ -582,6 +582,10 @@ pub struct ResourceRequirements {
     pub cpu: String,
     pub memory: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub gpus: Option<GpuRequirementsSpec>,
 }
 
@@ -673,6 +677,8 @@ pub struct CreateDeploymentRequest {
     pub public: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<HealthCheckConfig>,
     #[serde(default = "default_enable_billing")]
     pub enable_billing: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -720,6 +726,12 @@ pub struct DeploymentResponse {
     pub updated_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pods: Option<Vec<PodInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<DeploymentProgress>,
 }
 
 /// Deployment summary for list responses
@@ -748,4 +760,83 @@ pub struct DeleteDeploymentResponse {
     pub instance_name: String,
     pub state: String,
     pub message: String,
+}
+
+/// Deployment event from Kubernetes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub reason: String,
+    pub message: String,
+    pub count: Option<i32>,
+    pub last_timestamp: Option<String>,
+}
+
+/// Deployment events response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentEventsResponse {
+    pub events: Vec<DeploymentEvent>,
+}
+
+/// Health check configuration for deployments
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthCheckConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<ProbeConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<ProbeConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup: Option<ProbeConfig>,
+}
+
+/// HTTP probe configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeConfig {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    #[serde(default = "default_initial_delay")]
+    pub initial_delay_seconds: u32,
+    #[serde(default = "default_period")]
+    pub period_seconds: u32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+}
+
+fn default_initial_delay() -> u32 {
+    30
+}
+
+fn default_period() -> u32 {
+    10
+}
+
+fn default_timeout() -> u32 {
+    5
+}
+
+fn default_failure_threshold() -> u32 {
+    3
+}
+
+/// Scale deployment request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleDeploymentRequest {
+    pub replicas: u32,
+}
+
+/// Deployment progress information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentProgress {
+    pub current_step: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percentage: Option<f64>,
+    pub elapsed_seconds: u64,
 }

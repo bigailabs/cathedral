@@ -57,6 +57,14 @@ pub enum ApiError {
     /// Validator communication error
     #[error("Validator communication error: {message}")]
     ValidatorCommunication { message: String },
+
+    /// Quota exceeded error
+    #[error("Quota exceeded: {message}")]
+    QuotaExceeded { message: String },
+
+    /// Generic API response error with status code
+    #[error("API error ({status}): {message}")]
+    ApiResponse { status: u16, message: String },
 }
 
 /// Result type alias
@@ -79,6 +87,8 @@ impl ApiError {
             ApiError::ServiceUnavailable => "BASILICA_API_SERVICE_UNAVAILABLE",
             ApiError::Timeout => "BASILICA_API_TIMEOUT",
             ApiError::ValidatorCommunication { .. } => "BASILICA_API_VALIDATOR_COMM_ERROR",
+            ApiError::QuotaExceeded { .. } => "BASILICA_API_QUOTA_EXCEEDED",
+            ApiError::ApiResponse { .. } => "BASILICA_API_RESPONSE_ERROR",
         }
     }
 
@@ -105,6 +115,7 @@ impl ApiError {
                 | ApiError::NotFound { .. }
                 | ApiError::BadRequest { .. }
                 | ApiError::Conflict { .. }
+                | ApiError::QuotaExceeded { .. }
         )
     }
 }
