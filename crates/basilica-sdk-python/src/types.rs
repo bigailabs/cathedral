@@ -641,8 +641,9 @@ use basilica_sdk::types::{
     CreateDeploymentRequest as SdkCreateDeploymentRequest,
     DeleteDeploymentResponse as SdkDeleteDeploymentResponse,
     DeploymentListResponse as SdkDeploymentListResponse,
-    DeploymentResponse as SdkDeploymentResponse, DeploymentSummary as SdkDeploymentSummary,
-    EnvVar as SdkEnvVar, GpuRequirementsSpec as SdkGpuRequirementsSpec,
+    DeploymentProgress as SdkDeploymentProgress, DeploymentResponse as SdkDeploymentResponse,
+    DeploymentSummary as SdkDeploymentSummary, EnvVar as SdkEnvVar,
+    GpuRequirementsSpec as SdkGpuRequirementsSpec,
     PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
     ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
     StorageBackend as SdkStorageBackend, StorageSpec as SdkStorageSpec,
@@ -753,6 +754,10 @@ pub struct ResourceRequirements {
     #[pyo3(get, set)]
     pub memory: String,
     #[pyo3(get, set)]
+    pub cpu_request: Option<String>,
+    #[pyo3(get, set)]
+    pub memory_request: Option<String>,
+    #[pyo3(get, set)]
     pub gpus: Option<GpuRequirementsSpec>,
 }
 
@@ -760,9 +765,21 @@ pub struct ResourceRequirements {
 #[pymethods]
 impl ResourceRequirements {
     #[new]
-    #[pyo3(signature = (cpu, memory, gpus=None))]
-    fn new(cpu: String, memory: String, gpus: Option<GpuRequirementsSpec>) -> Self {
-        Self { cpu, memory, gpus }
+    #[pyo3(signature = (cpu, memory, gpus=None, cpu_request=None, memory_request=None))]
+    fn new(
+        cpu: String,
+        memory: String,
+        gpus: Option<GpuRequirementsSpec>,
+        cpu_request: Option<String>,
+        memory_request: Option<String>,
+    ) -> Self {
+        Self {
+            cpu,
+            memory,
+            gpus,
+            cpu_request,
+            memory_request,
+        }
     }
 }
 
@@ -771,6 +788,8 @@ impl From<ResourceRequirements> for SdkResourceRequirements {
         Self {
             cpu: res.cpu,
             memory: res.memory,
+            cpu_request: res.cpu_request,
+            memory_request: res.memory_request,
             gpus: res.gpus.map(|g| g.into()),
         }
     }
@@ -781,6 +800,8 @@ impl From<SdkResourceRequirements> for ResourceRequirements {
         Self {
             cpu: res.cpu,
             memory: res.memory,
+            cpu_request: res.cpu_request,
+            memory_request: res.memory_request,
             gpus: res.gpus.map(|g| g.into()),
         }
     }
@@ -976,6 +997,7 @@ pub struct CreateDeploymentRequest {
     pub public: bool,
     #[pyo3(get, set)]
     pub storage: Option<StorageSpec>,
+    // health_check: Not exposed to Python - use None
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
@@ -1027,10 +1049,34 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             ttl_seconds: req.ttl_seconds,
             public: req.public,
             storage: req.storage.map(Into::into),
+            health_check: None,
             enable_billing: true,
             queue_name: None,
             suspended: false,
             priority: None,
+        }
+    }
+}
+
+/// Deployment progress information
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct DeploymentProgress {
+    #[pyo3(get)]
+    pub current_step: String,
+    #[pyo3(get)]
+    pub percentage: Option<f64>,
+    #[pyo3(get)]
+    pub elapsed_seconds: u64,
+}
+
+impl From<SdkDeploymentProgress> for DeploymentProgress {
+    fn from(progress: SdkDeploymentProgress) -> Self {
+        Self {
+            current_step: progress.current_step,
+            percentage: progress.percentage,
+            elapsed_seconds: progress.elapsed_seconds,
         }
     }
 }
@@ -1058,6 +1104,12 @@ pub struct DeploymentResponse {
     pub updated_at: Option<String>,
     #[pyo3(get)]
     pub pods: Option<Vec<PodInfo>>,
+    #[pyo3(get)]
+    pub phase: Option<String>,
+    #[pyo3(get)]
+    pub message: Option<String>,
+    #[pyo3(get)]
+    pub progress: Option<DeploymentProgress>,
 }
 
 impl From<SdkDeploymentResponse> for DeploymentResponse {
@@ -1074,6 +1126,9 @@ impl From<SdkDeploymentResponse> for DeploymentResponse {
             pods: response
                 .pods
                 .map(|pods| pods.into_iter().map(Into::into).collect()),
+            phase: response.phase,
+            message: response.message,
+            progress: response.progress.map(Into::into),
         }
     }
 }
