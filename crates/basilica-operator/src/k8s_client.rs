@@ -9,6 +9,7 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
+use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use kube::ResourceExt;
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -135,6 +136,17 @@ pub trait K8sClient: Send + Sync {
         ns: &str,
         obj: &kube::core::DynamicObject,
     ) -> Result<kube::core::DynamicObject>;
+
+    // PodDisruptionBudget management
+    async fn create_pdb(&self, ns: &str, pdb: &PodDisruptionBudget) -> Result<PodDisruptionBudget>;
+    async fn get_pdb(&self, ns: &str, name: &str) -> Result<PodDisruptionBudget>;
+    async fn delete_pdb(&self, ns: &str, name: &str) -> Result<()>;
+    async fn patch_pdb(
+        &self,
+        ns: &str,
+        name: &str,
+        pdb: &PodDisruptionBudget,
+    ) -> Result<PodDisruptionBudget>;
 }
 
 /// In-memory mock client implementing a subset of the Kubernetes API for tests.
@@ -156,6 +168,7 @@ pub struct MockK8sClient {
     nodes: Arc<RwLock<HashMap<String, Node>>>,
     evict_block: Arc<RwLock<std::collections::HashSet<String>>>,
     http_routes: Arc<RwLock<HashMap<String, HashMap<String, kube::core::DynamicObject>>>>,
+    pdbs: Arc<RwLock<HashMap<String, HashMap<String, PodDisruptionBudget>>>>,
 }
 
 fn key(ns: &str) -> String {
@@ -661,6 +674,46 @@ impl K8sClient for MockK8sClient {
             .or_default()
             .insert(name.clone(), obj.clone());
         Ok(obj.clone())
+    }
+
+    async fn create_pdb(&self, ns: &str, pdb: &PodDisruptionBudget) -> Result<PodDisruptionBudget> {
+        let name = pdb.metadata.name.clone().unwrap_or_default();
+        if name.is_empty() {
+            return Err(anyhow!("PodDisruptionBudget missing metadata.name"));
+        }
+        let mut map = self.pdbs.write().await;
+        map.entry(key(ns))
+            .or_default()
+            .insert(name.clone(), pdb.clone());
+        Ok(pdb.clone())
+    }
+
+    async fn get_pdb(&self, ns: &str, name: &str) -> Result<PodDisruptionBudget> {
+        let map = self.pdbs.read().await;
+        map.get(ns)
+            .and_then(|m| m.get(name))
+            .cloned()
+            .ok_or_else(|| anyhow!("PodDisruptionBudget not found: {}/{}", ns, name))
+    }
+
+    async fn delete_pdb(&self, ns: &str, name: &str) -> Result<()> {
+        let mut map = self.pdbs.write().await;
+        map.get_mut(ns).and_then(|m| m.remove(name));
+        Ok(())
+    }
+
+    async fn patch_pdb(
+        &self,
+        ns: &str,
+        _name: &str,
+        pdb: &PodDisruptionBudget,
+    ) -> Result<PodDisruptionBudget> {
+        let name = pdb.metadata.name.clone().unwrap_or_default();
+        let mut map = self.pdbs.write().await;
+        map.entry(ns.to_string())
+            .or_default()
+            .insert(name.clone(), pdb.clone());
+        Ok(pdb.clone())
     }
 }
 
@@ -1276,6 +1329,56 @@ impl K8sClient for KubeClient {
             Err(e) => Err(anyhow!(e)),
         }
     }
+
+    async fn create_pdb(&self, ns: &str, pdb: &PodDisruptionBudget) -> Result<PodDisruptionBudget> {
+        use kube::api::PostParams;
+        let api: kube::Api<PodDisruptionBudget> = self.api(ns);
+        match api.create(&PostParams::default(), pdb).await {
+            Ok(o) => Ok(o),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(pdb.clone()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn get_pdb(&self, ns: &str, name: &str) -> Result<PodDisruptionBudget> {
+        let api: kube::Api<PodDisruptionBudget> = self.api(ns);
+        api.get(name).await.map_err(|e| anyhow!(e))
+    }
+
+    async fn delete_pdb(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::DeleteParams;
+        let api: kube::Api<PodDisruptionBudget> = self.api(ns);
+        match api.delete(name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
+
+    async fn patch_pdb(
+        &self,
+        ns: &str,
+        name: &str,
+        pdb: &PodDisruptionBudget,
+    ) -> Result<PodDisruptionBudget> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<PodDisruptionBudget> = self.api(ns);
+        let pdb_json = serde_json::to_value(pdb)?;
+        let patch_params = PatchParams::apply("basilica-operator");
+        match api
+            .patch(name, &patch_params, &Patch::Apply(&pdb_json))
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                let force_params = patch_params.force();
+                api.patch(name, &force_params, &Patch::Apply(&pdb_json))
+                    .await
+                    .map_err(|e| anyhow!(e))
+            }
+            Err(e) => Err(anyhow!(e)),
+        }
+    }
 }
 
 /// Rate-limited Kubernetes client wrapper.
@@ -1601,6 +1704,31 @@ impl K8sClient for RateLimitedKubeClient {
     ) -> Result<kube::core::DynamicObject> {
         self.wait_for_permit().await;
         self.inner.create_http_route(ns, obj).await
+    }
+
+    async fn create_pdb(&self, ns: &str, pdb: &PodDisruptionBudget) -> Result<PodDisruptionBudget> {
+        self.wait_for_permit().await;
+        self.inner.create_pdb(ns, pdb).await
+    }
+
+    async fn get_pdb(&self, ns: &str, name: &str) -> Result<PodDisruptionBudget> {
+        self.wait_for_permit().await;
+        self.inner.get_pdb(ns, name).await
+    }
+
+    async fn delete_pdb(&self, ns: &str, name: &str) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.delete_pdb(ns, name).await
+    }
+
+    async fn patch_pdb(
+        &self,
+        ns: &str,
+        name: &str,
+        pdb: &PodDisruptionBudget,
+    ) -> Result<PodDisruptionBudget> {
+        self.wait_for_permit().await;
+        self.inner.patch_pdb(ns, name, pdb).await
     }
 }
 

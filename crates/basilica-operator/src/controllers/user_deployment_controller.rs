@@ -11,6 +11,7 @@ use k8s_openapi::api::networking::v1::{
     NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
     NetworkPolicySpec,
 };
+use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -97,6 +98,20 @@ fn network_policy_needs_update(current: &NetworkPolicy, desired: &NetworkPolicy)
     };
 
     current_spec.ingress != desired_spec.ingress || current_spec.egress != desired_spec.egress
+}
+
+fn pdb_needs_update(current: &PodDisruptionBudget, desired: &PodDisruptionBudget) -> bool {
+    let current_spec = match &current.spec {
+        Some(s) => s,
+        None => return true,
+    };
+    let desired_spec = match &desired.spec {
+        Some(s) => s,
+        None => return false,
+    };
+
+    current_spec.min_available != desired_spec.min_available
+        || current_spec.selector != desired_spec.selector
 }
 
 fn to_quantity(s: &str) -> Quantity {
@@ -728,6 +743,82 @@ pub fn render_network_policy(instance_name: &str, namespace: &str, port: u32) ->
     }
 }
 
+/// Render a PodDisruptionBudget for deployments with replicas > 1.
+/// Returns None if replicas <= 1 (PDB not needed for single-replica deployments).
+/// The PDB includes owner references to the UserDeployment for proper garbage collection.
+pub fn render_pdb(
+    instance_name: &str,
+    namespace: &str,
+    replicas: u32,
+    owner: &UserDeployment,
+) -> Option<PodDisruptionBudget> {
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+    use kube::ResourceExt;
+
+    if replicas <= 1 {
+        return None;
+    }
+
+    let mut labels = BTreeMap::new();
+    labels.insert("app".to_string(), instance_name.to_string());
+    labels.insert(
+        "basilica.ai/type".to_string(),
+        "user-deployment".to_string(),
+    );
+    labels.insert(
+        "basilica.ai/instance".to_string(),
+        instance_name.to_string(),
+    );
+
+    // Use more specific selector to avoid affecting other deployments
+    let mut selector_labels = BTreeMap::new();
+    selector_labels.insert("app".to_string(), instance_name.to_string());
+    selector_labels.insert(
+        "basilica.ai/instance".to_string(),
+        instance_name.to_string(),
+    );
+
+    // Calculate minAvailable based on replica count:
+    // - 2-3 replicas: minAvailable = 1 (ensure at least 1 pod survives)
+    // - 4+ replicas: minAvailable = 50% (allow half to be disrupted)
+    let min_available = if replicas <= 3 {
+        IntOrString::Int(1)
+    } else {
+        IntOrString::String("50%".to_string())
+    };
+
+    // Owner UID is required for valid owner references - skip PDB if missing
+    let owner_uid = owner.metadata.uid.as_ref()?;
+
+    let owner_references = vec![OwnerReference {
+        api_version: "basilica.ai/v1".to_string(),
+        kind: "UserDeployment".to_string(),
+        name: owner.name_any(),
+        uid: owner_uid.clone(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }];
+
+    Some(PodDisruptionBudget {
+        metadata: ObjectMeta {
+            name: Some(format!("{}-pdb", instance_name)),
+            namespace: Some(namespace.to_string()),
+            labels: Some(labels),
+            owner_references: Some(owner_references),
+            ..Default::default()
+        },
+        spec: Some(PodDisruptionBudgetSpec {
+            min_available: Some(min_available),
+            selector: Some(LabelSelector {
+                match_labels: Some(selector_labels),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
+}
+
 #[derive(Clone)]
 pub struct UserDeploymentController {
     client: Arc<dyn K8sClient>,
@@ -766,6 +857,7 @@ impl UserDeploymentController {
         let deployment_name = format!("{}-deployment", instance_name);
         let service_name = make_service_name(instance_name);
         let netpol_name = format!("{}-netpol", instance_name);
+        let pdb_name = format!("{}-pdb", instance_name);
 
         let desired_deployment = render_deployment(instance_name, ns, spec)?;
         let current_deployment = self.client.get_deployment(ns, &deployment_name).await.ok();
@@ -804,6 +896,34 @@ impl UserDeploymentController {
             self.client
                 .patch_network_policy(ns, &netpol_name, &desired_netpol)
                 .await?;
+        }
+
+        // PDB: Create for multi-replica deployments, delete for single-replica
+        let desired_pdb = render_pdb(instance_name, ns, spec.replicas, cr);
+        let current_pdb = self.client.get_pdb(ns, &pdb_name).await.ok();
+
+        match (desired_pdb, current_pdb) {
+            (Some(desired), Some(current)) => {
+                if pdb_needs_update(&current, &desired) {
+                    debug!("PodDisruptionBudget {} needs update, patching", pdb_name);
+                    self.client.patch_pdb(ns, &pdb_name, &desired).await?;
+                }
+            }
+            (Some(desired), None) => {
+                debug!(
+                    "Creating PodDisruptionBudget {} for {} replicas",
+                    pdb_name, spec.replicas
+                );
+                self.client.create_pdb(ns, &desired).await?;
+            }
+            (None, Some(_)) => {
+                debug!(
+                    "Deleting PodDisruptionBudget {} (replicas reduced to {})",
+                    pdb_name, spec.replicas
+                );
+                self.client.delete_pdb(ns, &pdb_name).await?;
+            }
+            (None, None) => {}
         }
 
         let pods = self
@@ -939,6 +1059,18 @@ mod phase_detection {
     use super::*;
     use k8s_openapi::api::core::v1::PodStatus;
 
+    /// Timeout for ImagePullBackOff/ErrImagePull before treating as failure (5 minutes)
+    const IMAGE_PULL_FAILURE_TIMEOUT_SECS: u64 = 300;
+
+    /// Calculate pod age in seconds from creation timestamp
+    pub fn get_pod_age_seconds(pod: &Pod) -> Option<u64> {
+        pod.metadata.creation_timestamp.as_ref().map(|ts| {
+            let now = k8s_openapi::chrono::Utc::now();
+            let created = ts.0;
+            (now - created).num_seconds().max(0) as u64
+        })
+    }
+
     pub fn determine_phase(pods: &[Pod], desired_replicas: u32) -> (DeploymentPhase, u32) {
         if pods.is_empty() {
             return (DeploymentPhase::Pending, 0);
@@ -953,13 +1085,14 @@ mod phase_detection {
 
         for pod in pods {
             let status = pod.status.as_ref();
+            let pod_age = get_pod_age_seconds(pod);
 
             if !is_scheduled(status) {
                 scheduling_count += 1;
                 continue;
             }
 
-            if is_pulling_image(status) {
+            if is_pulling_image(status, pod_age) {
                 pulling_count += 1;
                 continue;
             }
@@ -969,7 +1102,7 @@ mod phase_detection {
                 continue;
             }
 
-            if is_failed(status) {
+            if is_failed(status, pod_age) {
                 failed_count += 1;
                 continue;
             }
@@ -1018,8 +1151,8 @@ mod phase_detection {
             .unwrap_or(false)
     }
 
-    fn is_pulling_image(status: Option<&PodStatus>) -> bool {
-        status
+    fn is_pulling_image(status: Option<&PodStatus>, pod_age: Option<u64>) -> bool {
+        let is_image_pull_state = status
             .and_then(|s| s.container_statuses.as_ref())
             .map(|statuses| {
                 statuses.iter().any(|cs| {
@@ -1033,6 +1166,38 @@ mod phase_detection {
                                 || reason == "ImagePullBackOff"
                                 || reason == "ErrImagePull"
                         })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if !is_image_pull_state {
+            return false;
+        }
+
+        // If pod is older than timeout and in ImagePullBackOff/ErrImagePull, treat as failure instead
+        let is_prolonged_failure = has_prolonged_image_pull_failure(status, pod_age);
+        !is_prolonged_failure
+    }
+
+    fn has_prolonged_image_pull_failure(status: Option<&PodStatus>, pod_age: Option<u64>) -> bool {
+        let exceeds_timeout = pod_age
+            .map(|age| age > IMAGE_PULL_FAILURE_TIMEOUT_SECS)
+            .unwrap_or(false);
+
+        if !exceeds_timeout {
+            return false;
+        }
+
+        status
+            .and_then(|s| s.container_statuses.as_ref())
+            .map(|statuses| {
+                statuses.iter().any(|cs| {
+                    cs.state
+                        .as_ref()
+                        .and_then(|state| state.waiting.as_ref())
+                        .and_then(|w| w.reason.as_deref())
+                        .map(|reason| reason == "ImagePullBackOff" || reason == "ErrImagePull")
                         .unwrap_or(false)
                 })
             })
@@ -1067,13 +1232,18 @@ mod phase_detection {
             .unwrap_or(false)
     }
 
-    fn is_failed(status: Option<&PodStatus>) -> bool {
+    pub(crate) fn is_failed(status: Option<&PodStatus>, pod_age: Option<u64>) -> bool {
         let status = match status {
             Some(s) => s,
             None => return false,
         };
 
         if status.phase.as_deref() == Some("Failed") {
+            return true;
+        }
+
+        // Check for prolonged image pull failures (ImagePullBackOff/ErrImagePull after timeout)
+        if has_prolonged_image_pull_failure(Some(status), pod_age) {
             return true;
         }
 
@@ -1275,6 +1445,128 @@ mod tests {
         assert_eq!(ports[0].protocol, Some("TCP".to_string()));
 
         assert!(spec.egress.is_none());
+    }
+
+    #[test]
+    fn test_render_pdb_single_replica() {
+        let owner = UserDeployment {
+            metadata: ObjectMeta {
+                name: Some("test-deploy".to_string()),
+                namespace: Some("u-test".to_string()),
+                uid: Some("test-uid-123".to_string()),
+                ..Default::default()
+            },
+            spec: UserDeploymentSpec::new(
+                "user123".to_string(),
+                "my-app".to_string(),
+                "nginx:latest".to_string(),
+                1,
+                80,
+                "/deployments/my-app".to_string(),
+            ),
+            status: None,
+        };
+
+        // PDB should not be created for single replica deployments
+        let pdb = render_pdb("my-app", "u-test", 1, &owner);
+        assert!(pdb.is_none());
+    }
+
+    #[test]
+    fn test_render_pdb_multi_replica() {
+        let owner = UserDeployment {
+            metadata: ObjectMeta {
+                name: Some("test-deploy".to_string()),
+                namespace: Some("u-test".to_string()),
+                uid: Some("test-uid-123".to_string()),
+                ..Default::default()
+            },
+            spec: UserDeploymentSpec::new(
+                "user123".to_string(),
+                "my-app".to_string(),
+                "nginx:latest".to_string(),
+                3,
+                80,
+                "/deployments/my-app".to_string(),
+            ),
+            status: None,
+        };
+
+        let pdb = render_pdb("my-app", "u-test", 3, &owner);
+        assert!(pdb.is_some());
+
+        let pdb = pdb.unwrap();
+        assert_eq!(pdb.metadata.name, Some("my-app-pdb".to_string()));
+        assert_eq!(pdb.metadata.namespace, Some("u-test".to_string()));
+
+        // Check owner references
+        let owner_refs = pdb.metadata.owner_references.unwrap();
+        assert_eq!(owner_refs.len(), 1);
+        assert_eq!(owner_refs[0].uid, "test-uid-123");
+        assert_eq!(owner_refs[0].kind, "UserDeployment");
+        assert_eq!(owner_refs[0].controller, Some(true));
+        assert_eq!(owner_refs[0].block_owner_deletion, Some(true));
+
+        // Check minAvailable = 1 for 3 replicas
+        let spec = pdb.spec.unwrap();
+        assert_eq!(spec.min_available, Some(IntOrString::Int(1)));
+    }
+
+    #[test]
+    fn test_render_pdb_missing_uid() {
+        let owner = UserDeployment {
+            metadata: ObjectMeta {
+                name: Some("test-deploy".to_string()),
+                namespace: Some("u-test".to_string()),
+                uid: None, // Missing UID
+                ..Default::default()
+            },
+            spec: UserDeploymentSpec::new(
+                "user123".to_string(),
+                "my-app".to_string(),
+                "nginx:latest".to_string(),
+                3,
+                80,
+                "/deployments/my-app".to_string(),
+            ),
+            status: None,
+        };
+
+        // PDB should not be created when owner UID is missing
+        let pdb = render_pdb("my-app", "u-test", 3, &owner);
+        assert!(pdb.is_none());
+    }
+
+    #[test]
+    fn test_render_pdb_large_replica_count() {
+        let owner = UserDeployment {
+            metadata: ObjectMeta {
+                name: Some("test-deploy".to_string()),
+                namespace: Some("u-test".to_string()),
+                uid: Some("test-uid-123".to_string()),
+                ..Default::default()
+            },
+            spec: UserDeploymentSpec::new(
+                "user123".to_string(),
+                "my-app".to_string(),
+                "nginx:latest".to_string(),
+                4,
+                80,
+                "/deployments/my-app".to_string(),
+            ),
+            status: None,
+        };
+
+        let pdb = render_pdb("my-app", "u-test", 4, &owner);
+        assert!(pdb.is_some());
+
+        let pdb = pdb.unwrap();
+        let spec = pdb.spec.unwrap();
+        // For 4+ replicas, minAvailable should be 50%
+        assert_eq!(
+            spec.min_available,
+            Some(IntOrString::String("50%".to_string()))
+        );
     }
 
     #[test]
@@ -2154,6 +2446,228 @@ mod tests {
             assert_eq!(DeploymentPhase::Pending.to_state_string(), "Pending");
             assert_eq!(DeploymentPhase::Scheduling.to_state_string(), "Pending");
             assert_eq!(DeploymentPhase::Pulling.to_state_string(), "Pending");
+        }
+
+        #[test]
+        fn test_is_failed_crash_loop_backoff() {
+            use k8s_openapi::api::core::v1::ContainerStateWaiting;
+
+            let status = PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("CrashLoopBackOff".to_string()),
+                            message: Some("Back-off restarting failed container".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+
+            assert!(phase_detection::is_failed(Some(&status), None));
+        }
+
+        #[test]
+        fn test_is_failed_oom_killed() {
+            use k8s_openapi::api::core::v1::ContainerStateTerminated;
+
+            let status = PodStatus {
+                phase: Some("Running".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            reason: Some("OOMKilled".to_string()),
+                            exit_code: 137,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+
+            assert!(phase_detection::is_failed(Some(&status), None));
+        }
+
+        #[test]
+        fn test_is_failed_image_pull_backoff_within_timeout() {
+            use k8s_openapi::api::core::v1::ContainerStateWaiting;
+
+            let status = PodStatus {
+                phase: Some("Pending".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ImagePullBackOff".to_string()),
+                            message: Some("Back-off pulling image".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+
+            // ImagePullBackOff within 5 minute timeout is NOT a failure (transient pulling state)
+            assert!(!phase_detection::is_failed(Some(&status), Some(60))); // 1 minute old
+            assert!(!phase_detection::is_failed(Some(&status), Some(299))); // Just under 5 minutes
+            assert!(!phase_detection::is_failed(Some(&status), None)); // No age info
+        }
+
+        #[test]
+        fn test_is_failed_image_pull_backoff_after_timeout() {
+            use k8s_openapi::api::core::v1::ContainerStateWaiting;
+
+            let status = PodStatus {
+                phase: Some("Pending".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ImagePullBackOff".to_string()),
+                            message: Some("Back-off pulling image".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+
+            // ImagePullBackOff after 5 minute timeout IS a failure
+            assert!(phase_detection::is_failed(Some(&status), Some(301))); // Just over 5 minutes
+            assert!(phase_detection::is_failed(Some(&status), Some(600))); // 10 minutes
+        }
+
+        #[test]
+        fn test_is_failed_err_image_pull_within_timeout() {
+            use k8s_openapi::api::core::v1::ContainerStateWaiting;
+
+            let status = PodStatus {
+                phase: Some("Pending".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ErrImagePull".to_string()),
+                            message: Some("Failed to pull image".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+
+            // ErrImagePull within 5 minute timeout is NOT a failure (transient pulling state)
+            assert!(!phase_detection::is_failed(Some(&status), Some(60)));
+            assert!(!phase_detection::is_failed(Some(&status), None));
+        }
+
+        #[test]
+        fn test_is_failed_err_image_pull_after_timeout() {
+            use k8s_openapi::api::core::v1::ContainerStateWaiting;
+
+            let status = PodStatus {
+                phase: Some("Pending".to_string()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ErrImagePull".to_string()),
+                            message: Some("Failed to pull image".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+
+            // ErrImagePull after 5 minute timeout IS a failure
+            assert!(phase_detection::is_failed(Some(&status), Some(301)));
+            assert!(phase_detection::is_failed(Some(&status), Some(600)));
+        }
+
+        #[test]
+        fn test_determine_phase_image_pull_backoff_within_timeout() {
+            // Pod in ImagePullBackOff state but within timeout should be Pulling phase
+            let pod = Pod {
+                metadata: ObjectMeta {
+                    creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        k8s_openapi::chrono::Utc::now()
+                            - k8s_openapi::chrono::Duration::seconds(60),
+                    )),
+                    ..Default::default()
+                },
+                status: Some(PodStatus {
+                    conditions: Some(vec![PodCondition {
+                        type_: "PodScheduled".to_string(),
+                        status: "True".to_string(),
+                        ..Default::default()
+                    }]),
+                    container_statuses: Some(vec![ContainerStatus {
+                        state: Some(ContainerState {
+                            waiting: Some(ContainerStateWaiting {
+                                reason: Some("ImagePullBackOff".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Pulling);
+            assert_eq!(ready, 0);
+        }
+
+        #[test]
+        fn test_determine_phase_image_pull_backoff_after_timeout() {
+            // Pod in ImagePullBackOff state past timeout should be Failed phase
+            let pod = Pod {
+                metadata: ObjectMeta {
+                    creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                        k8s_openapi::chrono::Utc::now()
+                            - k8s_openapi::chrono::Duration::seconds(400),
+                    )),
+                    ..Default::default()
+                },
+                status: Some(PodStatus {
+                    conditions: Some(vec![PodCondition {
+                        type_: "PodScheduled".to_string(),
+                        status: "True".to_string(),
+                        ..Default::default()
+                    }]),
+                    container_statuses: Some(vec![ContainerStatus {
+                        state: Some(ContainerState {
+                            waiting: Some(ContainerStateWaiting {
+                                reason: Some("ImagePullBackOff".to_string()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let (phase, ready) = phase_detection::determine_phase(&[pod], 1);
+            assert_eq!(phase, DeploymentPhase::Failed);
+            assert_eq!(ready, 0);
         }
     }
 }

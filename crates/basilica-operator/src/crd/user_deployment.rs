@@ -889,4 +889,14 @@ mod tests {
         let deserialized_r2: StorageBackend = serde_json::from_str(&json_r2).unwrap();
         assert!(matches!(deserialized_r2, StorageBackend::R2));
     }
+
+    #[test]
+    fn test_progress_info_new_sets_started_at() {
+        let progress = ProgressInfo::new("Pulling image");
+
+        assert!(!progress.started_at.is_empty());
+        assert!(progress.started_at.contains("T")); // ISO 8601 format
+        assert_eq!(progress.elapsed_seconds, 0);
+        assert_eq!(progress.current_step, "Pulling image");
+    }
 }
