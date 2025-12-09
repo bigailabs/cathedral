@@ -1079,6 +1079,28 @@ impl ApiK8sClient for K8sClient {
         }
     }
 
+    async fn scale_user_deployment(&self, ns: &str, name: &str, replicas: u32) -> Result<()> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        let patch = serde_json::json!({
+            "spec": {
+                "replicas": replicas
+            }
+        });
+
+        api.patch(
+            name,
+            &kube::api::PatchParams::apply("basilica-api"),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("scale UserDeployment failed: {e}"),
+        })?;
+
+        Ok(())
+    }
+
     async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)> {
         let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
 

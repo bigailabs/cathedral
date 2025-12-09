@@ -43,6 +43,12 @@ fn default_enable_billing() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleDeploymentRequest {
+    pub replicas: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceRequirements {
@@ -165,6 +171,8 @@ pub struct DeploymentResponse {
     pub pods: Option<Vec<PodInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProgressResponse>,
 }

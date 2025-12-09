@@ -172,6 +172,25 @@ pub async fn mark_deployment_deleted(pool: &PgPool, id: i32) -> Result<()> {
     Ok(())
 }
 
+pub async fn update_deployment_replicas(pool: &PgPool, id: i32, replicas: i32) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE user_deployments
+        SET replicas = $2, updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(replicas)
+    .execute(pool)
+    .await
+    .map_err(|e| ApiError::Internal {
+        message: format!("Failed to update deployment replicas: {e}"),
+    })?;
+
+    Ok(())
+}
+
 /// Reactivate a soft-deleted deployment with updated configuration.
 /// Used for idempotent deployment creation - when a user recreates a deployment
 /// with the same instance_name, we reactivate the existing record to preserve

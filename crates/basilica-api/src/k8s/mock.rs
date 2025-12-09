@@ -433,6 +433,10 @@ impl ApiK8sClient for MockK8sClient {
         Ok(false)
     }
 
+    async fn scale_user_deployment(&self, _ns: &str, _name: &str, _replicas: u32) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_user_deployment_status(&self, _ns: &str, _name: &str) -> Result<(u32, u32)> {
         Ok((2, 2))
     }

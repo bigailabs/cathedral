@@ -664,6 +664,7 @@ pub async fn create_deployment(
                             updated_at: Some(record.updated_at.to_rfc3339()),
                             pods: None,
                             phase: Some("pending".to_string()),
+                            message: None,
                             progress: None,
                         }),
                     ));
@@ -785,6 +786,7 @@ pub async fn create_deployment(
                     updated_at: Some(record.updated_at.to_rfc3339()),
                     pods: None,
                     phase: Some("pending".to_string()),
+                    message: None,
                     progress: None,
                 }),
             ))
@@ -817,55 +819,78 @@ pub async fn get_deployment(
             message: "Deployment not found".to_string(),
         })?;
 
-    let (desired, ready) = if let Some(k8s_client) = state.k8s.as_ref() {
-        tracing::debug!(
-            user_id = %auth.user_id,
-            instance_name = %instance_name,
-            namespace = %deployment.namespace,
-            cr_name = %deployment.cr_name,
-            "Querying K8s for UserDeployment status"
-        );
-        match k8s_client
-            .get_user_deployment_status(&deployment.namespace, &deployment.cr_name)
-            .await
-        {
-            Ok((d, r)) => {
-                tracing::info!(
-                    user_id = %auth.user_id,
-                    instance_name = %instance_name,
-                    desired = d,
-                    ready = r,
-                    "Retrieved replica status from K8s"
-                );
-                (d, r)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %auth.user_id,
-                    instance_name = %instance_name,
-                    error = %e,
-                    "Failed to get K8s status, using database values"
-                );
-                (deployment.replicas as u32, 0)
-            }
-        }
-    } else {
+    let Some(k8s_client) = state.k8s.as_ref() else {
         tracing::debug!(
             user_id = %auth.user_id,
             instance_name = %instance_name,
             "No K8s client available, using database values"
         );
-        (deployment.replicas as u32, 0)
+        apimetrics::record_request("GET /deployments/:name", "200", start, true);
+        return Ok((
+            StatusCode::OK,
+            Json(DeploymentResponse::from_record_with_status(
+                &deployment,
+                deployment.replicas as u32,
+                0,
+            )),
+        ));
     };
+
+    tracing::debug!(
+        user_id = %auth.user_id,
+        instance_name = %instance_name,
+        namespace = %deployment.namespace,
+        cr_name = %deployment.cr_name,
+        "Querying K8s for UserDeployment phase"
+    );
+
+    let phase_dto = k8s_client
+        .get_user_deployment_phase(&deployment.namespace, &deployment.cr_name)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                user_id = %auth.user_id,
+                instance_name = %instance_name,
+                error = %e,
+                "Failed to get K8s phase, using defaults"
+            );
+            crate::k8s::DeploymentPhaseDto::default()
+        });
+
+    let progress = phase_dto.progress.map(|p| super::types::ProgressResponse {
+        bytes_synced: p.bytes_synced,
+        bytes_total: p.bytes_total,
+        percentage: p.percentage,
+        current_step: p.current_step,
+        started_at: p.started_at,
+        elapsed_seconds: p.elapsed_seconds,
+    });
+
+    let message = phase_dto
+        .phase_history
+        .last()
+        .and_then(|h| h.message.clone());
+
+    tracing::info!(
+        user_id = %auth.user_id,
+        instance_name = %instance_name,
+        phase = %phase_dto.phase,
+        desired = phase_dto.replicas_desired,
+        ready = phase_dto.replicas_ready,
+        "Retrieved phase information from K8s"
+    );
 
     apimetrics::record_request("GET /deployments/:name", "200", start, true);
 
     Ok((
         StatusCode::OK,
-        Json(DeploymentResponse::from_record_with_status(
+        Json(DeploymentResponse::from_record_with_phase(
             &deployment,
-            desired,
-            ready,
+            phase_dto.replicas_desired,
+            phase_dto.replicas_ready,
+            Some(phase_dto.phase),
+            message,
+            progress,
         )),
     ))
 }
@@ -968,6 +993,42 @@ pub async fn delete_deployment(
     ))
 }
 
+pub async fn scale_deployment(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(instance_name): Path<String>,
+    Json(req): Json<super::types::ScaleDeploymentRequest>,
+) -> Result<impl IntoResponse> {
+    let start = std::time::Instant::now();
+
+    validate_replicas(req.replicas, state.config.deployment.max_replicas)?;
+
+    let deployment = db::get_deployment(&state.db, &auth.user_id, &instance_name)
+        .await?
+        .ok_or(ApiError::NotFound {
+            message: "Deployment not found".to_string(),
+        })?;
+
+    let k8s_client = state.k8s.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    k8s_client
+        .scale_user_deployment(&deployment.namespace, &deployment.cr_name, req.replicas)
+        .await?;
+
+    db::update_deployment_replicas(&state.db, deployment.id, req.replicas as i32).await?;
+
+    let (desired, ready) = k8s_client
+        .get_user_deployment_status(&deployment.namespace, &deployment.cr_name)
+        .await
+        .unwrap_or((req.replicas, 0));
+
+    apimetrics::record_request("POST /deployments/:name/scale", "200", start, true);
+
+    let response = DeploymentResponse::from_record_with_status(&deployment, desired, ready);
+
+    Ok((StatusCode::OK, Json(response)))
+}
+
 pub async fn list_deployments(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -1028,6 +1089,7 @@ impl DeploymentResponse {
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
             phase: None,
+            message: None,
             progress: None,
         }
     }
@@ -1048,6 +1110,7 @@ impl DeploymentResponse {
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
             phase: None,
+            message: None,
             progress: None,
         }
     }
@@ -1057,6 +1120,7 @@ impl DeploymentResponse {
         desired: u32,
         ready: u32,
         phase: Option<String>,
+        message: Option<String>,
         progress: Option<super::types::ProgressResponse>,
     ) -> Self {
         Self {
@@ -1070,6 +1134,7 @@ impl DeploymentResponse {
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
             phase,
+            message,
             progress,
         }
     }
@@ -1101,7 +1166,8 @@ pub async fn stream_deployment_logs(
     };
 
     let ns = user_namespace(&auth.user_id);
-    let cr_name = generate_cr_name(&instance_name);
+    // Use instance_name for pod label selector, not cr_name (which has -deployment suffix)
+    let instance_label = instance_name.clone();
     let follow = query.follow.unwrap_or(false);
     let tail = query.tail;
     let since_seconds = query.since_seconds;
@@ -1109,7 +1175,7 @@ pub async fn stream_deployment_logs(
     let stream: Pin<Box<dyn Stream<Item = std::result::Result<Event, std::io::Error>> + Send>> =
         if !follow {
             let logs = client
-                .get_user_deployment_logs(&ns, &cr_name, tail, since_seconds)
+                .get_user_deployment_logs(&ns, &instance_label, tail, since_seconds)
                 .await?;
             let lines: Vec<String> = logs.lines().map(|s| s.to_string()).collect();
             Box::pin(async_stream::stream! {
@@ -1134,7 +1200,7 @@ pub async fn stream_deployment_logs(
                     if start_at.elapsed() >= max_duration {
                         break;
                     }
-                    if let Ok(body) = client_clone.get_user_deployment_logs(&ns, &cr_name, tail.or(Some(100)), since_seconds).await {
+                    if let Ok(body) = client_clone.get_user_deployment_logs(&ns, &instance_label, tail.or(Some(100)), since_seconds).await {
                         let lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
                         if !lines.is_empty() {
                             let start_idx = if let Some(ref marker) = last_marker {

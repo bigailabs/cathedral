@@ -87,6 +87,8 @@ pub trait ApiK8sClient {
 
     async fn user_deployment_exists(&self, ns: &str, name: &str) -> Result<bool>;
 
+    async fn scale_user_deployment(&self, ns: &str, name: &str, replicas: u32) -> Result<()>;
+
     async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)>;
 
     async fn get_user_deployment_phase(&self, ns: &str, name: &str) -> Result<DeploymentPhaseDto>;
