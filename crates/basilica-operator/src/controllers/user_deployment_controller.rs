@@ -252,13 +252,11 @@ fn build_tolerations(has_gpu: bool) -> Vec<Toleration> {
 
 fn build_topology_spread(
     instance_name: &str,
-    replicas: u32,
     config: Option<&TopologySpreadConfig>,
 ) -> Option<Vec<TopologySpreadConstraint>> {
-    if replicas <= 1 {
-        return None;
-    }
-
+    // Always include topology spread constraints regardless of replica count.
+    // This ensures the pod template remains stable when scaling, preventing
+    // Kubernetes from creating new ReplicaSets on scale operations.
     let max_skew = config.map(|c| c.max_skew).unwrap_or(1);
     let when_unsatisfiable = config
         .map(|c| c.when_unsatisfiable.clone())
@@ -610,7 +608,6 @@ pub fn render_deployment(
             affinity: node_affinity,
             topology_spread_constraints: build_topology_spread(
                 instance_name,
-                spec.replicas,
                 spec.topology_spread.as_ref(),
             ),
             restart_policy: Some("Always".into()),
@@ -2112,14 +2109,9 @@ mod tests {
     }
 
     #[test]
-    fn test_topology_spread_not_applied_for_single_replica() {
-        let result = build_topology_spread("my-app", 1, None);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_topology_spread_applied_for_multi_replica() {
-        let result = build_topology_spread("my-app", 3, None);
+    fn test_topology_spread_always_applied() {
+        // Topology spread is always applied to ensure pod template stability during scaling
+        let result = build_topology_spread("my-app", None);
         assert!(result.is_some());
 
         let constraints = result.unwrap();
@@ -2140,7 +2132,7 @@ mod tests {
             when_unsatisfiable: "DoNotSchedule".to_string(),
         };
 
-        let result = build_topology_spread("my-app", 3, Some(&config));
+        let result = build_topology_spread("my-app", Some(&config));
         assert!(result.is_some());
 
         let constraints = result.unwrap();
