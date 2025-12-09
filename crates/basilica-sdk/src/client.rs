@@ -819,28 +819,36 @@ impl BasilicaClient {
         let timeout = Duration::from_secs(options.timeout_secs);
         let poll_interval = Duration::from_secs(options.poll_interval_secs);
         let mut last_phase: Option<String> = None;
+        let mut last_state: String = "Unknown".to_string();
 
         loop {
             if start.elapsed() > timeout {
                 return Ok(WaitResult::Timeout {
-                    last_state: "Unknown".to_string(),
+                    last_state,
                     last_phase,
                 });
             }
 
             let status = self.get_deployment(instance_name).await?;
 
+            // Track state for timeout reporting
+            last_state = status.state.clone();
+
             // Call progress callback if phase changed or on first poll
             if let Some(ref callback) = on_progress {
                 let current_phase = status.phase.as_deref();
                 if last_phase.as_deref() != current_phase {
                     callback(current_phase, &status);
-                    last_phase = status.phase.clone();
                 }
             }
 
-            // Check for ready state
-            if status.state == "Active" && status.replicas.ready >= status.replicas.desired {
+            // Always track phase for timeout reporting
+            last_phase = status.phase.clone();
+
+            // Check for ready state (Active or Running with sufficient replicas)
+            if matches!(status.state.as_str(), "Active" | "Running")
+                && status.replicas.ready >= status.replicas.desired
+            {
                 return Ok(WaitResult::Ready(Box::new(status)));
             }
 
