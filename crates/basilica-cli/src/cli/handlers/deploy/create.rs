@@ -473,7 +473,8 @@ fn auto_health_check_for_framework(
 ) -> (Option<String>, Option<String>, Option<String>) {
     match packager.detect_framework() {
         Framework::FastApi => {
-            // FastAPI auto-generates /docs, use /health for startup if available
+            // FastAPI auto-generates /docs (Swagger UI) which serves as a weak fallback.
+            // For production, users should define explicit /health endpoints.
             (None, Some("/docs".to_string()), Some("/docs".to_string()))
         }
         Framework::Flask => {
