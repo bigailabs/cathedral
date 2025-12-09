@@ -102,9 +102,13 @@ pub async fn handle_create(
 
     // 12. Wait for ready if not detached
     if !cmd.lifecycle.detach {
-        let result =
-            wait_for_ready_with_phases(client, &actual_name, cmd.lifecycle.timeout, cmd.show_phases)
-                .await?;
+        let result = wait_for_ready_with_phases(
+            client,
+            &actual_name,
+            cmd.lifecycle.timeout,
+            cmd.show_phases,
+        )
+        .await?;
 
         match result {
             WaitResult::Ready(deployment) => {
@@ -134,7 +138,10 @@ pub async fn handle_create(
     } else if cmd.json {
         crate::output::json_output(&response)?;
     } else {
-        print_success(&format!("Deployment '{}' created (detached mode)", actual_name));
+        print_success(&format!(
+            "Deployment '{}' created (detached mode)",
+            actual_name
+        ));
         println!("  Check status: basilica deploy status {}", actual_name);
     }
 
@@ -297,7 +304,7 @@ fn format_phase_message(phase: &str, status: &DeploymentResponse) -> String {
         "initializing" => "Running init containers...".to_string(),
         "storage_sync" => "Syncing storage volume...".to_string(),
         "starting" => "Starting application container...".to_string(),
-        "healthcheck" => "Running health checks...".to_string(),
+        "health_check" => "Running health checks...".to_string(),
         "ready" => format!(
             "Deployment ready! {}/{} replicas running",
             status.replicas.ready, status.replicas.desired
