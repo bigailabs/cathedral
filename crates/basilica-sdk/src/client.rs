@@ -49,7 +49,7 @@ use crate::{
         DepositAccountResponse, HealthCheckResponse, HistoricalRentalsResponse,
         ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
         RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
-        ScaleDeploymentRequest, SshKeyResponse, UsageHistoryResponse,
+        ScaleDeploymentRequest, SshKeyResponse, UsageHistoryResponse, WaitOptions, WaitResult,
     },
     StartRentalApiRequest,
 };
@@ -756,6 +756,199 @@ impl BasilicaClient {
         self.post(&path, &request).await
     }
 
+    /// Wait for a deployment to become ready
+    ///
+    /// Polls the deployment status until it reaches a ready state, fails, or times out.
+    /// Optionally calls a progress callback on each status update.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The deployment instance name
+    /// * `options` - Wait configuration (timeout, poll interval)
+    /// * `on_progress` - Optional callback invoked on each status poll with (phase, status)
+    ///
+    /// # Returns
+    ///
+    /// Returns `WaitResult::Ready` with the final deployment status when ready,
+    /// `WaitResult::Failed` if the deployment enters a failed state,
+    /// or `WaitResult::Timeout` if the timeout is exceeded.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use basilica_sdk::{ClientBuilder, WaitOptions, WaitResult};
+    ///
+    /// let client = ClientBuilder::default()
+    ///     .with_api_key("key")
+    ///     .build()?;
+    ///
+    /// // Wait with default options (300s timeout)
+    /// let result = client.wait_for_ready("my-app", WaitOptions::default(), None::<fn(Option<&str>, &_)>).await?;
+    ///
+    /// // Wait with progress callback
+    /// let result = client.wait_for_ready(
+    ///     "my-app",
+    ///     WaitOptions::with_timeout(120),
+    ///     Some(|phase, status| {
+    ///         println!("Phase: {} ({}/{})",
+    ///             phase.unwrap_or("unknown"),
+    ///             status.replicas.ready,
+    ///             status.replicas.desired
+    ///         );
+    ///     }),
+    /// ).await?;
+    ///
+    /// match result {
+    ///     WaitResult::Ready(deployment) => println!("Ready at {}", deployment.url),
+    ///     WaitResult::Failed { reason } => eprintln!("Failed: {}", reason),
+    ///     WaitResult::Timeout { last_state, .. } => eprintln!("Timeout in state: {}", last_state),
+    /// }
+    /// ```
+    pub async fn wait_for_ready<F>(
+        &self,
+        instance_name: &str,
+        options: WaitOptions,
+        on_progress: Option<F>,
+    ) -> Result<WaitResult>
+    where
+        F: Fn(Option<&str>, &DeploymentResponse),
+    {
+        use std::time::{Duration, Instant};
+
+        let start = Instant::now();
+        let timeout = Duration::from_secs(options.timeout_secs);
+        let poll_interval = Duration::from_secs(options.poll_interval_secs);
+        let mut last_phase: Option<String> = None;
+
+        loop {
+            if start.elapsed() > timeout {
+                return Ok(WaitResult::Timeout {
+                    last_state: "Unknown".to_string(),
+                    last_phase,
+                });
+            }
+
+            let status = self.get_deployment(instance_name).await?;
+
+            // Call progress callback if phase changed or on first poll
+            if let Some(ref callback) = on_progress {
+                let current_phase = status.phase.as_deref();
+                if last_phase.as_deref() != current_phase {
+                    callback(current_phase, &status);
+                    last_phase = status.phase.clone();
+                }
+            }
+
+            // Check for ready state
+            if status.state == "Active" && status.replicas.ready >= status.replicas.desired {
+                return Ok(WaitResult::Ready(Box::new(status)));
+            }
+
+            // Check for failed state
+            if status.state == "Failed" {
+                let reason = status
+                    .message
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                return Ok(WaitResult::Failed { reason });
+            }
+
+            // Check for terminating state
+            if status.state == "Terminating" || status.phase.as_deref() == Some("terminating") {
+                return Ok(WaitResult::Failed {
+                    reason: "Deployment is being terminated".to_string(),
+                });
+            }
+
+            // Dynamic sleep based on phase
+            let sleep_duration = match status.phase.as_deref() {
+                Some("scheduling") | Some("pulling") => Duration::from_secs(10),
+                Some("storage_sync") => Duration::from_secs(3),
+                _ => poll_interval,
+            };
+
+            tokio::time::sleep(sleep_duration).await;
+        }
+    }
+
+    /// Wait for a deployment to become ready with default progress output
+    ///
+    /// This is a convenience method that waits for a deployment and prints
+    /// progress updates to stdout, similar to the CLI behavior.
+    ///
+    /// # Arguments
+    ///
+    /// * `instance_name` - The deployment instance name
+    /// * `timeout_secs` - Maximum time to wait in seconds
+    ///
+    /// # Returns
+    ///
+    /// Returns the ready deployment or an error
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use basilica_sdk::ClientBuilder;
+    ///
+    /// let client = ClientBuilder::default()
+    ///     .with_api_key("key")
+    ///     .build()?;
+    ///
+    /// let deployment = client.wait_for_ready_with_output("my-app", 120).await?;
+    /// println!("Deployment ready at {}", deployment.url);
+    /// ```
+    pub async fn wait_for_ready_with_output(
+        &self,
+        instance_name: &str,
+        timeout_secs: u64,
+    ) -> Result<DeploymentResponse> {
+        let options = WaitOptions::with_timeout(timeout_secs);
+
+        let result = self
+            .wait_for_ready(
+                instance_name,
+                options,
+                Some(|phase: Option<&str>, status: &DeploymentResponse| {
+                    let phase_msg = format_phase_message(phase.unwrap_or("pending"));
+                    let replica_info =
+                        format!("{}/{}", status.replicas.ready, status.replicas.desired);
+                    println!(
+                        "[{}] {} (replicas: {})",
+                        instance_name, phase_msg, replica_info
+                    );
+
+                    // Show progress for storage sync
+                    if phase == Some("storage_sync") {
+                        if let Some(ref progress) = status.progress {
+                            if let Some(pct) = progress.percentage {
+                                println!("  Storage sync: {:.1}%", pct);
+                            }
+                        }
+                    }
+                }),
+            )
+            .await?;
+
+        match result {
+            WaitResult::Ready(deployment) => {
+                println!("[{}] Deployment ready!", instance_name);
+                Ok(*deployment)
+            }
+            WaitResult::Failed { reason } => Err(ApiError::Internal {
+                message: format!("Deployment failed: {}", reason),
+            }),
+            WaitResult::Timeout {
+                last_state,
+                last_phase,
+            } => Err(ApiError::Internal {
+                message: format!(
+                    "Timeout waiting for deployment (state: {}, phase: {})",
+                    last_state,
+                    last_phase.unwrap_or_else(|| "unknown".to_string())
+                ),
+            }),
+        }
+    }
+
     // ===== Private Helper Methods =====
 
     /// Apply authentication to request
@@ -880,6 +1073,24 @@ impl BasilicaClient {
                 }),
             }
         }
+    }
+}
+
+/// Format human-readable phase message for progress output
+fn format_phase_message(phase: &str) -> &'static str {
+    match phase {
+        "pending" => "Waiting for scheduler...",
+        "scheduling" => "Finding suitable node...",
+        "pulling" => "Pulling container image...",
+        "initializing" => "Running init containers...",
+        "storage_sync" => "Syncing storage volume...",
+        "starting" => "Starting application...",
+        "health_check" => "Running health checks...",
+        "ready" => "Deployment ready!",
+        "degraded" => "Deployment degraded",
+        "failed" => "Deployment failed",
+        "terminating" => "Terminating...",
+        _ => "Processing...",
     }
 }
 

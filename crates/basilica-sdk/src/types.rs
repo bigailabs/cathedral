@@ -840,3 +840,45 @@ pub struct DeploymentProgress {
     pub percentage: Option<f64>,
     pub elapsed_seconds: u64,
 }
+
+/// Result of waiting for a deployment to become ready
+#[derive(Debug, Clone)]
+pub enum WaitResult {
+    /// Deployment is ready with all replicas running
+    Ready(Box<DeploymentResponse>),
+    /// Deployment failed with an error message
+    Failed { reason: String },
+    /// Wait timed out before deployment became ready
+    Timeout {
+        last_state: String,
+        last_phase: Option<String>,
+    },
+}
+
+/// Options for waiting on a deployment
+#[derive(Debug, Clone)]
+pub struct WaitOptions {
+    /// Maximum time to wait in seconds (default: 300)
+    pub timeout_secs: u64,
+    /// Interval between status checks in seconds (default: 5)
+    pub poll_interval_secs: u64,
+}
+
+impl Default for WaitOptions {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 300,
+            poll_interval_secs: 5,
+        }
+    }
+}
+
+impl WaitOptions {
+    /// Create wait options with a specific timeout
+    pub fn with_timeout(timeout_secs: u64) -> Self {
+        Self {
+            timeout_secs,
+            ..Default::default()
+        }
+    }
+}
