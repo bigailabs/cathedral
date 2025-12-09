@@ -13,8 +13,9 @@ spec:
     maxParallelRequests: 1024
   timeout:
     tcp:
-      connectTimeout: 10s
+      connectTimeout: 30s
     http:
-      requestTimeout: 300s
+      requestTimeout: 3700s
+      connectionIdleTimeout: 3700s
   loadBalancer:
     type: RoundRobin

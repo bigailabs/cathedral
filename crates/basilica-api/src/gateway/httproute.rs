@@ -176,7 +176,8 @@ impl HTTPRoute {
                     "port": self.service_port
                 }],
                 "timeouts": {
-                    "request": "300s"
+                    "request": "3700s",
+                    "backendRequest": "3700s"
                 },
                 "retry": {
                     "attempts": 2,
@@ -205,7 +206,8 @@ impl HTTPRoute {
                     "port": self.service_port
                 }],
                 "timeouts": {
-                    "request": "300s"
+                    "request": "3700s",
+                    "backendRequest": "3700s"
                 },
                 "retry": {
                     "attempts": 2,
