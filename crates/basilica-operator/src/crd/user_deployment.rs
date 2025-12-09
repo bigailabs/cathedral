@@ -254,7 +254,7 @@ pub struct ResourceUsage {
 
 /// Deployment lifecycle phase for granular progress tracking.
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum DeploymentPhase {
     #[default]
     Pending,
