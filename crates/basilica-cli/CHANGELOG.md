@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0]
+
+### Added
+- New `deploy` command for Python script deployment to Basilica cloud
+  - Subcommands: `create`, `delete`, `list`, `logs`, `status`
+  - Comprehensive option groups: naming, resources, GPU, storage, health checks, networking, lifecycle
+  - Source file packaging with automatic validation
+- FIDO/U2F security key support for SSH authentication
+
+### Fixed
+- Deployment tracking now uses API-returned instance_name for accurate status monitoring
+
 ## [0.6.0]
 
 ### Added
