@@ -20,6 +20,7 @@ use crate::crd::gpu_rental::GpuRental;
 use crate::crd::user_deployment::UserDeployment;
 use crate::k8s_client::{K8sClient, RateLimitedKubeClient};
 use crate::metrics_provider::K8sMetricsProvider;
+use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::Node;
 
 #[derive(Clone)]
@@ -108,11 +109,18 @@ async fn reconcile_user_deployment(
 }
 
 fn error_policy_user_deployment(
-    _obj: Arc<UserDeployment>,
+    obj: Arc<UserDeployment>,
     err: &ReconcileError,
     ctx: Arc<UserDeploymentCtx>,
 ) -> Action {
-    warn!("user deployment reconcile error: {}", err);
+    let ns = obj.namespace().unwrap_or_else(|| "unknown".into());
+    let name = obj.name_any();
+    error!(
+        namespace = %ns,
+        deployment = %name,
+        error = %err,
+        "UserDeployment reconciliation failed"
+    );
     Action::requeue(ctx.reconcile_config.error_interval)
 }
 
@@ -166,6 +174,7 @@ pub async fn run() -> AnyResult<()> {
     let gr_api: Api<GpuRental> = Api::all(client.clone());
     let np_api: Api<BasilicaNodeProfile> = Api::all(client.clone());
     let ud_api: Api<UserDeployment> = Api::all(client.clone());
+    let deployment_api: Api<Deployment> = Api::all(client.clone());
     let node_api: Api<Node> = Api::all(client.clone());
 
     // Run controllers as streams with explicit watcher configuration
@@ -266,6 +275,7 @@ pub async fn run() -> AnyResult<()> {
         });
 
     let user_deployments = Controller::new(ud_api, watcher::Config::default().any_semantic())
+        .owns(deployment_api, watcher::Config::default().any_semantic())
         .run(
             reconcile_user_deployment,
             error_policy_user_deployment,

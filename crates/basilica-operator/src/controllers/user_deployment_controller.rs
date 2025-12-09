@@ -480,6 +480,7 @@ pub fn render_deployment(
     instance_name: &str,
     namespace: &str,
     spec: &crate::crd::user_deployment::UserDeploymentSpec,
+    owner: Option<&UserDeployment>,
 ) -> anyhow::Result<Deployment> {
     let (pod_sc, container_sc) = build_security_contexts();
     let (mut volumes, mut volume_mounts) = build_writable_volumes();
@@ -625,11 +626,26 @@ pub fn render_deployment(
         spec.replicas as i32
     };
 
+    let owner_references = owner.and_then(|o| {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+        use kube::ResourceExt;
+        let uid = o.metadata.uid.as_ref()?;
+        Some(vec![OwnerReference {
+            api_version: "basilica.ai/v1".to_string(),
+            kind: "UserDeployment".to_string(),
+            name: o.name_any(),
+            uid: uid.clone(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        }])
+    });
+
     Ok(Deployment {
         metadata: ObjectMeta {
             name: Some(format!("{}-deployment", instance_name)),
             namespace: Some(namespace.to_string()),
             labels: Some(labels.clone()),
+            owner_references,
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
@@ -859,7 +875,7 @@ impl UserDeploymentController {
         let netpol_name = format!("{}-netpol", instance_name);
         let pdb_name = format!("{}-pdb", instance_name);
 
-        let desired_deployment = render_deployment(instance_name, ns, spec)?;
+        let desired_deployment = render_deployment(instance_name, ns, spec, Some(cr))?;
         let current_deployment = self.client.get_deployment(ns, &deployment_name).await.ok();
         if current_deployment
             .as_ref()
@@ -1006,11 +1022,18 @@ impl UserDeploymentController {
     }
 }
 
+fn is_pod_terminating(pod: &k8s_openapi::api::core::v1::Pod) -> bool {
+    pod.metadata.deletion_timestamp.is_some()
+}
+
 fn compute_state_from_pods(
     pods: &[k8s_openapi::api::core::v1::Pod],
     desired_replicas: u32,
 ) -> (String, u32) {
-    if pods.is_empty() {
+    // Filter out terminating pods
+    let active_pods: Vec<_> = pods.iter().filter(|p| !is_pod_terminating(p)).collect();
+
+    if active_pods.is_empty() {
         return ("Pending".to_string(), 0);
     }
 
@@ -1018,7 +1041,7 @@ fn compute_state_from_pods(
     let mut failed_count = 0;
     let mut _pending_count = 0;
 
-    for pod in pods {
+    for pod in active_pods {
         if let Some(status) = &pod.status {
             match status.phase.as_deref() {
                 Some("Running") => {
@@ -1072,7 +1095,13 @@ mod phase_detection {
     }
 
     pub fn determine_phase(pods: &[Pod], desired_replicas: u32) -> (DeploymentPhase, u32) {
-        if pods.is_empty() {
+        // Filter out terminating pods
+        let active_pods: Vec<_> = pods
+            .iter()
+            .filter(|p| !super::is_pod_terminating(p))
+            .collect();
+
+        if active_pods.is_empty() {
             return (DeploymentPhase::Pending, 0);
         }
 
@@ -1083,7 +1112,7 @@ mod phase_detection {
         let mut failed_count = 0u32;
         let mut health_check_count = 0u32;
 
-        for pod in pods {
+        for pod in active_pods {
             let status = pod.status.as_ref();
             let pod_age = get_pod_age_seconds(pod);
 
@@ -1353,7 +1382,7 @@ mod tests {
             cpu_request_ratio: 1.0,
         });
 
-        let deployment = render_deployment("my-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("my-app", "u-user123", &spec, None).unwrap();
 
         assert_eq!(
             deployment.metadata.name,
@@ -1757,7 +1786,7 @@ mod tests {
             cpu_request_ratio: 1.0,
         });
 
-        let deployment = render_deployment("gpu-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("gpu-app", "u-user123", &spec, None).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         assert!(pod_spec.affinity.is_some());
@@ -1862,7 +1891,7 @@ mod tests {
             }),
         });
 
-        let deployment = render_deployment("storage-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("storage-app", "u-user123", &spec, None).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         // DaemonSet pattern: only 1 container (no sidecar)
@@ -1936,7 +1965,7 @@ mod tests {
         )
         .suspended();
 
-        let deployment = render_deployment("suspended-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("suspended-app", "u-user123", &spec, None).unwrap();
         let deployment_spec = deployment.spec.unwrap();
 
         assert_eq!(deployment_spec.replicas, Some(0));
@@ -1953,7 +1982,7 @@ mod tests {
             "/deployments/active-app".to_string(),
         );
 
-        let deployment = render_deployment("active-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("active-app", "u-user123", &spec, None).unwrap();
         let deployment_spec = deployment.spec.unwrap();
 
         assert_eq!(deployment_spec.replicas, Some(3));
@@ -1983,7 +2012,7 @@ mod tests {
             cpu_request_ratio: 1.0,
         });
 
-        let deployment = render_deployment("minimal-gpu-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("minimal-gpu-app", "u-user123", &spec, None).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         assert!(pod_spec.affinity.is_some());
@@ -2067,7 +2096,7 @@ mod tests {
             cpu_request_ratio: 0.75,
         });
 
-        let deployment = render_deployment("burstable-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("burstable-app", "u-user123", &spec, None).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
         let container = &pod_spec.containers[0];
         let resources = container.resources.as_ref().unwrap();
@@ -2136,7 +2165,7 @@ mod tests {
             when_unsatisfiable: "ScheduleAnyway".to_string(),
         });
 
-        let deployment = render_deployment("spread-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("spread-app", "u-user123", &spec, None).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
 
         assert!(pod_spec.topology_spread_constraints.is_some());
@@ -2169,7 +2198,7 @@ mod tests {
             cpu_request_ratio: 1.0,
         });
 
-        let deployment = render_deployment("gpu-app", "u-user123", &spec).unwrap();
+        let deployment = render_deployment("gpu-app", "u-user123", &spec, None).unwrap();
         let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
         let tolerations = pod_spec.tolerations.unwrap();
 
