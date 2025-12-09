@@ -14,9 +14,9 @@ wireguard_port: 51820
 wireguard_network: "10.200.0.0/16"
 
 # Persistent keepalive interval (seconds)
-# Increased from 25s to 60s to reduce handshake frequency
-# Previous: 25s (2.4 handshakes/min) | New: 60s (1 handshake/min)
-wireguard_keepalive: 60
+# Keeps NAT mappings alive for nodes behind NAT
+# Most NAT gateways timeout after 60-120s, so 25s is safe
+wireguard_keepalive: 25
 
 # AllowedIPs for peers (GPU nodes can reach these networks)
 wireguard_allowed_ips:
@@ -58,8 +58,8 @@ wireguard_ratelimit_rate: "200/minute"
 wireguard_ratelimit_burst: 50
 
 # MTU for WireGuard interface
-# AWS uses jumbo frames (9001 MTU), minus WireGuard overhead (80 bytes)
-wireguard_mtu: 8921
+# Standard internet MTU (1500) minus WireGuard overhead (~80 bytes) = 1420
+wireguard_mtu: 1420
 
 # Monitoring configuration
 wireguard_monitoring_enabled: true
