@@ -95,31 +95,20 @@ pub struct Rental {
 
 impl Rental {
     /// Create a new community cloud rental
-    pub fn new_community(
-        user_id: UserId,
-        node_id: String,
-        validator_id: Option<String>,
-        miner_uid: Option<u32>,
-        resource_spec: ResourceSpec,
-        base_price_per_gpu: Decimal,
-        gpu_count: u32,
-    ) -> Self {
+    pub fn new_community(params: CreateCommunityRentalParams) -> Self {
         let now = Utc::now();
         let mut metadata = HashMap::new();
-        metadata.insert("node_id".to_string(), node_id);
-        if let Some(vid) = validator_id {
-            metadata.insert("validator_id".to_string(), vid);
-        }
-        if let Some(uid) = miner_uid {
-            metadata.insert("miner_uid".to_string(), uid.to_string());
-        }
+        metadata.insert("node_id".to_string(), params.node_id);
+        metadata.insert("validator_id".to_string(), params.validator_id);
+        metadata.insert("miner_uid".to_string(), params.miner_uid.to_string());
+        metadata.insert("miner_hotkey".to_string(), params.miner_hotkey);
 
         Self {
             id: RentalId::new(),
-            user_id,
+            user_id: params.user_id,
             cloud_type: CloudType::Community,
             state: RentalState::Pending,
-            resource_spec,
+            resource_spec: params.resource_spec,
             usage_metrics: UsageMetrics::zero(),
             cost_breakdown: CostBreakdown {
                 base_cost: CreditBalance::zero(),
@@ -138,8 +127,8 @@ impl Rental {
             actual_start_time: None,
             actual_end_time: None,
             actual_cost: CreditBalance::zero(),
-            base_price_per_gpu,
-            gpu_count,
+            base_price_per_gpu: params.base_price_per_gpu,
+            gpu_count: params.gpu_count,
         }
     }
 
@@ -203,6 +192,11 @@ impl Rental {
     /// Get miner_uid (community cloud only) - Bittensor miner UID
     pub fn miner_uid(&self) -> Option<u32> {
         self.metadata.get("miner_uid").and_then(|s| s.parse().ok())
+    }
+
+    /// Get miner_hotkey (community cloud only) - Bittensor miner hotkey
+    pub fn miner_hotkey(&self) -> Option<&str> {
+        self.metadata.get("miner_hotkey").map(|s| s.as_str())
     }
 
     /// Get provider (secure cloud only)
@@ -296,7 +290,9 @@ pub struct CreateCommunityRentalParams {
     pub node_id: String,
     pub validator_id: String,
     /// Bittensor miner UID for payment reconciliation
-    pub miner_uid: Option<u32>,
+    pub miner_uid: u32,
+    /// Bittensor miner hotkey for payment reconciliation
+    pub miner_hotkey: String,
     pub resource_spec: ResourceSpec,
     pub base_price_per_gpu: Decimal,
     pub gpu_count: u32,
@@ -364,15 +360,7 @@ impl RentalManager {
 impl RentalOperations for RentalManager {
     async fn create_rental(&self, params: CreateRentalParams) -> Result<RentalId> {
         let rental = match params {
-            CreateRentalParams::Community(p) => Rental::new_community(
-                p.user_id,
-                p.node_id,
-                Some(p.validator_id),
-                p.miner_uid,
-                p.resource_spec,
-                p.base_price_per_gpu,
-                p.gpu_count,
-            ),
+            CreateRentalParams::Community(p) => Rental::new_community(p),
             CreateRentalParams::Secure(p) => Rental::new_secure(
                 p.user_id,
                 p.provider,
