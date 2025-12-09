@@ -35,7 +35,7 @@ Using `@basilica.deployment` decorator:
 | `05_decorator_fastapi.py` | FastAPI + uvicorn | `python3 05_decorator_fastapi.py` |
 | `05_decorator_gpu.py` | GPU decorator | `python3 05_decorator_gpu.py` |
 
-## Advanced Examples (06-14)
+## Advanced Examples (06-16)
 
 | Example | Description | Run |
 |---------|-------------|-----|
@@ -49,6 +49,7 @@ Using `@basilica.deployment` decorator:
 | `13_lobe_chat_vllm.py` | LobeChat + vLLM (fully private AI stack) | `python3 13_lobe_chat_vllm.py` |
 | `14_streamlit.py` | Streamlit interactive data app | `python3 14_streamlit.py` |
 | `15_cli_deploy/` | CLI deploy walkthrough | See directory README |
+| `16_progress_callback.py` | Custom deployment progress monitoring | `python3 16_progress_callback.py` |
 
 ## Deployment Options
 
@@ -138,6 +139,33 @@ def serve():
 def serve():
     ...
 ```
+
+### Progress Monitoring
+
+By default, `client.deploy()` and `deployment.wait_until_ready()` show progress output:
+```
+[my-app] Waiting for scheduler... (replicas: 0/1)
+[my-app] Pulling container image... (replicas: 0/1)
+[my-app] Running health checks... (replicas: 0/1)
+[my-app] Deployment ready!
+```
+
+**Silent mode** - suppress all output:
+```python
+deployment.wait_until_ready(timeout=120, silent=True)
+```
+
+**Custom callback** - for custom UIs or logging:
+```python
+def my_progress(status):
+    print(f"Phase: {status.phase}, Replicas: {status.replicas_ready}/{status.replicas_desired}")
+    if status.progress and status.progress.percentage:
+        print(f"  Progress: {status.progress.percentage:.1f}%")
+
+deployment.wait_until_ready(on_progress=my_progress)
+```
+
+See `16_progress_callback.py` for a complete example.
 
 ## Available GPUs
 
