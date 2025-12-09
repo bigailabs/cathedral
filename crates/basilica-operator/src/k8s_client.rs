@@ -916,8 +916,13 @@ impl K8sClient for KubeClient {
     ) -> Result<()> {
         use kube::api::{Patch, PatchParams};
         let api: kube::Api<UserDeployment> = self.api(ns);
-        let patch = serde_json::json!({"status": status});
-        api.patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
+        let patch = serde_json::json!({
+            "apiVersion": "basilica.ai/v1",
+            "kind": "UserDeployment",
+            "status": status
+        });
+        let params = PatchParams::apply("basilica-operator").force();
+        api.patch_status(name, &params, &Patch::Apply(&patch))
             .await
             .map(|_| ())
             .map_err(|e| anyhow!(e))
