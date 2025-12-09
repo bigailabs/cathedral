@@ -9,7 +9,7 @@ Usage:
     export BASILICA_API_TOKEN="your-token"
     python3 16_progress_callback.py
 """
-from basilica import BasilicaClient, Deployment, DeploymentStatus
+from basilica import BasilicaClient, DeploymentStatus
 
 
 def custom_progress(status: DeploymentStatus) -> None:
@@ -69,8 +69,8 @@ def main():
     print(f"Deployment ID: {response.instance_name}")
     print(f"Waiting for deployment to be ready...\n")
 
-    # Create Deployment facade and wait with custom callback
-    deployment = Deployment._from_response(client, response)
+    # Get Deployment object using the public API
+    deployment = client.get(response.instance_name)
 
     try:
         status = deployment.wait_until_ready(
