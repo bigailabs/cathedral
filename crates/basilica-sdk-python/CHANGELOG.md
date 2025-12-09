@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2025-12-09
+
+### Added
+- Progress callback support in `wait_until_ready()` with `on_progress` and `silent` parameters
+- `wait_for_ready()` function with progress callback support in Rust SDK
+- Deployment events, scaling, and health check types
+
+### Changed
+- Improved `wait_for_ready` state tracking and ready condition logic
+
+## [0.8.0] - 2025-12-06
+
+### Added
+- Deployment progress and resource request bindings
+
 ## [0.7.0] - 2025-12-05
 
 ### Added
@@ -104,7 +119,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline API documentation
 - Example code for common workflows
 
-[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.7.0...HEAD
+[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...HEAD
+[0.9.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.8.0...basilica-sdk-python-v0.9.0
+[0.8.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.7.0...basilica-sdk-python-v0.8.0
 [0.7.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.6.0...basilica-sdk-python-v0.7.0
 [0.6.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.5.0...basilica-sdk-python-v0.6.0
 [0.5.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.4.0...basilica-sdk-python-v0.5.0
