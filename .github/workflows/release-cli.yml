@@ -76,9 +76,9 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: blacksmith-4vcpu-ubuntu-2404-arm
             suffix: linux-arm64
-          # macOS Intel build
+          # macOS Intel build (cross-compile from Apple Silicon)
           - target: x86_64-apple-darwin
-            os: macos-13 # Use macos-13 for Intel (x86_64) runners
+            os: macos-14 # Cross-compile from Apple Silicon (macos-13 retired)
             suffix: darwin-amd64
           # macOS Apple Silicon build
           - target: aarch64-apple-darwin
