@@ -261,8 +261,12 @@ pub enum DeploymentPhase {
     Scheduling,
     Pulling,
     Initializing,
+    /// Backward compat: accepts "storagesync" (old lowercase format)
+    #[serde(alias = "storagesync")]
     StorageSync,
     Starting,
+    /// Backward compat: accepts "healthcheck" (old lowercase format)
+    #[serde(alias = "healthcheck")]
     HealthCheck,
     Ready,
     Degraded,
