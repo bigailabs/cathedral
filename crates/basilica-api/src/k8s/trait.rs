@@ -108,6 +108,14 @@ pub trait ApiK8sClient {
         limit: Option<u32>,
     ) -> Result<Vec<DeploymentEventDto>>;
 
+    /// Get resource requirements for a UserDeployment CR.
+    /// Returns (cpu_request, memory_request, gpu_per_replica)
+    async fn get_user_deployment_resources(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<(String, String, Option<u32>)>;
+
     // Pre-deployment validation methods
     async fn secret_exists(&self, ns: &str, name: &str) -> Result<bool>;
     async fn get_namespace_resource_quota(&self, ns: &str) -> Result<Option<ResourceQuotaDto>>;

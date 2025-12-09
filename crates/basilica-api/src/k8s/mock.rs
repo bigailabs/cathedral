@@ -474,6 +474,14 @@ impl ApiK8sClient for MockK8sClient {
         Ok(vec![])
     }
 
+    async fn get_user_deployment_resources(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<(String, String, Option<u32>)> {
+        Ok(("500m".to_string(), "512Mi".to_string(), None))
+    }
+
     async fn secret_exists(&self, _ns: &str, _name: &str) -> Result<bool> {
         // Mock always returns true - secrets exist
         Ok(true)

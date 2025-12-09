@@ -900,21 +900,19 @@ impl ApiK8sClient for K8sClient {
                     }
                 };
 
-                // When using custom storage (user-provided credentials), bucket is required
+                // When using custom storage (user-provided credentials), bucket is required.
                 // When using system credentials, bucket is read from the credentials secret
-                // by the operator, so we don't pass it in the CR spec
+                // by the operator. The operator validates that bucket is empty when using
+                // system credentials (see security/validation.rs).
                 let (bucket, credentials_secret) = if is_custom_storage {
                     (
                         persistent.bucket.clone(),
                         persistent.credentials_secret.clone(),
                     )
                 } else {
-                    // For system credentials, bucket comes from the secret, not the request
-                    // The operator will read STORAGE_BUCKET from the credentials secret
-                    (
-                        String::new(), // Empty bucket - operator reads from secret
-                        Some(default_secret_name.to_string()),
-                    )
+                    // For system credentials, leave bucket empty.
+                    // Operator reads STORAGE_BUCKET from the credentials secret.
+                    (String::new(), Some(default_secret_name.to_string()))
                 };
 
                 let mut persistent_obj = json!({
@@ -1399,6 +1397,46 @@ impl ApiK8sClient for K8sClient {
         Ok(all_events)
     }
 
+    async fn get_user_deployment_resources(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<(String, String, Option<u32>)> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        let obj = api.get(name).await.map_err(|e| match &e {
+            kube::Error::Api(err) if err.code == 404 => ApiError::NotFound {
+                message: format!("UserDeployment not found: {name}"),
+            },
+            _ => ApiError::Internal {
+                message: format!("get UserDeployment failed: {e}"),
+            },
+        })?;
+
+        let spec = obj.data.get("spec").ok_or(ApiError::Internal {
+            message: "UserDeployment has no spec".to_string(),
+        })?;
+
+        let resources = spec.get("resources");
+        let cpu = resources
+            .and_then(|r| r.get("cpu"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("500m")
+            .to_string();
+        let memory = resources
+            .and_then(|r| r.get("memory"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("512Mi")
+            .to_string();
+        let gpu = resources
+            .and_then(|r| r.get("gpus"))
+            .and_then(|g| g.get("count"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        Ok((cpu, memory, gpu))
+    }
+
     async fn secret_exists(&self, ns: &str, name: &str) -> Result<bool> {
         let secrets_api: Api<k8s_openapi::api::core::v1::Secret> =
             Api::namespaced(self.client.clone(), ns);
@@ -1490,7 +1528,7 @@ impl ApiK8sClient for K8sClient {
                     if spec.unschedulable.unwrap_or(false) {
                         return false;
                     }
-                    // Skip nodes with NoSchedule taints (that don't have matching tolerations)
+                    // Skip nodes with NoSchedule taints (conservative capacity estimate)
                     if let Some(taints) = &spec.taints {
                         for taint in taints {
                             if taint.effect == "NoSchedule" {
