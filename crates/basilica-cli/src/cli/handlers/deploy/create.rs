@@ -97,10 +97,13 @@ pub async fn handle_create(
 
     complete_spinner_and_clear(spinner);
 
+    // Use the instance_name returned by API (may differ from user-provided name)
+    let actual_name = response.instance_name.clone();
+
     // 12. Wait for ready if not detached
     if !cmd.lifecycle.detach {
         let result =
-            wait_for_ready_with_phases(client, &name, cmd.lifecycle.timeout, cmd.show_phases)
+            wait_for_ready_with_phases(client, &actual_name, cmd.lifecycle.timeout, cmd.show_phases)
                 .await?;
 
         match result {
@@ -113,17 +116,17 @@ pub async fn handle_create(
             }
             WaitResult::Failed(reason) => {
                 // Fetch events to help diagnose the failure
-                fetch_and_print_events(client, &name).await;
+                fetch_and_print_events(client, &actual_name).await;
                 return Err(CliError::Deploy(DeployError::DeploymentFailed {
-                    name,
+                    name: actual_name,
                     reason,
                 }));
             }
             WaitResult::Timeout => {
                 // Fetch events to help diagnose the timeout
-                fetch_and_print_events(client, &name).await;
+                fetch_and_print_events(client, &actual_name).await;
                 return Err(CliError::Deploy(DeployError::Timeout {
-                    name,
+                    name: actual_name,
                     timeout_secs: cmd.lifecycle.timeout,
                 }));
             }
@@ -131,8 +134,8 @@ pub async fn handle_create(
     } else if cmd.json {
         crate::output::json_output(&response)?;
     } else {
-        print_success(&format!("Deployment '{}' created (detached mode)", name));
-        println!("  Check status: basilica deploy status {}", name);
+        print_success(&format!("Deployment '{}' created (detached mode)", actual_name));
+        println!("  Check status: basilica deploy status {}", actual_name);
     }
 
     Ok(())
