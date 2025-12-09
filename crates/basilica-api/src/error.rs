@@ -48,6 +48,10 @@ pub enum ApiError {
     #[error("Rate limit exceeded")]
     RateLimitExceeded,
 
+    /// Resource quota exceeded
+    #[error("Resource quota exceeded: {message}")]
+    QuotaExceeded { message: String },
+
     /// Insufficient balance
     #[error("Insufficient balance: {message}")]
     InsufficientBalance {
@@ -167,6 +171,7 @@ impl ApiError {
             ApiError::Authentication { .. } => "BASILICA_API_AUTH_ERROR",
             ApiError::Authorization { .. } => "BASILICA_API_AUTHZ_ERROR",
             ApiError::RateLimitExceeded => "BASILICA_API_RATE_LIMIT",
+            ApiError::QuotaExceeded { .. } => "BASILICA_API_QUOTA_EXCEEDED",
             ApiError::InsufficientBalance { .. } => "BASILICA_API_INSUFFICIENT_BALANCE",
             ApiError::InvalidRequest { .. } => "BASILICA_API_INVALID_REQUEST",
             ApiError::Aggregation { .. } => "BASILICA_API_AGGREGATION_ERROR",
@@ -216,6 +221,7 @@ impl ApiError {
                 | ApiError::Authentication { .. }
                 | ApiError::Authorization { .. }
                 | ApiError::RateLimitExceeded
+                | ApiError::QuotaExceeded { .. }
                 | ApiError::InvalidRequest { .. }
                 | ApiError::NotFound { .. }
                 | ApiError::DeploymentNotFound(_)
@@ -244,6 +250,7 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many requests. Please try again later.".to_string(),
             ),
+            ApiError::QuotaExceeded { .. } => (StatusCode::FORBIDDEN, self.to_string()),
             ApiError::InsufficientBalance {
                 message,
                 current_balance,

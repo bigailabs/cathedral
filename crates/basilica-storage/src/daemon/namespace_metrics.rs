@@ -383,4 +383,108 @@ mod tests {
         let total_namespaces = thread_count * namespaces_per_thread;
         assert_eq!(store.namespace_count(), total_namespaces);
     }
+
+    #[test]
+    fn test_end_write_underflow_protection() {
+        let metrics = NamespaceMetrics::new();
+
+        // Call end_write without start_write - should not panic or underflow
+        metrics.end_write();
+        metrics.end_write();
+        metrics.end_write();
+
+        assert_eq!(metrics.get_active_write_count(), 0);
+    }
+
+    #[test]
+    fn test_end_read_underflow_protection() {
+        let metrics = NamespaceMetrics::new();
+
+        // Call end_read without start_read - should not panic or underflow
+        metrics.end_read();
+        metrics.end_read();
+
+        assert_eq!(metrics.get_active_read_count(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_rate_limit_cleanup() {
+        use std::sync::atomic::AtomicU64;
+        use std::thread;
+        use std::time::Duration;
+
+        let store = Arc::new(PerNamespaceMetricsStore::new());
+        let cleanup_count = Arc::new(AtomicU64::new(0));
+        let mut handles = vec![];
+
+        // Writers: continuously add namespaces
+        for t in 0..5 {
+            let s = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for i in 0..100 {
+                    let ns = format!("u-writer{}-{}", t, i);
+                    s.get_or_create(&ns).record_write(100);
+                    thread::sleep(Duration::from_micros(10));
+                }
+            }));
+        }
+
+        // Cleaners: continuously remove namespaces
+        for _ in 0..3 {
+            let s = Arc::clone(&store);
+            let count = Arc::clone(&cleanup_count);
+            handles.push(thread::spawn(move || {
+                for _ in 0..50 {
+                    let namespaces = s.list_namespaces();
+                    for ns in namespaces.iter().take(5) {
+                        if s.remove(ns).is_some() {
+                            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    thread::sleep(Duration::from_micros(50));
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify no panics or data corruption occurred
+        assert!(cleanup_count.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn test_concurrent_sync_worker_simulation() {
+        use std::thread;
+
+        let store = Arc::new(PerNamespaceMetricsStore::new());
+        let mut handles = vec![];
+
+        // Simulate multiple sync workers operating on same namespace
+        let namespace = "u-shared-sync";
+        for _ in 0..10 {
+            let s = Arc::clone(&store);
+            let ns = namespace.to_string();
+            handles.push(thread::spawn(move || {
+                let metrics = s.get_or_create(&ns);
+                for _ in 0..1000 {
+                    metrics.start_write();
+                    metrics.record_write(1024);
+                    metrics.record_file_created();
+                    metrics.end_write();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        let metrics = store.get(namespace).expect("namespace should exist");
+        // 10 threads * 1000 ops * 1024 bytes = 10_240_000
+        assert_eq!(metrics.get_bytes_written(), 10_240_000);
+        assert_eq!(metrics.get_files_created(), 10_000);
+        assert_eq!(metrics.get_active_write_count(), 0);
+    }
 }

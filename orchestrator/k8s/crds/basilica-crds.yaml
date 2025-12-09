@@ -717,6 +717,9 @@ spec:
     - jsonPath: .status.state
       name: State
       type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
     - jsonPath: .status.replicasReady
       name: Replicas
       type: string
@@ -981,6 +984,88 @@ spec:
               message:
                 nullable: true
                 type: string
+              phase:
+                description: Deployment lifecycle phase for granular progress tracking.
+                enum:
+                - pending
+                - scheduling
+                - pulling
+                - initializing
+                - storage_sync
+                - starting
+                - health_check
+                - ready
+                - degraded
+                - failed
+                - suspended
+                - terminating
+                nullable: true
+                type: string
+              phaseHistory:
+                items:
+                  description: Record of a phase transition for history tracking.
+                  properties:
+                    durationSeconds:
+                      format: uint64
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    message:
+                      nullable: true
+                      type: string
+                    phase:
+                      description: Deployment lifecycle phase for granular progress tracking.
+                      enum:
+                      - pending
+                      - scheduling
+                      - pulling
+                      - initializing
+                      - storage_sync
+                      - starting
+                      - health_check
+                      - ready
+                      - degraded
+                      - failed
+                      - suspended
+                      - terminating
+                      type: string
+                    timestamp:
+                      type: string
+                  required:
+                  - phase
+                  - timestamp
+                  type: object
+                type: array
+              progress:
+                description: Progress information for phases that support tracking.
+                nullable: true
+                properties:
+                  bytesSynced:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  bytesTotal:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  currentStep:
+                    default: ''
+                    type: string
+                  elapsedSeconds:
+                    default: 0
+                    format: uint64
+                    minimum: 0.0
+                    type: integer
+                  percentage:
+                    format: float
+                    nullable: true
+                    type: number
+                  startedAt:
+                    default: ''
+                    type: string
+                type: object
               publicUrl:
                 default: ''
                 type: string

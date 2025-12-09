@@ -81,6 +81,14 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/deployments/:instance_name/logs",
             get(routes::deployments::stream_deployment_logs),
         )
+        .route(
+            "/deployments/:instance_name/events",
+            get(routes::deployments::get_deployment_events),
+        )
+        .route(
+            "/deployments/:instance_name/scale",
+            post(routes::deployments::scale_deployment),
+        )
         // GPU node registration endpoints
         .route(
             "/v1/gpu-nodes/register",

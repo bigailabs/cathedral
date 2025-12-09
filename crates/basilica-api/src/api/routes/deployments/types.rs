@@ -43,6 +43,12 @@ fn default_enable_billing() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleDeploymentRequest {
+    pub replicas: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceRequirements {
@@ -165,6 +171,8 @@ pub struct DeploymentResponse {
     pub pods: Option<Vec<PodInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProgressResponse>,
 }
@@ -433,9 +441,17 @@ pub fn validate_persistent_storage(storage: &PersistentStorageSpec) -> Result<()
         return Ok(());
     }
 
-    if storage.bucket.is_empty() {
+    // Allow empty bucket when using system credentials (basilica-r2-credentials).
+    // Operator reads bucket from credentials secret for system credentials.
+    // Require bucket only when using custom credentials.
+    let has_custom_credentials = storage
+        .credentials_secret
+        .as_ref()
+        .is_some_and(|s| !s.is_empty());
+
+    if storage.bucket.is_empty() && has_custom_credentials {
         return Err(ApiError::InvalidRequest {
-            message: "Storage bucket cannot be empty".to_string(),
+            message: "Storage bucket cannot be empty when using custom credentials".to_string(),
         });
     }
 

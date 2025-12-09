@@ -16,14 +16,28 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
-from .exceptions import (
-    DeploymentFailed,
-    DeploymentNotFound,
-    DeploymentTimeout,
-)
+from basilica.exceptions import DeploymentFailed, DeploymentTimeout
 
 if TYPE_CHECKING:
     from . import BasilicaClient
+
+
+def _format_phase_message(phase: Optional[str]) -> str:
+    """Format human-readable phase message for progress output."""
+    messages = {
+        "pending": "Waiting for scheduler...",
+        "scheduling": "Finding suitable node...",
+        "pulling": "Pulling container image...",
+        "initializing": "Running init containers...",
+        "storage_sync": "Syncing storage volume...",
+        "starting": "Starting application...",
+        "health_check": "Running health checks...",
+        "ready": "Deployment ready!",
+        "degraded": "Deployment degraded",
+        "failed": "Deployment failed",
+        "terminating": "Terminating...",
+    }
+    return messages.get(phase or "pending", f"Phase: {phase}")
 
 
 @dataclass
@@ -91,9 +105,9 @@ class DeploymentStatus:
             "scheduling",
             "pulling",
             "initializing",
-            "storagesync",
+            "storage_sync",
             "starting",
-            "healthcheck",
+            "health_check",
         )
 
 
@@ -282,12 +296,14 @@ class Deployment:
         poll_interval: int = 5,
         raise_on_failure: bool = True,
         on_progress: Optional[Callable[[DeploymentStatus], None]] = None,
+        silent: bool = False,
     ) -> DeploymentStatus:
         """
         Wait for the deployment to become ready.
 
         Polls the deployment status until it reaches a ready state,
-        fails, or times out. Optionally calls a progress callback on each poll.
+        fails, or times out. By default, prints progress to stdout.
+        Use silent=True to suppress output, or provide a custom on_progress callback.
 
         Args:
             timeout: Maximum seconds to wait (default: 300)
@@ -295,7 +311,8 @@ class Deployment:
             raise_on_failure: If True, raises DeploymentFailed on failure state
             on_progress: Optional callback invoked on each status poll.
                          Receives the current DeploymentStatus as argument.
-                         Useful for displaying progress bars or status updates.
+                         If None and silent=False, uses default progress output.
+            silent: If True, suppresses default progress output (default: False)
 
         Returns:
             Final DeploymentStatus when ready or failed
@@ -306,31 +323,35 @@ class Deployment:
             DeploymentNotFound: If deployment is deleted during wait
 
         Example:
+            >>> # Default: shows progress output
+            >>> status = deployment.wait_until_ready(timeout=120)
+            >>>
+            >>> # Silent mode: no output
+            >>> status = deployment.wait_until_ready(timeout=120, silent=True)
+            >>>
+            >>> # Custom callback
             >>> def show_progress(status):
-            ...     if status.phase:
-            ...         print(f"Phase: {status.phase}")
-            ...     if status.progress and status.progress.percentage:
-            ...         print(f"Progress: {status.progress.percentage:.1f}%")
-            ...
-            >>> try:
-            ...     status = deployment.wait_until_ready(
-            ...         timeout=120,
-            ...         on_progress=show_progress
-            ...     )
-            ...     print(f"Ready! URL: {deployment.url}")
-            ... except DeploymentTimeout:
-            ...     print("Timed out waiting for deployment")
+            ...     print(f"Phase: {status.phase}")
+            >>> status = deployment.wait_until_ready(on_progress=show_progress)
         """
         elapsed = 0
         last_status = None
+        last_phase = None
+
+        callback = on_progress
+        if callback is None and not silent:
+            callback = self._default_progress_callback
 
         while elapsed < timeout:
             last_status = self.status()
 
-            if on_progress:
-                on_progress(last_status)
+            if callback and last_status.phase != last_phase:
+                callback(last_status)
+                last_phase = last_status.phase
 
             if last_status.is_ready:
+                if callback and not on_progress and not silent:
+                    print(f"[{self._name}] Deployment ready!")
                 return last_status
 
             if last_status.is_failed and raise_on_failure:
@@ -349,6 +370,16 @@ class Deployment:
             replicas_ready=last_status.replicas_ready if last_status else 0,
             replicas_desired=last_status.replicas_desired if last_status else 1,
         )
+
+    def _default_progress_callback(self, status: DeploymentStatus) -> None:
+        """Default progress callback that prints human-readable status."""
+        phase_msg = _format_phase_message(status.phase)
+        replica_info = f"{status.replicas_ready}/{status.replicas_desired}"
+        print(f"[{self._name}] {phase_msg} (replicas: {replica_info})")
+
+        if status.phase == "storage_sync" and status.progress:
+            if status.progress.percentage is not None:
+                print(f"  Storage sync: {status.progress.percentage:.1f}%")
 
     def delete(self) -> None:
         """
@@ -394,7 +425,9 @@ class Deployment:
         return self
 
     def __repr__(self) -> str:
-        return f"Deployment(name={self._name!r}, state={self._state!r}, url={self._url!r})"
+        return (
+            f"Deployment(name={self._name!r}, state={self._state!r}, url={self._url!r})"
+        )
 
     def __str__(self) -> str:
         return f"Deployment '{self._name}' ({self._state}) at {self._url}"

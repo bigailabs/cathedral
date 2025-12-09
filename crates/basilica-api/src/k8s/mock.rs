@@ -433,8 +433,26 @@ impl ApiK8sClient for MockK8sClient {
         Ok(false)
     }
 
+    async fn scale_user_deployment(&self, _ns: &str, _name: &str, _replicas: u32) -> Result<()> {
+        Ok(())
+    }
+
     async fn get_user_deployment_status(&self, _ns: &str, _name: &str) -> Result<(u32, u32)> {
         Ok((2, 2))
+    }
+
+    async fn get_user_deployment_phase(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<DeploymentPhaseDto> {
+        Ok(DeploymentPhaseDto {
+            phase: "ready".to_string(),
+            progress: None,
+            phase_history: vec![],
+            replicas_desired: 1,
+            replicas_ready: 1,
+        })
     }
 
     async fn get_user_deployment_logs(
@@ -445,6 +463,54 @@ impl ApiK8sClient for MockK8sClient {
         _since_seconds: Option<u32>,
     ) -> Result<String> {
         Ok("Mock deployment logs\nLine 1\nLine 2\n".to_string())
+    }
+
+    async fn get_user_deployment_events(
+        &self,
+        _ns: &str,
+        _instance_name: &str,
+        _limit: Option<u32>,
+    ) -> Result<Vec<DeploymentEventDto>> {
+        Ok(vec![])
+    }
+
+    async fn get_user_deployment_resources(
+        &self,
+        _ns: &str,
+        _name: &str,
+    ) -> Result<(String, String, Option<u32>)> {
+        Ok(("500m".to_string(), "512Mi".to_string(), None))
+    }
+
+    async fn secret_exists(&self, _ns: &str, _name: &str) -> Result<bool> {
+        // Mock always returns true - secrets exist
+        Ok(true)
+    }
+
+    async fn get_namespace_resource_quota(&self, _ns: &str) -> Result<Option<ResourceQuotaDto>> {
+        // Mock returns no quota (unlimited)
+        Ok(None)
+    }
+
+    async fn check_cluster_capacity(
+        &self,
+        _cpu_request: &str,
+        _memory_request: &str,
+        _gpu_count: Option<u32>,
+    ) -> Result<ClusterCapacityResult> {
+        // Mock always returns sufficient capacity
+        Ok(ClusterCapacityResult {
+            has_capacity: true,
+            message: None,
+            available_cpu: Some("8000m".to_string()),
+            available_memory: Some("32Gi".to_string()),
+            available_gpus: Some(4),
+        })
+    }
+
+    async fn get_image_pull_secrets(&self, _ns: &str) -> Result<Vec<String>> {
+        // Mock returns empty list (no private registry secrets)
+        Ok(vec![])
     }
 }
 

@@ -8,8 +8,8 @@ pub use cluster_tokens::{
 };
 pub use deployments::{
     create_deployment, get_deployment, get_deployment_including_deleted, list_user_deployments,
-    mark_deployment_deleted, reactivate_deployment, update_deployment_state,
-    CreateDeploymentParams, DeploymentRecord, ReactivateDeploymentParams,
+    mark_deployment_deleted, reactivate_deployment, update_deployment_replicas,
+    update_deployment_state, CreateDeploymentParams, DeploymentRecord, ReactivateDeploymentParams,
 };
 pub use instance_mappings::{
     get_instance_mapping, get_or_create_instance_id, list_user_instance_mappings, InstanceMapping,

@@ -21,6 +21,354 @@ fn user_namespace(user_id: &str) -> String {
     format!("u-{}", sanitize_user_id(user_id))
 }
 
+/// Pre-deployment validation for P1-1 (storage), P1-2 (quota), P1-4 (capacity), P1-6 (image pull)
+async fn validate_deployment_prerequisites(
+    k8s_client: std::sync::Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>,
+    namespace: &str,
+    req: &CreateDeploymentRequest,
+) -> Result<()> {
+    // P1-1: Validate storage secret exists if storage is enabled
+    if let Some(ref storage) = req.storage {
+        if let Some(ref persistent) = storage.persistent {
+            if persistent.enabled {
+                if let Some(ref credentials_secret) = persistent.credentials_secret {
+                    let exists = k8s_client
+                        .secret_exists(namespace, credentials_secret)
+                        .await?;
+                    if !exists {
+                        return Err(ApiError::InvalidRequest {
+                            message: format!(
+                                "Storage credentials secret '{}' not found in namespace '{}'. \
+                                 Please ensure the secret is created before enabling storage.",
+                                credentials_secret, namespace
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // P1-2: Validate resource quota (if namespace has quota configured)
+    if let Some(quota) = k8s_client.get_namespace_resource_quota(namespace).await? {
+        validate_against_quota(&quota, req)?;
+    }
+
+    // P1-4: Validate cluster capacity
+    let (cpu_request, memory_request) = if let Some(ref resources) = req.resources {
+        (resources.cpu.clone(), resources.memory.clone())
+    } else {
+        ("500m".to_string(), "512Mi".to_string())
+    };
+
+    let gpu_count = req
+        .resources
+        .as_ref()
+        .and_then(|r| r.gpus.as_ref())
+        .map(|g| g.count * req.replicas);
+
+    let capacity = k8s_client
+        .check_cluster_capacity(&cpu_request, &memory_request, gpu_count)
+        .await?;
+
+    if !capacity.has_capacity {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "Insufficient cluster capacity: {}",
+                capacity.message.unwrap_or_else(|| "unknown".to_string())
+            ),
+        });
+    }
+
+    // P1-6: Validate image pull credentials for private registries
+    if let Some(registry) = extract_registry_from_image(&req.image) {
+        if is_private_registry(&registry) {
+            let pull_secrets = k8s_client.get_image_pull_secrets(namespace).await?;
+            if pull_secrets.is_empty() {
+                tracing::warn!(
+                    namespace = namespace,
+                    image = %req.image,
+                    registry = %registry,
+                    "Private registry detected but no image pull secrets found"
+                );
+                return Err(ApiError::InvalidRequest {
+                    message: format!(
+                        "Image '{}' requires credentials from private registry '{}', \
+                         but no image pull secrets found in namespace '{}'. \
+                         Create a docker-registry secret with your credentials.",
+                        req.image, registry, namespace
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_registry_from_image(image: &str) -> Option<String> {
+    let image = image.trim();
+    // Simple images like "nginx:latest" or "nginx" have no registry
+    if !image.contains('/') {
+        return None;
+    }
+    // Images like "library/nginx" are still Docker Hub
+    let first_part = image.split('/').next()?;
+    // Registry must contain '.' or ':' (e.g., gcr.io, localhost:5000)
+    // or be a known registry prefix
+    if first_part.contains('.') || first_part.contains(':') {
+        Some(first_part.to_string())
+    } else {
+        None // Docker Hub image like "myuser/myimage"
+    }
+}
+
+fn is_private_registry(registry: &str) -> bool {
+    // Public registries that don't require credentials
+    let public_registries = [
+        "docker.io",
+        "registry.hub.docker.com",
+        "ghcr.io",           // GitHub Container Registry (public images)
+        "gcr.io",            // Google Container Registry (public images)
+        "quay.io",           // Quay (public images)
+        "nvcr.io",           // NVIDIA NGC (some public)
+        "public.ecr.aws",    // AWS ECR Public
+        "mcr.microsoft.com", // Microsoft Container Registry
+    ];
+    !public_registries.iter().any(|&r| registry.starts_with(r))
+}
+
+fn check_resource_quota(
+    limit: Option<&String>,
+    used: Option<&String>,
+    requested_per_replica: i64,
+    replicas: i64,
+    resource_name: &str,
+    parse_fn: fn(&str) -> i64,
+    format_fn: fn(i64) -> String,
+) -> Result<()> {
+    let (Some(limit_str), Some(used_str)) = (limit, used) else {
+        return Ok(());
+    };
+
+    let limit_val = parse_fn(limit_str);
+    let used_val = parse_fn(used_str);
+    let requested_total = requested_per_replica.saturating_mul(replicas);
+    let available = limit_val.saturating_sub(used_val);
+
+    if used_val.saturating_add(requested_total) > limit_val {
+        return Err(ApiError::QuotaExceeded {
+            message: format!(
+                "{} quota exceeded: requesting {} x {} replicas = {}, but only {} available (limit: {}, used: {})",
+                resource_name,
+                format_fn(requested_per_replica),
+                replicas,
+                format_fn(requested_total),
+                format_fn(available),
+                format_fn(limit_val),
+                format_fn(used_val)
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_against_quota(
+    quota: &crate::k8s::ResourceQuotaDto,
+    req: &CreateDeploymentRequest,
+) -> Result<()> {
+    use basilica_common::utils::{
+        format_bytes, format_milli_cpu, parse_cpu_to_milli, parse_memory_to_bytes,
+    };
+
+    let Some(ref resources) = req.resources else {
+        return Ok(());
+    };
+
+    let replicas = req.replicas as i64;
+    let cpu_per_replica = parse_cpu_to_milli(&resources.cpu);
+    let memory_per_replica = parse_memory_to_bytes(&resources.memory);
+
+    // Check CPU limits quota
+    check_resource_quota(
+        quota.cpu_limit.as_ref(),
+        quota.cpu_used.as_ref(),
+        cpu_per_replica,
+        replicas,
+        "CPU limits",
+        parse_cpu_to_milli,
+        format_milli_cpu,
+    )?;
+
+    // Check CPU requests quota
+    check_resource_quota(
+        quota.requests_cpu_limit.as_ref(),
+        quota.requests_cpu_used.as_ref(),
+        cpu_per_replica,
+        replicas,
+        "CPU requests",
+        parse_cpu_to_milli,
+        format_milli_cpu,
+    )?;
+
+    // Check memory limits quota
+    check_resource_quota(
+        quota.memory_limit.as_ref(),
+        quota.memory_used.as_ref(),
+        memory_per_replica,
+        replicas,
+        "Memory limits",
+        parse_memory_to_bytes,
+        format_bytes,
+    )?;
+
+    // Check memory requests quota
+    check_resource_quota(
+        quota.requests_memory_limit.as_ref(),
+        quota.requests_memory_used.as_ref(),
+        memory_per_replica,
+        replicas,
+        "Memory requests",
+        parse_memory_to_bytes,
+        format_bytes,
+    )?;
+
+    // Check GPU quota
+    if let (Some(gpu_limit), Some(gpu_used)) = (quota.gpu_limit, quota.gpu_used) {
+        let gpu_per_replica = resources.gpus.as_ref().map_or(0, |g| g.count as i64);
+        let requested_total = gpu_per_replica.saturating_mul(replicas);
+        let available = gpu_limit.saturating_sub(gpu_used);
+
+        if gpu_used.saturating_add(requested_total) > gpu_limit {
+            return Err(ApiError::QuotaExceeded {
+                message: format!(
+                    "GPU quota exceeded: requesting {} x {} replicas = {}, but only {} available (limit: {}, used: {})",
+                    gpu_per_replica, replicas, requested_total, available, gpu_limit, gpu_used
+                ),
+            });
+        }
+    }
+
+    // Check pods quota
+    if let (Some(pods_limit), Some(pods_used)) = (quota.pods_limit, quota.pods_used) {
+        let available = pods_limit.saturating_sub(pods_used);
+        if pods_used.saturating_add(replicas) > pods_limit {
+            return Err(ApiError::QuotaExceeded {
+                message: format!(
+                    "Pods quota exceeded: requesting {} replicas, but only {} available (limit: {}, used: {})",
+                    replicas, available, pods_limit, pods_used
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate capacity for scale-up operations. Only validates if scaling up.
+///
+/// Note: This validation is subject to TOCTOU (time-of-check time-of-use) race conditions.
+/// Between this check and the actual scale operation, cluster state may change (e.g., other
+/// deployments consuming resources). The K8s scheduler handles the authoritative allocation,
+/// so the pod may end up Pending if capacity is exhausted. This validation serves as a
+/// best-effort early rejection to improve user experience.
+async fn validate_scale_capacity(
+    k8s_client: std::sync::Arc<dyn crate::k8s_client::ApiK8sClient + Send + Sync>,
+    namespace: &str,
+    current_replicas: i32,
+    new_replicas: u32,
+    cpu_request: &str,
+    memory_request: &str,
+    gpu_per_replica: Option<u32>,
+) -> Result<()> {
+    use basilica_common::utils::{
+        format_bytes, format_milli_cpu, parse_cpu_to_milli, parse_memory_to_bytes,
+    };
+
+    let replica_delta = (new_replicas as i32) - current_replicas;
+    if replica_delta <= 0 {
+        return Ok(()); // Scaling down, no capacity check needed
+    }
+
+    let cpu_per = parse_cpu_to_milli(cpu_request);
+    let memory_per = parse_memory_to_bytes(memory_request);
+    let delta = replica_delta as i64;
+
+    // Validate resource quota for incremental replicas
+    if let Some(quota) = k8s_client.get_namespace_resource_quota(namespace).await? {
+        // Check CPU requests quota
+        check_resource_quota(
+            quota.requests_cpu_limit.as_ref(),
+            quota.requests_cpu_used.as_ref(),
+            cpu_per,
+            delta,
+            "CPU requests",
+            parse_cpu_to_milli,
+            format_milli_cpu,
+        )?;
+
+        // Check memory requests quota
+        check_resource_quota(
+            quota.requests_memory_limit.as_ref(),
+            quota.requests_memory_used.as_ref(),
+            memory_per,
+            delta,
+            "Memory requests",
+            parse_memory_to_bytes,
+            format_bytes,
+        )?;
+
+        // Check GPU quota
+        if let (Some(gpu_limit), Some(gpu_used)) = (quota.gpu_limit, quota.gpu_used) {
+            let gpu_delta = gpu_per_replica.map_or(0, |g| g as i64 * delta);
+            let available = gpu_limit.saturating_sub(gpu_used);
+
+            if gpu_used.saturating_add(gpu_delta) > gpu_limit {
+                return Err(ApiError::QuotaExceeded {
+                    message: format!(
+                        "GPU quota exceeded: scaling requires {} additional GPUs, but only {} available (limit: {}, used: {})",
+                        gpu_delta, available, gpu_limit, gpu_used
+                    ),
+                });
+            }
+        }
+
+        // Check pods quota
+        if let (Some(pods_limit), Some(pods_used)) = (quota.pods_limit, quota.pods_used) {
+            let available = pods_limit.saturating_sub(pods_used);
+            if pods_used.saturating_add(delta) > pods_limit {
+                return Err(ApiError::QuotaExceeded {
+                    message: format!(
+                        "Pods quota exceeded: scaling requires {} additional pods, but only {} available (limit: {}, used: {})",
+                        delta, available, pods_limit, pods_used
+                    ),
+                });
+            }
+        }
+    }
+
+    // Validate cluster capacity for total incremental resources
+    let total_cpu = format_milli_cpu(cpu_per * delta);
+    let total_memory = format_bytes(memory_per * delta);
+    let gpu_count = gpu_per_replica.map(|g| g * delta as u32);
+    let capacity = k8s_client
+        .check_cluster_capacity(&total_cpu, &total_memory, gpu_count)
+        .await?;
+
+    if !capacity.has_capacity {
+        return Err(ApiError::InvalidRequest {
+            message: format!(
+                "Insufficient cluster capacity to scale from {} to {} replicas: {}",
+                current_replicas,
+                new_replicas,
+                capacity.message.unwrap_or_else(|| "unknown".to_string())
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 fn generate_cr_name(instance_name: &str) -> String {
     format!("{}-deployment", instance_name)
 }
@@ -146,6 +494,9 @@ pub async fn create_deployment(
     let namespace = user_namespace(&auth.user_id);
     let cr_name = generate_cr_name(&instance_name);
     let path_prefix = format!("/deployments/{}", instance_name);
+
+    // Pre-deployment validation (P1-1, P1-2, P1-4)
+    validate_deployment_prerequisites(k8s_client.clone(), &namespace, &req).await?;
 
     let public_url = if req.public {
         state.config.dns.build_public_url(&instance_name).unwrap_or_else(|| {
@@ -417,6 +768,7 @@ pub async fn create_deployment(
                             updated_at: Some(record.updated_at.to_rfc3339()),
                             pods: None,
                             phase: Some("pending".to_string()),
+                            message: None,
                             progress: None,
                         }),
                     ));
@@ -538,6 +890,7 @@ pub async fn create_deployment(
                     updated_at: Some(record.updated_at.to_rfc3339()),
                     pods: None,
                     phase: Some("pending".to_string()),
+                    message: None,
                     progress: None,
                 }),
             ))
@@ -570,55 +923,78 @@ pub async fn get_deployment(
             message: "Deployment not found".to_string(),
         })?;
 
-    let (desired, ready) = if let Some(k8s_client) = state.k8s.as_ref() {
-        tracing::debug!(
-            user_id = %auth.user_id,
-            instance_name = %instance_name,
-            namespace = %deployment.namespace,
-            cr_name = %deployment.cr_name,
-            "Querying K8s for UserDeployment status"
-        );
-        match k8s_client
-            .get_user_deployment_status(&deployment.namespace, &deployment.cr_name)
-            .await
-        {
-            Ok((d, r)) => {
-                tracing::info!(
-                    user_id = %auth.user_id,
-                    instance_name = %instance_name,
-                    desired = d,
-                    ready = r,
-                    "Retrieved replica status from K8s"
-                );
-                (d, r)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user_id = %auth.user_id,
-                    instance_name = %instance_name,
-                    error = %e,
-                    "Failed to get K8s status, using database values"
-                );
-                (deployment.replicas as u32, 0)
-            }
-        }
-    } else {
+    let Some(k8s_client) = state.k8s.as_ref() else {
         tracing::debug!(
             user_id = %auth.user_id,
             instance_name = %instance_name,
             "No K8s client available, using database values"
         );
-        (deployment.replicas as u32, 0)
+        apimetrics::record_request("GET /deployments/:name", "200", start, true);
+        return Ok((
+            StatusCode::OK,
+            Json(DeploymentResponse::from_record_with_status(
+                &deployment,
+                deployment.replicas as u32,
+                0,
+            )),
+        ));
     };
+
+    tracing::debug!(
+        user_id = %auth.user_id,
+        instance_name = %instance_name,
+        namespace = %deployment.namespace,
+        cr_name = %deployment.cr_name,
+        "Querying K8s for UserDeployment phase"
+    );
+
+    let phase_dto = k8s_client
+        .get_user_deployment_phase(&deployment.namespace, &deployment.cr_name)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                user_id = %auth.user_id,
+                instance_name = %instance_name,
+                error = %e,
+                "Failed to get K8s phase, using defaults"
+            );
+            crate::k8s::DeploymentPhaseDto::default()
+        });
+
+    let progress = phase_dto.progress.map(|p| super::types::ProgressResponse {
+        bytes_synced: p.bytes_synced,
+        bytes_total: p.bytes_total,
+        percentage: p.percentage,
+        current_step: p.current_step,
+        started_at: p.started_at,
+        elapsed_seconds: p.elapsed_seconds,
+    });
+
+    let message = phase_dto
+        .phase_history
+        .last()
+        .and_then(|h| h.message.clone());
+
+    tracing::info!(
+        user_id = %auth.user_id,
+        instance_name = %instance_name,
+        phase = %phase_dto.phase,
+        desired = phase_dto.replicas_desired,
+        ready = phase_dto.replicas_ready,
+        "Retrieved phase information from K8s"
+    );
 
     apimetrics::record_request("GET /deployments/:name", "200", start, true);
 
     Ok((
         StatusCode::OK,
-        Json(DeploymentResponse::from_record_with_status(
+        Json(DeploymentResponse::from_record_with_phase(
             &deployment,
-            desired,
-            ready,
+            phase_dto.replicas_desired,
+            phase_dto.replicas_ready,
+            Some(phase_dto.phase),
+            message,
+            progress,
         )),
     ))
 }
@@ -721,6 +1097,73 @@ pub async fn delete_deployment(
     ))
 }
 
+pub async fn scale_deployment(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    Path(instance_name): Path<String>,
+    Json(req): Json<super::types::ScaleDeploymentRequest>,
+) -> Result<impl IntoResponse> {
+    let start = std::time::Instant::now();
+
+    validate_replicas(req.replicas, state.config.deployment.max_replicas)?;
+
+    let deployment = db::get_deployment(&state.db, &auth.user_id, &instance_name)
+        .await?
+        .ok_or(ApiError::NotFound {
+            message: "Deployment not found".to_string(),
+        })?;
+
+    let k8s_client = state.k8s.as_ref().ok_or(ApiError::ServiceUnavailable)?;
+
+    // Get deployment resource requirements for quota/capacity validation
+    let (cpu_request, memory_request, gpu_per_replica) = k8s_client
+        .get_user_deployment_resources(&deployment.namespace, &deployment.cr_name)
+        .await?;
+
+    // Validate quota and capacity before scaling (only if scaling up)
+    validate_scale_capacity(
+        k8s_client.clone(),
+        &deployment.namespace,
+        deployment.replicas,
+        req.replicas,
+        &cpu_request,
+        &memory_request,
+        gpu_per_replica,
+    )
+    .await?;
+
+    // Scale K8s deployment first
+    k8s_client
+        .scale_user_deployment(&deployment.namespace, &deployment.cr_name, req.replicas)
+        .await?;
+
+    // Update DB only after K8s operation succeeds
+    db::update_deployment_replicas(&state.db, deployment.id, req.replicas as i32).await?;
+
+    // Get updated status (log errors but don't fail the request)
+    let (desired, ready) = match k8s_client
+        .get_user_deployment_status(&deployment.namespace, &deployment.cr_name)
+        .await
+    {
+        Ok(status) => status,
+        Err(e) => {
+            tracing::warn!(
+                namespace = %deployment.namespace,
+                cr_name = %deployment.cr_name,
+                error = %e,
+                "Failed to get deployment status after scaling"
+            );
+            (req.replicas, 0)
+        }
+    };
+
+    apimetrics::record_request("POST /deployments/:name/scale", "200", start, true);
+
+    let response = DeploymentResponse::from_record_with_status(&deployment, desired, ready);
+
+    Ok((StatusCode::OK, Json(response)))
+}
+
 pub async fn list_deployments(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -781,6 +1224,7 @@ impl DeploymentResponse {
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
             phase: None,
+            message: None,
             progress: None,
         }
     }
@@ -801,6 +1245,7 @@ impl DeploymentResponse {
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
             phase: None,
+            message: None,
             progress: None,
         }
     }
@@ -810,6 +1255,7 @@ impl DeploymentResponse {
         desired: u32,
         ready: u32,
         phase: Option<String>,
+        message: Option<String>,
         progress: Option<super::types::ProgressResponse>,
     ) -> Self {
         Self {
@@ -823,6 +1269,7 @@ impl DeploymentResponse {
             updated_at: Some(record.updated_at.to_rfc3339()),
             pods: None,
             phase,
+            message,
             progress,
         }
     }
@@ -854,7 +1301,8 @@ pub async fn stream_deployment_logs(
     };
 
     let ns = user_namespace(&auth.user_id);
-    let cr_name = generate_cr_name(&instance_name);
+    // Use instance_name for pod label selector, not cr_name (which has -deployment suffix)
+    let instance_label = instance_name.clone();
     let follow = query.follow.unwrap_or(false);
     let tail = query.tail;
     let since_seconds = query.since_seconds;
@@ -862,7 +1310,7 @@ pub async fn stream_deployment_logs(
     let stream: Pin<Box<dyn Stream<Item = std::result::Result<Event, std::io::Error>> + Send>> =
         if !follow {
             let logs = client
-                .get_user_deployment_logs(&ns, &cr_name, tail, since_seconds)
+                .get_user_deployment_logs(&ns, &instance_label, tail, since_seconds)
                 .await?;
             let lines: Vec<String> = logs.lines().map(|s| s.to_string()).collect();
             Box::pin(async_stream::stream! {
@@ -887,7 +1335,7 @@ pub async fn stream_deployment_logs(
                     if start_at.elapsed() >= max_duration {
                         break;
                     }
-                    if let Ok(body) = client_clone.get_user_deployment_logs(&ns, &cr_name, tail.or(Some(100)), since_seconds).await {
+                    if let Ok(body) = client_clone.get_user_deployment_logs(&ns, &instance_label, tail.or(Some(100)), since_seconds).await {
                         let lines: Vec<String> = body.lines().map(|s| s.to_string()).collect();
                         if !lines.is_empty() {
                             let start_idx = if let Some(ref marker) = last_marker {
@@ -916,6 +1364,50 @@ pub async fn stream_deployment_logs(
 
     apimetrics::record_request("deployments.logs", "GET", start, true);
     Ok(Sse::new(stream))
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeploymentEventsResponse {
+    pub events: Vec<crate::k8s::DeploymentEventDto>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EventsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+pub async fn get_deployment_events(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<AppState>,
+    Path(instance_name): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<EventsQuery>,
+) -> Result<Json<DeploymentEventsResponse>> {
+    let start = std::time::Instant::now();
+
+    // Verify deployment exists and belongs to this user
+    let deployment = db::get_deployment(&state.db, &auth.user_id, &instance_name)
+        .await?
+        .ok_or(ApiError::NotFound {
+            message: "Deployment not found".to_string(),
+        })?;
+
+    let client = match state.k8s.as_ref() {
+        Some(c) => c.clone(),
+        None => {
+            apimetrics::record_request("deployments.events", "GET", start, false);
+            return Err(ApiError::ServiceUnavailable);
+        }
+    };
+
+    let limit = query.limit.unwrap_or(10);
+
+    let events = client
+        .get_user_deployment_events(&deployment.namespace, &instance_name, Some(limit))
+        .await?;
+
+    apimetrics::record_request("deployments.events", "GET", start, true);
+    Ok(Json(DeploymentEventsResponse { events }))
 }
 
 #[cfg(test)]

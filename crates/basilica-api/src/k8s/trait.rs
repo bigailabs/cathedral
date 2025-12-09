@@ -87,7 +87,11 @@ pub trait ApiK8sClient {
 
     async fn user_deployment_exists(&self, ns: &str, name: &str) -> Result<bool>;
 
+    async fn scale_user_deployment(&self, ns: &str, name: &str, replicas: u32) -> Result<()>;
+
     async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)>;
+
+    async fn get_user_deployment_phase(&self, ns: &str, name: &str) -> Result<DeploymentPhaseDto>;
 
     async fn get_user_deployment_logs(
         &self,
@@ -96,4 +100,30 @@ pub trait ApiK8sClient {
         tail: Option<u32>,
         since_seconds: Option<u32>,
     ) -> Result<String>;
+
+    async fn get_user_deployment_events(
+        &self,
+        ns: &str,
+        instance_name: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<DeploymentEventDto>>;
+
+    /// Get resource requirements for a UserDeployment CR.
+    /// Returns (cpu_request, memory_request, gpu_per_replica)
+    async fn get_user_deployment_resources(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<(String, String, Option<u32>)>;
+
+    // Pre-deployment validation methods
+    async fn secret_exists(&self, ns: &str, name: &str) -> Result<bool>;
+    async fn get_namespace_resource_quota(&self, ns: &str) -> Result<Option<ResourceQuotaDto>>;
+    async fn check_cluster_capacity(
+        &self,
+        cpu_request: &str,
+        memory_request: &str,
+        gpu_count: Option<u32>,
+    ) -> Result<ClusterCapacityResult>;
+    async fn get_image_pull_secrets(&self, ns: &str) -> Result<Vec<String>>;
 }

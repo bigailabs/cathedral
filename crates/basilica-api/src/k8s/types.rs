@@ -126,3 +126,85 @@ pub struct RentalSshDto {
     pub enabled: bool,
     pub public_key: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentEventDto {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub reason: String,
+    pub message: String,
+    pub count: Option<i32>,
+    pub last_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceQuotaDto {
+    // limits.* quota (for containers with resource limits)
+    pub cpu_limit: Option<String>,
+    pub cpu_used: Option<String>,
+    pub memory_limit: Option<String>,
+    pub memory_used: Option<String>,
+    // requests.* quota (for containers with resource requests)
+    pub requests_cpu_limit: Option<String>,
+    pub requests_cpu_used: Option<String>,
+    pub requests_memory_limit: Option<String>,
+    pub requests_memory_used: Option<String>,
+    // pod count quota
+    pub pods_limit: Option<i64>,
+    pub pods_used: Option<i64>,
+    // GPU quota (requests.nvidia.com/gpu)
+    pub gpu_limit: Option<i64>,
+    pub gpu_used: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterCapacityResult {
+    pub has_capacity: bool,
+    pub message: Option<String>,
+    pub available_cpu: Option<String>,
+    pub available_memory: Option<String>,
+    pub available_gpus: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentProgressDto {
+    #[serde(default)]
+    pub bytes_synced: Option<u64>,
+    #[serde(default)]
+    pub bytes_total: Option<u64>,
+    #[serde(default)]
+    pub percentage: Option<f32>,
+    #[serde(default)]
+    pub current_step: String,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub elapsed_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PhaseTransitionDto {
+    pub phase: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub duration_seconds: Option<u64>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentPhaseDto {
+    #[serde(default)]
+    pub phase: String,
+    #[serde(default)]
+    pub progress: Option<DeploymentProgressDto>,
+    #[serde(default)]
+    pub phase_history: Vec<PhaseTransitionDto>,
+    #[serde(default)]
+    pub replicas_desired: u32,
+    #[serde(default)]
+    pub replicas_ready: u32,
+}

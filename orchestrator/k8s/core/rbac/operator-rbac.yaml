@@ -26,6 +26,11 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch", "patch", "delete"]
 
+  # PodDisruptionBudgets for UserDeployment controller
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
+
   # Evictions (PDB-aware draining)
   - apiGroups: ["policy"]
     resources: ["pods/eviction"]

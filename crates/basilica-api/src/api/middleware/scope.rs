@@ -164,6 +164,9 @@ fn get_required_scope(req: &Request) -> Option<String> {
         (&Method::GET, "/deployments") => Some(String::new()),
         (&Method::GET, p) if p.starts_with("/deployments/") => Some(String::new()),
         (&Method::DELETE, p) if p.starts_with("/deployments/") => Some(String::new()),
+        (&Method::POST, p) if p.starts_with("/deployments/") && p.ends_with("/scale") => {
+            Some(String::new())
+        }
 
         // GPU node registration endpoints - require authentication but no specific scope
         // All authenticated users should be able to register their own GPU nodes

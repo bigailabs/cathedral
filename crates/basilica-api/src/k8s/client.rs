@@ -900,21 +900,19 @@ impl ApiK8sClient for K8sClient {
                     }
                 };
 
-                // When using custom storage (user-provided credentials), bucket is required
+                // When using custom storage (user-provided credentials), bucket is required.
                 // When using system credentials, bucket is read from the credentials secret
-                // by the operator, so we don't pass it in the CR spec
+                // by the operator. The operator validates that bucket is empty when using
+                // system credentials (see security/validation.rs).
                 let (bucket, credentials_secret) = if is_custom_storage {
                     (
                         persistent.bucket.clone(),
                         persistent.credentials_secret.clone(),
                     )
                 } else {
-                    // For system credentials, bucket comes from the secret, not the request
-                    // The operator will read STORAGE_BUCKET from the credentials secret
-                    (
-                        String::new(), // Empty bucket - operator reads from secret
-                        Some(default_secret_name.to_string()),
-                    )
+                    // For system credentials, leave bucket empty.
+                    // Operator reads STORAGE_BUCKET from the credentials secret.
+                    (String::new(), Some(default_secret_name.to_string()))
                 };
 
                 let mut persistent_obj = json!({
@@ -1079,6 +1077,28 @@ impl ApiK8sClient for K8sClient {
         }
     }
 
+    async fn scale_user_deployment(&self, ns: &str, name: &str, replicas: u32) -> Result<()> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        let patch = serde_json::json!({
+            "spec": {
+                "replicas": replicas
+            }
+        });
+
+        api.patch(
+            name,
+            &kube::api::PatchParams::apply("basilica-api"),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("scale UserDeployment failed: {e}"),
+        })?;
+
+        Ok(())
+    }
+
     async fn get_user_deployment_status(&self, ns: &str, name: &str) -> Result<(u32, u32)> {
         let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
 
@@ -1144,6 +1164,112 @@ impl ApiK8sClient for K8sClient {
         }
     }
 
+    async fn get_user_deployment_phase(&self, ns: &str, name: &str) -> Result<DeploymentPhaseDto> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        match api.get(name).await {
+            Ok(obj) => {
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    "Retrieved UserDeployment CR for phase extraction"
+                );
+
+                let Some(status) = obj.data.get("status") else {
+                    tracing::warn!(
+                        namespace = ns,
+                        name = name,
+                        "UserDeployment CR has no status field"
+                    );
+                    return Ok(DeploymentPhaseDto::default());
+                };
+
+                let phase = status
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("pending")
+                    .to_string();
+
+                let progress = status.get("progress").and_then(|p| {
+                    serde_json::from_value::<DeploymentProgressDto>(p.clone())
+                        .map_err(|e| {
+                            tracing::warn!(
+                                namespace = ns,
+                                name = name,
+                                error = %e,
+                                "Failed to parse progress field"
+                            );
+                            e
+                        })
+                        .ok()
+                });
+
+                let phase_history = status
+                    .get("phaseHistory")
+                    .and_then(|h| {
+                        serde_json::from_value::<Vec<PhaseTransitionDto>>(h.clone())
+                            .map_err(|e| {
+                                tracing::warn!(
+                                    namespace = ns,
+                                    name = name,
+                                    error = %e,
+                                    "Failed to parse phaseHistory field"
+                                );
+                                e
+                            })
+                            .ok()
+                    })
+                    .unwrap_or_default();
+
+                let replicas_desired = status
+                    .get("replicasDesired")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                let replicas_ready = status
+                    .get("replicasReady")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                tracing::debug!(
+                    namespace = ns,
+                    name = name,
+                    phase = %phase,
+                    replicas_desired = replicas_desired,
+                    replicas_ready = replicas_ready,
+                    "Extracted phase info from UserDeployment status"
+                );
+
+                Ok(DeploymentPhaseDto {
+                    phase,
+                    progress,
+                    phase_history,
+                    replicas_desired,
+                    replicas_ready,
+                })
+            }
+            Err(kube::Error::Api(err_resp)) if err_resp.code == 404 => {
+                tracing::warn!(
+                    namespace = ns,
+                    name = name,
+                    "UserDeployment CR not found (404)"
+                );
+                Ok(DeploymentPhaseDto::default())
+            }
+            Err(e) => {
+                tracing::error!(
+                    namespace = ns,
+                    name = name,
+                    error = %e,
+                    "Failed to get UserDeployment phase"
+                );
+                Err(ApiError::Internal {
+                    message: format!("get UserDeployment phase failed: {e}"),
+                })
+            }
+        }
+    }
+
     async fn get_user_deployment_logs(
         &self,
         ns: &str,
@@ -1198,5 +1324,410 @@ impl ApiK8sClient for K8sClient {
         })?;
 
         Ok(logs)
+    }
+
+    async fn get_user_deployment_events(
+        &self,
+        ns: &str,
+        instance_name: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<DeploymentEventDto>> {
+        let events_api: Api<k8s_openapi::api::core::v1::Event> =
+            Api::namespaced(self.client.clone(), ns);
+
+        let pods_api: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.client.clone(), ns);
+
+        let label_selector = format!("basilica.ai/instance={}", instance_name);
+        let pods = pods_api
+            .list(&ListParams::default().labels(&label_selector))
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to list pods: {}", e),
+            })?;
+
+        let pod_names: Vec<String> = pods
+            .items
+            .iter()
+            .filter_map(|p| p.metadata.name.clone())
+            .collect();
+
+        if pod_names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Batch query: fetch all events in namespace, filter in-memory by pod names
+        let pod_name_set: std::collections::HashSet<&str> =
+            pod_names.iter().map(|s| s.as_str()).collect();
+
+        let events =
+            events_api
+                .list(&ListParams::default())
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to list events: {}", e),
+                })?;
+
+        let mut all_events: Vec<DeploymentEventDto> = events
+            .items
+            .into_iter()
+            .filter(|event| {
+                event
+                    .involved_object
+                    .name
+                    .as_deref()
+                    .map(|name| pod_name_set.contains(name))
+                    .unwrap_or(false)
+            })
+            .map(|event| DeploymentEventDto {
+                event_type: event.type_.unwrap_or_else(|| "Normal".to_string()),
+                reason: event.reason.unwrap_or_default(),
+                message: event.message.unwrap_or_default(),
+                count: event.count,
+                last_timestamp: event.last_timestamp.map(|t| t.0.to_rfc3339()),
+            })
+            .collect();
+
+        // Sort by timestamp (newest first)
+        all_events.sort_by(|a, b| b.last_timestamp.as_ref().cmp(&a.last_timestamp.as_ref()));
+
+        let limit = limit.unwrap_or(10) as usize;
+        all_events.truncate(limit);
+
+        Ok(all_events)
+    }
+
+    async fn get_user_deployment_resources(
+        &self,
+        ns: &str,
+        name: &str,
+    ) -> Result<(String, String, Option<u32>)> {
+        let api = self.cr_api(ns, "basilica.ai", "v1", "UserDeployment");
+
+        let obj = api.get(name).await.map_err(|e| match &e {
+            kube::Error::Api(err) if err.code == 404 => ApiError::NotFound {
+                message: format!("UserDeployment not found: {name}"),
+            },
+            _ => ApiError::Internal {
+                message: format!("get UserDeployment failed: {e}"),
+            },
+        })?;
+
+        let spec = obj.data.get("spec").ok_or(ApiError::Internal {
+            message: "UserDeployment has no spec".to_string(),
+        })?;
+
+        let resources = spec.get("resources");
+        let cpu = resources
+            .and_then(|r| r.get("cpu"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("500m")
+            .to_string();
+        let memory = resources
+            .and_then(|r| r.get("memory"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("512Mi")
+            .to_string();
+        let gpu = resources
+            .and_then(|r| r.get("gpus"))
+            .and_then(|g| g.get("count"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        Ok((cpu, memory, gpu))
+    }
+
+    async fn secret_exists(&self, ns: &str, name: &str) -> Result<bool> {
+        let secrets_api: Api<k8s_openapi::api::core::v1::Secret> =
+            Api::namespaced(self.client.clone(), ns);
+
+        match secrets_api.get(name).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(err)) if err.code == 404 => Ok(false),
+            Err(e) => Err(ApiError::Internal {
+                message: format!("Failed to check secret: {}", e),
+            }),
+        }
+    }
+
+    async fn get_namespace_resource_quota(&self, ns: &str) -> Result<Option<ResourceQuotaDto>> {
+        let quota_api: Api<k8s_openapi::api::core::v1::ResourceQuota> =
+            Api::namespaced(self.client.clone(), ns);
+
+        let quotas =
+            quota_api
+                .list(&ListParams::default())
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to list resource quotas: {}", e),
+                })?;
+
+        // Return the first quota found (typically there's one per namespace)
+        if let Some(quota) = quotas.items.into_iter().next() {
+            let status = quota.status.unwrap_or_default();
+            let hard = status.hard.unwrap_or_default();
+            let used = status.used.unwrap_or_default();
+
+            Ok(Some(ResourceQuotaDto {
+                cpu_limit: hard.get("limits.cpu").map(|q| q.0.clone()),
+                cpu_used: used.get("limits.cpu").map(|q| q.0.clone()),
+                memory_limit: hard.get("limits.memory").map(|q| q.0.clone()),
+                memory_used: used.get("limits.memory").map(|q| q.0.clone()),
+                requests_cpu_limit: hard.get("requests.cpu").map(|q| q.0.clone()),
+                requests_cpu_used: used.get("requests.cpu").map(|q| q.0.clone()),
+                requests_memory_limit: hard.get("requests.memory").map(|q| q.0.clone()),
+                requests_memory_used: used.get("requests.memory").map(|q| q.0.clone()),
+                pods_limit: hard.get("pods").and_then(|q| q.0.parse().ok()),
+                pods_used: used.get("pods").and_then(|q| q.0.parse().ok()),
+                gpu_limit: hard
+                    .get("requests.nvidia.com/gpu")
+                    .and_then(|q| q.0.parse().ok()),
+                gpu_used: used
+                    .get("requests.nvidia.com/gpu")
+                    .and_then(|q| q.0.parse().ok()),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn check_cluster_capacity(
+        &self,
+        cpu_request: &str,
+        memory_request: &str,
+        gpu_count: Option<u32>,
+    ) -> Result<ClusterCapacityResult> {
+        use basilica_common::utils::{
+            format_bytes, parse_cpu_to_milli, parse_gpu_count, parse_memory_to_bytes,
+        };
+
+        // RACE CONDITION NOTE: Capacity is calculated from two separate API calls.
+        // The cluster state may change between calls, so we apply a 15% pessimistic
+        // buffer to reduce false positives. The kube-scheduler will ultimately
+        // enforce correct placement.
+
+        let nodes_api: Api<k8s_openapi::api::core::v1::Node> = Api::all(self.client.clone());
+        let pods_api: Api<k8s_openapi::api::core::v1::Pod> = Api::all(self.client.clone());
+
+        // Get all nodes
+        let all_nodes =
+            nodes_api
+                .list(&ListParams::default())
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to list nodes: {}", e),
+                })?;
+
+        // Filter out cordoned (unschedulable) nodes and nodes with NoSchedule taints
+        let nodes: Vec<_> = all_nodes
+            .items
+            .into_iter()
+            .filter(|node| {
+                // Skip cordoned nodes
+                if let Some(spec) = &node.spec {
+                    if spec.unschedulable.unwrap_or(false) {
+                        return false;
+                    }
+                    // Skip nodes with NoSchedule taints (conservative capacity estimate)
+                    if let Some(taints) = &spec.taints {
+                        for taint in taints {
+                            if taint.effect == "NoSchedule" {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Get all pods and filter in-memory for active ones.
+        // Note: Kubernetes field selectors don't support compound conditions like
+        // "status.phase!=Succeeded,status.phase!=Failed", so we filter in-memory.
+        let all_pods =
+            pods_api
+                .list(&ListParams::default())
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to list pods: {}", e),
+                })?;
+
+        // Filter to only running/pending pods (exclude Succeeded, Failed, Unknown)
+        let active_pods: Vec<_> = all_pods
+            .items
+            .into_iter()
+            .filter(|pod| {
+                let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
+                matches!(phase, Some("Running") | Some("Pending"))
+            })
+            .collect();
+
+        // Sum allocatable resources from schedulable nodes
+        let mut total_allocatable_cpu_milli: i64 = 0;
+        let mut total_allocatable_memory_bytes: i64 = 0;
+        let mut total_allocatable_gpus: u32 = 0;
+
+        for node in &nodes {
+            if let Some(status) = &node.status {
+                if let Some(allocatable) = &status.allocatable {
+                    if let Some(cpu) = allocatable.get("cpu") {
+                        total_allocatable_cpu_milli += parse_cpu_to_milli(&cpu.0);
+                    }
+                    if let Some(memory) = allocatable.get("memory") {
+                        total_allocatable_memory_bytes += parse_memory_to_bytes(&memory.0);
+                    }
+                    if let Some(gpu) = allocatable.get("nvidia.com/gpu") {
+                        total_allocatable_gpus += parse_gpu_count(&gpu.0);
+                    }
+                }
+            }
+        }
+
+        // Sum resource requests from all running/pending pods.
+        // Kubernetes resource accounting: Pod request = MAX(init_containers) or SUM(containers)
+        // because init containers run sequentially before app containers.
+        let mut used_cpu_milli: i64 = 0;
+        let mut used_memory_bytes: i64 = 0;
+        let mut used_gpus: u32 = 0;
+
+        for pod in &active_pods {
+            if let Some(spec) = &pod.spec {
+                // Calculate max init container resources (they run sequentially)
+                let mut max_init_cpu: i64 = 0;
+                let mut max_init_memory: i64 = 0;
+                let mut max_init_gpu: u32 = 0;
+
+                if let Some(init_containers) = &spec.init_containers {
+                    for container in init_containers {
+                        if let Some(resources) = &container.resources {
+                            if let Some(requests) = &resources.requests {
+                                if let Some(cpu) = requests.get("cpu") {
+                                    max_init_cpu = max_init_cpu.max(parse_cpu_to_milli(&cpu.0));
+                                }
+                                if let Some(memory) = requests.get("memory") {
+                                    max_init_memory =
+                                        max_init_memory.max(parse_memory_to_bytes(&memory.0));
+                                }
+                                if let Some(gpu) = requests.get("nvidia.com/gpu") {
+                                    max_init_gpu = max_init_gpu.max(parse_gpu_count(&gpu.0));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Sum app container resources (they run in parallel)
+                let mut app_cpu: i64 = 0;
+                let mut app_memory: i64 = 0;
+                let mut app_gpu: u32 = 0;
+
+                for container in &spec.containers {
+                    if let Some(resources) = &container.resources {
+                        if let Some(requests) = &resources.requests {
+                            if let Some(cpu) = requests.get("cpu") {
+                                app_cpu += parse_cpu_to_milli(&cpu.0);
+                            }
+                            if let Some(memory) = requests.get("memory") {
+                                app_memory += parse_memory_to_bytes(&memory.0);
+                            }
+                            if let Some(gpu) = requests.get("nvidia.com/gpu") {
+                                app_gpu += parse_gpu_count(&gpu.0);
+                            }
+                        }
+                    }
+                }
+
+                // Pod resources = MAX(init, app) per Kubernetes scheduling semantics
+                let pod_cpu = app_cpu.max(max_init_cpu);
+                let pod_memory = app_memory.max(max_init_memory);
+                let pod_gpu = app_gpu.max(max_init_gpu);
+
+                used_cpu_milli += pod_cpu;
+                used_memory_bytes += pod_memory;
+                used_gpus += pod_gpu;
+            }
+        }
+
+        // Calculate available capacity (allocatable - used)
+        let raw_available_cpu = total_allocatable_cpu_milli.saturating_sub(used_cpu_milli);
+        let raw_available_memory = total_allocatable_memory_bytes.saturating_sub(used_memory_bytes);
+        let raw_available_gpus = total_allocatable_gpus.saturating_sub(used_gpus);
+
+        // Apply 15% pessimistic buffer to account for race conditions between
+        // node/pod listing and actual scheduling
+        let buffer_cpu = (total_allocatable_cpu_milli as f64 * 0.15) as i64;
+        let buffer_memory = (total_allocatable_memory_bytes as f64 * 0.15) as i64;
+
+        let available_cpu_milli = raw_available_cpu.saturating_sub(buffer_cpu);
+        let available_memory_bytes = raw_available_memory.saturating_sub(buffer_memory);
+        let available_gpus = raw_available_gpus; // No buffer for GPUs (discrete resources)
+
+        let requested_cpu_milli = parse_cpu_to_milli(cpu_request);
+        let requested_memory_bytes = parse_memory_to_bytes(memory_request);
+        let requested_gpus = gpu_count.unwrap_or(0);
+
+        let has_cpu = available_cpu_milli >= requested_cpu_milli;
+        let has_memory = available_memory_bytes >= requested_memory_bytes;
+        let has_gpus = requested_gpus == 0 || available_gpus >= requested_gpus;
+
+        let has_capacity = has_cpu && has_memory && has_gpus;
+        let message = if !has_capacity {
+            let mut reasons = Vec::new();
+            if !has_cpu {
+                reasons.push(format!(
+                    "insufficient CPU (requested: {}, available: {}m)",
+                    cpu_request, available_cpu_milli
+                ));
+            }
+            if !has_memory {
+                reasons.push(format!(
+                    "insufficient memory (requested: {}, available: {})",
+                    memory_request,
+                    format_bytes(available_memory_bytes)
+                ));
+            }
+            if !has_gpus {
+                reasons.push(format!(
+                    "insufficient GPUs (requested: {}, available: {})",
+                    requested_gpus, available_gpus
+                ));
+            }
+            Some(reasons.join("; "))
+        } else {
+            None
+        };
+
+        Ok(ClusterCapacityResult {
+            has_capacity,
+            message,
+            available_cpu: Some(format!("{}m", available_cpu_milli)),
+            available_memory: Some(format_bytes(available_memory_bytes)),
+            available_gpus: Some(available_gpus),
+        })
+    }
+
+    async fn get_image_pull_secrets(&self, ns: &str) -> Result<Vec<String>> {
+        let secrets_api: Api<k8s_openapi::api::core::v1::Secret> =
+            Api::namespaced(self.client.clone(), ns);
+
+        let secrets = secrets_api
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to list secrets: {}", e),
+            })?;
+
+        let image_pull_secrets: Vec<String> = secrets
+            .items
+            .into_iter()
+            .filter(|s| {
+                s.type_
+                    .as_ref()
+                    .is_some_and(|t| t == "kubernetes.io/dockerconfigjson")
+            })
+            .filter_map(|s| s.metadata.name)
+            .collect();
+
+        Ok(image_pull_secrets)
     }
 }
