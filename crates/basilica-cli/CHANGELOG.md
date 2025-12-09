@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0]
+
+### Fixed
+- Fixed macOS build image in CI pipeline
+
 ## [0.7.0]
 
 ### Added
