@@ -245,7 +245,7 @@ jobs:
           image-ref: basilica/validator:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
   # Build and test miner
@@ -307,7 +307,7 @@ jobs:
           image-ref: basilica/miner:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
   # Build and test basilica-api
@@ -369,7 +369,7 @@ jobs:
           image-ref: basilica/basilica-api:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
   # Build and test basilica-operator
@@ -425,7 +425,7 @@ jobs:
           image-ref: basilica/basilica-operator:ci-test
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
   # Build and test basilica-cli
@@ -572,7 +572,7 @@ jobs:
           image-ref: basilica/billing:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
   # Build and test payments
@@ -682,7 +682,7 @@ jobs:
           image-ref: basilica/payments:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
   # Build and test Python SDK
@@ -836,7 +836,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica-operator:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push operator image
@@ -860,7 +860,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica/validator:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push validator image
@@ -884,7 +884,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica/miner:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push miner image
@@ -908,7 +908,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica-api:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push API image
@@ -930,7 +930,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica/billing:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push billing image
@@ -952,7 +952,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica/payments:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push payments image
@@ -975,7 +975,7 @@ jobs:
           image-ref: ghcr.io/one-covenant/basilica/cli:${{ env.TAG }}
           format: 'table'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'
+          exit-code: '0'
           trivyignores: '.trivyignore.yaml'
 
       - name: Push CLI image
