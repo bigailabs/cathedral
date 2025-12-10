@@ -97,7 +97,7 @@ USER basilica
 # It does NOT hold funds and does NOT sign transactions
 RUN python3 -c "\
 import bittensor as bt; \
-wallet = bt.wallet(name='default', hotkey='default'); \
+wallet = bt.Wallet(name='default', hotkey='default'); \
 wallet.create_if_non_existent(coldkey_use_password=False, hotkey_use_password=False); \
 print('Wallet created successfully')"
 
