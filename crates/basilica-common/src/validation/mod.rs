@@ -1,7 +1,12 @@
+pub mod input;
 pub mod path;
 pub mod secrets;
 pub mod storage;
 
+pub use input::{
+    validate_description, validate_env_var_name, validate_hostname, validate_image_reference,
+    validate_name, validate_namespace, validate_port, validate_user_id,
+};
 pub use path::{
     sanitize_path_component, validate_mount_path, validate_namespaced_path, validate_storage_path,
 };
