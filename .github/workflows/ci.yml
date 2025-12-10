@@ -239,6 +239,14 @@ jobs:
         run: |
           chmod +x scripts/validator/build.sh
           BITTENSOR_NETWORK=finney ./scripts/validator/build.sh --no-extract
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: basilica-validator:latest
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
   # Build and test miner
   build-miner:
@@ -293,6 +301,14 @@ jobs:
         run: |
           chmod +x scripts/miner/build.sh
           BITTENSOR_NETWORK=finney ./scripts/miner/build.sh --no-extract
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: basilica-miner:latest
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
   # Build and test basilica-api
   build-api:
@@ -347,6 +363,14 @@ jobs:
         run: |
           chmod +x scripts/api/build.sh
           BITTENSOR_NETWORK=finney ./scripts/api/build.sh --no-extract
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: basilica-api:latest
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
   # Build and test basilica-operator
   build-operator:
@@ -395,6 +419,14 @@ jobs:
         run: |
           chmod +x scripts/operator/build.sh
           ./scripts/operator/build.sh --image-tag ci-test
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: basilica-operator:ci-test
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
   # Build and test basilica-cli
   build-cli:
@@ -534,6 +566,14 @@ jobs:
         run: |
           chmod +x scripts/billing/build.sh
           ./scripts/billing/build.sh --no-extract
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: basilica-billing:latest
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
   # Build and test payments
   build-payments:
@@ -636,6 +676,14 @@ jobs:
         run: |
           chmod +x scripts/payments/build.sh
           ./scripts/payments/build.sh --no-extract
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: basilica-payments:latest
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
   # Build and test Python SDK
   test-python-sdk:
@@ -782,6 +830,14 @@ jobs:
           ./scripts/operator/build.sh \
             --image-name ghcr.io/one-covenant/basilica-operator \
             --image-tag "$TAG"
+      - name: Scan operator image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica-operator:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push operator image
         run: |
@@ -798,6 +854,14 @@ jobs:
             --image-name ghcr.io/one-covenant/basilica/validator \
             --image-tag "$TAG" \
             --no-extract
+      - name: Scan validator image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica/validator:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push validator image
         run: |
@@ -814,6 +878,14 @@ jobs:
             --image-name ghcr.io/one-covenant/basilica/miner \
             --image-tag "$TAG" \
             --no-extract
+      - name: Scan miner image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica/miner:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push miner image
         run: |
@@ -830,6 +902,14 @@ jobs:
             --image-name ghcr.io/one-covenant/basilica-api \
             --image-tag "$TAG" \
             --no-extract
+      - name: Scan API image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica-api:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push API image
         run: |
@@ -844,6 +924,14 @@ jobs:
             --image-name ghcr.io/one-covenant/basilica/billing \
             --image-tag "$TAG" \
             --no-extract
+      - name: Scan billing image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica/billing:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push billing image
         run: |
@@ -858,6 +946,14 @@ jobs:
             --image-name ghcr.io/one-covenant/basilica/payments \
             --image-tag "$TAG" \
             --no-extract
+      - name: Scan payments image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica/payments:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push payments image
         run: |
@@ -873,6 +969,14 @@ jobs:
             --image-name ghcr.io/one-covenant/basilica/cli \
             --image-tag "$TAG" \
             --no-extract
+      - name: Scan CLI image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/one-covenant/basilica/cli:${{ env.TAG }}
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          trivyignores: '.trivyignore.yaml'
 
       - name: Push CLI image
         run: |
