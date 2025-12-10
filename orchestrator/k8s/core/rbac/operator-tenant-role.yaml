@@ -14,9 +14,34 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["create", "get", "list", "watch", "patch", "update"]
+
+  # Secrets: Restricted to specific storage credential secrets (SEC-005)
+  # Read access for existing credentials
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["create", "get", "list", "watch", "patch", "update"]
+    verbs: ["get", "watch"]
+    resourceNames:
+      - basilica-r2-credentials
+      - basilica-s3-credentials
+      - basilica-gcs-credentials
+      - basilica-storage-config
+
+  # Secrets: Create/update for copying credentials to tenant namespace
+  # Note: resourceNames cannot be used with create verb
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+
+  # Secrets: Update only specific secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["patch", "update"]
+    resourceNames:
+      - basilica-r2-credentials
+      - basilica-s3-credentials
+      - basilica-gcs-credentials
+      - basilica-storage-config
+
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
