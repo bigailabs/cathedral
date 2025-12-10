@@ -242,7 +242,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica-validator:latest
+          image-ref: basilica/validator:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
@@ -304,7 +304,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica-miner:latest
+          image-ref: basilica/miner:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
@@ -366,7 +366,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica-api:latest
+          image-ref: basilica/basilica-api:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
@@ -422,7 +422,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica-operator:ci-test
+          image-ref: basilica/basilica-operator:ci-test
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
@@ -569,7 +569,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica-billing:latest
+          image-ref: basilica/billing:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
@@ -679,7 +679,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: basilica-payments:latest
+          image-ref: basilica/payments:latest
           format: 'table'
           severity: 'CRITICAL,HIGH'
           exit-code: '1'
