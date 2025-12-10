@@ -35,7 +35,7 @@ Using `@basilica.deployment` decorator:
 | `05_decorator_fastapi.py` | FastAPI + uvicorn | `python3 05_decorator_fastapi.py` |
 | `05_decorator_gpu.py` | GPU decorator | `python3 05_decorator_gpu.py` |
 
-## Advanced Examples (06-16)
+## Advanced Examples (06-18)
 
 | Example | Description | Run |
 |---------|-------------|-----|
@@ -50,6 +50,8 @@ Using `@basilica.deployment` decorator:
 | `14_streamlit.py` | Streamlit interactive data app | `python3 14_streamlit.py` |
 | `15_cli_deploy/` | CLI deploy walkthrough | See directory README |
 | `16_progress_callback.py` | Custom deployment progress monitoring | `python3 16_progress_callback.py` |
+| `17_agentgym_custom/` | Custom AgentGym environment | See directory README |
+| `18_torchrun_ddp/` | PyTorch DDP training with torchrun | See directory README |
 
 ## Deployment Options
 

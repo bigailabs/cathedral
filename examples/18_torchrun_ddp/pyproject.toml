@@ -1,0 +1,33 @@
+[project]
+name = "torchrun-ddp"
+version = "0.1.0"
+description = "experiment with pytorch ddp"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Evangelos Pappas", email = "epappas@evalonlabs.com" }]
+dependencies = [
+  "torch==2.7.0",
+  "transformers>=4.28.0",
+  "accelerate>=1.6.0",
+  "datasets>=3.5.1",
+  "rich>=14.0.0",
+  "python-dotenv>=1.0.1",
+  "uvloop>=0.21.0",
+  "torchft>=0.1.1",
+  "huggingface-hub>=0.30.2",
+  "sentencepiece>=0.2.0",
+]
+
+[project.scripts]
+torchrun-ddp = "torchrun_ddp:main"
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff.mccabe]
+max-complexity = 10
+
+[tool.uv]
+dev-dependencies = ["nox>=2025.2.9", "pytest>=8.3.4"]
