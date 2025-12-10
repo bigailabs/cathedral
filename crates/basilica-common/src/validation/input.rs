@@ -44,14 +44,16 @@ pub fn validate_name(name: &str, field: &str) -> Result<(), ValidationError> {
         });
     }
 
-    let valid = name.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')
-    });
+    let valid = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.'));
 
     if !valid {
         return Err(ValidationError::InvalidFormat {
             field: field.to_string(),
-            value: "contains invalid characters (allowed: alphanumeric, dash, underscore, space, dot)".to_string(),
+            value:
+                "contains invalid characters (allowed: alphanumeric, dash, underscore, space, dot)"
+                    .to_string(),
         });
     }
 
@@ -88,9 +90,9 @@ pub fn validate_user_id(user_id: &str) -> Result<(), ValidationError> {
         });
     }
 
-    let valid = user_id.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '|' | '@')
-    });
+    let valid = user_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '|' | '@'));
 
     if !valid {
         return Err(ValidationError::InvalidFormat {
@@ -141,12 +143,15 @@ pub fn validate_namespace(namespace: &str) -> Result<(), ValidationError> {
         });
     }
 
-    let valid = namespace.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    let valid = namespace
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
 
     if !valid {
         return Err(ValidationError::InvalidFormat {
             field: "namespace".to_string(),
-            value: "contains invalid characters (allowed: lowercase alphanumeric, dash)".to_string(),
+            value: "contains invalid characters (allowed: lowercase alphanumeric, dash)"
+                .to_string(),
         });
     }
 
@@ -175,9 +180,9 @@ pub fn validate_description(description: &str) -> Result<(), ValidationError> {
         });
     }
 
-    let has_invalid_control = description.chars().any(|c| {
-        c.is_control() && !matches!(c, '\n' | '\t' | '\r')
-    });
+    let has_invalid_control = description
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'));
 
     if has_invalid_control {
         return Err(ValidationError::InvalidFormat {
@@ -189,13 +194,17 @@ pub fn validate_description(description: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validates a container image reference
+/// Validates a container image reference for safe use in shell commands
 ///
 /// Image references must:
 /// - Be non-empty
 /// - Not exceed 512 characters
-/// - Not contain shell metacharacters
-/// - Match docker image format (registry/image:tag)
+/// - Not contain shell metacharacters ($, `, ;, |, &, >, <, newline, carriage return, null)
+/// - Contain only alphanumeric characters and allowed punctuation (/, :, -, _, ., @)
+///
+/// Note: This provides basic injection prevention validation, not strict Docker
+/// image format validation. For strict OCI image reference parsing, use
+/// `validate_docker_image()` from `basilica_common::utils` instead.
 pub fn validate_image_reference(image: &str) -> Result<(), ValidationError> {
     if image.is_empty() {
         return Err(ValidationError::InvalidFormat {
@@ -225,10 +234,9 @@ pub fn validate_image_reference(image: &str) -> Result<(), ValidationError> {
     }
 
     // Basic format check: must have at least one valid character sequence
-    let valid = image.chars().all(|c| {
-        c.is_ascii_alphanumeric()
-            || matches!(c, '/' | ':' | '-' | '_' | '.' | '@')
-    });
+    let valid = image
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '-' | '_' | '.' | '@'));
 
     if !valid {
         return Err(ValidationError::InvalidFormat {

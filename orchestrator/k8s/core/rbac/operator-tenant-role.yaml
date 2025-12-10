@@ -24,7 +24,6 @@ rules:
       - basilica-r2-credentials
       - basilica-s3-credentials
       - basilica-gcs-credentials
-      - basilica-storage-config
 
   # Secrets: Create/update for copying credentials to tenant namespace
   # Note: resourceNames cannot be used with create verb
@@ -40,7 +39,6 @@ rules:
       - basilica-r2-credentials
       - basilica-s3-credentials
       - basilica-gcs-credentials
-      - basilica-storage-config
 
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]

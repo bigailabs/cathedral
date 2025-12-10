@@ -1,0 +1,25 @@
+# Trivy Vulnerability Ignore File
+# SEC-019: Container Image Scanning Configuration
+#
+# This file contains CVEs that have been reviewed and accepted.
+# Each entry must include:
+#   - id: The CVE identifier
+#   - statement: Why this CVE is acceptable (required)
+#   - expires: When this exception should be reviewed (optional)
+#
+# Format: https://aquasecurity.github.io/trivy/latest/docs/configuration/filtering/
+
+vulnerabilities: []
+
+# Example entries (uncomment and modify as needed):
+#
+# vulnerabilities:
+#   - id: CVE-2023-XXXXX
+#     paths:
+#       - "usr/lib/libssl.so"
+#     statement: "Not exploitable in our configuration - TLS 1.3 only"
+#     expires: 2025-06-01
+#
+#   - id: CVE-2024-YYYYY
+#     statement: "False positive - feature not used"
+#     expires: 2025-03-01

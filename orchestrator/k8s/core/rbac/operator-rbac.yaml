@@ -27,7 +27,7 @@ rules:
     verbs: ["get", "list", "watch", "create"]
 
   # Secrets: Read-only access to specific system secrets (SEC-005)
-  # The operator reads R2 credentials from basilica-system to copy to user namespaces
+  # The operator reads storage credentials from basilica-system to copy to user namespaces
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
@@ -35,7 +35,6 @@ rules:
       - basilica-r2-credentials
       - basilica-s3-credentials
       - basilica-gcs-credentials
-      - basilica-operator-config
 
   # PodDisruptionBudgets for UserDeployment controller
   - apiGroups: ["policy"]
@@ -73,21 +72,6 @@ rules:
     resources: ["deployments"]
     verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
 
-  # ConfigMaps: Read-only for Envoy routing config
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "watch"]
-    resourceNames:
-      - basilica-envoy-config
-      - basilica-operator-config
-
-  # ConfigMaps: Write access for dynamic route updates
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["patch", "update"]
-    resourceNames:
-      - basilica-envoy-routes
-      - basilica-envoy-clusters
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

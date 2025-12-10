@@ -29,9 +29,9 @@ fn validate_mount_path(path: &str) -> Result<(), CommandWrapError> {
         ));
     }
     // Only allow safe characters in mount paths
-    let valid = path.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.')
-    });
+    let valid = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'));
     if !valid {
         return Err(CommandWrapError::InvalidMountPath(
             "mount path contains invalid characters".to_string(),
@@ -207,21 +207,14 @@ mod tests {
 
     #[test]
     fn test_mount_path_empty_rejected() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string()]),
-            None,
-            "",
-        );
+        let result = wrap_command_with_fuse_wait(Some(vec!["echo".to_string()]), None, "");
         assert!(matches!(result, Err(CommandWrapError::InvalidMountPath(_))));
     }
 
     #[test]
     fn test_mount_path_relative_rejected() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string()]),
-            None,
-            "data/storage",
-        );
+        let result =
+            wrap_command_with_fuse_wait(Some(vec!["echo".to_string()]), None, "data/storage");
         assert!(matches!(result, Err(CommandWrapError::InvalidMountPath(_))));
     }
 
@@ -247,21 +240,15 @@ mod tests {
 
     #[test]
     fn test_mount_path_command_substitution_rejected() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string()]),
-            None,
-            "/data/$(id)",
-        );
+        let result =
+            wrap_command_with_fuse_wait(Some(vec!["echo".to_string()]), None, "/data/$(id)");
         assert!(matches!(result, Err(CommandWrapError::InvalidMountPath(_))));
     }
 
     #[test]
     fn test_mount_path_backtick_injection_rejected() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string()]),
-            None,
-            "/data/`id`",
-        );
+        let result =
+            wrap_command_with_fuse_wait(Some(vec!["echo".to_string()]), None, "/data/`id`");
         assert!(matches!(result, Err(CommandWrapError::InvalidMountPath(_))));
     }
 
@@ -327,11 +314,8 @@ mod tests {
 
     #[test]
     fn test_mount_path_redirect_injection_rejected() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string()]),
-            None,
-            "/data > /tmp/pwned",
-        );
+        let result =
+            wrap_command_with_fuse_wait(Some(vec!["echo".to_string()]), None, "/data > /tmp/pwned");
         assert!(matches!(result, Err(CommandWrapError::InvalidMountPath(_))));
     }
 
@@ -347,11 +331,8 @@ mod tests {
 
     #[test]
     fn test_mount_path_valid_with_dots() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string()]),
-            None,
-            "/data/.fuse",
-        );
+        let result =
+            wrap_command_with_fuse_wait(Some(vec!["echo".to_string()]), None, "/data/.fuse");
         assert!(result.is_ok());
     }
 
@@ -363,7 +344,10 @@ mod tests {
     #[test]
     fn test_command_semicolon_injection_escaped() {
         let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string(), "hello; cat /etc/passwd".to_string()]),
+            Some(vec![
+                "echo".to_string(),
+                "hello; cat /etc/passwd".to_string(),
+            ]),
             None,
             "/data",
         )
@@ -407,7 +391,10 @@ mod tests {
     #[test]
     fn test_pipe_injection_escaped() {
         let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string(), "hello | cat /etc/passwd".to_string()]),
+            Some(vec![
+                "echo".to_string(),
+                "hello | cat /etc/passwd".to_string(),
+            ]),
             None,
             "/data",
         )
@@ -433,7 +420,10 @@ mod tests {
     #[test]
     fn test_newline_injection_escaped() {
         let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string(), "hello\ncat /etc/passwd".to_string()]),
+            Some(vec![
+                "echo".to_string(),
+                "hello\ncat /etc/passwd".to_string(),
+            ]),
             None,
             "/data",
         )
@@ -441,14 +431,19 @@ mod tests {
 
         let script = &result.1.unwrap()[0];
         // shlex should properly escape newlines
-        assert!(script.contains("$'hello\\ncat /etc/passwd'") ||
-                script.contains("'hello\ncat /etc/passwd'"));
+        assert!(
+            script.contains("$'hello\\ncat /etc/passwd'")
+                || script.contains("'hello\ncat /etc/passwd'")
+        );
     }
 
     #[test]
     fn test_single_quote_injection_escaped() {
         let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string(), "test'; cat /etc/passwd; echo '".to_string()]),
+            Some(vec![
+                "echo".to_string(),
+                "test'; cat /etc/passwd; echo '".to_string(),
+            ]),
             None,
             "/data",
         )
@@ -470,7 +465,10 @@ mod tests {
     #[test]
     fn test_double_quote_injection_escaped() {
         let result = wrap_command_with_fuse_wait(
-            Some(vec!["echo".to_string(), "test\"; cat /etc/passwd; echo \"".to_string()]),
+            Some(vec![
+                "echo".to_string(),
+                "test\"; cat /etc/passwd; echo \"".to_string(),
+            ]),
             None,
             "/data",
         )
@@ -556,7 +554,11 @@ mod tests {
     #[test]
     fn test_brace_expansion_escaped() {
         let result = wrap_command_with_fuse_wait(
-            Some(vec!["rm".to_string(), "-rf".to_string(), "{/,}".to_string()]),
+            Some(vec![
+                "rm".to_string(),
+                "-rf".to_string(),
+                "{/,}".to_string(),
+            ]),
             None,
             "/data",
         )
@@ -572,12 +574,7 @@ mod tests {
 
     #[test]
     fn test_empty_command_array() {
-        let result = wrap_command_with_fuse_wait(
-            Some(vec![]),
-            None,
-            "/data",
-        )
-        .unwrap();
+        let result = wrap_command_with_fuse_wait(Some(vec![]), None, "/data").unwrap();
 
         let script = &result.1.unwrap()[0];
         // Empty command should result in just "exec" with nothing after
