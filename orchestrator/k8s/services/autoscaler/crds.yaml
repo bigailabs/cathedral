@@ -1,0 +1,553 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nodepools.autoscaler.basilica.ai
+spec:
+  group: autoscaler.basilica.ai
+  names:
+    kind: NodePool
+    listKind: NodePoolList
+    plural: nodepools
+    singular: nodepool
+    shortNames:
+      - np
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Node
+          type: string
+          jsonPath: .status.nodeName
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - mode
+                - k3s
+              x-kubernetes-validations:
+                - rule: "self.mode == 'Manual' ? has(self.ssh) : true"
+                  message: "ssh configuration is required when mode is Manual"
+                - rule: "self.mode == 'Dynamic' ? has(self.secureCloud) : true"
+                  message: "secureCloud configuration is required when mode is Dynamic"
+              properties:
+                mode:
+                  type: string
+                  enum:
+                    - Manual
+                    - Dynamic
+                ssh:
+                  type: object
+                  properties:
+                    host:
+                      type: string
+                      minLength: 1
+                    port:
+                      type: integer
+                      default: 22
+                      minimum: 1
+                      maximum: 65535
+                    user:
+                      type: string
+                      default: root
+                    authSecretRef:
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        key:
+                          type: string
+                        namespace:
+                          type: string
+                    authType:
+                      type: string
+                      enum:
+                        - PrivateKey
+                        - PrivateKeyPem
+                      default: PrivateKey
+                secureCloud:
+                  type: object
+                  required:
+                    - offeringId
+                    - sshKeyId
+                    - sshKeySecretRef
+                  properties:
+                    offeringId:
+                      type: string
+                      minLength: 1
+                    sshKeyId:
+                      type: string
+                      minLength: 1
+                    sshKeySecretRef:
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        key:
+                          type: string
+                        namespace:
+                          type: string
+                k3s:
+                  type: object
+                  required:
+                    - serverUrl
+                    - tokenSecretRef
+                  properties:
+                    version:
+                      type: string
+                      pattern: "^v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+$"
+                    serverUrl:
+                      type: string
+                      pattern: "^https://.+"
+                    tokenSecretRef:
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        key:
+                          type: string
+                        namespace:
+                          type: string
+                    extraArgs:
+                      type: array
+                      items:
+                        type: string
+                    nodeLabels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    nodeTaints:
+                      type: array
+                      items:
+                        type: string
+                wireguard:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                healthCheck:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    intervalSeconds:
+                      type: integer
+                      default: 30
+                    timeoutSeconds:
+                      type: integer
+                      default: 10
+                    failureThreshold:
+                      type: integer
+                      default: 5
+                lifecycle:
+                  type: object
+                  properties:
+                    drainOnRemoval:
+                      type: boolean
+                      default: true
+                    drainTimeoutSeconds:
+                      type: integer
+                      default: 600
+                    deleteGracePeriodSeconds:
+                      type: integer
+                      default: 30
+                    forceDrain:
+                      type: boolean
+                      default: false
+                    preJoinScript:
+                      type: string
+                    postJoinScript:
+                      type: string
+                nodeId:
+                  type: string
+                datacenterId:
+                  type: string
+                nodePassword:
+                  type: object
+                  properties:
+                    secretRef:
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                        key:
+                          type: string
+                        namespace:
+                          type: string
+                adoptExisting:
+                  type: boolean
+                  default: false
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Configuring
+                    - InstallingWireGuard
+                    - ValidatingNetwork
+                    - JoiningCluster
+                    - WaitingForNode
+                    - Ready
+                    - Unhealthy
+                    - Draining
+                    - Terminating
+                    - Failed
+                    - Deleted
+                phaseEnteredAt:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      lastProbeTime:
+                        type: string
+                        format: date-time
+                wireguard:
+                  type: object
+                  properties:
+                    nodeIp:
+                      type: string
+                    publicKey:
+                      type: string
+                    endpoint:
+                      type: string
+                nodeName:
+                  type: string
+                nodeUid:
+                  type: string
+                internalIp:
+                  type: string
+                externalIp:
+                  type: string
+                rentalId:
+                  type: string
+                providerId:
+                  type: string
+                provider:
+                  type: string
+                gpuModel:
+                  type: string
+                gpuCount:
+                  type: integer
+                gpuMemoryGb:
+                  type: integer
+                cudaVersion:
+                  type: string
+                driverVersion:
+                  type: string
+                provisionedAt:
+                  type: string
+                  format: date-time
+                joinedAt:
+                  type: string
+                  format: date-time
+                lastHealthCheckAt:
+                  type: string
+                  format: date-time
+                lastError:
+                  type: string
+                failureCount:
+                  type: integer
+                  default: 0
+                retryAfter:
+                  type: string
+                  format: date-time
+                cleanupInProgress:
+                  type: boolean
+                  default: false
+                identityVerified:
+                  type: boolean
+                  default: false
+                identityCheckDetails:
+                  type: string
+                managedBy:
+                  type: string
+                  enum:
+                    - Autoscaler
+                    - OnboardScript
+                observedGeneration:
+                  type: integer
+                  format: int64
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: scalingpolicies.autoscaler.basilica.ai
+spec:
+  group: autoscaler.basilica.ai
+  names:
+    kind: ScalingPolicy
+    listKind: ScalingPolicyList
+    plural: scalingpolicies
+    singular: scalingpolicy
+    shortNames:
+      - sp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: Enabled
+          type: boolean
+          jsonPath: .spec.enabled
+        - name: Min
+          type: integer
+          jsonPath: .spec.minNodes
+        - name: Max
+          type: integer
+          jsonPath: .spec.maxNodes
+        - name: Current
+          type: integer
+          jsonPath: .status.currentNodes
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  default: true
+                minNodes:
+                  type: integer
+                  default: 0
+                maxNodes:
+                  type: integer
+                  default: 10
+                scaleUp:
+                  type: object
+                  properties:
+                    pendingPodThreshold:
+                      type: integer
+                      default: 1
+                    cooldownSeconds:
+                      type: integer
+                      default: 300
+                    increment:
+                      type: integer
+                      default: 1
+                scaleDown:
+                  type: object
+                  properties:
+                    idleTimeoutSeconds:
+                      type: integer
+                      default: 600
+                    gpuUtilizationThreshold:
+                      type: number
+                      default: 10.0
+                    zeroPodsDurationSeconds:
+                      type: integer
+                      default: 300
+                    cooldownSeconds:
+                      type: integer
+                      default: 300
+                    decrement:
+                      type: integer
+                      default: 1
+                nodeTemplate:
+                  type: object
+                  properties:
+                    secureCloud:
+                      type: object
+                      required:
+                        - sshKeyId
+                        - sshKeySecretRef
+                      properties:
+                        gpuType:
+                          type: string
+                        minGpuCount:
+                          type: integer
+                          default: 1
+                        maxHourlyRate:
+                          type: number
+                        preferredProvider:
+                          type: string
+                        region:
+                          type: string
+                        sshKeyId:
+                          type: string
+                        sshKeySecretRef:
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                            key:
+                              type: string
+                            namespace:
+                              type: string
+                    k3s:
+                      type: object
+                      required:
+                        - serverUrl
+                        - tokenSecretRef
+                      properties:
+                        version:
+                          type: string
+                        serverUrl:
+                          type: string
+                        tokenSecretRef:
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                            key:
+                              type: string
+                            namespace:
+                              type: string
+                        extraArgs:
+                          type: array
+                          items:
+                            type: string
+                        nodeLabels:
+                          type: object
+                          additionalProperties:
+                            type: string
+                        nodeTaints:
+                          type: array
+                          items:
+                            type: string
+                    lifecycle:
+                      type: object
+                      properties:
+                        drainOnRemoval:
+                          type: boolean
+                          default: true
+                        drainTimeoutSeconds:
+                          type: integer
+                          default: 600
+                        deleteGracePeriodSeconds:
+                          type: integer
+                          default: 30
+                        forceDrain:
+                          type: boolean
+                          default: false
+                metrics:
+                  type: object
+                  properties:
+                    collectionIntervalSeconds:
+                      type: integer
+                      default: 30
+                    evaluationIntervalSeconds:
+                      type: integer
+                      default: 60
+            status:
+              type: object
+              properties:
+                currentNodes:
+                  type: integer
+                  default: 0
+                desiredNodes:
+                  type: integer
+                  default: 0
+                pendingScaleUp:
+                  type: integer
+                  default: 0
+                pendingScaleDown:
+                  type: integer
+                  default: 0
+                lastScaleUpTime:
+                  type: string
+                  format: date-time
+                lastScaleDownTime:
+                  type: string
+                  format: date-time
+                lastEvaluationTime:
+                  type: string
+                  format: date-time
+                metrics:
+                  type: object
+                  properties:
+                    pendingGpuPods:
+                      type: integer
+                    totalGpuNodes:
+                      type: integer
+                    healthyGpuNodes:
+                      type: integer
+                    averageGpuUtilization:
+                      type: number
+                    idleNodes:
+                      type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                observedGeneration:
+                  type: integer
+                  format: int64
