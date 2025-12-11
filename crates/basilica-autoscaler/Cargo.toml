@@ -11,7 +11,7 @@ name = "basilica-autoscaler"
 path = "src/main.rs"
 
 [[bin]]
-name = "autoscaler-crdgen"
+name = "crdgen"
 path = "src/bin/crdgen.rs"
 
 [dependencies]
