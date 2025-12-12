@@ -998,7 +998,9 @@ impl Server {
             match GoogleSheetsClient::new(
                 std::path::Path::new(&vip_config.google_credentials_path),
                 vip_config.google_sheet_id.clone(),
-            ).await {
+            )
+            .await
+            {
                 Ok(sheets_client) => {
                     let vip_cache = Arc::new(VipCache::new());
 

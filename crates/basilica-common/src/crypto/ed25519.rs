@@ -3,6 +3,10 @@
 //! This module provides Ed25519 key generation, signing, and verification functionality
 //! using the ed25519-dalek library with proper key formatting for SSH and PEM formats.
 
+// Allow unused_assignments: ZeroizeOnDrop derive macro with #[zeroize(skip)] generates code
+// that triggers this lint as a false positive when fields are skipped from zeroization.
+#![allow(unused_assignments)]
+
 use crate::error::CryptoError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use ed25519_dalek::{

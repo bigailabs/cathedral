@@ -57,7 +57,8 @@ impl GoogleSheetsClient {
         // Fetch columns A through K (all data columns)
         let range = "A:K";
 
-        let result = self.hub
+        let result = self
+            .hub
             .spreadsheets()
             .values_get(&self.sheet_id, range)
             .doit()
@@ -107,7 +108,11 @@ impl GoogleSheetsClient {
         let gpu_count_str = get_col(7, "gpu_count")?;
         let region = get_col(8, "region")?;
         let hourly_rate_str = get_col(9, "hourly_rate")?;
-        let notes = row.get(10).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let notes = row
+            .get(10)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         let ssh_port: u16 = ssh_port_str.parse().map_err(|_| SheetsError::RowParse {
             row: row_num,

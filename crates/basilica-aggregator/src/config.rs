@@ -134,9 +134,7 @@ fn default_vip_ready_value() -> String {
 impl VipConfig {
     /// Check if VIP is enabled and properly configured
     pub fn is_configured(&self) -> bool {
-        self.enabled
-            && !self.google_sheet_id.is_empty()
-            && !self.google_credentials_path.is_empty()
+        self.enabled && !self.google_sheet_id.is_empty() && !self.google_credentials_path.is_empty()
     }
 }
 

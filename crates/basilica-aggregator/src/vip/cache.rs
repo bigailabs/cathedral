@@ -1,5 +1,5 @@
 use crate::models::extract_vip_machine_id;
-use crate::vip::types::{VipRentalRecord, VipConnectionInfo, VipDisplayInfo};
+use crate::vip::types::{VipConnectionInfo, VipDisplayInfo, VipRentalRecord};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -91,7 +91,7 @@ impl VipCache {
                 location_code, created_at
             FROM secure_cloud_rentals
             WHERE is_vip = TRUE AND status != 'stopped' AND provider_instance_id LIKE 'vip:%'
-            "#
+            "#,
         )
         .fetch_all(pool)
         .await?;
@@ -104,23 +104,34 @@ impl VipCache {
 
         for row in rows {
             // Extract vip_machine_id from provider_instance_id (remove 'vip:' prefix)
-            if let Some(vip_machine_id) = row.provider_instance_id.as_ref().and_then(|id| extract_vip_machine_id(id)) {
+            if let Some(vip_machine_id) = row
+                .provider_instance_id
+                .as_ref()
+                .and_then(|id| extract_vip_machine_id(id))
+            {
                 let vip_machine_id = vip_machine_id.to_string();
 
                 // Parse connection_info JSON
                 let connection = if let Some(conn_json) = &row.connection_info {
-                    let ssh_host = conn_json.get("ssh_host")
+                    let ssh_host = conn_json
+                        .get("ssh_host")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&row.ip_address.clone().unwrap_or_default())
                         .to_string();
-                    let ssh_port = conn_json.get("ssh_port")
+                    let ssh_port = conn_json
+                        .get("ssh_port")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(22) as u16;
-                    let ssh_user = conn_json.get("ssh_user")
+                    let ssh_user = conn_json
+                        .get("ssh_user")
                         .and_then(|v| v.as_str())
                         .unwrap_or("ubuntu")
                         .to_string();
-                    VipConnectionInfo { ssh_host, ssh_port, ssh_user }
+                    VipConnectionInfo {
+                        ssh_host,
+                        ssh_port,
+                        ssh_user,
+                    }
                 } else {
                     VipConnectionInfo {
                         ssh_host: row.ip_address.clone().unwrap_or_default(),
@@ -131,14 +142,17 @@ impl VipCache {
 
                 // Parse raw_response JSON for display info
                 let display = if let Some(raw_json) = &row.raw_response {
-                    let gpu_type = raw_json.get("gpu_type")
+                    let gpu_type = raw_json
+                        .get("gpu_type")
                         .and_then(|v| v.as_str())
                         .unwrap_or(&row.instance_type.clone().unwrap_or_default())
                         .to_string();
-                    let gpu_count = raw_json.get("gpu_count")
+                    let gpu_count = raw_json
+                        .get("gpu_count")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(1) as u32;
-                    let notes = raw_json.get("notes")
+                    let notes = raw_json
+                        .get("notes")
                         .and_then(|v| v.as_str())
                         .map(String::from);
                     VipDisplayInfo {

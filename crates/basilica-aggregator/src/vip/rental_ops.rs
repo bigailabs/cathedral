@@ -86,7 +86,7 @@ pub async fn insert_vip_rental(
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
         )
-        "#
+        "#,
     )
     .bind(&prepared.rental_id)
     .bind(&prepared.assigned_user)
@@ -145,7 +145,7 @@ pub async fn close_vip_rental(
             stopped_at = $1,
             updated_at = $1
         WHERE id = $2 AND provider_instance_id = $3 AND is_vip = TRUE
-        "#
+        "#,
     )
     .bind(now)
     .bind(rental_id)
@@ -179,7 +179,7 @@ pub async fn close_vip_rental(
         FROM secure_cloud_rentals
         WHERE id = $1 AND provider_instance_id = $2 AND is_vip = TRUE
         ON CONFLICT (id) DO NOTHING
-        "#
+        "#,
     )
     .bind(rental_id)
     .bind(&prefixed_machine_id)
@@ -200,7 +200,7 @@ pub async fn close_vip_rental(
         r#"
         DELETE FROM secure_cloud_rentals
         WHERE id = $1 AND provider_instance_id = $2 AND is_vip = TRUE
-        "#
+        "#,
     )
     .bind(rental_id)
     .bind(&prefixed_machine_id)
@@ -228,7 +228,7 @@ pub async fn get_vip_rental_by_machine_id(
         SELECT id, user_id
         FROM secure_cloud_rentals
         WHERE provider_instance_id = $1 AND is_vip = TRUE AND status != 'stopped'
-        "#
+        "#,
     )
     .bind(&prefixed_machine_id)
     .fetch_optional(pool)
@@ -259,7 +259,7 @@ pub async fn update_vip_rental_metadata(
             location_code = $5,
             updated_at = $6
         WHERE id = $7 AND provider_instance_id = $8 AND is_vip = TRUE
-        "#
+        "#,
     )
     .bind(&connection.ssh_host)
     .bind(serde_json::json!({

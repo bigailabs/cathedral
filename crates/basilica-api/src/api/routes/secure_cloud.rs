@@ -608,7 +608,8 @@ pub async fn stop_secure_cloud_rental(
     // Check if this is a VIP rental - VIP rentals cannot be stopped by users
     if rental.2 {
         return Err(ApiError::BadRequest {
-            message: "VIP rentals cannot be stopped by the user. Contact support for assistance.".to_string(),
+            message: "VIP rentals cannot be stopped by the user. Contact support for assistance."
+                .to_string(),
         });
     }
 
