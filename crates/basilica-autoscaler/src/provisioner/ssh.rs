@@ -381,12 +381,12 @@ impl NodeProvisioner for SshProvisioner {
         )
         .await?;
 
-        // Enable IP forwarding
+        // Enable IP forwarding (idempotent: only add if not already present)
         self.execute_ssh_command(
             host,
             port,
             ssh_config,
-            "echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf && sysctl -p",
+            "grep -q '^net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf; sysctl -p",
         )
         .await?;
 
