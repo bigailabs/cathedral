@@ -13,4 +13,4 @@ pub use rental_ops::{
     update_vip_rental_metadata, PreparedVipRental, VipRentalError,
 };
 pub use task::VipPollerTask;
-pub use types::{ValidVipMachine, VipConnectionInfo, VipDisplayInfo, VipRentalRecord, VipSheetRow};
+pub use types::{ValidVipMachine, VipConnectionInfo, VipCsvRow, VipDisplayInfo, VipRentalRecord};

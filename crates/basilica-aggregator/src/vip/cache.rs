@@ -50,7 +50,7 @@ impl VipCache {
     }
 
     /// Get all vip_machine_ids that are NOT in the provided set
-    /// Used to find cached entries that were removed from the sheet
+    /// Used to find cached entries that were removed from CSV
     pub async fn get_ids_not_in(&self, seen_ids: &HashSet<String>) -> Vec<String> {
         let entries = self.entries.read().await;
         entries
@@ -159,7 +159,7 @@ impl VipCache {
                         gpu_type,
                         gpu_count,
                         region: row.location_code.clone().unwrap_or_default(),
-                        hourly_rate: Decimal::ZERO, // Not stored in DB, will be fetched from sheet
+                        hourly_rate: Decimal::ZERO, // Not stored in DB, will be fetched from CSV
                         notes,
                     }
                 } else {

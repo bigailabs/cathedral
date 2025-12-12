@@ -175,7 +175,7 @@ pub async fn close_vip_rental(
             id, user_id, provider, provider_instance_id, offering_id, instance_type,
             location_code, status, hostname, ssh_key_id, ip_address, connection_info,
             raw_response, error_message, created_at, updated_at, stopped_at,
-            'vip_removed_from_sheet'
+            'vip_removed_from_csv'
         FROM secure_cloud_rentals
         WHERE id = $1 AND provider_instance_id = $2 AND is_vip = TRUE
         ON CONFLICT (id) DO NOTHING
@@ -237,7 +237,7 @@ pub async fn get_vip_rental_by_machine_id(
     Ok(row)
 }
 
-/// Update VIP rental metadata when sheet data changes (not user reassignment)
+/// Update VIP rental metadata when CSV data changes (not user reassignment)
 pub async fn update_vip_rental_metadata(
     pool: &PgPool,
     rental_id: &str,

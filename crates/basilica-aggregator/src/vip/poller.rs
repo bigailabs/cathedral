@@ -6,7 +6,7 @@ use crate::vip::{
         close_vip_rental, get_vip_rental_by_machine_id, insert_vip_rental, prepare_vip_rental,
         update_vip_rental_metadata, VipRentalError,
     },
-    types::{ValidVipMachine, VipConnectionInfo, VipDisplayInfo, VipRentalRecord, VipSheetRow},
+    types::{ValidVipMachine, VipConnectionInfo, VipCsvRow, VipDisplayInfo, VipRentalRecord},
 };
 use chrono::Utc;
 use sqlx::PgPool;
@@ -55,7 +55,7 @@ impl<D: VipDataSource> VipPoller<D> {
     }
 
     /// Perform a single poll cycle
-    /// On sheet fetch failure, returns error WITHOUT mutating cache or rentals
+    /// On CSV fetch failure, returns error WITHOUT mutating cache or rentals
     pub async fn poll_once(&self) -> Result<PollStats, PollerError> {
         let start_time = std::time::Instant::now();
         let mut stats = PollStats::default();
@@ -112,7 +112,7 @@ impl<D: VipDataSource> VipPoller<D> {
             }
         }
 
-        // 4. Find and remove stale entries (in cache but not in sheet)
+        // 4. Find and remove stale entries (in cache but not in CSV)
         let stale_ids = self.cache.get_ids_not_in(&seen_ids).await;
         for stale_id in stale_ids {
             if let Err(e) = self.remove_stale_rental(&stale_id).await {
@@ -146,8 +146,8 @@ impl<D: VipDataSource> VipPoller<D> {
         Ok(stats)
     }
 
-    /// Validate a sheet row and convert to ValidVipMachine
-    fn validate_row(&self, row: &VipSheetRow) -> Option<ValidVipMachine> {
+    /// Validate a CSV row and convert to ValidVipMachine
+    fn validate_row(&self, row: &VipCsvRow) -> Option<ValidVipMachine> {
         // Check required fields
         if row.vip_machine_id.is_empty() {
             tracing::warn!(row = ?row, "Invalid row: missing vip_machine_id");
@@ -240,8 +240,8 @@ impl<D: VipDataSource> VipPoller<D> {
                     tracing::warn!(
                         vip_machine_id = %machine.vip_machine_id,
                         db_user = %user_id,
-                        sheet_user = %machine.assigned_user,
-                        "User mismatch between DB and sheet - keeping DB user"
+                        csv_user = %machine.assigned_user,
+                        "User mismatch between DB and CSV - keeping DB user"
                     );
                 }
 
@@ -303,7 +303,7 @@ impl<D: VipDataSource> VipPoller<D> {
             || cached.display.notes != new.display.notes
     }
 
-    /// Remove a stale VIP rental (no longer in sheet)
+    /// Remove a stale VIP rental (no longer in CSV)
     async fn remove_stale_rental(&self, vip_machine_id: &str) -> Result<(), PollerError> {
         // Get rental info from cache
         if let Some(cached) = self.cache.get(vip_machine_id).await {

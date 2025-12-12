@@ -1,4 +1,4 @@
-use crate::vip::types::VipSheetRow;
+use crate::vip::types::VipCsvRow;
 use async_trait::async_trait;
 use aws_sdk_s3::Client as S3Client;
 use rust_decimal::Decimal;
@@ -23,7 +23,7 @@ pub enum DataSourceError {
 /// Trait for fetching VIP machine data (allows mocking for tests)
 #[async_trait]
 pub trait VipDataSource: Send + Sync {
-    async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, DataSourceError>;
+    async fn fetch_vip_rows(&self) -> Result<Vec<VipCsvRow>, DataSourceError>;
 }
 
 /// Source type for CSV data
@@ -96,10 +96,10 @@ impl CsvDataSource {
         }
     }
 
-    /// Parse CSV content into VipSheetRow records
+    /// Parse CSV content into VipCsvRow records
     /// Expects header row with columns: vip_machine_id, assigned_user, ready, ssh_host,
     /// ssh_port, ssh_user, gpu_type, gpu_count, region, hourly_rate, notes
-    fn parse_csv(&self, content: &str) -> Result<Vec<VipSheetRow>, DataSourceError> {
+    fn parse_csv(&self, content: &str) -> Result<Vec<VipCsvRow>, DataSourceError> {
         let mut reader = csv::Reader::from_reader(content.as_bytes());
         let mut rows = Vec::new();
 
@@ -108,7 +108,7 @@ impl CsvDataSource {
             let row_num = idx + 2; // +2 because: +1 for 0-index, +1 for header row
 
             match Self::parse_record(row_num, &record) {
-                Ok(sheet_row) => rows.push(sheet_row),
+                Ok(csv_row) => rows.push(csv_row),
                 Err(e) => {
                     tracing::warn!(row = row_num, error = %e, "Skipping invalid row");
                     // Continue processing other rows
@@ -119,14 +119,14 @@ impl CsvDataSource {
         Ok(rows)
     }
 
-    /// Parse a single CSV record into a VipSheetRow
+    /// Parse a single CSV record into a VipCsvRow
     /// Expected columns (0-indexed):
     /// 0: vip_machine_id, 1: assigned_user, 2: ready, 3: ssh_host, 4: ssh_port,
     /// 5: ssh_user, 6: gpu_type, 7: gpu_count, 8: region, 9: hourly_rate, 10: notes (optional)
     fn parse_record(
         row_num: usize,
         record: &csv::StringRecord,
-    ) -> Result<VipSheetRow, DataSourceError> {
+    ) -> Result<VipCsvRow, DataSourceError> {
         let get_col = |idx: usize, name: &str| -> Result<String, DataSourceError> {
             record
                 .get(idx)
@@ -175,7 +175,7 @@ impl CsvDataSource {
                     message: format!("Invalid hourly_rate: {}", hourly_rate_str),
                 })?;
 
-        Ok(VipSheetRow {
+        Ok(VipCsvRow {
             vip_machine_id,
             assigned_user,
             ready,
@@ -193,7 +193,7 @@ impl CsvDataSource {
 
 #[async_trait]
 impl VipDataSource for CsvDataSource {
-    async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, DataSourceError> {
+    async fn fetch_vip_rows(&self) -> Result<Vec<VipCsvRow>, DataSourceError> {
         let content = self.read_csv_content().await?;
         self.parse_csv(&content)
     }
@@ -202,25 +202,25 @@ impl VipDataSource for CsvDataSource {
 /// Mock data source for testing - returns configurable rows
 #[derive(Clone)]
 pub struct MockVipDataSource {
-    rows: Arc<RwLock<Vec<VipSheetRow>>>,
+    rows: Arc<RwLock<Vec<VipCsvRow>>>,
 }
 
 impl MockVipDataSource {
     /// Create a new mock with initial rows
-    pub fn new(rows: Vec<VipSheetRow>) -> Self {
+    pub fn new(rows: Vec<VipCsvRow>) -> Self {
         Self {
             rows: Arc::new(RwLock::new(rows)),
         }
     }
 
     /// Replace all rows
-    pub async fn set_rows(&self, rows: Vec<VipSheetRow>) {
+    pub async fn set_rows(&self, rows: Vec<VipCsvRow>) {
         let mut guard = self.rows.write().await;
         *guard = rows;
     }
 
     /// Add a single row
-    pub async fn add_row(&self, row: VipSheetRow) {
+    pub async fn add_row(&self, row: VipCsvRow) {
         let mut guard = self.rows.write().await;
         guard.push(row);
     }
@@ -234,7 +234,7 @@ impl MockVipDataSource {
     /// Update a row by vip_machine_id
     pub async fn update_row<F>(&self, vip_machine_id: &str, f: F)
     where
-        F: FnOnce(&mut VipSheetRow),
+        F: FnOnce(&mut VipCsvRow),
     {
         let mut guard = self.rows.write().await;
         if let Some(row) = guard
@@ -248,7 +248,7 @@ impl MockVipDataSource {
 
 #[async_trait]
 impl VipDataSource for MockVipDataSource {
-    async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, DataSourceError> {
+    async fn fetch_vip_rows(&self) -> Result<Vec<VipCsvRow>, DataSourceError> {
         let guard = self.rows.read().await;
         Ok(guard.clone())
     }
@@ -306,15 +306,15 @@ machine-003,auth0|user789,READY,10.0.0.3,invalid_port,ubuntu,H100,4,us-east-1,15
     #[tokio::test]
     async fn test_mock_data_source() {
         let mock = MockVipDataSource::new(vec![
-            VipSheetRow::test_machine("m1", "user1"),
-            VipSheetRow::test_machine("m2", "user2"),
+            VipCsvRow::test_machine("m1", "user1"),
+            VipCsvRow::test_machine("m2", "user2"),
         ]);
 
         let rows = mock.fetch_vip_rows().await.unwrap();
         assert_eq!(rows.len(), 2);
 
         // Test add
-        mock.add_row(VipSheetRow::test_machine("m3", "user3")).await;
+        mock.add_row(VipCsvRow::test_machine("m3", "user3")).await;
         let rows = mock.fetch_vip_rows().await.unwrap();
         assert_eq!(rows.len(), 3);
 

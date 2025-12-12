@@ -2,9 +2,9 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
-/// Raw row from Google Sheet (fixed column positions A-K)
+/// Raw row from CSV file
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VipSheetRow {
+pub struct VipCsvRow {
     pub vip_machine_id: String, // Column A
     pub assigned_user: String,  // Column B (Auth0 user ID)
     pub ready: String,          // Column C
@@ -18,7 +18,7 @@ pub struct VipSheetRow {
     pub notes: Option<String>,  // Column K (optional)
 }
 
-impl VipSheetRow {
+impl VipCsvRow {
     /// Create a test machine row with sensible defaults
     pub fn test_machine(id: &str, user: &str) -> Self {
         Self {
@@ -37,7 +37,7 @@ impl VipSheetRow {
     }
 }
 
-/// Connection info extracted from sheet row
+/// Connection info extracted from CSV row
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VipConnectionInfo {
     pub ssh_host: String,

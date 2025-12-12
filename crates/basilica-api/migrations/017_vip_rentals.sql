@@ -15,4 +15,4 @@ CREATE INDEX IF NOT EXISTS idx_secure_cloud_rentals_provider_instance_id_vip
     ON secure_cloud_rentals(provider_instance_id)
     WHERE provider_instance_id LIKE 'vip:%';
 
-COMMENT ON COLUMN secure_cloud_rentals.is_vip IS 'TRUE if this is a VIP rental (managed by sheet, cannot be stopped by user). VIP machines use provider_instance_id with vip: prefix';
+COMMENT ON COLUMN secure_cloud_rentals.is_vip IS 'TRUE if this is a VIP rental (managed by CSV, cannot be stopped by user). VIP machines use provider_instance_id with vip: prefix';

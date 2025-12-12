@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::Router;
 use basilica_aggregator::{
-    vip::{CsvDataSource, MockVipDataSource, VipCache, VipPoller, VipPollerTask, VipSheetRow},
+    vip::{CsvDataSource, MockVipDataSource, VipCache, VipCsvRow, VipPoller, VipPollerTask},
     AggregatorService, Database as AggregatorDatabase,
 };
 use basilica_billing::BillingClient;
@@ -1352,11 +1352,11 @@ async fn shutdown_signal() {
 }
 
 /// Create mock VIP data for testing
-fn create_mock_vip_data(user_id: &str) -> Vec<VipSheetRow> {
+fn create_mock_vip_data(user_id: &str) -> Vec<VipCsvRow> {
     use rust_decimal::Decimal;
 
     vec![
-        VipSheetRow {
+        VipCsvRow {
             vip_machine_id: "mock-vip-h100-01".to_string(),
             assigned_user: user_id.to_string(),
             ready: "READY".to_string(),
@@ -1369,7 +1369,7 @@ fn create_mock_vip_data(user_id: &str) -> Vec<VipSheetRow> {
             hourly_rate: Decimal::new(2500, 2), // $25.00/hr
             notes: Some("Mock H100 cluster for testing".to_string()),
         },
-        VipSheetRow {
+        VipCsvRow {
             vip_machine_id: "mock-vip-a100-01".to_string(),
             assigned_user: user_id.to_string(),
             ready: "READY".to_string(),
