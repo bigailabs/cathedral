@@ -14,6 +14,7 @@ use zeroize::ZeroizeOnDrop;
 
 /// Ed25519 private key wrapper with secure memory handling
 #[derive(ZeroizeOnDrop)]
+#[allow(unused_assignments)]
 pub struct Ed25519PrivateKey {
     #[zeroize(skip)]
     signing_key: SigningKey,
@@ -27,6 +28,7 @@ pub struct Ed25519PublicKey {
 
 /// Ed25519 key pair containing both private and public keys
 #[derive(ZeroizeOnDrop)]
+#[allow(unused_assignments)]
 pub struct Ed25519KeyPair {
     private_key: Ed25519PrivateKey,
     #[zeroize(skip)]

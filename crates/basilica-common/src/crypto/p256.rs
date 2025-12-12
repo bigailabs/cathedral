@@ -22,6 +22,7 @@ pub struct P256Signature {
 
 /// P256 private key wrapper with secure memory handling
 #[derive(ZeroizeOnDrop)]
+#[allow(unused_assignments)]
 pub struct P256PrivateKey {
     #[zeroize(skip)]
     signing_key: SigningKey,
@@ -35,6 +36,7 @@ pub struct P256PublicKey {
 
 /// P256 key pair containing both private and public keys
 #[derive(ZeroizeOnDrop)]
+#[allow(unused_assignments)]
 pub struct P256KeyPair {
     private_key: P256PrivateKey,
     #[zeroize(skip)]
