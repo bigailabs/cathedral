@@ -1,6 +1,7 @@
 use crate::models::format_vip_machine_id;
 use crate::vip::types::{ValidVipMachine, VipConnectionInfo, VipDisplayInfo};
 use chrono::Utc;
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -14,12 +15,14 @@ pub enum VipRentalError {
     PriceConversion(String),
 }
 
-/// Apply the standard 20% markup to the hourly rate (same as regular Secure Cloud)
-pub fn apply_markup(base_rate: Decimal) -> Result<Decimal, VipRentalError> {
-    // 20% markup
-    let markup = Decimal::from(120) / Decimal::from(100);
+/// Apply markup to the hourly rate (same formula as Secure Cloud in balance.rs)
+pub fn apply_markup(base_rate: Decimal, markup_percent: f64) -> Result<Decimal, VipRentalError> {
+    let multiplier = Decimal::from_f64(1.0 + (markup_percent / 100.0)).ok_or_else(|| {
+        VipRentalError::PriceConversion(format!("Invalid markup percent: {}", markup_percent))
+    })?;
+
     base_rate
-        .checked_mul(markup)
+        .checked_mul(multiplier)
         .ok_or_else(|| VipRentalError::PriceConversion("Markup calculation overflow".into()))
 }
 
@@ -46,9 +49,10 @@ pub struct PreparedVipRental {
 /// and billing registration as needed
 pub fn prepare_vip_rental(
     vip_machine: &ValidVipMachine,
+    markup_percent: f64,
 ) -> Result<PreparedVipRental, VipRentalError> {
     let rental_id = Uuid::new_v4().to_string();
-    let marked_up_hourly_rate = apply_markup(vip_machine.display.hourly_rate)?;
+    let marked_up_hourly_rate = apply_markup(vip_machine.display.hourly_rate, markup_percent)?;
 
     Ok(PreparedVipRental {
         rental_id,

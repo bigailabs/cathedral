@@ -42,15 +42,24 @@ pub struct VipPoller<D: VipDataSource> {
     data_source: D,
     cache: Arc<VipCache>,
     db: PgPool,
+    /// Markup percentage for VIP rentals (same as secure cloud)
+    markup_percent: f64,
 }
 
 impl<D: VipDataSource> VipPoller<D> {
-    pub fn new(config: VipConfig, data_source: D, cache: Arc<VipCache>, db: PgPool) -> Self {
+    pub fn new(
+        config: VipConfig,
+        data_source: D,
+        cache: Arc<VipCache>,
+        db: PgPool,
+        markup_percent: f64,
+    ) -> Self {
         Self {
             config,
             data_source,
             cache,
             db,
+            markup_percent,
         }
     }
 
@@ -261,7 +270,7 @@ impl<D: VipDataSource> VipPoller<D> {
                 );
             } else {
                 // Create new rental
-                let prepared = prepare_vip_rental(machine)?;
+                let prepared = prepare_vip_rental(machine, self.markup_percent)?;
                 insert_vip_rental(&self.db, &prepared).await?;
 
                 // TODO: Call billing service to track rental
