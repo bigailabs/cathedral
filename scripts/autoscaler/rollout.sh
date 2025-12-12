@@ -4,7 +4,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-NAMESPACE="basilica-system"
+NAMESPACE="basilica-autoscaler"
 DEPLOYMENT="basilica-autoscaler"
 KUBECONFIG_PATH="${KUBECONFIG:-$HOME/.kube/k3s-basilica-config}"
 FOLLOW_LOGS=false
