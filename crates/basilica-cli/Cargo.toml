@@ -63,6 +63,8 @@ self_update = { workspace = true }
 # SSH key parsing
 ssh-key = { workspace = true }
 
+# Pattern matching
+regex = { workspace = true }
 
 # Internal crate dependencies
 basilica-aggregator = { path = "../basilica-aggregator" }

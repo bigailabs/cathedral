@@ -1,0 +1,13 @@
+//! Deployment templates for common ML inference frameworks
+//!
+//! This module provides pre-configured deployment shortcuts for:
+//! - vLLM: OpenAI-compatible LLM inference server
+//! - SGLang: Fast LLM inference with RadixAttention
+
+pub mod model_size;
+pub mod sglang;
+pub mod vllm;
+
+pub use model_size::{estimate_gpu_requirements, GpuRequirements};
+pub use sglang::handle_sglang_deploy;
+pub use vllm::handle_vllm_deploy;
