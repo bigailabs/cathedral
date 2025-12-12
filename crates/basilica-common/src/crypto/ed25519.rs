@@ -3,6 +3,8 @@
 //! This module provides Ed25519 key generation, signing, and verification functionality
 //! using the ed25519-dalek library with proper key formatting for SSH and PEM formats.
 
+#![allow(unused_assignments)] // ZeroizeOnDrop derive generates assignments in Drop impl
+
 use crate::error::CryptoError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use ed25519_dalek::{
