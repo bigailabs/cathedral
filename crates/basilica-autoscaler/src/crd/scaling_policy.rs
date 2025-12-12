@@ -162,6 +162,9 @@ pub struct NodeTemplate {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecureCloudTemplate {
+    /// GPU offering ID from Basilica API (required for rental)
+    pub offering_id: String,
+
     /// Preferred GPU type (e.g., RTX_4090, A100)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_type: Option<String>,

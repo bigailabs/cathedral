@@ -42,6 +42,17 @@ pub trait AutoscalerK8sClient: Send + Sync {
         increment: u32,
     ) -> Result<bool>;
 
+    /// Atomically increment pending_scale_down using optimistic locking.
+    /// Returns Ok(true) if successful, Ok(false) if conflict (another reconcile won).
+    async fn try_increment_pending_scale_down(
+        &self,
+        ns: &str,
+        name: &str,
+        resource_version: &str,
+        current_value: u32,
+        increment: u32,
+    ) -> Result<bool>;
+
     // Node operations
     async fn get_node(&self, name: &str) -> Result<Node>;
     async fn list_nodes(&self) -> Result<Vec<Node>>;
@@ -227,6 +238,47 @@ impl AutoscalerK8sClient for KubeClient {
         // Update the status with incremented pending_scale_up
         if let Some(ref mut status) = policy.status {
             status.pending_scale_up = current_value + increment;
+        }
+
+        // Serialize policy to bytes for replace_status
+        let data = serde_json::to_vec(&policy)?;
+
+        // Use replace_status with resourceVersion in metadata for optimistic locking
+        match api.replace_status(name, &PostParams::default(), data).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(ae)) if ae.code == 409 => {
+                // Conflict - another reconcile modified the resource
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn try_increment_pending_scale_down(
+        &self,
+        ns: &str,
+        name: &str,
+        resource_version: &str,
+        current_value: u32,
+        increment: u32,
+    ) -> Result<bool> {
+        use kube::api::{Api, PostParams};
+
+        let api: Api<ScalingPolicy> = Api::namespaced(self.client.clone(), ns);
+
+        // Fetch current policy to get full object for replace
+        let mut policy = api.get(name).await?;
+
+        // Verify resourceVersion matches (optimistic concurrency check)
+        let current_rv = policy.metadata.resource_version.as_deref().unwrap_or("");
+        if current_rv != resource_version {
+            // Resource was modified - another reconcile won the race
+            return Ok(false);
+        }
+
+        // Update the status with incremented pending_scale_down
+        if let Some(ref mut status) = policy.status {
+            status.pending_scale_down = current_value + increment;
         }
 
         // Serialize policy to bytes for replace_status
