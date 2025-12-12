@@ -1,11 +1,11 @@
 use crate::config::VipConfig;
 use crate::vip::{
     cache::VipCache,
+    csv::{DataSourceError, VipDataSource},
     rental_ops::{
         close_vip_rental, get_vip_rental_by_machine_id, insert_vip_rental, prepare_vip_rental,
         update_vip_rental_metadata, VipRentalError,
     },
-    sheets::{SheetsError, VipDataSource},
     types::{ValidVipMachine, VipConnectionInfo, VipDisplayInfo, VipRentalRecord, VipSheetRow},
 };
 use chrono::Utc;
@@ -16,8 +16,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PollerError {
-    #[error("Sheets error: {0}")]
-    Sheets(#[from] SheetsError),
+    #[error("Data source error: {0}")]
+    DataSource(#[from] DataSourceError),
     #[error("Rental error: {0}")]
     Rental(#[from] VipRentalError),
     #[error("Database error: {0}")]
@@ -36,7 +36,7 @@ pub struct PollStats {
     pub removed: usize,
 }
 
-/// VIP Poller that syncs rentals from a data source (Google Sheets or mock)
+/// VIP Poller that syncs rentals from a data source (CSV file, S3, or mock)
 pub struct VipPoller<D: VipDataSource> {
     config: VipConfig,
     data_source: D,
@@ -67,7 +67,7 @@ impl<D: VipDataSource> VipPoller<D> {
                 tracing::error!(
                     poll_success = false,
                     error = %e,
-                    "VIP poll cycle failed - sheet fetch error"
+                    "VIP poll cycle failed - data source fetch error"
                 );
                 return Err(e.into());
             }

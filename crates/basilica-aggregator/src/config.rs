@@ -109,19 +109,22 @@ pub struct VipConfig {
     /// Feature flag to enable/disable VIP polling
     #[serde(default)]
     pub enabled: bool,
-    /// Google Sheet ID containing VIP machine inventory
+    /// Local CSV file path (for dev/testing)
     #[serde(default)]
-    pub google_sheet_id: String,
-    /// Path to Google service account credentials JSON file
+    pub csv_file_path: Option<String>,
+    /// S3 bucket name (for production)
     #[serde(default)]
-    pub google_credentials_path: String,
+    pub s3_bucket: Option<String>,
+    /// S3 object key (for production)
+    #[serde(default)]
+    pub s3_key: Option<String>,
     /// Polling interval in seconds (default: 60)
     #[serde(default = "default_vip_poll_interval")]
     pub poll_interval_secs: u64,
     /// Expected value in the "ready" column (default: "READY")
     #[serde(default = "default_vip_ready_value")]
     pub ready_value: String,
-    /// Mock mode: If set, use mock data with this user ID instead of Google Sheets
+    /// Mock mode: If set, use mock data with this user ID instead of CSV
     #[serde(default)]
     pub mock_user_id: Option<String>,
 }
@@ -130,8 +133,9 @@ impl Default for VipConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            google_sheet_id: String::new(),
-            google_credentials_path: String::new(),
+            csv_file_path: None,
+            s3_bucket: None,
+            s3_key: None,
             poll_interval_secs: default_vip_poll_interval(),
             ready_value: default_vip_ready_value(),
             mock_user_id: None,
@@ -148,11 +152,31 @@ fn default_vip_ready_value() -> String {
 }
 
 impl VipConfig {
-    /// Check if VIP is enabled and properly configured (either real or mock mode)
+    /// Check if VIP is enabled and properly configured (mock, local CSV, or S3)
     pub fn is_configured(&self) -> bool {
-        self.enabled
-            && (self.is_mock_mode()
-                || (!self.google_sheet_id.is_empty() && !self.google_credentials_path.is_empty()))
+        self.enabled && (self.is_mock_mode() || self.has_csv_source())
+    }
+
+    /// Check if a CSV source is configured (local file or S3)
+    pub fn has_csv_source(&self) -> bool {
+        self.has_s3_source() || self.has_local_csv()
+    }
+
+    /// Check if S3 source is configured
+    pub fn has_s3_source(&self) -> bool {
+        self.s3_bucket
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            && self.s3_key.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+    }
+
+    /// Check if local CSV file is configured
+    pub fn has_local_csv(&self) -> bool {
+        self.csv_file_path
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
     }
 
     /// Check if mock mode is enabled

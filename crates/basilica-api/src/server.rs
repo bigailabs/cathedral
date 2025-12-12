@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::Router;
 use basilica_aggregator::{
-    vip::{GoogleSheetsClient, MockVipDataSource, VipCache, VipPoller, VipPollerTask, VipSheetRow},
+    vip::{CsvDataSource, MockVipDataSource, VipCache, VipPoller, VipPollerTask, VipSheetRow},
     AggregatorService, Database as AggregatorDatabase,
 };
 use basilica_billing::BillingClient;
@@ -1045,14 +1045,28 @@ impl Server {
                     "VIP poller task started (mock mode)"
                 );
             } else {
-                // Real mode - use Google Sheets
-                match GoogleSheetsClient::new(
-                    std::path::Path::new(&vip_config.google_credentials_path),
-                    vip_config.google_sheet_id.clone(),
-                )
-                .await
-                {
-                    Ok(sheets_client) => {
+                // Real mode - use CSV data source (S3 or local file)
+                let data_source_result = if vip_config.has_s3_source() {
+                    let bucket = vip_config.s3_bucket.as_ref().unwrap();
+                    let key = vip_config.s3_key.as_ref().unwrap();
+                    tracing::info!(bucket = %bucket, key = %key, "VIP: Using S3 CSV source");
+                    CsvDataSource::from_s3(bucket.clone(), key.clone()).await
+                } else if vip_config.has_local_csv() {
+                    let file_path = vip_config.csv_file_path.as_ref().unwrap();
+                    tracing::info!(file_path = %file_path, "VIP: Using local CSV file");
+                    Ok(CsvDataSource::from_local(file_path.clone()))
+                } else {
+                    tracing::warn!("VIP: No CSV source configured - VIP polling disabled");
+                    Err(basilica_aggregator::vip::DataSourceError::FileRead(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "No CSV source configured",
+                        ),
+                    ))
+                };
+
+                match data_source_result {
+                    Ok(data_source) => {
                         let vip_cache = Arc::new(VipCache::new());
 
                         // Rebuild cache from DB on startup
@@ -1062,7 +1076,7 @@ impl Server {
 
                         let poller = Arc::new(VipPoller::new(
                             vip_config.clone(),
-                            sheets_client,
+                            data_source,
                             vip_cache,
                             vip_db,
                         ));
@@ -1095,7 +1109,7 @@ impl Server {
                     Err(e) => {
                         tracing::error!(
                             error = %e,
-                            "Failed to initialize Google Sheets client for VIP - VIP polling disabled"
+                            "Failed to initialize CSV data source for VIP - VIP polling disabled"
                         );
                     }
                 }

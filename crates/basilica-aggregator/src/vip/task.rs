@@ -1,7 +1,7 @@
 // task.rs - Background task wrapper for VIP polling
 
+use crate::vip::csv::VipDataSource;
 use crate::vip::poller::VipPoller;
-use crate::vip::sheets::VipDataSource;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
