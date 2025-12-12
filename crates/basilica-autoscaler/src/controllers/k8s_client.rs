@@ -122,9 +122,18 @@ impl AutoscalerK8sClient for KubeClient {
         use crate::crd::FINALIZER;
         use kube::api::{Api, Patch, PatchParams};
         let api: Api<NodePool> = Api::namespaced(self.client.clone(), ns);
+
+        let node_pool = api.get(name).await?;
+        let mut finalizers = node_pool.metadata.finalizers.unwrap_or_default();
+
+        if finalizers.contains(&FINALIZER.to_string()) {
+            return Ok(());
+        }
+
+        finalizers.push(FINALIZER.to_string());
         let patch = serde_json::json!({
             "metadata": {
-                "finalizers": [FINALIZER]
+                "finalizers": finalizers
             }
         });
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
@@ -133,13 +142,33 @@ impl AutoscalerK8sClient for KubeClient {
     }
 
     async fn remove_node_pool_finalizer(&self, ns: &str, name: &str) -> Result<()> {
+        use crate::crd::FINALIZER;
         use kube::api::{Api, Patch, PatchParams};
         let api: Api<NodePool> = Api::namespaced(self.client.clone(), ns);
-        let patch = serde_json::json!({
-            "metadata": {
-                "finalizers": null
-            }
-        });
+
+        let node_pool = api.get(name).await?;
+        let finalizers: Vec<String> = node_pool
+            .metadata
+            .finalizers
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| f != FINALIZER)
+            .collect();
+
+        let patch = if finalizers.is_empty() {
+            serde_json::json!({
+                "metadata": {
+                    "finalizers": serde_json::Value::Null
+                }
+            })
+        } else {
+            serde_json::json!({
+                "metadata": {
+                    "finalizers": finalizers
+                }
+            })
+        };
+
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
         Ok(())

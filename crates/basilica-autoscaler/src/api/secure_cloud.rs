@@ -25,6 +25,7 @@ pub enum CircuitState {
 pub struct CircuitBreaker {
     state: RwLock<CircuitState>,
     failure_count: AtomicU32,
+    success_count: AtomicU32,
     last_failure_epoch_ms: AtomicU64,
     config: CircuitBreakerConfig,
 }
@@ -55,6 +56,7 @@ impl CircuitBreaker {
         Self {
             state: RwLock::new(CircuitState::Closed),
             failure_count: AtomicU32::new(0),
+            success_count: AtomicU32::new(0),
             last_failure_epoch_ms: AtomicU64::new(0),
             config,
         }
@@ -93,9 +95,18 @@ impl CircuitBreaker {
         let mut state = self.state.write().await;
         match *state {
             CircuitState::HalfOpen => {
-                *state = CircuitState::Closed;
-                self.failure_count.store(0, Ordering::SeqCst);
-                info!("Circuit breaker closed after successful call");
+                let count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count >= self.config.success_threshold {
+                    *state = CircuitState::Closed;
+                    self.failure_count.store(0, Ordering::SeqCst);
+                    self.success_count.store(0, Ordering::SeqCst);
+                    info!("Circuit breaker closed after {} successful calls", count);
+                } else {
+                    debug!(
+                        "Circuit breaker half-open: {}/{} successful calls",
+                        count, self.config.success_threshold
+                    );
+                }
             }
             CircuitState::Closed => {
                 self.failure_count.store(0, Ordering::SeqCst);
@@ -125,6 +136,7 @@ impl CircuitBreaker {
             }
             CircuitState::HalfOpen => {
                 *state = CircuitState::Open;
+                self.success_count.store(0, Ordering::SeqCst);
                 warn!("Circuit breaker reopened after failure in half-open state");
             }
             _ => {}
