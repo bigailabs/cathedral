@@ -461,9 +461,11 @@ PersistentKeepalive = 25
         // Parse peer status for detailed logging
         let peers = parse_wg_show_output(&output);
         for peer in &peers {
+            // Use safe slice to avoid panic on short/malformed keys
+            let key_prefix = peer.public_key.get(..8).unwrap_or(&peer.public_key);
             debug!(
                 host = %host,
-                peer_key = %&peer.public_key[..8],
+                peer_key = %key_prefix,
                 endpoint = ?peer.endpoint,
                 "WireGuard peer status"
             );
@@ -565,9 +567,10 @@ PersistentKeepalive = 25
 
         // Set hostname using safe slice (max 8 chars)
         let hostname = format!("gpu-{}", &node_id[..node_id.len().min(8)]);
+        // Idempotent /etc/hosts update: only add if not already present
         let set_hostname = format!(
-            "hostnamectl set-hostname {} && echo '127.0.0.1 {}' >> /etc/hosts",
-            hostname, hostname
+            "hostnamectl set-hostname {} && (grep -q '127.0.0.1 {}' /etc/hosts || echo '127.0.0.1 {}' >> /etc/hosts)",
+            hostname, hostname, hostname
         );
         self.execute_ssh_command(host, port, ssh_config, &set_hostname)
             .await?;
