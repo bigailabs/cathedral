@@ -3,6 +3,8 @@
 //! This module provides P256 key generation, signing, and verification functionality
 //! using the p256 crate with proper key formatting for PEM and DER formats.
 
+#![allow(unused_assignments)] // ZeroizeOnDrop derive generates assignments in Drop impl
+
 use crate::error::CryptoError;
 use p256::{
     ecdsa::{signature::Signer, signature::Verifier, Signature, SigningKey, VerifyingKey},
@@ -22,7 +24,6 @@ pub struct P256Signature {
 
 /// P256 private key wrapper with secure memory handling
 #[derive(ZeroizeOnDrop)]
-#[allow(unused_assignments)]
 pub struct P256PrivateKey {
     #[zeroize(skip)]
     signing_key: SigningKey,
@@ -36,7 +37,6 @@ pub struct P256PublicKey {
 
 /// P256 key pair containing both private and public keys
 #[derive(ZeroizeOnDrop)]
-#[allow(unused_assignments)]
 pub struct P256KeyPair {
     private_key: P256PrivateKey,
     #[zeroize(skip)]

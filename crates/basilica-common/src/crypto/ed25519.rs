@@ -3,6 +3,8 @@
 //! This module provides Ed25519 key generation, signing, and verification functionality
 //! using the ed25519-dalek library with proper key formatting for SSH and PEM formats.
 
+#![allow(unused_assignments)] // ZeroizeOnDrop derive generates assignments in Drop impl
+
 use crate::error::CryptoError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use ed25519_dalek::{
@@ -14,7 +16,6 @@ use zeroize::ZeroizeOnDrop;
 
 /// Ed25519 private key wrapper with secure memory handling
 #[derive(ZeroizeOnDrop)]
-#[allow(unused_assignments)]
 pub struct Ed25519PrivateKey {
     #[zeroize(skip)]
     signing_key: SigningKey,
@@ -28,7 +29,6 @@ pub struct Ed25519PublicKey {
 
 /// Ed25519 key pair containing both private and public keys
 #[derive(ZeroizeOnDrop)]
-#[allow(unused_assignments)]
 pub struct Ed25519KeyPair {
     private_key: Ed25519PrivateKey,
     #[zeroize(skip)]
