@@ -582,8 +582,8 @@ pub async fn stop_secure_cloud_rental(
     use chrono::Utc;
 
     // 1. Get rental and verify ownership
-    let rental: (String, chrono::DateTime<Utc>) = sqlx::query_as(
-        "SELECT user_id, created_at
+    let rental: (String, chrono::DateTime<Utc>, bool) = sqlx::query_as(
+        "SELECT user_id, created_at, is_vip
          FROM secure_cloud_rentals
          WHERE id = $1",
     )
@@ -602,6 +602,13 @@ pub async fn stop_secure_cloud_rental(
     if rental.0 != auth.user_id {
         return Err(ApiError::Authorization {
             message: "Not authorized to stop this rental".to_string(),
+        });
+    }
+
+    // Check if this is a VIP rental - VIP rentals cannot be stopped by users
+    if rental.2 {
+        return Err(ApiError::BadRequest {
+            message: "VIP rentals cannot be stopped by the user. Contact support for assistance.".to_string(),
         });
     }
 

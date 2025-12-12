@@ -525,6 +525,7 @@ impl AggregatorService {
             error_message: None,
             created_at: now,
             updated_at: now,
+            is_vip: false,
         };
 
         self.db.create_deployment(&deployment).await?;

@@ -9,6 +9,7 @@ pub mod error;
 pub mod models;
 pub mod providers;
 pub mod service;
+pub mod vip;
 
 // Re-export commonly used types for easy access
 pub use config::Config as AggregatorConfig;

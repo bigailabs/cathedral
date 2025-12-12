@@ -128,6 +128,10 @@ pub struct AggregatorConfig {
 
     /// GPU provider configurations
     pub providers: AggregatorProvidersConfig,
+
+    /// VIP configuration
+    #[serde(default)]
+    pub vip: basilica_aggregator::config::VipConfig,
 }
 
 fn default_aggregator_ttl() -> u64 {
@@ -139,6 +143,7 @@ impl Default for AggregatorConfig {
         Self {
             ttl_seconds: default_aggregator_ttl(),
             providers: AggregatorProvidersConfig::default(),
+            vip: basilica_aggregator::config::VipConfig::default(),
         }
     }
 }
@@ -342,6 +347,7 @@ impl Config {
             database: basilica_aggregator::config::DatabaseConfig {
                 path: self.database.url.clone(), // Uses PostgreSQL URL from API config
             },
+            vip: self.aggregator.vip.clone(),
         }
     }
 }

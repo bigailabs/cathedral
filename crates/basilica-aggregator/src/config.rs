@@ -8,6 +8,8 @@ pub struct Config {
     pub cache: CacheConfig,
     pub providers: ProvidersConfig,
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub vip: VipConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -102,6 +104,42 @@ fn default_db_path() -> String {
     "aggregator.db".to_string()
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct VipConfig {
+    /// Feature flag to enable/disable VIP polling
+    #[serde(default)]
+    pub enabled: bool,
+    /// Google Sheet ID containing VIP machine inventory
+    #[serde(default)]
+    pub google_sheet_id: String,
+    /// Path to Google service account credentials JSON file
+    #[serde(default)]
+    pub google_credentials_path: String,
+    /// Polling interval in seconds (default: 60)
+    #[serde(default = "default_vip_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Expected value in the "ready" column (default: "READY")
+    #[serde(default = "default_vip_ready_value")]
+    pub ready_value: String,
+}
+
+fn default_vip_poll_interval() -> u64 {
+    60
+}
+
+fn default_vip_ready_value() -> String {
+    "READY".to_string()
+}
+
+impl VipConfig {
+    /// Check if VIP is enabled and properly configured
+    pub fn is_configured(&self) -> bool {
+        self.enabled
+            && !self.google_sheet_id.is_empty()
+            && !self.google_credentials_path.is_empty()
+    }
+}
+
 impl Config {
     /// Load configuration from file and environment variables
     pub fn load(config_path: Option<PathBuf>) -> Result<Self> {
@@ -164,6 +202,7 @@ impl Config {
             database: DatabaseConfig {
                 path: default_db_path(),
             },
+            vip: VipConfig::default(),
         }
     }
 }
@@ -189,6 +228,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: VipConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -211,6 +251,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: VipConfig::default(),
         };
 
         assert!(config.validate().is_err());
@@ -237,6 +278,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: VipConfig::default(),
         };
 
         assert!(config.validate().is_ok());
@@ -263,6 +305,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: VipConfig::default(),
         };
 
         assert!(config.validate().is_ok());

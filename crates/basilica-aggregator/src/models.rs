@@ -145,6 +145,20 @@ pub struct Deployment {
     pub error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub is_vip: bool,
+}
+
+/// VIP machine ID prefix used in provider_instance_id column
+pub const VIP_MACHINE_ID_PREFIX: &str = "vip:";
+
+/// Format a VIP machine ID for storage in provider_instance_id
+pub fn format_vip_machine_id(machine_id: &str) -> String {
+    format!("{}{}", VIP_MACHINE_ID_PREFIX, machine_id)
+}
+
+/// Extract the VIP machine ID from a provider_instance_id (removes 'vip:' prefix)
+pub fn extract_vip_machine_id(provider_instance_id: &str) -> Option<&str> {
+    provider_instance_id.strip_prefix(VIP_MACHINE_ID_PREFIX)
 }
 
 /// User SSH key
