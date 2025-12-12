@@ -252,19 +252,44 @@ async fn acquire_lease(
     identity: &str,
     config: &LeaderElectionConfig,
 ) -> Result<()> {
+    // Get current lease to obtain resourceVersion for optimistic concurrency
+    let current = api.get(name).await?;
+    let resource_version = current
+        .metadata
+        .resource_version
+        .clone()
+        .unwrap_or_default();
+
+    // Increment lease transitions counter
+    let transitions = current
+        .spec
+        .as_ref()
+        .and_then(|s| s.lease_transitions)
+        .unwrap_or(0)
+        + 1;
+
     let now = chrono::Utc::now().to_rfc3339();
-    let patch = serde_json::json!({
+
+    // Build the updated lease object with resourceVersion for replace
+    let lease = serde_json::json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {
+            "name": name,
+            "resourceVersion": resource_version
+        },
         "spec": {
             "holderIdentity": identity,
             "leaseDurationSeconds": config.lease_duration.as_secs(),
             "acquireTime": now,
             "renewTime": now,
-            "leaseTransitions": 1
+            "leaseTransitions": transitions
         }
     });
 
-    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await?;
+    let lease: Lease = serde_json::from_value(lease)?;
+    // Use replace instead of patch to enforce optimistic concurrency via resourceVersion
+    api.replace(name, &PostParams::default(), &lease).await?;
     Ok(())
 }
 

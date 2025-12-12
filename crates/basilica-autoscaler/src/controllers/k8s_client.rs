@@ -181,24 +181,30 @@ impl AutoscalerK8sClient for KubeClient {
         current_value: u32,
         increment: u32,
     ) -> Result<bool> {
-        use kube::api::{Api, Patch, PatchParams};
+        use kube::api::{Api, PostParams};
 
         let api: Api<ScalingPolicy> = Api::namespaced(self.client.clone(), ns);
 
-        // Use Strategic Merge Patch with resourceVersion precondition
-        let patch = serde_json::json!({
-            "metadata": {
-                "resourceVersion": resource_version
-            },
-            "status": {
-                "pendingScaleUp": current_value + increment
-            }
-        });
+        // Fetch current policy to get full object for replace
+        let mut policy = api.get(name).await?;
 
-        match api
-            .patch_status(name, &PatchParams::default(), &Patch::Merge(&patch))
-            .await
-        {
+        // Verify resourceVersion matches (optimistic concurrency check)
+        let current_rv = policy.metadata.resource_version.as_deref().unwrap_or("");
+        if current_rv != resource_version {
+            // Resource was modified - another reconcile won the race
+            return Ok(false);
+        }
+
+        // Update the status with incremented pending_scale_up
+        if let Some(ref mut status) = policy.status {
+            status.pending_scale_up = current_value + increment;
+        }
+
+        // Serialize policy to bytes for replace_status
+        let data = serde_json::to_vec(&policy)?;
+
+        // Use replace_status with resourceVersion in metadata for optimistic locking
+        match api.replace_status(name, &PostParams::default(), data).await {
             Ok(_) => Ok(true),
             Err(kube::Error::Api(ae)) if ae.code == 409 => {
                 // Conflict - another reconcile modified the resource

@@ -1029,16 +1029,21 @@ fn add_condition(
 
 /// Generate a deterministic node ID based on pool name and IP address.
 /// This ensures idempotent node registration across reconciliation cycles.
+/// Uses SHA-256 for stable output across Rust versions (unlike DefaultHasher).
 fn generate_deterministic_node_id(pool_name: &str, ip: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = DefaultHasher::new();
-    pool_name.hash(&mut hasher);
-    ip.hash(&mut hasher);
-    let hash = hasher.finish();
+    let mut hasher = Sha256::new();
+    hasher.update(pool_name.as_bytes());
+    hasher.update(b":");
+    hasher.update(ip.as_bytes());
+    let result = hasher.finalize();
 
-    format!("node-{:016x}", hash)
+    // Take first 8 bytes (16 hex chars) to match previous format
+    format!(
+        "node-{:016x}",
+        u64::from_be_bytes(result[..8].try_into().unwrap())
+    )
 }
 
 /// Get or generate a node ID with proper precedence:
