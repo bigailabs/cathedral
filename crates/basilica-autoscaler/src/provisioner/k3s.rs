@@ -1,8 +1,23 @@
 /// K3s installation utilities
 pub struct K3sInstaller;
 
+/// Sanitize a shell argument by removing potentially dangerous characters.
+/// Allows alphanumeric, dash, underscore, dot, colon, slash, and equals.
+fn sanitize_shell_arg(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '='))
+        .collect()
+}
+
+/// Escape a value for safe use in a single-quoted shell context.
+/// This wraps the value in single quotes and escapes any single quotes within.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
 impl K3sInstaller {
     /// Generate K3s agent installation script
+    /// All inputs are sanitized to prevent shell injection attacks.
     pub fn generate_install_script(
         server_url: &str,
         token: &str,
@@ -11,32 +26,43 @@ impl K3sInstaller {
         flannel_interface: &str,
         extra_labels: &[(String, String)],
     ) -> String {
+        // Sanitize all inputs to prevent shell injection
+        let safe_node_name = sanitize_shell_arg(node_name);
+        let safe_node_id = sanitize_shell_arg(node_id);
+        let safe_flannel = sanitize_shell_arg(flannel_interface);
+
         let mut labels = vec![
-            format!("--node-label=basilica.ai/node-id={}", node_id),
+            format!("--node-label=basilica.ai/node-id={}", safe_node_id),
             "--node-label=basilica.ai/managed-by=autoscaler".to_string(),
         ];
 
         for (key, value) in extra_labels {
-            labels.push(format!("--node-label={}={}", key, value));
+            let safe_key = sanitize_shell_arg(key);
+            let safe_value = sanitize_shell_arg(value);
+            labels.push(format!("--node-label={}={}", safe_key, safe_value));
         }
 
         let labels_str = labels.join(" ");
+
+        // Use shell escaping for URL and token to handle special characters safely
+        let escaped_url = shell_escape(server_url);
+        let escaped_token = shell_escape(token);
 
         format!(
             r#"#!/bin/bash
 set -euo pipefail
 
 # Set hostname
-hostnamectl set-hostname {node_name}
-echo "127.0.0.1 {node_name}" >> /etc/hosts
+hostnamectl set-hostname {safe_node_name}
+echo "127.0.0.1 {safe_node_name}" >> /etc/hosts
 
 # Install K3s agent
 curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="agent" \
-    K3S_URL="{server_url}" \
-    K3S_TOKEN="{token}" \
+    K3S_URL={escaped_url} \
+    K3S_TOKEN={escaped_token} \
     sh -s - \
-    --node-name={node_name} \
-    --flannel-iface={flannel_interface} \
+    --node-name={safe_node_name} \
+    --flannel-iface={safe_flannel} \
     {labels_str}
 
 # Wait for agent to be ready
@@ -45,10 +71,10 @@ sleep 10
 # Verify installation
 systemctl is-active k3s-agent || systemctl is-active k3s
 "#,
-            node_name = node_name,
-            server_url = server_url,
-            token = token,
-            flannel_interface = flannel_interface,
+            safe_node_name = safe_node_name,
+            escaped_url = escaped_url,
+            escaped_token = escaped_token,
+            safe_flannel = safe_flannel,
             labels_str = labels_str
         )
     }
@@ -133,12 +159,29 @@ mod tests {
             &[("custom-label".to_string(), "value".to_string())],
         );
 
-        assert!(script.contains("K3S_URL=\"https://k3s.example.com:6443\""));
-        assert!(script.contains("K3S_TOKEN=\"secret-token\""));
+        // URL and token now use single-quote escaping for safety
+        assert!(script.contains("K3S_URL='https://k3s.example.com:6443'"));
+        assert!(script.contains("K3S_TOKEN='secret-token'"));
         assert!(script.contains("--node-name=gpu-node-1"));
         assert!(script.contains("--flannel-iface=wg0"));
         assert!(script.contains("basilica.ai/node-id=node-123"));
         assert!(script.contains("custom-label=value"));
+    }
+
+    #[test]
+    fn sanitize_shell_arg_removes_dangerous_chars() {
+        assert_eq!(sanitize_shell_arg("node-123"), "node-123");
+        assert_eq!(sanitize_shell_arg("node_name.local"), "node_name.local");
+        assert_eq!(sanitize_shell_arg("$(rm -rf /)"), "rm-rf/");
+        assert_eq!(sanitize_shell_arg("test`whoami`"), "testwhoami");
+        assert_eq!(sanitize_shell_arg("test;echo"), "testecho");
+        assert_eq!(sanitize_shell_arg("label=value"), "label=value");
+    }
+
+    #[test]
+    fn shell_escape_handles_special_chars() {
+        assert_eq!(shell_escape("simple"), "'simple'");
+        assert_eq!(shell_escape("with'quote"), "'with'\"'\"'quote'");
     }
 
     #[test]

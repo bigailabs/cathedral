@@ -209,11 +209,12 @@ impl SshProvisioner {
         remote_path: &str,
         mode: &str,
     ) -> Result<()> {
-        // Use echo with heredoc to write file content
-        let escaped_content = content.replace('\'', "'\"'\"'");
+        use base64::Engine;
+        // Use base64 encoding to avoid heredoc delimiter collision and command injection
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content);
         let command = format!(
-            "cat > {} << 'BASILICA_EOF'\n{}\nBASILICA_EOF\nchmod {} {}",
-            remote_path, escaped_content, mode, remote_path
+            "echo '{}' | base64 -d > {} && chmod {} {}",
+            encoded, remote_path, mode, remote_path
         );
         self.execute_ssh_command(host, port, ssh_config, &command)
             .await?;
@@ -411,6 +412,7 @@ impl NodeProvisioner for SshProvisioner {
         info!(host = %host, peer_count = %peers.len(), "Configuring WireGuard peers");
 
         for peer in peers {
+            use base64::Engine;
             let peer_config = format!(
                 r#"
 [Peer]
@@ -422,11 +424,9 @@ PersistentKeepalive = 25
                 peer.public_key, peer.allowed_ips, peer.endpoint
             );
 
-            // Append peer to config
-            let cmd = format!(
-                "cat >> /etc/wireguard/wg0.conf << 'PEER_EOF'\n{}\nPEER_EOF",
-                peer_config
-            );
+            // Use base64 encoding to avoid heredoc delimiter collision
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&peer_config);
+            let cmd = format!("echo '{}' | base64 -d >> /etc/wireguard/wg0.conf", encoded);
             self.execute_ssh_command(host, port, ssh_config, &cmd)
                 .await?;
         }
@@ -562,8 +562,8 @@ PersistentKeepalive = 25
     ) -> Result<String> {
         info!(host = %host, "Installing K3s agent");
 
-        // Set hostname
-        let hostname = format!("gpu-{}", &node_id[..8]);
+        // Set hostname using safe slice (max 8 chars)
+        let hostname = format!("gpu-{}", &node_id[..node_id.len().min(8)]);
         let set_hostname = format!(
             "hostnamectl set-hostname {} && echo '127.0.0.1 {}' >> /etc/hosts",
             hostname, hostname
