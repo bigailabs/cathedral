@@ -36,6 +36,8 @@ type RentalQueryRow = (
     Option<i32>,                           // system_memory_gb (from gpu_offerings)
     Option<String>,                        // region (from gpu_offerings)
     Option<String>,                        // ssh_public_key (from ssh_keys)
+    bool,                                  // is_vip
+    Option<serde_json::Value>,             // raw_response (for VIP metadata)
 );
 
 /// Get SSH public key for user and validate ownership
@@ -151,7 +153,8 @@ pub async fn list_secure_cloud_rentals(
     let rentals: Vec<RentalQueryRow> = sqlx::query_as(
         "SELECT r.id, r.provider, r.provider_instance_id, r.offering_id, r.instance_type, \
          r.location_code, r.status, r.ip_address, r.created_at, r.stopped_at, \
-         o.vcpu_count, o.system_memory_gb, o.region, k.public_key \
+         o.vcpu_count, o.system_memory_gb, o.region, k.public_key, \
+         r.is_vip, r.raw_response \
          FROM secure_cloud_rentals r \
          LEFT JOIN gpu_offerings o ON r.offering_id = o.id \
          LEFT JOIN ssh_keys k ON r.ssh_key_id = k.id \
@@ -222,47 +225,61 @@ pub async fn list_secure_cloud_rentals(
                 db_system_memory_gb,
                 db_region,
                 ssh_public_key,
+                is_vip,
+                raw_response,
             )| {
-                // Try to find the offering to get GPU details and pricing
-                let (gpu_type, gpu_count, hourly_cost) =
-                    if let Some(offering) = offerings_map.get(offering_id.as_str()) {
-                        let gpu_count = offering.gpu_count;
-                        // Total hourly cost = per-GPU price × markup × number of GPUs
-                        let hourly_cost = match hourly_cost_with_markup(
-                            offering.hourly_rate_per_gpu,
-                            gpu_count,
-                            state.pricing_config.secure_cloud_markup_percent,
-                        ) {
-                            Ok(decimal) => decimal.to_f64().unwrap_or_else(|| {
-                                tracing::error!(
-                                    "Failed to convert hourly_cost {} to f64 for offering {} rental {} display",
-                                    decimal,
-                                    offering_id,
-                                    rental_id
-                                );
-                                0.0
-                            }),
-                            Err(e) => {
-                                tracing::error!(
-                                    "Failed to calculate hourly_cost for offering {} rental {}: {}",
-                                    offering_id,
-                                    rental_id,
-                                    e
-                                );
-                                0.0
-                            }
-                        };
+                // For VIP rentals, extract GPU info from raw_response and instance_type
+                // VIP rentals don't have a matching gpu_offerings entry
+                let (gpu_type, gpu_count, hourly_cost) = if is_vip {
+                    // VIP: gpu_type is stored in instance_type, gpu_count in raw_response
+                    let vip_gpu_count = raw_response
+                        .as_ref()
+                        .and_then(|r| r.get("gpu_count"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1) as u32;
 
-                        (offering.gpu_type.to_string(), gpu_count, hourly_cost)
-                    } else {
-                        // Fallback if offering not found (e.g., offering expired)
-                        tracing::warn!(
-                            "Offering {} not found for rental {}, using defaults",
-                            offering_id,
-                            rental_id
-                        );
-                        ("unknown".to_string(), 0, 0.0)
+                    // VIP hourly cost comes from billing service (cost_map), not offering
+                    // For display, we use 0.0 since actual cost tracking is in billing
+                    (instance_type.clone(), vip_gpu_count, 0.0)
+                } else if let Some(offering) = offerings_map.get(offering_id.as_str()) {
+                    // Regular rental: use offering data
+                    let gpu_count = offering.gpu_count;
+                    // Total hourly cost = per-GPU price × markup × number of GPUs
+                    let hourly_cost = match hourly_cost_with_markup(
+                        offering.hourly_rate_per_gpu,
+                        gpu_count,
+                        state.pricing_config.secure_cloud_markup_percent,
+                    ) {
+                        Ok(decimal) => decimal.to_f64().unwrap_or_else(|| {
+                            tracing::error!(
+                                "Failed to convert hourly_cost {} to f64 for offering {} rental {} display",
+                                decimal,
+                                offering_id,
+                                rental_id
+                            );
+                            0.0
+                        }),
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to calculate hourly_cost for offering {} rental {}: {}",
+                                offering_id,
+                                rental_id,
+                                e
+                            );
+                            0.0
+                        }
                     };
+
+                    (offering.gpu_type.to_string(), gpu_count, hourly_cost)
+                } else {
+                    // Fallback if offering not found (e.g., offering expired)
+                    tracing::warn!(
+                        "Offering {} not found for rental {}, using defaults",
+                        offering_id,
+                        rental_id
+                    );
+                    ("unknown".to_string(), 0, 0.0)
+                };
 
                 // Use resource specs from database JOIN (already available)
                 let vcpu_count = db_vcpu_count.map(|v| v as u32);

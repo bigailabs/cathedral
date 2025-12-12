@@ -1,9 +1,12 @@
 use crate::vip::types::VipSheetRow;
+use async_trait::async_trait;
 use google_sheets4::{hyper, hyper_rustls, Sheets};
 use rust_decimal::Decimal;
 use serde_json::Value as JsonValue;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use yup_oauth2;
 
 #[derive(Debug, Error)]
@@ -18,6 +21,12 @@ pub enum SheetsError {
     Api(String),
     #[error("Failed to parse row {row}: {message}")]
     RowParse { row: usize, message: String },
+}
+
+/// Trait for fetching VIP machine data (allows mocking for tests)
+#[async_trait]
+pub trait VipDataSource: Send + Sync {
+    async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, SheetsError>;
 }
 
 pub struct GoogleSheetsClient {
@@ -53,7 +62,7 @@ impl GoogleSheetsClient {
     }
 
     /// Fetch all VIP rows from the sheet (skips header row)
-    pub async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, SheetsError> {
+    async fn fetch_vip_rows_impl(&self) -> Result<Vec<VipSheetRow>, SheetsError> {
         // Fetch columns A through K (all data columns)
         let range = "A:K";
 
@@ -142,5 +151,67 @@ impl GoogleSheetsClient {
             hourly_rate,
             notes,
         })
+    }
+}
+
+#[async_trait]
+impl VipDataSource for GoogleSheetsClient {
+    async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, SheetsError> {
+        self.fetch_vip_rows_impl().await
+    }
+}
+
+/// Mock data source for testing - returns configurable rows
+#[derive(Clone)]
+pub struct MockVipDataSource {
+    rows: Arc<RwLock<Vec<VipSheetRow>>>,
+}
+
+impl MockVipDataSource {
+    /// Create a new mock with initial rows
+    pub fn new(rows: Vec<VipSheetRow>) -> Self {
+        Self {
+            rows: Arc::new(RwLock::new(rows)),
+        }
+    }
+
+    /// Replace all rows
+    pub async fn set_rows(&self, rows: Vec<VipSheetRow>) {
+        let mut guard = self.rows.write().await;
+        *guard = rows;
+    }
+
+    /// Add a single row
+    pub async fn add_row(&self, row: VipSheetRow) {
+        let mut guard = self.rows.write().await;
+        guard.push(row);
+    }
+
+    /// Remove a row by vip_machine_id
+    pub async fn remove_row(&self, vip_machine_id: &str) {
+        let mut guard = self.rows.write().await;
+        guard.retain(|r| r.vip_machine_id != vip_machine_id);
+    }
+
+    /// Update a row by vip_machine_id
+    pub async fn update_row<F>(&self, vip_machine_id: &str, f: F)
+    where
+        F: FnOnce(&mut VipSheetRow),
+    {
+        let mut guard = self.rows.write().await;
+        if let Some(row) = guard
+            .iter_mut()
+            .find(|r| r.vip_machine_id == vip_machine_id)
+        {
+            f(row);
+        }
+    }
+}
+
+#[async_trait]
+impl VipDataSource for MockVipDataSource {
+    async fn fetch_vip_rows(&self) -> Result<Vec<VipSheetRow>, SheetsError> {
+        let guard = self.rows.read().await;
+        Ok(guard.clone())
     }
 }

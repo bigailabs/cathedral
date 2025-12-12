@@ -5,7 +5,7 @@ use crate::vip::{
         close_vip_rental, get_vip_rental_by_machine_id, insert_vip_rental, prepare_vip_rental,
         update_vip_rental_metadata, VipRentalError,
     },
-    sheets::{GoogleSheetsClient, SheetsError},
+    sheets::{SheetsError, VipDataSource},
     types::{ValidVipMachine, VipConnectionInfo, VipDisplayInfo, VipRentalRecord, VipSheetRow},
 };
 use chrono::Utc;
@@ -36,24 +36,19 @@ pub struct PollStats {
     pub removed: usize,
 }
 
-/// VIP Poller that syncs rentals from Google Sheet
-pub struct VipPoller {
+/// VIP Poller that syncs rentals from a data source (Google Sheets or mock)
+pub struct VipPoller<D: VipDataSource> {
     config: VipConfig,
-    sheets_client: GoogleSheetsClient,
+    data_source: D,
     cache: Arc<VipCache>,
     db: PgPool,
 }
 
-impl VipPoller {
-    pub fn new(
-        config: VipConfig,
-        sheets_client: GoogleSheetsClient,
-        cache: Arc<VipCache>,
-        db: PgPool,
-    ) -> Self {
+impl<D: VipDataSource> VipPoller<D> {
+    pub fn new(config: VipConfig, data_source: D, cache: Arc<VipCache>, db: PgPool) -> Self {
         Self {
             config,
-            sheets_client,
+            data_source,
             cache,
             db,
         }
@@ -65,8 +60,8 @@ impl VipPoller {
         let start_time = std::time::Instant::now();
         let mut stats = PollStats::default();
 
-        // 1. Fetch all rows from sheet
-        let rows = match self.sheets_client.fetch_vip_rows().await {
+        // 1. Fetch all rows from data source
+        let rows = match self.data_source.fetch_vip_rows().await {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::error!(

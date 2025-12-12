@@ -9,7 +9,7 @@ use crate::{
 };
 use axum::Router;
 use basilica_aggregator::{
-    vip::{GoogleSheetsClient, VipCache, VipPoller, VipPollerTask},
+    vip::{GoogleSheetsClient, MockVipDataSource, VipCache, VipPoller, VipPollerTask, VipSheetRow},
     AggregatorService, Database as AggregatorDatabase,
 };
 use basilica_billing::BillingClient;
@@ -991,61 +991,113 @@ impl Server {
         );
 
         // Start VIP poller task if enabled
+        tracing::info!(
+            vip_enabled = config.aggregator.vip.enabled,
+            vip_mock_user_id = ?config.aggregator.vip.mock_user_id,
+            vip_is_configured = config.aggregator.vip.is_configured(),
+            vip_is_mock_mode = config.aggregator.vip.is_mock_mode(),
+            "VIP configuration check"
+        );
         if config.aggregator.vip.is_configured() {
             let vip_config = config.aggregator.vip.clone();
             let vip_db = state.db.clone();
 
-            match GoogleSheetsClient::new(
-                std::path::Path::new(&vip_config.google_credentials_path),
-                vip_config.google_sheet_id.clone(),
-            )
-            .await
-            {
-                Ok(sheets_client) => {
-                    let vip_cache = Arc::new(VipCache::new());
+            if vip_config.is_mock_mode() {
+                // Mock mode - use fake VIP data
+                let mock_user_id = vip_config.mock_user_id.clone().unwrap();
+                tracing::info!(user_id = %mock_user_id, "Starting VIP poller in MOCK mode");
 
-                    // Rebuild cache from DB on startup
-                    if let Err(e) = vip_cache.rebuild_from_db(&vip_db).await {
-                        tracing::error!(error = %e, "Failed to rebuild VIP cache from database");
-                    }
+                let mock_data = create_mock_vip_data(&mock_user_id);
+                let mock_source = MockVipDataSource::new(mock_data);
 
-                    let poller = Arc::new(VipPoller::new(
-                        vip_config.clone(),
-                        sheets_client,
-                        vip_cache,
-                        vip_db,
-                    ));
-
-                    // Do initial poll immediately
-                    tracing::info!("Starting initial VIP poll...");
-                    match poller.poll_once().await {
-                        Ok(stats) => {
-                            tracing::info!(
-                                created = stats.created,
-                                updated = stats.updated,
-                                removed = stats.removed,
-                                "Initial VIP poll completed"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Initial VIP poll failed");
-                        }
-                    }
-
-                    // Start periodic polling
-                    let task = VipPollerTask::new(poller, vip_config.poll_interval_secs);
-                    task.start();
-
-                    tracing::info!(
-                        interval_secs = vip_config.poll_interval_secs,
-                        "VIP poller task started"
-                    );
+                let vip_cache = Arc::new(VipCache::new());
+                if let Err(e) = vip_cache.rebuild_from_db(&vip_db).await {
+                    tracing::error!(error = %e, "Failed to rebuild VIP cache from database");
                 }
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to initialize Google Sheets client for VIP - VIP polling disabled"
-                    );
+
+                let poller = Arc::new(VipPoller::new(
+                    vip_config.clone(),
+                    mock_source,
+                    vip_cache,
+                    vip_db,
+                ));
+
+                tracing::info!("Starting initial VIP poll (mock mode)...");
+                match poller.poll_once().await {
+                    Ok(stats) => {
+                        tracing::info!(
+                            created = stats.created,
+                            updated = stats.updated,
+                            removed = stats.removed,
+                            "Initial VIP poll completed (mock mode)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Initial VIP poll failed (mock mode)");
+                    }
+                }
+
+                let task = VipPollerTask::new(poller, vip_config.poll_interval_secs);
+                task.start();
+
+                tracing::info!(
+                    interval_secs = vip_config.poll_interval_secs,
+                    "VIP poller task started (mock mode)"
+                );
+            } else {
+                // Real mode - use Google Sheets
+                match GoogleSheetsClient::new(
+                    std::path::Path::new(&vip_config.google_credentials_path),
+                    vip_config.google_sheet_id.clone(),
+                )
+                .await
+                {
+                    Ok(sheets_client) => {
+                        let vip_cache = Arc::new(VipCache::new());
+
+                        // Rebuild cache from DB on startup
+                        if let Err(e) = vip_cache.rebuild_from_db(&vip_db).await {
+                            tracing::error!(error = %e, "Failed to rebuild VIP cache from database");
+                        }
+
+                        let poller = Arc::new(VipPoller::new(
+                            vip_config.clone(),
+                            sheets_client,
+                            vip_cache,
+                            vip_db,
+                        ));
+
+                        // Do initial poll immediately
+                        tracing::info!("Starting initial VIP poll...");
+                        match poller.poll_once().await {
+                            Ok(stats) => {
+                                tracing::info!(
+                                    created = stats.created,
+                                    updated = stats.updated,
+                                    removed = stats.removed,
+                                    "Initial VIP poll completed"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Initial VIP poll failed");
+                            }
+                        }
+
+                        // Start periodic polling
+                        let task = VipPollerTask::new(poller, vip_config.poll_interval_secs);
+                        task.start();
+
+                        tracing::info!(
+                            interval_secs = vip_config.poll_interval_secs,
+                            "VIP poller task started"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to initialize Google Sheets client for VIP - VIP polling disabled"
+                        );
+                    }
                 }
             }
         } else {
@@ -1283,4 +1335,38 @@ async fn shutdown_signal() {
             warn!("Received terminate signal, shutting down");
         },
     }
+}
+
+/// Create mock VIP data for testing
+fn create_mock_vip_data(user_id: &str) -> Vec<VipSheetRow> {
+    use rust_decimal::Decimal;
+
+    vec![
+        VipSheetRow {
+            vip_machine_id: "mock-vip-h100-01".to_string(),
+            assigned_user: user_id.to_string(),
+            ready: "READY".to_string(),
+            ssh_host: "mock-h100-01.basilica.dev".to_string(),
+            ssh_port: 22,
+            ssh_user: "ubuntu".to_string(),
+            gpu_type: "H100".to_string(),
+            gpu_count: 8,
+            region: "us-west-2".to_string(),
+            hourly_rate: Decimal::new(2500, 2), // $25.00/hr
+            notes: Some("Mock H100 cluster for testing".to_string()),
+        },
+        VipSheetRow {
+            vip_machine_id: "mock-vip-a100-01".to_string(),
+            assigned_user: user_id.to_string(),
+            ready: "READY".to_string(),
+            ssh_host: "mock-a100-01.basilica.dev".to_string(),
+            ssh_port: 22,
+            ssh_user: "ubuntu".to_string(),
+            gpu_type: "A100-80GB".to_string(),
+            gpu_count: 4,
+            region: "us-east-1".to_string(),
+            hourly_rate: Decimal::new(1200, 2), // $12.00/hr
+            notes: Some("Mock A100 for testing".to_string()),
+        },
+    ]
 }

@@ -412,6 +412,7 @@ impl Database {
     }
 
     /// Get all active deployments (for telemetry monitoring)
+    /// Note: Excludes VIP rentals - those are managed by the VIP poller
     pub async fn get_all_active_deployments(&self) -> Result<Vec<Deployment>> {
         let active_statuses: Vec<&str> = vec![
             DeploymentStatus::Pending.as_str(),
@@ -425,7 +426,7 @@ impl Database {
                    status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
                    error_message, created_at, updated_at, is_vip
             FROM secure_cloud_rentals
-            WHERE status = ANY($1)
+            WHERE status = ANY($1) AND (is_vip = FALSE OR is_vip IS NULL)
             ORDER BY created_at DESC
             "#,
         )

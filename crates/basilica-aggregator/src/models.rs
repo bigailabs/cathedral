@@ -12,6 +12,8 @@ pub enum Provider {
     Hyperstack,
     Lambda,
     HydraHost,
+    /// VIP managed machines (not a real cloud provider, but uses Deployment model)
+    Vip,
 }
 
 impl Provider {
@@ -21,6 +23,7 @@ impl Provider {
             Provider::Hyperstack => "hyperstack",
             Provider::Lambda => "lambda",
             Provider::HydraHost => "hydrahost",
+            Provider::Vip => "vip",
         }
     }
 }
@@ -40,6 +43,7 @@ impl std::str::FromStr for Provider {
             "hyperstack" => Ok(Provider::Hyperstack),
             "lambda" => Ok(Provider::Lambda),
             "hydrahost" => Ok(Provider::HydraHost),
+            "vip" => Ok(Provider::Vip),
             _ => Err(format!("Unknown provider: {}", s)),
         }
     }

@@ -18,6 +18,25 @@ pub struct VipSheetRow {
     pub notes: Option<String>,  // Column K (optional)
 }
 
+impl VipSheetRow {
+    /// Create a test machine row with sensible defaults
+    pub fn test_machine(id: &str, user: &str) -> Self {
+        Self {
+            vip_machine_id: id.to_string(),
+            assigned_user: user.to_string(),
+            ready: "READY".to_string(),
+            ssh_host: format!("{}.example.com", id),
+            ssh_port: 22,
+            ssh_user: "ubuntu".to_string(),
+            gpu_type: "A100".to_string(),
+            gpu_count: 1,
+            region: "us-west-2".to_string(),
+            hourly_rate: Decimal::new(500, 2), // $5.00
+            notes: None,
+        }
+    }
+}
+
 /// Connection info extracted from sheet row
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VipConnectionInfo {

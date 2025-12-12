@@ -104,7 +104,7 @@ fn default_db_path() -> String {
     "aggregator.db".to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VipConfig {
     /// Feature flag to enable/disable VIP polling
     #[serde(default)]
@@ -121,6 +121,22 @@ pub struct VipConfig {
     /// Expected value in the "ready" column (default: "READY")
     #[serde(default = "default_vip_ready_value")]
     pub ready_value: String,
+    /// Mock mode: If set, use mock data with this user ID instead of Google Sheets
+    #[serde(default)]
+    pub mock_user_id: Option<String>,
+}
+
+impl Default for VipConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            google_sheet_id: String::new(),
+            google_credentials_path: String::new(),
+            poll_interval_secs: default_vip_poll_interval(),
+            ready_value: default_vip_ready_value(),
+            mock_user_id: None,
+        }
+    }
 }
 
 fn default_vip_poll_interval() -> u64 {
@@ -132,9 +148,19 @@ fn default_vip_ready_value() -> String {
 }
 
 impl VipConfig {
-    /// Check if VIP is enabled and properly configured
+    /// Check if VIP is enabled and properly configured (either real or mock mode)
     pub fn is_configured(&self) -> bool {
-        self.enabled && !self.google_sheet_id.is_empty() && !self.google_credentials_path.is_empty()
+        self.enabled
+            && (self.is_mock_mode()
+                || (!self.google_sheet_id.is_empty() && !self.google_credentials_path.is_empty()))
+    }
+
+    /// Check if mock mode is enabled
+    pub fn is_mock_mode(&self) -> bool {
+        self.mock_user_id
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
     }
 }
 

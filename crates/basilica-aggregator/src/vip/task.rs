@@ -1,19 +1,20 @@
 // task.rs - Background task wrapper for VIP polling
 
 use crate::vip::poller::VipPoller;
+use crate::vip::sheets::VipDataSource;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-/// Background task that periodically polls the VIP Google Sheet
-pub struct VipPollerTask {
-    poller: Arc<VipPoller>,
+/// Background task that periodically polls the VIP data source
+pub struct VipPollerTask<D: VipDataSource + 'static> {
+    poller: Arc<VipPoller<D>>,
     interval: Duration,
 }
 
-impl VipPollerTask {
-    pub fn new(poller: Arc<VipPoller>, poll_interval_secs: u64) -> Self {
+impl<D: VipDataSource + 'static> VipPollerTask<D> {
+    pub fn new(poller: Arc<VipPoller<D>>, poll_interval_secs: u64) -> Self {
         Self {
             poller,
             interval: Duration::from_secs(poll_interval_secs),
