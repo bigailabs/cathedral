@@ -59,6 +59,15 @@ impl K3sInstaller {
         for (key, value) in extra_labels {
             let safe_key = sanitize_label_key(key);
             let safe_value = sanitize_label_value(value);
+            // Skip labels that become empty after sanitization
+            if safe_key.is_empty() || safe_value.is_empty() {
+                tracing::warn!(
+                    original_key = %key,
+                    original_value = %value,
+                    "Skipping invalid label: sanitized key or value is empty"
+                );
+                continue;
+            }
             labels.push(format!("--node-label={}={}", safe_key, safe_value));
         }
 
@@ -74,7 +83,8 @@ set -euo pipefail
 
 # Set hostname
 hostnamectl set-hostname {safe_node_name}
-echo "127.0.0.1 {safe_node_name}" >> /etc/hosts
+# Idempotent /etc/hosts update: only add if not already present
+grep -q "127.0.0.1 {safe_node_name}" /etc/hosts || echo "127.0.0.1 {safe_node_name}" >> /etc/hosts
 
 # Install K3s agent
 curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="agent" \
@@ -122,23 +132,42 @@ rm -rf /etc/rancher/k3s
     }
 
     /// Generate node labels from pool spec
+    /// All values are sanitized to conform to Kubernetes label rules
     pub fn collect_node_labels(
         node_id: &str,
         pool_name: &str,
         gpu_type: Option<&str>,
         gpu_count: Option<u32>,
     ) -> Vec<(String, String)> {
+        // Sanitize inputs - use "unknown" as fallback if sanitization results in empty string
+        let safe_node_id = sanitize_label_value(node_id);
+        let safe_node_id = if safe_node_id.is_empty() {
+            "unknown".to_string()
+        } else {
+            safe_node_id
+        };
+
+        let safe_pool_name = sanitize_label_value(pool_name);
+        let safe_pool_name = if safe_pool_name.is_empty() {
+            "unknown".to_string()
+        } else {
+            safe_pool_name
+        };
+
         let mut labels = vec![
-            ("basilica.ai/node-id".to_string(), node_id.to_string()),
+            ("basilica.ai/node-id".to_string(), safe_node_id),
             (
                 "basilica.ai/managed-by".to_string(),
                 "autoscaler".to_string(),
             ),
-            ("basilica.ai/nodepool".to_string(), pool_name.to_string()),
+            ("basilica.ai/nodepool".to_string(), safe_pool_name),
         ];
 
         if let Some(gpu) = gpu_type {
-            labels.push(("nvidia.com/gpu.product".to_string(), gpu.to_string()));
+            let safe_gpu = sanitize_label_value(gpu);
+            if !safe_gpu.is_empty() {
+                labels.push(("nvidia.com/gpu.product".to_string(), safe_gpu));
+            }
         }
 
         if let Some(count) = gpu_count {
