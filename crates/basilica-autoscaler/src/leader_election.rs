@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use k8s_openapi::api::coordination::v1::Lease;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, PostParams};
 use kube::Client;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -53,6 +53,13 @@ impl LeaderElector {
 
     /// Start the leader election loop
     pub async fn start(&mut self) -> Result<watch::Receiver<bool>> {
+        // Guard: prevent multiple start() calls from spawning competing loops
+        if self.shutdown_tx.is_some() {
+            return Err(crate::error::AutoscalerError::LeaderElection(
+                "LeaderElector already started".to_string(),
+            ));
+        }
+
         if !self.config.enabled {
             info!("Leader election disabled, assuming leader");
             self.is_leader.store(true, Ordering::SeqCst);
@@ -267,11 +274,9 @@ async fn acquire_lease(
 ) -> Result<()> {
     // Get current lease to obtain resourceVersion for optimistic concurrency
     let current = api.get(name).await?;
-    let resource_version = current
-        .metadata
-        .resource_version
-        .clone()
-        .unwrap_or_default();
+    let resource_version = current.metadata.resource_version.clone().ok_or_else(|| {
+        crate::error::AutoscalerError::LeaderElection("Lease missing resourceVersion".to_string())
+    })?;
 
     // Increment lease transitions counter
     let transitions = current
@@ -312,8 +317,35 @@ async fn renew_lease(
     identity: &str,
     config: &LeaderElectionConfig,
 ) -> Result<()> {
+    // Get current lease to obtain resourceVersion for optimistic concurrency
+    let current = api.get(name).await?;
+    let resource_version = current.metadata.resource_version.clone().ok_or_else(|| {
+        crate::error::AutoscalerError::LeaderElection(
+            "Lease missing resourceVersion for renew".to_string(),
+        )
+    })?;
+
+    // Verify we still hold the lease before renewing
+    let holder = current
+        .spec
+        .as_ref()
+        .and_then(|s| s.holder_identity.as_ref());
+    if holder != Some(&identity.to_string()) {
+        return Err(crate::error::AutoscalerError::LeaderElection(
+            "Lease held by another instance, cannot renew".to_string(),
+        ));
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
-    let patch = serde_json::json!({
+
+    // Build the updated lease object with resourceVersion for replace
+    let lease = serde_json::json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {
+            "name": name,
+            "resourceVersion": resource_version
+        },
         "spec": {
             "holderIdentity": identity,
             "leaseDurationSeconds": config.lease_duration.as_secs(),
@@ -321,28 +353,60 @@ async fn renew_lease(
         }
     });
 
-    api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await?;
+    let lease: Lease = serde_json::from_value(lease)?;
+    // Use replace instead of patch to enforce optimistic concurrency via resourceVersion
+    api.replace(name, &PostParams::default(), &lease).await?;
     Ok(())
 }
 
 async fn release_lease(api: &Api<Lease>, name: &str, identity: &str) -> Result<()> {
-    // Check if we still hold the lease before releasing
-    if let Ok(lease) = api.get(name).await {
-        let holder = lease.spec.as_ref().and_then(|s| s.holder_identity.as_ref());
+    // Get the lease to verify ownership and obtain resourceVersion for optimistic concurrency
+    let current = match api.get(name).await {
+        Ok(lease) => lease,
+        Err(_) => return Ok(()), // Lease doesn't exist, nothing to release
+    };
 
-        if holder == Some(&identity.to_string()) {
-            let patch = serde_json::json!({
-                "spec": {
-                    "holderIdentity": null
-                }
-            });
-            api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-                .await?;
-            info!(identity = %identity, "Released lease");
-        }
+    let holder = current
+        .spec
+        .as_ref()
+        .and_then(|s| s.holder_identity.as_ref());
+    if holder != Some(&identity.to_string()) {
+        // We don't hold the lease, nothing to release
+        return Ok(());
     }
-    Ok(())
+
+    let resource_version = match current.metadata.resource_version.clone() {
+        Some(rv) => rv,
+        None => return Ok(()), // Cannot release without resourceVersion
+    };
+
+    // Build the updated lease object with resourceVersion for replace
+    let lease = serde_json::json!({
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
+        "metadata": {
+            "name": name,
+            "resourceVersion": resource_version
+        },
+        "spec": {
+            "holderIdentity": serde_json::Value::Null
+        }
+    });
+
+    let lease: Lease = serde_json::from_value(lease)?;
+    // Use replace instead of patch to enforce optimistic concurrency via resourceVersion
+    match api.replace(name, &PostParams::default(), &lease).await {
+        Ok(_) => {
+            info!(identity = %identity, "Released lease");
+            Ok(())
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 409 => {
+            // Conflict - lease was modified, but we're releasing anyway so this is fine
+            debug!("Lease conflict during release, ignoring");
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 #[cfg(test)]
