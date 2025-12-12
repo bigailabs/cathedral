@@ -281,28 +281,44 @@ impl ControllerRuntime {
 
         // Run controllers until shutdown
         let shutdown_token = self.shutdown_token.clone();
+        let mut fatal_error: Option<String> = None;
+
         tokio::select! {
             _ = shutdown_token.cancelled() => {
                 info!("Shutdown signal received");
             }
             _ = futures::future::join(node_pools, scaling_policies) => {
                 error!("Controllers exited unexpectedly");
+                fatal_error = Some("Controllers exited unexpectedly".to_string());
             }
             _ = leader_watch_task => {
                 error!("Leader election failed fatally, initiating shutdown");
+                fatal_error = Some("Leader election failed fatally".to_string());
             }
             result = health_server_handle => {
                 match result {
                     Ok(Ok(())) => warn!("Health server exited normally"),
-                    Ok(Err(e)) => error!(error = %e, "Health server failed"),
-                    Err(e) => error!(error = %e, "Health server task panicked"),
+                    Ok(Err(e)) => {
+                        error!(error = %e, "Health server failed");
+                        fatal_error = Some(format!("Health server failed: {}", e));
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Health server task panicked");
+                        fatal_error = Some(format!("Health server task panicked: {}", e));
+                    }
                 }
             }
             result = metrics_server_handle => {
                 match result {
                     Ok(Ok(())) => warn!("Metrics server exited normally"),
-                    Ok(Err(e)) => error!(error = %e, "Metrics server failed"),
-                    Err(e) => error!(error = %e, "Metrics server task panicked"),
+                    Ok(Err(e)) => {
+                        error!(error = %e, "Metrics server failed");
+                        fatal_error = Some(format!("Metrics server failed: {}", e));
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Metrics server task panicked");
+                        fatal_error = Some(format!("Metrics server task panicked: {}", e));
+                    }
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -314,6 +330,12 @@ impl ControllerRuntime {
         info!("Initiating graceful shutdown");
         leader_elector.stop().await;
         health_state.set_ready(false).await;
+
+        // Return error if a fatal condition occurred
+        if let Some(reason) = fatal_error {
+            error!("Runtime exiting with error: {}", reason);
+            return Err(AutoscalerError::Runtime(reason));
+        }
 
         info!("Shutdown complete");
         Ok(())

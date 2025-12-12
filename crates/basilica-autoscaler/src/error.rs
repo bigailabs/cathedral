@@ -110,6 +110,9 @@ pub enum AutoscalerError {
     #[error("Leader election failed: {0}")]
     LeaderElection(String),
 
+    #[error("Controller runtime failed: {0}")]
+    Runtime(String),
+
     #[error("Circuit breaker open: {0}")]
     CircuitBreakerOpen(String),
 
