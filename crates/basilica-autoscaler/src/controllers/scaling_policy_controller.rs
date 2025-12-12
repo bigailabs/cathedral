@@ -145,8 +145,10 @@ where
             }
             ScalingDecision::NoAction => {
                 debug!(policy = %name, "No scaling action needed");
-                status.pending_scale_up = 0;
-                status.pending_scale_down = 0;
+                // Note: Do NOT reset pending_scale_up and pending_scale_down here.
+                // These counters track in-flight scaling operations initiated in previous
+                // reconciliation cycles. They should only be decremented when NodePools
+                // reach Ready or Failed state, not when no new scaling is needed.
                 add_condition(
                     &mut status,
                     "Scaling",

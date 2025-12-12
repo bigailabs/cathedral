@@ -603,12 +603,14 @@ impl SecureCloudApi for SecureCloudClient {
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                warn!(
+                // Return error so circuit breaker correctly records failure
+                return Err(AutoscalerError::SecureCloudApi(format!(
                     "Failed to deregister node {}: {} - {}",
                     node_id, status, body
-                );
+                )));
             }
 
+            info!("Node {} deregistered successfully", node_id);
             Ok(())
         }
         .await;
