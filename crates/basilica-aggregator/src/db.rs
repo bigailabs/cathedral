@@ -452,52 +452,6 @@ impl Database {
         Ok(())
     }
 
-    /// Get a VIP rental by vip_machine_id (looks up by provider_instance_id with vip: prefix)
-    pub async fn get_rental_by_vip_machine_id(
-        &self,
-        vip_machine_id: &str,
-    ) -> Result<Option<Deployment>> {
-        use crate::models::format_vip_machine_id;
-        let prefixed_id = format_vip_machine_id(vip_machine_id);
-        let row = sqlx::query(
-            r#"
-            SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
-                   status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at, is_vip
-            FROM secure_cloud_rentals
-            WHERE provider_instance_id = $1 AND is_vip = TRUE
-            "#,
-        )
-        .bind(&prefixed_id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.and_then(|r| Self::parse_deployment_from_row(&r)))
-    }
-
-    /// List all VIP rentals
-    pub async fn list_vip_rentals(&self) -> Result<Vec<Deployment>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
-                   status, hostname, ssh_key_id, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at, is_vip
-            FROM secure_cloud_rentals
-            WHERE is_vip = TRUE AND status != 'deleted'
-            ORDER BY created_at DESC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        let deployments = rows
-            .iter()
-            .filter_map(Self::parse_deployment_from_row)
-            .collect();
-
-        Ok(deployments)
-    }
-
     // ========================================================================
     // SSH Key Management
     // ========================================================================
