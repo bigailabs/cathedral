@@ -544,7 +544,9 @@ where
                         "basilica.ai/managed-by".to_string(),
                         "autoscaler".to_string(),
                     );
-                    if let Some(node_id) = &pool.spec.node_id {
+                    // Use resolved node_id (status for dynamic mode, spec for manual mode)
+                    let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+                    if let Some(node_id) = resolved_node_id {
                         labels.insert("basilica.ai/node-id".to_string(), node_id.clone());
                     }
                     self.k8s.add_node_labels(&k8s_node_name, &labels).await?;
@@ -607,6 +609,8 @@ where
                         .transition_phase(ns, &name, status, NodePoolPhase::Unhealthy)
                         .await;
                 }
+                // Reset failure count on successful health check
+                status.failure_count = 0;
                 status.last_health_check_at = Some(Utc::now());
             }
             Err(e) => {

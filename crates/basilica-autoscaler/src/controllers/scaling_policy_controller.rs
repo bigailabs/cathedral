@@ -127,6 +127,31 @@ where
             }
             ScalingDecision::ScaleDown(count) => {
                 if self.can_scale_down(&status, &policy.spec.scale_down) {
+                    // Get resourceVersion for optimistic locking
+                    let resource_version = policy
+                        .metadata
+                        .resource_version
+                        .as_deref()
+                        .unwrap_or_default();
+
+                    // Atomically increment pending_scale_down to prevent race conditions
+                    // If another reconcile beat us, this returns false and we skip
+                    let acquired = self
+                        .k8s
+                        .try_increment_pending_scale_down(
+                            ns,
+                            &name,
+                            resource_version,
+                            status.pending_scale_down,
+                            count,
+                        )
+                        .await?;
+
+                    if !acquired {
+                        debug!(policy = %name, "Scale-down conflict, another reconcile is handling it");
+                        return Ok(());
+                    }
+
                     info!(policy = %name, count = %count, "Scaling down");
                     self.scale_down(ns, &node_pools, count).await?;
                     status.last_scale_down_time = Some(Utc::now());
@@ -374,7 +399,7 @@ where
 
         // Build SecureCloudConfig from template
         let secure_cloud = template.secure_cloud.as_ref().map(|sc| SecureCloudConfig {
-            offering_id: sc.preferred_provider.clone().unwrap_or_default(),
+            offering_id: sc.offering_id.clone(),
             ssh_key_id: sc.ssh_key_id.clone(),
             ssh_key_secret_ref: sc.ssh_key_secret_ref.clone(),
         });
