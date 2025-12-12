@@ -18,6 +18,7 @@ pub struct LeaderElector {
     identity: String,
     is_leader: Arc<AtomicBool>,
     shutdown_tx: Option<watch::Sender<bool>>,
+    leader_tx: Option<watch::Sender<bool>>,
 }
 
 impl LeaderElector {
@@ -36,6 +37,7 @@ impl LeaderElector {
             identity,
             is_leader: Arc::new(AtomicBool::new(false)),
             shutdown_tx: None,
+            leader_tx: None,
         })
     }
 
@@ -54,14 +56,15 @@ impl LeaderElector {
         if !self.config.enabled {
             info!("Leader election disabled, assuming leader");
             self.is_leader.store(true, Ordering::SeqCst);
-            let (tx, rx) = watch::channel(true);
-            self.shutdown_tx = Some(tx);
-            return Ok(rx);
+            let (leader_tx, leader_rx) = watch::channel(true);
+            self.leader_tx = Some(leader_tx);
+            return Ok(leader_rx);
         }
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (leader_tx, leader_rx) = watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
+        self.leader_tx = Some(leader_tx.clone());
 
         let client = self.client.clone();
         let config = self.config.clone();
@@ -97,6 +100,9 @@ impl LeaderElector {
             let _ = tx.send(true);
         }
         self.is_leader.store(false, Ordering::SeqCst);
+        if let Some(tx) = self.leader_tx.take() {
+            let _ = tx.send(false);
+        }
         info!("Leader election stopped");
     }
 }
@@ -115,7 +121,14 @@ async fn leader_election_loop(
 
     loop {
         tokio::select! {
-            _ = shutdown_rx.changed() => {
+            res = shutdown_rx.changed() => {
+                if res.is_err() {
+                    // Sender dropped without calling stop() - exit cleanly
+                    info!("Shutdown channel closed; exiting leader election loop");
+                    is_leader.store(false, Ordering::SeqCst);
+                    let _ = leader_tx.send(false);
+                    break;
+                }
                 if *shutdown_rx.borrow() {
                     info!("Shutdown signal received, releasing leadership");
                     if is_leader.load(Ordering::SeqCst) {

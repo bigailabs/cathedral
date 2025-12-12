@@ -1,11 +1,31 @@
 /// K3s installation utilities
 pub struct K3sInstaller;
 
-/// Sanitize a shell argument by removing potentially dangerous characters.
-/// Allows alphanumeric, dash, underscore, dot, colon, slash, and equals.
-fn sanitize_shell_arg(s: &str) -> String {
+/// Sanitize a shell word by removing potentially dangerous characters.
+/// Allows alphanumeric, dash, underscore, and dot only.
+/// Suitable for hostnames, node names, and general shell arguments.
+fn sanitize_shell_word(s: &str) -> String {
     s.chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '='))
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect()
+}
+
+/// Sanitize a Kubernetes label key.
+/// Label keys can contain alphanumeric, dash, underscore, dot, and slash (for prefix).
+/// See: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
+fn sanitize_label_key(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        .collect()
+}
+
+/// Sanitize a Kubernetes label value.
+/// Label values can contain alphanumeric, dash, underscore, and dot only.
+/// Must be 63 characters or less.
+fn sanitize_label_value(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(63)
         .collect()
 }
 
@@ -26,10 +46,10 @@ impl K3sInstaller {
         flannel_interface: &str,
         extra_labels: &[(String, String)],
     ) -> String {
-        // Sanitize all inputs to prevent shell injection
-        let safe_node_name = sanitize_shell_arg(node_name);
-        let safe_node_id = sanitize_shell_arg(node_id);
-        let safe_flannel = sanitize_shell_arg(flannel_interface);
+        // Sanitize inputs based on context
+        let safe_node_name = sanitize_shell_word(node_name);
+        let safe_node_id = sanitize_label_value(node_id);
+        let safe_flannel = sanitize_shell_word(flannel_interface);
 
         let mut labels = vec![
             format!("--node-label=basilica.ai/node-id={}", safe_node_id),
@@ -37,8 +57,8 @@ impl K3sInstaller {
         ];
 
         for (key, value) in extra_labels {
-            let safe_key = sanitize_shell_arg(key);
-            let safe_value = sanitize_shell_arg(value);
+            let safe_key = sanitize_label_key(key);
+            let safe_value = sanitize_label_value(value);
             labels.push(format!("--node-label={}={}", safe_key, safe_value));
         }
 
@@ -169,13 +189,42 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_shell_arg_removes_dangerous_chars() {
-        assert_eq!(sanitize_shell_arg("node-123"), "node-123");
-        assert_eq!(sanitize_shell_arg("node_name.local"), "node_name.local");
-        assert_eq!(sanitize_shell_arg("$(rm -rf /)"), "rm-rf/");
-        assert_eq!(sanitize_shell_arg("test`whoami`"), "testwhoami");
-        assert_eq!(sanitize_shell_arg("test;echo"), "testecho");
-        assert_eq!(sanitize_shell_arg("label=value"), "label=value");
+    fn sanitize_shell_word_removes_dangerous_chars() {
+        assert_eq!(sanitize_shell_word("node-123"), "node-123");
+        assert_eq!(sanitize_shell_word("node_name.local"), "node_name.local");
+        assert_eq!(sanitize_shell_word("$(rm -rf /)"), "rm-rf");
+        assert_eq!(sanitize_shell_word("test`whoami`"), "testwhoami");
+        assert_eq!(sanitize_shell_word("test;echo"), "testecho");
+        assert_eq!(sanitize_shell_word("label=value"), "labelvalue");
+    }
+
+    #[test]
+    fn sanitize_label_key_allows_slash_for_prefix() {
+        assert_eq!(
+            sanitize_label_key("basilica.ai/node-id"),
+            "basilica.ai/node-id"
+        );
+        assert_eq!(
+            sanitize_label_key("kubernetes.io/arch"),
+            "kubernetes.io/arch"
+        );
+        assert_eq!(sanitize_label_key("app"), "app");
+        assert_eq!(sanitize_label_key("app=value"), "appvalue");
+    }
+
+    #[test]
+    fn sanitize_label_value_enforces_k8s_rules() {
+        assert_eq!(sanitize_label_value("node-123"), "node-123");
+        assert_eq!(sanitize_label_value("my_value.test"), "my_value.test");
+        assert_eq!(sanitize_label_value("no:colons"), "nocolons");
+        assert_eq!(sanitize_label_value("no=equals"), "noequals");
+        assert_eq!(sanitize_label_value("no/slashes"), "noslashes");
+    }
+
+    #[test]
+    fn sanitize_label_value_truncates_to_63_chars() {
+        let long_value = "a".repeat(100);
+        assert_eq!(sanitize_label_value(&long_value).len(), 63);
     }
 
     #[test]

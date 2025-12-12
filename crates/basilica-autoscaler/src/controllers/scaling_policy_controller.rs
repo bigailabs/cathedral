@@ -130,7 +130,7 @@ where
                     info!(policy = %name, count = %count, "Scaling down");
                     self.scale_down(ns, &node_pools, count).await?;
                     status.last_scale_down_time = Some(Utc::now());
-                    status.pending_scale_down = count;
+                    status.pending_scale_down = status.pending_scale_down.saturating_add(count);
                     add_condition(
                         &mut status,
                         "Scaling",

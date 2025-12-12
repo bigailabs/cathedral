@@ -174,8 +174,9 @@ where
             }
         }
 
-        // Note: node_id is in spec.node_id, not status
-        if let Some(node_id) = &pool.spec.node_id {
+        // Deregister node (prefer status.node_id for dynamic mode, fall back to spec)
+        let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+        if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
                 warn!(node = %node_id, error = %e, "Failed to deregister node");
             }
@@ -392,9 +393,8 @@ where
         let name = pool.name_any();
         info!(pool = %name, "Installing WireGuard");
 
-        let node_id = pool.spec.node_id.clone().ok_or_else(|| {
-            AutoscalerError::InvalidConfiguration("Missing node_id in spec".to_string())
-        })?;
+        // Use resolve_node_id to support both static (spec) and dynamic (status) modes
+        let node_id = resolve_node_id(pool, &status, None)?;
 
         let ssh_config = self.get_ssh_config(ns, pool).await?;
         let (host, port) = self.get_ssh_endpoint(pool, &status)?;
@@ -730,8 +730,9 @@ where
             self.metrics.record_rental_stopped(&name);
         }
 
-        // Deregister node
-        if let Some(node_id) = &pool.spec.node_id {
+        // Deregister node (prefer status.node_id for dynamic mode, fall back to spec)
+        let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+        if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
                 warn!(node = %node_id, error = %e, "Failed to deregister node");
             }
@@ -776,8 +777,9 @@ where
             | NodePoolPhase::InstallingWireGuard
             | NodePoolPhase::ValidatingNetwork
             | NodePoolPhase::JoiningCluster => {
-                // Deregister node if registered
-                if let Some(node_id) = &pool.spec.node_id {
+                // Deregister node if registered (prefer status.node_id for dynamic mode)
+                let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+                if let Some(node_id) = resolved_node_id {
                     if let Err(e) = self.api.deregister_node(node_id).await {
                         warn!(pool = %name, node = %node_id, error = %e, "Failed to deregister node during cleanup");
                     }
@@ -796,8 +798,9 @@ where
                         warn!(pool = %name, node = %node_name, error = %e, "Failed to delete node during cleanup");
                     }
                 }
-                // Deregister and stop rental
-                if let Some(node_id) = &pool.spec.node_id {
+                // Deregister and stop rental (prefer status.node_id for dynamic mode)
+                let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+                if let Some(node_id) = resolved_node_id {
                     if let Err(e) = self.api.deregister_node(node_id).await {
                         warn!(pool = %name, node = %node_id, error = %e, "Failed to deregister node during cleanup");
                     }

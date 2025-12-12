@@ -398,7 +398,8 @@ impl NodeProvisioner for SshProvisioner {
         self.execute_ssh_command(host, port, ssh_config, &enable_cmd)
             .await?;
 
-        info!(host = %host, "WireGuard installed, public key: {}", &public_key[..8]);
+        let key_prefix = public_key.get(..8).unwrap_or(&public_key);
+        info!(host = %host, "WireGuard installed, public key: {}", key_prefix);
         Ok(public_key)
     }
 
