@@ -28,6 +28,7 @@ Authentication:
 """
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -438,6 +439,299 @@ class BasilicaClient:
         deployment.wait_until_ready(timeout=timeout)
 
         # Refresh to get final URL and state
+        deployment.refresh()
+
+        return deployment
+
+    def deploy_vllm(
+        self,
+        model: str = "Qwen/Qwen3-0.6B",
+        name: Optional[str] = None,
+        gpu_count: Optional[int] = None,
+        gpu_models: Optional[List[str]] = None,
+        memory: str = "16Gi",
+        storage: bool = True,
+        tensor_parallel_size: Optional[int] = None,
+        max_model_len: Optional[int] = None,
+        dtype: Optional[str] = None,
+        quantization: Optional[str] = None,
+        served_model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        gpu_memory_utilization: Optional[float] = None,
+        enforce_eager: bool = False,
+        trust_remote_code: bool = False,
+        env: Optional[Dict[str, str]] = None,
+        ttl_seconds: Optional[int] = None,
+        timeout: int = 600,
+    ) -> Deployment:
+        """
+        Deploy a vLLM inference server.
+
+        Args:
+            model: HuggingFace model ID (default: Qwen/Qwen3-0.6B)
+            name: Deployment name (auto-generated if not specified)
+            gpu_count: Number of GPUs (auto-detected based on model size if not specified)
+            gpu_models: GPU model requirements (e.g., ["A100", "H100"])
+            memory: Memory allocation (default: 16Gi)
+            storage: Enable persistent storage for model cache (default: True)
+            tensor_parallel_size: Number of GPUs for tensor parallelism
+            max_model_len: Maximum sequence length
+            dtype: Model dtype (auto, float16, bfloat16)
+            quantization: Quantization method (awq, gptq, squeezellm, fp8)
+            served_model_name: OpenAI API model name
+            api_key: API key for vLLM authentication
+            gpu_memory_utilization: Fraction of GPU memory to use (0.0-1.0)
+            enforce_eager: Disable CUDA graphs
+            trust_remote_code: Allow custom model code from HuggingFace
+            env: Additional environment variables
+            ttl_seconds: Auto-delete after this many seconds
+            timeout: Wait timeout in seconds
+
+        Returns:
+            Deployment object with .url, .status(), .logs(), .delete() methods
+
+        Example:
+            >>> client = BasilicaClient()
+            >>> deployment = client.deploy_vllm("meta-llama/Llama-2-7b")
+            >>> print(f"OpenAI API: {deployment.url}/v1/chat/completions")
+        """
+        from .templates.model_size import estimate_gpu_requirements
+
+        # Always estimate GPU requirements to get recommended GPU
+        reqs = estimate_gpu_requirements(model)
+
+        # Use user-specified GPU count or auto-detected
+        if gpu_count is None:
+            gpu_count = reqs.gpu_count
+
+        # Use user-specified GPU models or recommended GPU
+        effective_gpu_models = gpu_models if gpu_models else [reqs.recommended_gpu]
+
+        # Generate name if not provided
+        if name is None:
+            import uuid
+            model_part = model.split("/")[-1].lower()
+            model_part = re.sub(r"[^a-z0-9-]", "-", model_part)[:40].strip("-")
+            name = f"vllm-{model_part}-{str(uuid.uuid4())[:8]}"
+
+        # Build vLLM command
+        args = [
+            "serve", model,
+            "--host", "0.0.0.0",
+            "--port", "8000",
+        ]
+
+        if tensor_parallel_size is not None:
+            args.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
+        if max_model_len is not None:
+            args.extend(["--max-model-len", str(max_model_len)])
+        if dtype is not None:
+            args.extend(["--dtype", dtype])
+        if quantization is not None:
+            args.extend(["--quantization", quantization])
+        if served_model_name is not None:
+            args.extend(["--served-model-name", served_model_name])
+        if api_key is not None:
+            args.extend(["--api-key", api_key])
+        if gpu_memory_utilization is not None:
+            args.extend(["--gpu-memory-utilization", str(gpu_memory_utilization)])
+        if enforce_eager:
+            args.append("--enforce-eager")
+        if trust_remote_code:
+            args.append("--trust-remote-code")
+
+        # Build storage spec
+        storage_spec = None
+        if storage:
+            storage_spec = StorageSpec(
+                persistent=PersistentStorageSpec(
+                    enabled=True,
+                    backend=StorageBackend.R2,
+                    bucket="",
+                    credentials_secret="basilica-r2-credentials",
+                    sync_interval_ms=1000,
+                    cache_size_mb=4096,
+                    mount_path="/root/.cache",
+                )
+            )
+
+        # Build GPU spec
+        gpu_spec = GpuRequirementsSpec(
+            count=gpu_count,
+            model=effective_gpu_models,
+            min_cuda_version=None,
+            min_gpu_memory_gb=None,
+        )
+
+        # Build resources
+        resources = ResourceRequirements(
+            cpu="4",
+            memory=memory,
+            gpus=gpu_spec,
+        )
+
+        # Create the deployment request
+        request = CreateDeploymentRequest(
+            instance_name=name,
+            image="vllm/vllm-openai:latest",
+            replicas=1,
+            port=8000,
+            command=["vllm"],
+            args=args,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds,
+            public=True,
+            storage=storage_spec,
+        )
+
+        # Create deployment
+        response = self._client.create_deployment(request)
+
+        # Create Deployment facade
+        deployment = Deployment._from_response(self, response)
+
+        # Wait for deployment to be ready
+        deployment.wait_until_ready(timeout=timeout)
+        deployment.refresh()
+
+        return deployment
+
+    def deploy_sglang(
+        self,
+        model: str = "Qwen/Qwen2.5-0.5B-Instruct",
+        name: Optional[str] = None,
+        gpu_count: Optional[int] = None,
+        gpu_models: Optional[List[str]] = None,
+        memory: str = "16Gi",
+        storage: bool = True,
+        tensor_parallel_size: Optional[int] = None,
+        context_length: Optional[int] = None,
+        quantization: Optional[str] = None,
+        mem_fraction_static: Optional[float] = None,
+        trust_remote_code: bool = False,
+        env: Optional[Dict[str, str]] = None,
+        ttl_seconds: Optional[int] = None,
+        timeout: int = 600,
+    ) -> Deployment:
+        """
+        Deploy an SGLang inference server.
+
+        Args:
+            model: HuggingFace model ID (default: Qwen/Qwen2.5-0.5B-Instruct)
+            name: Deployment name (auto-generated if not specified)
+            gpu_count: Number of GPUs (auto-detected based on model size if not specified)
+            gpu_models: GPU model requirements (e.g., ["A100", "H100"])
+            memory: Memory allocation (default: 16Gi)
+            storage: Enable persistent storage for model cache (default: True)
+            tensor_parallel_size: Number of GPUs for tensor parallelism
+            context_length: Maximum context length
+            quantization: Quantization method
+            mem_fraction_static: Static memory fraction (0.0-1.0)
+            trust_remote_code: Allow custom model code from HuggingFace
+            env: Additional environment variables
+            ttl_seconds: Auto-delete after this many seconds
+            timeout: Wait timeout in seconds
+
+        Returns:
+            Deployment object with .url, .status(), .logs(), .delete() methods
+
+        Example:
+            >>> client = BasilicaClient()
+            >>> deployment = client.deploy_sglang("Qwen/Qwen2.5-0.5B-Instruct")
+            >>> print(deployment.url)
+        """
+        from .templates.model_size import estimate_gpu_requirements
+
+        # Always estimate GPU requirements to get recommended GPU
+        reqs = estimate_gpu_requirements(model)
+
+        # Use user-specified GPU count or auto-detected
+        if gpu_count is None:
+            gpu_count = reqs.gpu_count
+
+        # Use user-specified GPU models or recommended GPU
+        effective_gpu_models = gpu_models if gpu_models else [reqs.recommended_gpu]
+
+        # Generate name if not provided
+        if name is None:
+            import uuid
+            model_part = model.split("/")[-1].lower()
+            model_part = re.sub(r"[^a-z0-9-]", "-", model_part)[:40].strip("-")
+            name = f"sglang-{model_part}-{str(uuid.uuid4())[:8]}"
+
+        # Build SGLang command
+        args = [
+            "-m", "sglang.launch_server",
+            "--model-path", model,
+            "--host", "0.0.0.0",
+            "--port", "30000",
+        ]
+
+        if tensor_parallel_size is not None:
+            args.extend(["--tp", str(tensor_parallel_size)])
+        if context_length is not None:
+            args.extend(["--context-length", str(context_length)])
+        if quantization is not None:
+            args.extend(["--quantization", quantization])
+        if mem_fraction_static is not None:
+            args.extend(["--mem-fraction-static", str(mem_fraction_static)])
+        if trust_remote_code:
+            args.append("--trust-remote-code")
+
+        # Build storage spec
+        storage_spec = None
+        if storage:
+            storage_spec = StorageSpec(
+                persistent=PersistentStorageSpec(
+                    enabled=True,
+                    backend=StorageBackend.R2,
+                    bucket="",
+                    credentials_secret="basilica-r2-credentials",
+                    sync_interval_ms=1000,
+                    cache_size_mb=4096,
+                    mount_path="/root/.cache",
+                )
+            )
+
+        # Build GPU spec
+        gpu_spec = GpuRequirementsSpec(
+            count=gpu_count,
+            model=effective_gpu_models,
+            min_cuda_version=None,
+            min_gpu_memory_gb=None,
+        )
+
+        # Build resources
+        resources = ResourceRequirements(
+            cpu="4",
+            memory=memory,
+            gpus=gpu_spec,
+        )
+
+        # Create the deployment request
+        request = CreateDeploymentRequest(
+            instance_name=name,
+            image="lmsysorg/sglang:latest",
+            replicas=1,
+            port=30000,
+            command=["python"],
+            args=args,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds,
+            public=True,
+            storage=storage_spec,
+        )
+
+        # Create deployment
+        response = self._client.create_deployment(request)
+
+        # Create Deployment facade
+        deployment = Deployment._from_response(self, response)
+
+        # Wait for deployment to be ready
+        deployment.wait_until_ready(timeout=timeout)
         deployment.refresh()
 
         return deployment
