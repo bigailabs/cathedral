@@ -28,8 +28,8 @@ pub enum PollerError {
 #[derive(Debug, Default, Clone)]
 pub struct PollStats {
     pub total_rows: usize,
-    pub ready_rows: usize,
-    pub skipped_not_ready: usize,
+    pub active_rows: usize,
+    pub skipped_inactive: usize,
     pub skipped_invalid: usize,
     pub created: usize,
     pub updated: usize,
@@ -38,6 +38,7 @@ pub struct PollStats {
 
 /// VIP Poller that syncs rentals from a data source (CSV file, S3, or mock)
 pub struct VipPoller<D: VipDataSource> {
+    #[allow(dead_code)] // Retained for future use (e.g., feature flags)
     config: VipConfig,
     data_source: D,
     cache: Arc<VipCache>,
@@ -83,19 +84,17 @@ impl<D: VipDataSource> VipPoller<D> {
         };
         stats.total_rows = rows.len();
 
-        // 2. Filter to ready rows and validate
+        // 2. Filter to active rows and validate
         let mut valid_machines: Vec<ValidVipMachine> = Vec::new();
         let mut seen_ids: HashSet<String> = HashSet::new();
 
         for row in rows {
-            // Check readiness gate
-            if row.ready != self.config.ready_value {
-                stats.skipped_not_ready += 1;
+            // Check if row is active
+            if !row.active {
+                stats.skipped_inactive += 1;
                 tracing::debug!(
                     vip_machine_id = %row.vip_machine_id,
-                    ready_value = %row.ready,
-                    expected = %self.config.ready_value,
-                    "Skipping row - not ready"
+                    "Skipping row - inactive"
                 );
                 continue;
             }
@@ -104,7 +103,7 @@ impl<D: VipDataSource> VipPoller<D> {
             if let Some(validated) = self.validate_row(&row) {
                 seen_ids.insert(validated.vip_machine_id.clone());
                 valid_machines.push(validated);
-                stats.ready_rows += 1;
+                stats.active_rows += 1;
             } else {
                 stats.skipped_invalid += 1;
             }
@@ -142,8 +141,8 @@ impl<D: VipDataSource> VipPoller<D> {
             poll_success = true,
             poll_duration_secs = elapsed.as_secs_f64(),
             total_rows = stats.total_rows,
-            ready_rows = stats.ready_rows,
-            skipped_not_ready = stats.skipped_not_ready,
+            active_rows = stats.active_rows,
+            skipped_inactive = stats.skipped_inactive,
             skipped_invalid = stats.skipped_invalid,
             created = stats.created,
             updated = stats.updated,

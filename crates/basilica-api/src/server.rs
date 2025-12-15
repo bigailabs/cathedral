@@ -1131,10 +1131,13 @@ impl Server {
             loop {
                 interval.tick().await;
 
-                // Query all active secure cloud rentals from the database
-                match sqlx::query_as::<_, (String,)>("SELECT id FROM secure_cloud_rentals")
-                    .fetch_all(&health_check_db)
-                    .await
+                // Query all active secure cloud rentals from the database (excluding VIP rentals
+                // which don't need health checks - they're manually managed and assumed always up)
+                match sqlx::query_as::<_, (String,)>(
+                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE",
+                )
+                .fetch_all(&health_check_db)
+                .await
                 {
                     Ok(rental_records) => {
                         // Process rentals sequentially to avoid overwhelming provider APIs
@@ -1361,7 +1364,7 @@ fn create_mock_vip_data(user_id: &str) -> Vec<VipCsvRow> {
         VipCsvRow {
             vip_machine_id: "mock-vip-h100-01".to_string(),
             assigned_user: user_id.to_string(),
-            ready: "READY".to_string(),
+            active: true,
             ssh_host: "mock-h100-01.basilica.dev".to_string(),
             ssh_port: 22,
             ssh_user: "ubuntu".to_string(),
@@ -1374,7 +1377,7 @@ fn create_mock_vip_data(user_id: &str) -> Vec<VipCsvRow> {
         VipCsvRow {
             vip_machine_id: "mock-vip-a100-01".to_string(),
             assigned_user: user_id.to_string(),
-            ready: "READY".to_string(),
+            active: true,
             ssh_host: "mock-a100-01.basilica.dev".to_string(),
             ssh_port: 22,
             ssh_user: "ubuntu".to_string(),

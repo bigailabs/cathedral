@@ -52,7 +52,7 @@ impl<D: VipDataSource + 'static> VipPollerTask<D> {
                         } else {
                             tracing::debug!(
                                 poll_duration_secs = poll_duration.as_secs_f64(),
-                                ready = stats.ready_rows,
+                                active = stats.active_rows,
                                 total = stats.total_rows,
                                 "VIP poll cycle completed (no changes)"
                             );

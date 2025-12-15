@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub struct VipCsvRow {
     pub vip_machine_id: String, // Column A
     pub assigned_user: String,  // Column B (Auth0 user ID)
-    pub ready: String,          // Column C
+    pub active: bool,           // Column C (0 = skip row, 1 = process)
     pub ssh_host: String,       // Column D
     pub ssh_port: u16,          // Column E
     pub ssh_user: String,       // Column F
@@ -24,7 +24,7 @@ impl VipCsvRow {
         Self {
             vip_machine_id: id.to_string(),
             assigned_user: user.to_string(),
-            ready: "READY".to_string(),
+            active: true,
             ssh_host: format!("{}.example.com", id),
             ssh_port: 22,
             ssh_user: "ubuntu".to_string(),

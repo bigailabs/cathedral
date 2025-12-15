@@ -121,9 +121,6 @@ pub struct VipConfig {
     /// Polling interval in seconds (default: 60)
     #[serde(default = "default_vip_poll_interval")]
     pub poll_interval_secs: u64,
-    /// Expected value in the "ready" column (default: "READY")
-    #[serde(default = "default_vip_ready_value")]
-    pub ready_value: String,
     /// Mock mode: If set, use mock data with this user ID instead of CSV
     #[serde(default)]
     pub mock_user_id: Option<String>,
@@ -137,7 +134,6 @@ impl Default for VipConfig {
             s3_bucket: None,
             s3_key: None,
             poll_interval_secs: default_vip_poll_interval(),
-            ready_value: default_vip_ready_value(),
             mock_user_id: None,
         }
     }
@@ -145,10 +141,6 @@ impl Default for VipConfig {
 
 fn default_vip_poll_interval() -> u64 {
     60
-}
-
-fn default_vip_ready_value() -> String {
-    "READY".to_string()
 }
 
 impl VipConfig {
