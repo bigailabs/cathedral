@@ -150,6 +150,49 @@ impl CircuitBreaker {
     }
 }
 
+/// Deserialize a value that can be either a string or a number into f64
+fn deserialize_string_or_f64<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct StringOrF64Visitor;
+
+    impl<'de> Visitor<'de> for StringOrF64Visitor {
+        type Value = f64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or number representing a float")
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<f64, E> {
+            Ok(v)
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<f64, E> {
+            Ok(v as f64)
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<f64, E> {
+            Ok(v as f64)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<f64, E> {
+            v.parse::<f64>().map_err(de::Error::custom)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrF64Visitor)
+}
+
+/// Response wrapper for GPU prices endpoint
+#[derive(Clone, Debug, Deserialize)]
+pub struct GpuPricesResponse {
+    pub nodes: Vec<GpuOffering>,
+    pub count: usize,
+}
+
 /// GPU offering from Secure Cloud API
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,11 +200,31 @@ pub struct GpuOffering {
     pub id: String,
     pub gpu_type: String,
     pub gpu_count: u32,
-    pub gpu_memory_gb: u32,
-    pub hourly_rate: f64,
+    #[serde(default)]
+    pub gpu_memory_gb_per_gpu: Option<u32>,
+    #[serde(alias = "hourly_rate", deserialize_with = "deserialize_string_or_f64")]
+    pub hourly_rate_per_gpu: f64,
     pub provider: String,
-    pub region: Option<String>,
-    pub available: bool,
+    pub region: String,
+    #[serde(alias = "available")]
+    pub availability: bool,
+}
+
+impl GpuOffering {
+    /// Get GPU memory in GB (convenience accessor)
+    pub fn gpu_memory_gb(&self) -> u32 {
+        self.gpu_memory_gb_per_gpu.unwrap_or(0)
+    }
+
+    /// Get hourly rate (convenience accessor for backwards compatibility)
+    pub fn hourly_rate(&self) -> f64 {
+        self.hourly_rate_per_gpu
+    }
+
+    /// Check if available (convenience accessor for backwards compatibility)
+    pub fn available(&self) -> bool {
+        self.availability
+    }
 }
 
 /// Rental information from Secure Cloud API
@@ -169,11 +232,14 @@ pub struct GpuOffering {
 #[serde(rename_all = "snake_case")]
 pub struct RentalInfo {
     pub rental_id: String,
-    pub provider_id: String,
+    pub deployment_id: String,
     pub provider: String,
-    pub external_ip: String,
-    pub ssh_port: u16,
     pub status: String,
+    #[serde(default)]
+    pub ip_address: Option<String>,
+    #[serde(default)]
+    pub ssh_command: Option<String>,
+    pub hourly_cost: f64,
 }
 
 /// Node registration request
@@ -251,7 +317,7 @@ pub struct WireGuardRegistrationResponse {
 #[serde(rename_all = "snake_case")]
 pub struct StartRentalRequest {
     pub offering_id: String,
-    pub ssh_key_id: String,
+    pub ssh_public_key_id: String,
 }
 
 /// Trait for Secure Cloud API operations
@@ -395,7 +461,7 @@ impl SecureCloudClient {
 impl SecureCloudApi for SecureCloudClient {
     async fn list_offerings(&self) -> Result<Vec<GpuOffering>> {
         self.check_circuit().await?;
-        let url = format!("{}/v1/secure-cloud/offerings", self.base_url);
+        let url = format!("{}/secure-cloud/gpu-prices", self.base_url);
         debug!("Listing GPU offerings from {}", url);
 
         let result = async {
@@ -415,9 +481,9 @@ impl SecureCloudApi for SecureCloudClient {
                 )));
             }
 
-            let offerings: Vec<GpuOffering> = response.json().await?;
-            info!("Retrieved {} GPU offerings", offerings.len());
-            Ok(offerings)
+            let response_body: GpuPricesResponse = response.json().await?;
+            info!("Retrieved {} GPU offerings", response_body.count);
+            Ok(response_body.nodes)
         }
         .await;
 
@@ -435,12 +501,12 @@ impl SecureCloudApi for SecureCloudClient {
 
     async fn start_rental(&self, offering_id: &str, ssh_key_id: &str) -> Result<RentalInfo> {
         self.check_circuit().await?;
-        let url = format!("{}/v1/secure-cloud/rentals", self.base_url);
+        let url = format!("{}/secure-cloud/rentals/start", self.base_url);
         info!("Starting rental for offering {}", offering_id);
 
         let request = StartRentalRequest {
             offering_id: offering_id.to_string(),
-            ssh_key_id: ssh_key_id.to_string(),
+            ssh_public_key_id: ssh_key_id.to_string(),
         };
 
         let result = async {
@@ -476,13 +542,13 @@ impl SecureCloudApi for SecureCloudClient {
 
     async fn stop_rental(&self, rental_id: &str) -> Result<()> {
         self.check_circuit().await?;
-        let url = format!("{}/v1/secure-cloud/rentals/{}", self.base_url, rental_id);
+        let url = format!("{}/secure-cloud/rentals/{}/stop", self.base_url, rental_id);
         info!("Stopping rental {}", rental_id);
 
         let result = async {
             let response = self
                 .client
-                .delete(&url)
+                .post(&url)
                 .header("Authorization", self.auth_header())
                 .send()
                 .await?;
@@ -699,21 +765,67 @@ mod tests {
 
     #[test]
     fn gpu_offering_deserializes() {
+        // Test with API response format (snake_case fields from aggregator)
         let json = r#"{
             "id": "rtx4090-2gpu",
             "gpu_type": "RTX_4090",
             "gpu_count": 2,
-            "gpu_memory_gb": 24,
-            "hourly_rate": 1.5,
+            "gpu_memory_gb_per_gpu": 24,
+            "hourly_rate_per_gpu": 1.5,
             "provider": "hyperstack",
             "region": "us-east-1",
-            "available": true
+            "availability": true
         }"#;
 
         let offering: GpuOffering = serde_json::from_str(json).unwrap();
         assert_eq!(offering.id, "rtx4090-2gpu");
         assert_eq!(offering.gpu_count, 2);
-        assert!(offering.available);
+        assert_eq!(offering.gpu_memory_gb(), 24);
+        assert_eq!(offering.hourly_rate(), 1.5);
+        assert!(offering.available());
+    }
+
+    #[test]
+    fn gpu_offering_deserializes_with_aliases() {
+        // Test with legacy field names (aliases should work)
+        let json = r#"{
+            "id": "a100-1gpu",
+            "gpu_type": "A100",
+            "gpu_count": 1,
+            "hourly_rate": 2.5,
+            "provider": "datacrunch",
+            "region": "eu-west-1",
+            "available": true
+        }"#;
+
+        let offering: GpuOffering = serde_json::from_str(json).unwrap();
+        assert_eq!(offering.id, "a100-1gpu");
+        assert_eq!(offering.gpu_count, 1);
+        assert_eq!(offering.gpu_memory_gb(), 0); // None defaults to 0
+        assert_eq!(offering.hourly_rate(), 2.5);
+        assert!(offering.available());
+    }
+
+    #[test]
+    fn gpu_offering_deserializes_string_hourly_rate() {
+        // Test with string-formatted hourly_rate (as returned by API's Decimal type)
+        let json = r#"{
+            "id": "h100-8gpu",
+            "gpu_type": "H100",
+            "gpu_count": 8,
+            "gpu_memory_gb_per_gpu": 80,
+            "hourly_rate_per_gpu": "1.76000",
+            "provider": "hyperstack",
+            "region": "us-west-2",
+            "availability": true
+        }"#;
+
+        let offering: GpuOffering = serde_json::from_str(json).unwrap();
+        assert_eq!(offering.id, "h100-8gpu");
+        assert_eq!(offering.gpu_count, 8);
+        assert_eq!(offering.gpu_memory_gb(), 80);
+        assert!((offering.hourly_rate() - 1.76).abs() < 0.0001);
+        assert!(offering.available());
     }
 
     #[test]
