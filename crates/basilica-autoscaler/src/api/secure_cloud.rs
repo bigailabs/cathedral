@@ -260,6 +260,9 @@ pub trait SecureCloudApi: Send + Sync {
     /// List available GPU offerings
     async fn list_offerings(&self) -> Result<Vec<GpuOffering>>;
 
+    /// Get a specific offering by ID
+    async fn get_offering(&self, offering_id: &str) -> Result<Option<GpuOffering>>;
+
     /// Start a rental
     async fn start_rental(&self, offering_id: &str, ssh_key_id: &str) -> Result<RentalInfo>;
 
@@ -423,6 +426,11 @@ impl SecureCloudApi for SecureCloudClient {
             Err(_) => self.circuit_breaker.record_failure().await,
         }
         result
+    }
+
+    async fn get_offering(&self, offering_id: &str) -> Result<Option<GpuOffering>> {
+        let offerings = self.list_offerings().await?;
+        Ok(offerings.into_iter().find(|o| o.id == offering_id))
     }
 
     async fn start_rental(&self, offering_id: &str, ssh_key_id: &str) -> Result<RentalInfo> {
