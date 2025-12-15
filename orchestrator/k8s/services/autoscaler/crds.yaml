@@ -377,6 +377,10 @@ spec:
                 format: date-time
                 nullable: true
                 type: string
+              labelsApplied:
+                default: false
+                description: Whether GPU labels have been applied to the K8s node. Used to track label application state and avoid race conditions.
+                type: boolean
               lastError:
                 description: Last error message
                 nullable: true
@@ -410,6 +414,10 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              offeringId:
+                description: GPU offering ID (for dynamic mode)
+                nullable: true
+                type: string
               phase:
                 description: Current phase
                 enum:
@@ -651,26 +659,30 @@ spec:
                     nullable: true
                     properties:
                       gpuType:
-                        description: Preferred GPU type (e.g., RTX_4090, A100)
+                        description: Preferred GPU type (e.g., RTX_4090, A100) for dynamic selection
                         nullable: true
                         type: string
                       maxHourlyRate:
-                        description: Maximum acceptable hourly rate
+                        description: Maximum acceptable hourly rate for dynamic selection
                         format: double
                         nullable: true
                         type: number
                       minGpuCount:
                         default: 1
-                        description: Minimum GPUs per node
+                        description: Minimum GPUs per node for dynamic selection
                         format: uint32
                         minimum: 0.0
                         type: integer
+                      offeringId:
+                        description: GPU offering ID from Basilica API. If not specified, the autoscaler will dynamically select an offering based on pending pod GPU requirements.
+                        nullable: true
+                        type: string
                       preferredProvider:
-                        description: Preferred provider
+                        description: Preferred provider for dynamic selection
                         nullable: true
                         type: string
                       region:
-                        description: Preferred region
+                        description: Preferred region for dynamic selection
                         nullable: true
                         type: string
                       sshKeyId:
@@ -699,6 +711,32 @@ spec:
                     type: object
                 required:
                 - k3s
+                type: object
+              offeringConstraints:
+                description: Constraints for dynamic offering selection
+                nullable: true
+                properties:
+                  fallbackOfferingId:
+                    description: Fallback offering ID if no dynamic match found
+                    nullable: true
+                    type: string
+                  maxHourlyRate:
+                    description: Maximum acceptable hourly rate
+                    format: double
+                    nullable: true
+                    type: number
+                  providers:
+                    default: []
+                    description: Preferred providers (empty = any)
+                    items:
+                      type: string
+                    type: array
+                  regions:
+                    description: Preferred regions (empty = any)
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
                 type: object
               scaleDown:
                 default:

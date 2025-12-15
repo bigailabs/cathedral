@@ -1,0 +1,108 @@
+# Default ScalingPolicy for dynamic GPU node provisioning
+# This policy enables automatic scale-up/down based on pending GPU workloads
+#
+# Apply with: kubectl apply -f scaling-policy.yaml
+---
+apiVersion: autoscaler.basilica.ai/v1alpha1
+kind: ScalingPolicy
+metadata:
+  name: default
+  namespace: basilica-autoscaler
+spec:
+  # Enable autoscaling
+  enabled: true
+
+  # Node count limits
+  minNodes: 0
+  maxNodes: 10
+
+  # Scale-up: Number of pending GPU pods that trigger provisioning
+  scaleUpThreshold: 1
+
+  # Scale-down: Number of pods on a node below which scale-down is considered
+  scaleDownThreshold: 0
+
+  # Cooldown periods to prevent thrashing (seconds)
+  cooldownPeriods:
+    scaleUp: 60
+    scaleDown: 300
+
+  # GPU utilization thresholds for scale-down decisions
+  scaleDownPolicy:
+    # Minimum idle time before node is considered for removal (seconds)
+    nodeIdleTimeoutSecs: 300
+    # GPU utilization threshold (0-100) below which node is considered underutilized
+    gpuUtilizationThreshold: 10
+
+  # Dynamic offering selection constraints
+  # The autoscaler will query available GPU offerings and select the cheapest
+  # one that meets the pending pod requirements
+  offeringConstraints:
+    # Preferred providers (empty = any provider)
+    providers:
+      - hyperstack
+    # Preferred regions (optional, empty = any region)
+    # regions:
+    #   - us-east-1
+    #   - eu-west-1
+    # Maximum hourly rate in USD (optional)
+    maxHourlyRate: 10.0
+    # Fallback offering ID if no dynamic match found (optional)
+    # Uncomment and set if you want a default fallback
+    # fallbackOfferingId: "rtx4090-1gpu"
+
+  # Node template for dynamically provisioned nodes
+  nodeTemplate:
+    # Secure Cloud configuration for dynamic provisioning
+    secureCloud:
+      # offering_id is now OPTIONAL - dynamically selected based on pending pods
+      # Uncomment to force a specific offering (bypasses dynamic selection):
+      # offeringId: "rtx4090-2gpu"
+
+      # SSH key ID registered with your cloud provider
+      sshKeyId: "default"
+
+      # Reference to SSH private key secret
+      sshKeySecretRef:
+        name: hyperstack-ssh-key
+        namespace: basilica-ssh-keys
+        key: ssh-private-key
+
+    # K3s agent configuration
+    k3s:
+      # K3s server URL (your cluster's API endpoint)
+      serverUrl: "https://connect.basilica.ai:6443"
+
+      # Reference to K3s join token secret
+      tokenSecretRef:
+        name: k3s-cluster-token
+        namespace: basilica-autoscaler
+        key: node-token
+
+      # Additional node labels applied to provisioned nodes
+      nodeLabels:
+        basilica.ai/node-role: miner
+        basilica.ai/validated: "true"
+        basilica.ai/node-group: user-deployments
+        basilica.ai/workloads-only: "true"
+
+      # Node taints for GPU workload isolation
+      nodeTaints:
+        - nvidia.com/gpu=true:NoSchedule
+
+      # Additional K3s agent arguments
+      extraArgs:
+        - "--kubelet-arg=max-pods=50"
+
+    # Health check configuration for provisioned nodes
+    healthCheck:
+      enabled: true
+      intervalSeconds: 30
+      failureThreshold: 5
+      timeoutSeconds: 10
+
+    # Lifecycle hooks
+    lifecycle:
+      # Drain node before removal
+      drainOnRemoval: true
+      drainTimeoutSeconds: 600
