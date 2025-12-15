@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::node_pool::{K3sConfig, LifecycleConfig, SecretRef};
+use crate::offering_matcher::OfferingConstraints;
 
 /// ScalingPolicy defines the autoscaling behavior for the cluster
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
@@ -44,6 +45,10 @@ pub struct ScalingPolicySpec {
     /// Node template for dynamic provisioning
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_template: Option<NodeTemplate>,
+
+    /// Constraints for dynamic offering selection
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offering_constraints: Option<OfferingConstraints>,
 
     /// Metrics collection configuration
     #[serde(default)]
@@ -162,26 +167,29 @@ pub struct NodeTemplate {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SecureCloudTemplate {
-    /// GPU offering ID from Basilica API (required for rental)
-    pub offering_id: String,
+    /// GPU offering ID from Basilica API.
+    /// If not specified, the autoscaler will dynamically select an offering
+    /// based on pending pod GPU requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offering_id: Option<String>,
 
-    /// Preferred GPU type (e.g., RTX_4090, A100)
+    /// Preferred GPU type (e.g., RTX_4090, A100) for dynamic selection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_type: Option<String>,
 
-    /// Minimum GPUs per node
+    /// Minimum GPUs per node for dynamic selection
     #[serde(default = "default_min_gpu_count")]
     pub min_gpu_count: u32,
 
-    /// Maximum acceptable hourly rate
+    /// Maximum acceptable hourly rate for dynamic selection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_hourly_rate: Option<f64>,
 
-    /// Preferred provider
+    /// Preferred provider for dynamic selection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_provider: Option<String>,
 
-    /// Preferred region
+    /// Preferred region for dynamic selection
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
 
