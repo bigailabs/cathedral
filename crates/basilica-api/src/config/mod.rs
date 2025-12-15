@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Rental health check interval in seconds
-const RENTAL_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+/// Default secure cloud health check interval in seconds
+const DEFAULT_SECURE_CLOUD_HEALTH_CHECK_INTERVAL_SECS: u64 = 60;
 
 /// Node token cleanup interval in seconds
 const NODE_TOKEN_CLEANUP_INTERVAL_SECS: u64 = 3600;
@@ -126,6 +126,10 @@ pub struct AggregatorConfig {
     #[serde(default = "default_aggregator_ttl")]
     pub ttl_seconds: u64,
 
+    /// Health check interval for secure cloud rentals in seconds
+    #[serde(default = "default_secure_cloud_health_check_interval")]
+    pub health_check_interval_secs: u64,
+
     /// GPU provider configurations
     pub providers: AggregatorProvidersConfig,
 }
@@ -134,10 +138,15 @@ fn default_aggregator_ttl() -> u64 {
     45
 }
 
+fn default_secure_cloud_health_check_interval() -> u64 {
+    DEFAULT_SECURE_CLOUD_HEALTH_CHECK_INTERVAL_SECS
+}
+
 impl Default for AggregatorConfig {
     fn default() -> Self {
         Self {
             ttl_seconds: default_aggregator_ttl(),
+            health_check_interval_secs: default_secure_cloud_health_check_interval(),
             providers: AggregatorProvidersConfig::default(),
         }
     }
@@ -299,9 +308,9 @@ impl Config {
         Duration::from_secs(30) // Default 30 seconds
     }
 
-    /// Get rental health check interval as Duration
+    /// Get secure cloud rental health check interval as Duration
     pub fn rental_health_check_interval(&self) -> Duration {
-        Duration::from_secs(RENTAL_HEALTH_CHECK_INTERVAL_SECS)
+        Duration::from_secs(self.aggregator.health_check_interval_secs)
     }
 
     /// Get node token cleanup interval as Duration
