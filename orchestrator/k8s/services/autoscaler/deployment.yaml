@@ -180,26 +180,6 @@ data:
     max_retries = 3
     retry_delay_secs = 5
 ---
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: basilica-autoscaler
-  namespace: basilica-autoscaler
-  labels:
-    app: basilica-autoscaler
-spec:
-  selector:
-    matchLabels:
-      app: basilica-autoscaler
-  namespaceSelector:
-    matchNames:
-      - basilica-autoscaler
-  endpoints:
-    - port: metrics
-      path: /metrics
-      interval: 30s
-      scrapeTimeout: 10s
----
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

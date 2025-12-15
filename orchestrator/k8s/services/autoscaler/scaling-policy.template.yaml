@@ -72,7 +72,7 @@ spec:
       # offeringId: "rtx4090-2gpu"
 
       # SSH key ID registered with your cloud provider
-      sshKeyId: "35f0ab63-e983-40b0-b53d-953cf67b53d2"
+      sshKeyId: "default"
 
       # Reference to SSH private key secret
       sshKeySecretRef:

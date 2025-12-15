@@ -716,6 +716,10 @@ spec:
                 description: Constraints for dynamic offering selection
                 nullable: true
                 properties:
+                  allowModelFallback:
+                    default: false
+                    description: Allow fallback to any available offering when requested model not found When true, if exact model match fails, will select cheapest offering meeting GPU count and other constraints (ignoring model requirement)
+                    type: boolean
                   fallbackOfferingId:
                     description: Fallback offering ID if no dynamic match found
                     nullable: true
