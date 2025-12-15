@@ -99,6 +99,12 @@ pub struct OfferingConstraints {
     /// Fallback offering ID if no dynamic match found
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_offering_id: Option<String>,
+
+    /// Allow fallback to any available offering when requested model not found
+    /// When true, if exact model match fails, will select cheapest offering
+    /// meeting GPU count and other constraints (ignoring model requirement)
+    #[serde(default)]
+    pub allow_model_fallback: bool,
 }
 
 impl OfferingConstraints {
@@ -116,6 +122,7 @@ impl OfferingConstraints {
             regions: region.map(|r| vec![r.to_string()]),
             max_hourly_rate,
             fallback_offering_id: None,
+            allow_model_fallback: false,
         }
     }
 
@@ -134,6 +141,7 @@ impl OfferingConstraints {
                 .fallback_offering_id
                 .clone()
                 .or_else(|| other.fallback_offering_id.clone()),
+            allow_model_fallback: self.allow_model_fallback || other.allow_model_fallback,
         }
     }
 }
@@ -316,7 +324,7 @@ impl OfferingMatcher {
 
     fn matches_memory(&self, offering: &GpuOffering, min_memory: Option<u32>) -> bool {
         match min_memory {
-            Some(min) => offering.gpu_memory_gb >= min,
+            Some(min) => offering.gpu_memory_gb() >= min,
             None => true,
         }
     }
@@ -333,20 +341,13 @@ impl OfferingMatcher {
         }
 
         if let Some(ref regions) = c.regions {
-            if !regions.is_empty() {
-                match &offering.region {
-                    Some(offering_region) => {
-                        if !regions.contains(offering_region) {
-                            return false;
-                        }
-                    }
-                    None => return false,
-                }
+            if !regions.is_empty() && !regions.contains(&offering.region) {
+                return false;
             }
         }
 
         if let Some(max_rate) = c.max_hourly_rate {
-            if offering.hourly_rate > max_rate {
+            if offering.hourly_rate() > max_rate {
                 return false;
             }
         }
@@ -366,7 +367,7 @@ impl OfferingSelector for OfferingMatcher {
 
         let best = offerings
             .iter()
-            .filter(|o| o.available)
+            .filter(|o| o.available())
             .filter(|o| o.gpu_count >= requirements.gpu_count)
             .filter(|o| self.matches_model(o, &requirements.gpu_models))
             .filter(|o| self.matches_memory(o, requirements.min_gpu_memory_gb))
@@ -432,8 +433,8 @@ fn compare_offerings(a: &GpuOffering, b: &GpuOffering, required_gpu_count: u32) 
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
         _ => a
-            .hourly_rate
-            .total_cmp(&b.hourly_rate)
+            .hourly_rate()
+            .total_cmp(&b.hourly_rate())
             .then_with(|| a.gpu_count.cmp(&b.gpu_count))
             .then_with(|| a.id.cmp(&b.id)),
     }
@@ -661,6 +662,27 @@ pub fn calculate_nodes_needed(
 mod tests {
     use super::*;
 
+    /// Test helper to create a GpuOffering with sensible defaults
+    fn test_offering(
+        id: &str,
+        gpu_type: &str,
+        gpu_count: u32,
+        gpu_memory_gb: u32,
+        hourly_rate: f64,
+        provider: &str,
+    ) -> GpuOffering {
+        GpuOffering {
+            id: id.to_string(),
+            gpu_type: gpu_type.to_string(),
+            gpu_count,
+            gpu_memory_gb_per_gpu: Some(gpu_memory_gb),
+            hourly_rate_per_gpu: hourly_rate,
+            provider: provider.to_string(),
+            region: "us-east-1".to_string(),
+            availability: true,
+        }
+    }
+
     #[test]
     fn test_normalize_gpu_model() {
         assert_eq!(normalize_gpu_model("A100"), "A100");
@@ -684,26 +706,8 @@ mod tests {
 
     #[test]
     fn test_compare_offerings_prefers_exact_match() {
-        let a = GpuOffering {
-            id: "a".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 2,
-            gpu_memory_gb: 40,
-            hourly_rate: 3.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
-        let b = GpuOffering {
-            id: "b".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 4,
-            gpu_memory_gb: 40,
-            hourly_rate: 2.0, // Cheaper but more GPUs
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let a = test_offering("a", "A100", 2, 40, 3.0, "test");
+        let b = test_offering("b", "A100", 4, 40, 2.0, "test"); // Cheaper but more GPUs
 
         // With requirement of 2 GPUs, exact match (a) should be preferred
         assert_eq!(compare_offerings(&a, &b, 2), Ordering::Less);
@@ -711,26 +715,8 @@ mod tests {
 
     #[test]
     fn test_compare_offerings_prefers_cheaper_when_no_exact_match() {
-        let a = GpuOffering {
-            id: "a".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 4,
-            gpu_memory_gb: 40,
-            hourly_rate: 5.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
-        let b = GpuOffering {
-            id: "b".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 4,
-            gpu_memory_gb: 40,
-            hourly_rate: 3.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let a = test_offering("a", "A100", 4, 40, 5.0, "test");
+        let b = test_offering("b", "A100", 4, 40, 3.0, "test");
 
         // Both have 4 GPUs, so cheaper (b) should be preferred
         assert_eq!(compare_offerings(&a, &b, 2), Ordering::Greater);
@@ -738,26 +724,8 @@ mod tests {
 
     #[test]
     fn test_compare_offerings_handles_nan() {
-        let a = GpuOffering {
-            id: "a".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 2,
-            gpu_memory_gb: 40,
-            hourly_rate: f64::NAN,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
-        let b = GpuOffering {
-            id: "b".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 2,
-            gpu_memory_gb: 40,
-            hourly_rate: 3.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let a = test_offering("a", "A100", 2, 40, f64::NAN, "test");
+        let b = test_offering("b", "A100", 2, 40, 3.0, "test");
 
         // total_cmp handles NaN gracefully
         let _ = compare_offerings(&a, &b, 2);
@@ -765,16 +733,7 @@ mod tests {
 
     #[test]
     fn test_calculate_nodes_needed() {
-        let offering = GpuOffering {
-            id: "test".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 8,
-            gpu_memory_gb: 40,
-            hourly_rate: 10.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let offering = test_offering("test", "A100", 8, 40, 10.0, "test");
 
         let pods: Vec<PendingGpuPod> = (0..5)
             .map(|i| PendingGpuPod {
@@ -792,16 +751,7 @@ mod tests {
 
     #[test]
     fn test_calculate_nodes_needed_single_gpu_pods() {
-        let offering = GpuOffering {
-            id: "test".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 4,
-            gpu_memory_gb: 40,
-            hourly_rate: 10.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let offering = test_offering("test", "A100", 4, 40, 10.0, "test");
 
         let pods: Vec<PendingGpuPod> = (0..10)
             .map(|i| PendingGpuPod {
@@ -819,16 +769,7 @@ mod tests {
 
     #[test]
     fn test_calculate_nodes_needed_insufficient_offering() {
-        let offering = GpuOffering {
-            id: "test".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 1,
-            gpu_memory_gb: 40,
-            hourly_rate: 10.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let offering = test_offering("test", "A100", 1, 40, 10.0, "test");
 
         let pods: Vec<PendingGpuPod> = vec![PendingGpuPod {
             pod_name: "pod-0".to_string(),
@@ -848,16 +789,7 @@ mod tests {
             OfferingMatcherConfig::default(),
         );
 
-        let offering = GpuOffering {
-            id: "test".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 2,
-            gpu_memory_gb: 40,
-            hourly_rate: 3.0,
-            provider: "hyperstack".to_string(),
-            region: None,
-            available: true,
-        };
+        let offering = test_offering("test", "A100", 2, 40, 3.0, "hyperstack");
 
         let constraints = OfferingConstraints {
             providers: vec!["hyperstack".to_string()],
@@ -879,16 +811,7 @@ mod tests {
             OfferingMatcherConfig::default(),
         );
 
-        let offering = GpuOffering {
-            id: "test".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 2,
-            gpu_memory_gb: 40,
-            hourly_rate: 5.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        };
+        let offering = test_offering("test", "A100", 2, 40, 5.0, "test");
 
         let constraints = OfferingConstraints {
             max_hourly_rate: Some(10.0),
@@ -905,16 +828,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_returns_offerings() {
-        let api = Arc::new(MockOfferingsApi::with_offerings(vec![GpuOffering {
-            id: "test-1".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 4,
-            gpu_memory_gb: 40,
-            hourly_rate: 3.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        }]));
+        let api = Arc::new(MockOfferingsApi::with_offerings(vec![
+            test_offering("test-1", "A100", 4, 40, 3.0, "test"),
+        ]));
 
         let matcher = OfferingMatcher::new(api, OfferingMatcherConfig::default());
 
@@ -930,26 +846,8 @@ mod tests {
     #[tokio::test]
     async fn test_cache_invalidation_removes_offering() {
         let api = Arc::new(MockOfferingsApi::with_offerings(vec![
-            GpuOffering {
-                id: "offering-1".to_string(),
-                gpu_type: "A100".to_string(),
-                gpu_count: 4,
-                gpu_memory_gb: 40,
-                hourly_rate: 5.0,
-                provider: "test".to_string(),
-                region: None,
-                available: true,
-            },
-            GpuOffering {
-                id: "offering-2".to_string(),
-                gpu_type: "A100".to_string(),
-                gpu_count: 4,
-                gpu_memory_gb: 40,
-                hourly_rate: 3.0, // Cheaper
-                provider: "test".to_string(),
-                region: None,
-                available: true,
-            },
+            test_offering("offering-1", "A100", 4, 40, 5.0, "test"),
+            test_offering("offering-2", "A100", 4, 40, 3.0, "test"), // Cheaper
         ]));
 
         let matcher = OfferingMatcher::new(api, OfferingMatcherConfig::default());
@@ -975,16 +873,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_refresh_restores_invalidated_offerings() {
-        let offerings = vec![GpuOffering {
-            id: "offering-1".to_string(),
-            gpu_type: "A100".to_string(),
-            gpu_count: 4,
-            gpu_memory_gb: 40,
-            hourly_rate: 3.0,
-            provider: "test".to_string(),
-            region: None,
-            available: true,
-        }];
+        let offerings = vec![test_offering("offering-1", "A100", 4, 40, 3.0, "test")];
 
         let api = Arc::new(MockOfferingsApi::with_offerings(offerings));
         let matcher = OfferingMatcher::new(api, OfferingMatcherConfig::default());
