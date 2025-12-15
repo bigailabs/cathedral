@@ -20,6 +20,7 @@ use crate::error::{AutoscalerError, Result};
 use crate::health::HealthState;
 use crate::leader_election::LeaderElector;
 use crate::metrics::AutoscalerMetrics;
+use crate::offering_matcher::{OfferingMatcher, OfferingMatcherConfig, OfferingSelector};
 use crate::provisioner::SshProvisioner;
 
 /// Controller runtime that manages all controllers and supporting infrastructure
@@ -50,6 +51,13 @@ impl ControllerRuntime {
 
         // Initialize metrics
         let metrics = Arc::new(AutoscalerMetrics::new());
+
+        // Initialize offering matcher for dynamic GPU selection with metrics
+        let offering_matcher = Arc::new(OfferingMatcher::with_metrics(
+            Arc::clone(&api) as Arc<dyn SecureCloudApi>,
+            OfferingMatcherConfig::default(),
+            Arc::clone(&metrics),
+        ));
 
         // Initialize health state
         let health_state = HealthState::new();
@@ -98,18 +106,23 @@ impl ControllerRuntime {
         // Set up controller context
         let reconcile_config = self.config.reconcile.clone();
 
-        // Create NodePool controller
-        let node_pool_ctrl = NodePoolController::new(
+        // Create NodePool controller with offering selector for cache invalidation
+        let node_pool_ctrl = NodePoolController::with_offering_selector(
             Arc::clone(&k8s),
             Arc::clone(&api),
             Arc::clone(&provisioner),
             Arc::clone(&metrics),
             self.config.network_validation.clone(),
+            Arc::clone(&offering_matcher),
         );
 
-        // Create ScalingPolicy controller
-        let scaling_policy_ctrl =
-            ScalingPolicyController::new(Arc::clone(&k8s), Arc::clone(&api), Arc::clone(&metrics));
+        // Create ScalingPolicy controller with offering matcher
+        let scaling_policy_ctrl = ScalingPolicyController::new(
+            Arc::clone(&k8s),
+            Arc::clone(&api),
+            Arc::clone(&offering_matcher),
+            Arc::clone(&metrics),
+        );
 
         // Set up APIs
         let np_api: Api<NodePool> = Api::namespaced(raw_client.clone(), &namespace);
@@ -117,25 +130,26 @@ impl ControllerRuntime {
 
         // Context for controllers
         #[derive(Clone)]
-        struct ControllerContext<K, A, P>
+        struct ControllerContext<K, A, P, S>
         where
             K: AutoscalerK8sClient + Clone,
             A: SecureCloudApi + Clone,
             P: crate::provisioner::NodeProvisioner + Clone,
         {
-            ctrl: NodePoolController<K, A, P>,
+            ctrl: NodePoolController<K, A, P, S>,
             success_interval: Duration,
             error_interval: Duration,
             is_leader: Arc<AtomicBool>,
         }
 
         #[derive(Clone)]
-        struct ScalingContext<K, A>
+        struct ScalingContext<K, A, S>
         where
             K: AutoscalerK8sClient + Clone,
             A: SecureCloudApi + Clone,
+            S: OfferingSelector,
         {
-            ctrl: ScalingPolicyController<K, A>,
+            ctrl: ScalingPolicyController<K, A, S>,
             success_interval: Duration,
             error_interval: Duration,
             is_leader: Arc<AtomicBool>,
@@ -166,14 +180,15 @@ impl ControllerRuntime {
         impl std::error::Error for ReconcileError {}
 
         // NodePool reconcile function
-        async fn reconcile_node_pool<K, A, P>(
+        async fn reconcile_node_pool<K, A, P, S>(
             obj: Arc<NodePool>,
-            ctx: Arc<ControllerContext<K, A, P>>,
+            ctx: Arc<ControllerContext<K, A, P, S>>,
         ) -> std::result::Result<Action, ReconcileError>
         where
             K: AutoscalerK8sClient + Clone + 'static,
             A: SecureCloudApi + Clone + 'static,
             P: crate::provisioner::NodeProvisioner + Clone + 'static,
+            S: crate::offering_matcher::MaybeOfferingSelector + 'static,
         {
             // Skip if not leader
             if !ctx.is_leader.load(Ordering::SeqCst) {
@@ -187,28 +202,30 @@ impl ControllerRuntime {
             Ok(Action::requeue(ctx.success_interval))
         }
 
-        fn error_policy_node_pool<K, A, P>(
+        fn error_policy_node_pool<K, A, P, S>(
             _obj: Arc<NodePool>,
             err: &ReconcileError,
-            ctx: Arc<ControllerContext<K, A, P>>,
+            ctx: Arc<ControllerContext<K, A, P, S>>,
         ) -> Action
         where
             K: AutoscalerK8sClient + Clone + 'static,
             A: SecureCloudApi + Clone + 'static,
             P: crate::provisioner::NodeProvisioner + Clone + 'static,
+            S: crate::offering_matcher::MaybeOfferingSelector + 'static,
         {
             warn!(error = %err, "NodePool reconcile error");
             Action::requeue(ctx.error_interval)
         }
 
         // ScalingPolicy reconcile function
-        async fn reconcile_scaling_policy<K, A>(
+        async fn reconcile_scaling_policy<K, A, S>(
             obj: Arc<ScalingPolicy>,
-            ctx: Arc<ScalingContext<K, A>>,
+            ctx: Arc<ScalingContext<K, A, S>>,
         ) -> std::result::Result<Action, ReconcileError>
         where
             K: AutoscalerK8sClient + Clone + 'static,
             A: SecureCloudApi + Clone + 'static,
+            S: OfferingSelector + 'static,
         {
             // Skip if not leader
             if !ctx.is_leader.load(Ordering::SeqCst) {
@@ -222,14 +239,15 @@ impl ControllerRuntime {
             Ok(Action::requeue(ctx.success_interval))
         }
 
-        fn error_policy_scaling_policy<K, A>(
+        fn error_policy_scaling_policy<K, A, S>(
             _obj: Arc<ScalingPolicy>,
             err: &ReconcileError,
-            ctx: Arc<ScalingContext<K, A>>,
+            ctx: Arc<ScalingContext<K, A, S>>,
         ) -> Action
         where
             K: AutoscalerK8sClient + Clone + 'static,
             A: SecureCloudApi + Clone + 'static,
+            S: OfferingSelector + 'static,
         {
             warn!(error = %err, "ScalingPolicy reconcile error");
             Action::requeue(ctx.error_interval)
