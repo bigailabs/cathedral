@@ -569,6 +569,7 @@ where
         constraints: Option<&OfferingConstraints>,
         remaining: u32,
     ) -> Result<OfferingResult> {
+        // Step 1: Try exact match with model requirements
         if let Some(offering) = self
             .offering_selector
             .find_best_offering(requirements, constraints)
@@ -577,7 +578,31 @@ where
             return Ok(OfferingResult::Found(offering));
         }
 
-        // Try fallback
+        // Step 2: If allow_model_fallback is enabled, try without model restriction
+        let allow_fallback = constraints.map(|c| c.allow_model_fallback).unwrap_or(false);
+        if allow_fallback && !requirements.gpu_models.is_empty() {
+            let relaxed_requirements = GpuRequirements {
+                gpu_count: requirements.gpu_count,
+                gpu_models: std::collections::BTreeSet::new(), // No model restriction
+                min_gpu_memory_gb: requirements.min_gpu_memory_gb,
+            };
+
+            if let Some(offering) = self
+                .offering_selector
+                .find_best_offering(&relaxed_requirements, constraints)
+                .await?
+            {
+                warn!(
+                    policy = %policy_name,
+                    requested_models = ?requirements.gpu_models,
+                    selected_model = %offering.gpu_type,
+                    "No exact model match, using fallback offering"
+                );
+                return Ok(OfferingResult::Found(offering));
+            }
+        }
+
+        // Step 3: Try explicit fallback offering ID
         if let Some(fallback_id) = constraints.and_then(|c| c.fallback_offering_id.as_ref()) {
             match self.api.get_offering(fallback_id).await {
                 Ok(Some(_)) => {

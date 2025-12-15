@@ -381,9 +381,9 @@ where
             };
 
             status.offering_id = Some(sc.offering_id.clone());
-            status.gpu_model = Some(offering.gpu_type);
+            status.gpu_model = Some(offering.gpu_type.clone());
             status.gpu_count = Some(offering.gpu_count);
-            status.gpu_memory_gb = Some(offering.gpu_memory_gb);
+            status.gpu_memory_gb = Some(offering.gpu_memory_gb());
             debug!(
                 pool = %name,
                 offering_id = ?status.offering_id,
@@ -415,12 +415,12 @@ where
             };
 
             status.rental_id = Some(rental.rental_id.clone());
-            status.external_ip = Some(rental.external_ip.clone());
+            status.external_ip = rental.ip_address.clone();
             status.provider = Some(rental.provider.clone());
-            status.provider_id = Some(rental.provider_id.clone());
+            status.provider_id = Some(rental.deployment_id.clone());
             self.metrics.record_rental_started(&name, &rental.provider);
 
-            rental.external_ip
+            rental.ip_address.clone().unwrap_or_default()
         };
 
         // Generate deterministic node_id based on external IP and persist it
