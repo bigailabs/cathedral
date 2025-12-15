@@ -137,7 +137,8 @@ mod tests {
         assert!((extract_param_count("llama-2-7b").unwrap() - 7.0).abs() < 0.001);
         assert!((extract_param_count("qwen3-0.6b").unwrap() - 0.6).abs() < 0.001);
         assert!((extract_param_count("mixtral-8x7b").unwrap() - 7.0).abs() < 0.001);
-        assert!((extract_param_count("phi-2").unwrap_or(0.0) - 0.0).abs() < 0.001); // No 'b' suffix
+        assert!((extract_param_count("phi-2").unwrap_or(0.0) - 0.0).abs() < 0.001);
+        // No 'b' suffix
     }
 
     #[test]

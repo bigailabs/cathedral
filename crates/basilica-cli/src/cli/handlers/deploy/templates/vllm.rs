@@ -224,10 +224,7 @@ fn build_vllm_command(model: &str, opts: &VllmOptions) -> (Vec<String>, Vec<Stri
     }
 
     if let Some(util) = opts.gpu_memory_utilization {
-        args.extend([
-            "--gpu-memory-utilization".to_string(),
-            util.to_string(),
-        ]);
+        args.extend(["--gpu-memory-utilization".to_string(), util.to_string()]);
     }
 
     if opts.enforce_eager {

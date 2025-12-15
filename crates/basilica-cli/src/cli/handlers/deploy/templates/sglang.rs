@@ -184,7 +184,11 @@ fn generate_sglang_name(model: &str) -> String {
 
     let prefix = if prefix.is_empty() { "sglang" } else { prefix };
 
-    format!("sglang-{}-{}", prefix, &uuid::Uuid::new_v4().to_string()[..8])
+    format!(
+        "sglang-{}-{}",
+        prefix,
+        &uuid::Uuid::new_v4().to_string()[..8]
+    )
 }
 
 /// Build SGLang launch command and arguments
@@ -485,9 +489,7 @@ fn print_sglang_success(deployment: &DeploymentResponse, model: &str) {
     println!("Example usage:");
     println!("  curl {}/generate \\", deployment.url);
     println!("    -H \"Content-Type: application/json\" \\");
-    println!(
-        "    -d '{{\"text\": \"Hello, \", \"sampling_params\": {{\"max_new_tokens\": 64}}}}'"
-    );
+    println!("    -d '{{\"text\": \"Hello, \", \"sampling_params\": {{\"max_new_tokens\": 64}}}}'");
     println!();
     println!("Commands:");
     println!(
