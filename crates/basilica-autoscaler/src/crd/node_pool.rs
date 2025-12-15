@@ -383,6 +383,10 @@ pub struct NodePoolStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
 
+    /// GPU offering ID (for dynamic mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offering_id: Option<String>,
+
     /// GPU model
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_model: Option<String>,
@@ -446,6 +450,11 @@ pub struct NodePoolStatus {
     /// Observed generation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+
+    /// Whether GPU labels have been applied to the K8s node.
+    /// Used to track label application state and avoid race conditions.
+    #[serde(default)]
+    pub labels_applied: bool,
 }
 
 /// NodePool condition
