@@ -183,6 +183,8 @@ impl<D: VipDataSource> VipPoller<D> {
                 gpu_count: row.gpu_count,
                 region: row.region.clone(),
                 hourly_rate: row.hourly_rate,
+                vcpu_count: row.vcpu_count,
+                system_memory_gb: row.system_memory_gb,
                 notes: row.notes.clone(),
             },
         })
@@ -308,6 +310,8 @@ impl<D: VipDataSource> VipPoller<D> {
             || cached.display.gpu_type != new.display.gpu_type
             || cached.display.gpu_count != new.display.gpu_count
             || cached.display.region != new.display.region
+            || cached.display.vcpu_count != new.display.vcpu_count
+            || cached.display.system_memory_gb != new.display.system_memory_gb
             || cached.display.notes != new.display.notes
     }
 

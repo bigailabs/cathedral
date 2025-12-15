@@ -98,7 +98,7 @@ impl CsvDataSource {
 
     /// Parse CSV content into VipCsvRow records
     /// Expects header row with columns: vip_machine_id, assigned_user, active, ssh_host,
-    /// ssh_port, ssh_user, gpu_type, gpu_count, region, hourly_rate, notes
+    /// ssh_port, ssh_user, gpu_type, gpu_count, region, hourly_rate, vcpu_count, system_memory_gb, notes
     fn parse_csv(&self, content: &str) -> Result<Vec<VipCsvRow>, DataSourceError> {
         let mut reader = csv::Reader::from_reader(content.as_bytes());
         let mut rows = Vec::new();
@@ -122,7 +122,8 @@ impl CsvDataSource {
     /// Parse a single CSV record into a VipCsvRow
     /// Expected columns (0-indexed):
     /// 0: vip_machine_id, 1: assigned_user, 2: active, 3: ssh_host, 4: ssh_port,
-    /// 5: ssh_user, 6: gpu_type, 7: gpu_count, 8: region, 9: hourly_rate, 10: notes (optional)
+    /// 5: ssh_user, 6: gpu_type, 7: gpu_count, 8: region, 9: hourly_rate,
+    /// 10: vcpu_count (optional), 11: system_memory_gb (optional), 12: notes (optional)
     fn parse_record(
         row_num: usize,
         record: &csv::StringRecord,
@@ -158,8 +159,12 @@ impl CsvDataSource {
         let gpu_count_str = get_col(7, "gpu_count")?;
         let region = get_col(8, "region")?;
         let hourly_rate_str = get_col(9, "hourly_rate")?;
+
+        let vcpu_count_str = get_col(10, "vcpu_count")?;
+        let system_memory_gb_str = get_col(11, "system_memory_gb")?;
+
         let notes = record
-            .get(10)
+            .get(12)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
@@ -185,6 +190,21 @@ impl CsvDataSource {
                     message: format!("Invalid hourly_rate: {}", hourly_rate_str),
                 })?;
 
+        let vcpu_count: u32 = vcpu_count_str
+            .parse()
+            .map_err(|_| DataSourceError::RowParse {
+                row: row_num,
+                message: format!("Invalid vcpu_count: {}", vcpu_count_str),
+            })?;
+
+        let system_memory_gb: u32 =
+            system_memory_gb_str
+                .parse()
+                .map_err(|_| DataSourceError::RowParse {
+                    row: row_num,
+                    message: format!("Invalid system_memory_gb: {}", system_memory_gb_str),
+                })?;
+
         Ok(VipCsvRow {
             vip_machine_id,
             assigned_user,
@@ -196,6 +216,8 @@ impl CsvDataSource {
             gpu_count,
             region,
             hourly_rate,
+            vcpu_count,
+            system_memory_gb,
             notes,
         })
     }
@@ -271,9 +293,9 @@ mod tests {
 
     #[test]
     fn test_parse_csv_valid() {
-        let csv_content = r#"vip_machine_id,assigned_user,active,ssh_host,ssh_port,ssh_user,gpu_type,gpu_count,region,hourly_rate,notes
-machine-001,auth0|user123,1,10.0.0.1,22,ubuntu,H100,8,us-east-1,25.00,Production machine
-machine-002,auth0|user456,1,10.0.0.2,22,ubuntu,A100,4,us-west-2,12.00,
+        let csv_content = r#"vip_machine_id,assigned_user,active,ssh_host,ssh_port,ssh_user,gpu_type,gpu_count,region,hourly_rate,vcpu_count,system_memory_gb,notes
+machine-001,auth0|user123,1,10.0.0.1,22,ubuntu,H100,8,us-east-1,25.00,128,500,Production machine
+machine-002,auth0|user456,1,10.0.0.2,22,ubuntu,A100,4,us-west-2,12.00,64,256,
 "#;
 
         let source = CsvDataSource::from_local("/tmp/test.csv".to_string());
@@ -291,19 +313,23 @@ machine-002,auth0|user456,1,10.0.0.2,22,ubuntu,A100,4,us-west-2,12.00,
         assert_eq!(rows[0].gpu_count, 8);
         assert_eq!(rows[0].region, "us-east-1");
         assert_eq!(rows[0].hourly_rate, Decimal::new(2500, 2));
+        assert_eq!(rows[0].vcpu_count, 128);
+        assert_eq!(rows[0].system_memory_gb, 500);
         assert_eq!(rows[0].notes, Some("Production machine".to_string()));
 
         assert_eq!(rows[1].vip_machine_id, "machine-002");
+        assert_eq!(rows[1].vcpu_count, 64);
+        assert_eq!(rows[1].system_memory_gb, 256);
         assert_eq!(rows[1].notes, None);
     }
 
     #[test]
     fn test_parse_csv_skips_invalid_rows() {
-        let csv_content = r#"vip_machine_id,assigned_user,active,ssh_host,ssh_port,ssh_user,gpu_type,gpu_count,region,hourly_rate,notes
-machine-001,auth0|user123,1,10.0.0.1,22,ubuntu,H100,8,us-east-1,25.00,
-,auth0|user456,1,10.0.0.2,22,ubuntu,A100,4,us-west-2,12.00,
-machine-003,auth0|user789,1,10.0.0.3,invalid_port,ubuntu,H100,4,us-east-1,15.00,
-machine-004,auth0|user000,INVALID,10.0.0.4,22,ubuntu,H100,4,us-east-1,15.00,
+        let csv_content = r#"vip_machine_id,assigned_user,active,ssh_host,ssh_port,ssh_user,gpu_type,gpu_count,region,hourly_rate,vcpu_count,system_memory_gb,notes
+machine-001,auth0|user123,1,10.0.0.1,22,ubuntu,H100,8,us-east-1,25.00,128,500,
+,auth0|user456,1,10.0.0.2,22,ubuntu,A100,4,us-west-2,12.00,64,256,
+machine-003,auth0|user789,1,10.0.0.3,invalid_port,ubuntu,H100,4,us-east-1,15.00,64,256,
+machine-004,auth0|user000,INVALID,10.0.0.4,22,ubuntu,H100,4,us-east-1,15.00,64,256,
 "#;
 
         let source = CsvDataSource::from_local("/tmp/test.csv".to_string());

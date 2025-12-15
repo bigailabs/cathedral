@@ -552,6 +552,10 @@ pub struct SecureCloudRentalListItem {
     /// Accumulated cost from billing service (actual tracked cost)
     /// None if billing service is unavailable
     pub accumulated_cost: Option<String>,
+
+    /// Whether this is a VIP rental (managed machine, cannot be stopped by user)
+    #[serde(default)]
+    pub is_vip: bool,
 }
 
 /// List secure cloud rentals response

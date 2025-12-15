@@ -151,6 +151,14 @@ impl VipCache {
                         .get("gpu_count")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(1) as u32;
+                    let vcpu_count = raw_json
+                        .get("vcpu_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    let system_memory_gb = raw_json
+                        .get("system_memory_gb")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
                     let notes = raw_json
                         .get("notes")
                         .and_then(|v| v.as_str())
@@ -160,6 +168,8 @@ impl VipCache {
                         gpu_count,
                         region: row.location_code.clone().unwrap_or_default(),
                         hourly_rate: Decimal::ZERO, // Not stored in DB, will be fetched from CSV
+                        vcpu_count,
+                        system_memory_gb,
                         notes,
                     }
                 } else {
@@ -168,6 +178,8 @@ impl VipCache {
                         gpu_count: 1,
                         region: row.location_code.clone().unwrap_or_default(),
                         hourly_rate: Decimal::ZERO,
+                        vcpu_count: 0,
+                        system_memory_gb: 0,
                         notes: None,
                     }
                 };

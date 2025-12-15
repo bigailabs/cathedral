@@ -1372,6 +1372,8 @@ fn create_mock_vip_data(user_id: &str) -> Vec<VipCsvRow> {
             gpu_count: 8,
             region: "us-west-2".to_string(),
             hourly_rate: Decimal::new(2500, 2), // $25.00/hr
+            vcpu_count: 128,
+            system_memory_gb: 500,
             notes: Some("Mock H100 cluster for testing".to_string()),
         },
         VipCsvRow {
@@ -1385,6 +1387,8 @@ fn create_mock_vip_data(user_id: &str) -> Vec<VipCsvRow> {
             gpu_count: 4,
             region: "us-east-1".to_string(),
             hourly_rate: Decimal::new(1200, 2), // $12.00/hr
+            vcpu_count: 64,
+            system_memory_gb: 256,
             notes: Some("Mock A100 for testing".to_string()),
         },
     ]

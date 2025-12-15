@@ -15,7 +15,9 @@ pub struct VipCsvRow {
     pub gpu_count: u32,         // Column H
     pub region: String,         // Column I
     pub hourly_rate: Decimal,   // Column J
-    pub notes: Option<String>,  // Column K (optional)
+    pub vcpu_count: u32,        // Column K
+    pub system_memory_gb: u32,  // Column L
+    pub notes: Option<String>,  // Column M (optional)
 }
 
 impl VipCsvRow {
@@ -32,6 +34,8 @@ impl VipCsvRow {
             gpu_count: 1,
             region: "us-west-2".to_string(),
             hourly_rate: Decimal::new(500, 2), // $5.00
+            vcpu_count: 64,
+            system_memory_gb: 256,
             notes: None,
         }
     }
@@ -52,6 +56,8 @@ pub struct VipDisplayInfo {
     pub gpu_count: u32,
     pub region: String,
     pub hourly_rate: Decimal,
+    pub vcpu_count: u32,
+    pub system_memory_gb: u32,
     pub notes: Option<String>,
 }
 

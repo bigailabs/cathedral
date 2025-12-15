@@ -230,7 +230,7 @@ pub async fn list_secure_cloud_rentals(
             )| {
                 // For VIP rentals, extract GPU info from raw_response and instance_type
                 // VIP rentals don't have a matching gpu_offerings entry
-                let (gpu_type, gpu_count, hourly_cost) = if is_vip {
+                let (gpu_type, gpu_count, hourly_cost, vip_vcpu, vip_ram) = if is_vip {
                     // VIP: gpu_type is stored in instance_type, gpu_count in raw_response
                     let vip_gpu_count = raw_response
                         .as_ref()
@@ -238,9 +238,29 @@ pub async fn list_secure_cloud_rentals(
                         .and_then(|v| v.as_u64())
                         .unwrap_or(1) as u32;
 
-                    // VIP hourly cost comes from billing service (cost_map), not offering
-                    // For display, we use 0.0 since actual cost tracking is in billing
-                    (instance_type.clone(), vip_gpu_count, 0.0)
+                    // VIP vcpu_count from raw_response
+                    let vip_vcpu = raw_response
+                        .as_ref()
+                        .and_then(|r| r.get("vcpu_count"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+
+                    // VIP system_memory_gb from raw_response
+                    let vip_ram = raw_response
+                        .as_ref()
+                        .and_then(|r| r.get("system_memory_gb"))
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v as u32);
+
+                    // VIP hourly rate from raw_response (marked up rate stored at insert time)
+                    let vip_hourly_rate = raw_response
+                        .as_ref()
+                        .and_then(|r| r.get("hourly_rate"))
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+
+                    (instance_type.clone(), vip_gpu_count, vip_hourly_rate, vip_vcpu, vip_ram)
                 } else if let Some(offering) = offerings_map.get(offering_id.as_str()) {
                     // Regular rental: use offering data
                     let gpu_count = offering.gpu_count;
@@ -270,7 +290,7 @@ pub async fn list_secure_cloud_rentals(
                         }
                     };
 
-                    (offering.gpu_type.to_string(), gpu_count, hourly_cost)
+                    (offering.gpu_type.to_string(), gpu_count, hourly_cost, None, None)
                 } else {
                     // Fallback if offering not found (e.g., offering expired)
                     tracing::warn!(
@@ -278,12 +298,12 @@ pub async fn list_secure_cloud_rentals(
                         offering_id,
                         rental_id
                     );
-                    ("unknown".to_string(), 0, 0.0)
+                    ("unknown".to_string(), 0, 0.0, None, None)
                 };
 
-                // Use resource specs from database JOIN (already available)
-                let vcpu_count = db_vcpu_count.map(|v| v as u32);
-                let system_memory_gb = db_system_memory_gb.map(|v| v as u32);
+                // Use VIP values if available, otherwise fall back to db values from gpu_offerings JOIN
+                let vcpu_count = if is_vip { vip_vcpu } else { db_vcpu_count.map(|v| v as u32) };
+                let system_memory_gb = if is_vip { vip_ram } else { db_system_memory_gb.map(|v| v as u32) };
 
                 // Prefer location_code from rental table, fallback to region from offering
                 let final_location_code = location_code.or(db_region);
@@ -312,6 +332,7 @@ pub async fn list_secure_cloud_rentals(
                     vcpu_count,
                     system_memory_gb,
                     accumulated_cost,
+                    is_vip,
                 }
             },
         )

@@ -41,6 +41,8 @@ pub struct PreparedVipRental {
     pub gpu_count: u32,
     pub region: String,
     pub marked_up_hourly_rate: Decimal,
+    pub vcpu_count: u32,
+    pub system_memory_gb: u32,
     pub notes: Option<String>,
 }
 
@@ -65,6 +67,8 @@ pub fn prepare_vip_rental(
         gpu_count: vip_machine.display.gpu_count,
         region: vip_machine.display.region.clone(),
         marked_up_hourly_rate,
+        vcpu_count: vip_machine.display.vcpu_count,
+        system_memory_gb: vip_machine.display.system_memory_gb,
         notes: vip_machine.display.notes.clone(),
     })
 }
@@ -112,6 +116,9 @@ pub async fn insert_vip_rental(
         "notes": prepared.notes,
         "gpu_type": prepared.gpu_type,
         "gpu_count": prepared.gpu_count,
+        "vcpu_count": prepared.vcpu_count,
+        "system_memory_gb": prepared.system_memory_gb,
+        "hourly_rate": prepared.marked_up_hourly_rate.to_string(),
     })) // raw_response - store VIP metadata
     .bind::<Option<&str>>(None) // error_message
     .bind(now) // created_at
@@ -275,6 +282,9 @@ pub async fn update_vip_rental_metadata(
         "notes": display.notes,
         "gpu_type": display.gpu_type,
         "gpu_count": display.gpu_count,
+        "vcpu_count": display.vcpu_count,
+        "system_memory_gb": display.system_memory_gb,
+        "hourly_rate": display.hourly_rate.to_string(),
     }))
     .bind(&display.gpu_type)
     .bind(&display.region)

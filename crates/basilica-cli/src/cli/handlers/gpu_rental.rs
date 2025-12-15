@@ -1191,7 +1191,8 @@ pub async fn handle_status(
         (target_id, compute_type)
     } else {
         // No rental ID provided - use unified selector
-        resolve_target_rental_unified(None, None, &api_client).await?
+        // exclude_vip=false: VIP rentals can be viewed
+        resolve_target_rental_unified(None, None, &api_client, false).await?
     };
 
     let spinner = create_spinner("Fetching rental status...");
@@ -1313,7 +1314,8 @@ pub async fn handle_logs(
         (target_id, compute_type)
     } else {
         // No rental ID provided - use unified selector
-        resolve_target_rental_unified(None, None, &api_client).await?
+        // exclude_vip=false: VIP rentals can be viewed
+        resolve_target_rental_unified(None, None, &api_client, false).await?
     };
 
     // Check if this is a secure cloud rental
@@ -1574,8 +1576,9 @@ pub async fn handle_down(
         }
     } else {
         // Single rental termination using unified resolution
+        // exclude_vip=true: VIP rentals cannot be stopped by users
         let (rental_id, compute_type) =
-            resolve_target_rental_unified(target, compute_filter, &api_client).await?;
+            resolve_target_rental_unified(target, compute_filter, &api_client, true).await?;
 
         let spinner = create_spinner(&format!("Stopping rental: {}", rental_id));
 
@@ -1641,8 +1644,9 @@ pub async fn handle_restart(target: Option<String>, config: &CliConfig) -> Resul
     let api_client = create_authenticated_client(config).await?;
 
     // Single rental restart (no --all flag as per requirements)
+    // exclude_vip=false: VIP rentals included in selector (though restart may fail for secure cloud)
     let (rental_id, _compute_type) =
-        resolve_target_rental_unified(target, None, &api_client).await?;
+        resolve_target_rental_unified(target, None, &api_client, false).await?;
     let spinner = create_spinner(&format!("Restarting rental: {}", rental_id));
 
     api_client
