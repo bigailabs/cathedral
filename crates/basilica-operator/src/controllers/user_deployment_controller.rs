@@ -531,6 +531,26 @@ pub fn render_deployment(
         );
     }
 
+    // Add GPU request labels for autoscaler detection
+    let mut annotations = BTreeMap::new();
+    if let Some(gpu) = gpu_config {
+        // Labels for quick pod identification
+        labels.insert(
+            "gpu-request.basilica.ai/count".to_string(),
+            gpu.count.to_string(),
+        );
+        if !gpu.model.is_empty() {
+            labels.insert(
+                "gpu-request.basilica.ai/model".to_string(),
+                gpu.model.join(","),
+            );
+        }
+        // Annotation with full GPU requirements (JSON) for autoscaler
+        if let Ok(json) = serde_json::to_string(gpu) {
+            annotations.insert("autoscaler.basilica.ai/gpu-requirements".to_string(), json);
+        }
+    }
+
     let resources = if let Some(ref res) = spec.resources {
         build_resources(
             &res.cpu,
@@ -597,6 +617,11 @@ pub fn render_deployment(
     let pod_template = PodTemplateSpec {
         metadata: Some(ObjectMeta {
             labels: Some(labels.clone()),
+            annotations: if annotations.is_empty() {
+                None
+            } else {
+                Some(annotations)
+            },
             ..Default::default()
         }),
         spec: Some(PodSpec {
