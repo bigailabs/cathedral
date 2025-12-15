@@ -12,12 +12,13 @@ use crate::crd::{
 };
 use crate::error::{AutoscalerError, Result};
 use crate::metrics::AutoscalerMetrics;
+use crate::offering_matcher::{MaybeOfferingSelector, OfferingSelector};
 use crate::provisioner::NodeProvisioner;
 
 use super::k8s_client::AutoscalerK8sClient;
 
 /// NodePool controller handles the lifecycle of GPU node pools
-pub struct NodePoolController<K, A, P>
+pub struct NodePoolController<K, A, P, S = ()>
 where
     K: AutoscalerK8sClient,
     A: SecureCloudApi,
@@ -28,9 +29,10 @@ where
     provisioner: Arc<P>,
     metrics: Arc<AutoscalerMetrics>,
     network_validation_config: NetworkValidationConfig,
+    offering_selector: Option<Arc<S>>,
 }
 
-impl<K, A, P> Clone for NodePoolController<K, A, P>
+impl<K, A, P, S> Clone for NodePoolController<K, A, P, S>
 where
     K: AutoscalerK8sClient,
     A: SecureCloudApi,
@@ -43,11 +45,12 @@ where
             provisioner: Arc::clone(&self.provisioner),
             metrics: Arc::clone(&self.metrics),
             network_validation_config: self.network_validation_config.clone(),
+            offering_selector: self.offering_selector.clone(),
         }
     }
 }
 
-impl<K, A, P> NodePoolController<K, A, P>
+impl<K, A, P> NodePoolController<K, A, P, ()>
 where
     K: AutoscalerK8sClient,
     A: SecureCloudApi,
@@ -66,6 +69,53 @@ where
             provisioner,
             metrics,
             network_validation_config,
+            offering_selector: None,
+        }
+    }
+}
+
+impl<K, A, P, S> NodePoolController<K, A, P, S>
+where
+    K: AutoscalerK8sClient,
+    A: SecureCloudApi,
+    P: NodeProvisioner,
+    S: OfferingSelector,
+{
+    pub fn with_offering_selector(
+        k8s: Arc<K>,
+        api: Arc<A>,
+        provisioner: Arc<P>,
+        metrics: Arc<AutoscalerMetrics>,
+        network_validation_config: NetworkValidationConfig,
+        offering_selector: Arc<S>,
+    ) -> Self {
+        Self {
+            k8s,
+            api,
+            provisioner,
+            metrics,
+            network_validation_config,
+            offering_selector: Some(offering_selector),
+        }
+    }
+}
+
+impl<K, A, P, S> NodePoolController<K, A, P, S>
+where
+    K: AutoscalerK8sClient,
+    A: SecureCloudApi,
+    P: NodeProvisioner,
+    S: MaybeOfferingSelector,
+{
+    /// Invalidate an offering from the cache after a rental failure.
+    /// Only has effect if the controller was created with an offering selector.
+    async fn invalidate_offering_on_failure(&self, offering_id: &str) {
+        if let Some(selector) = &self.offering_selector {
+            warn!(
+                offering_id = %offering_id,
+                "Rental failed, invalidating offering from cache"
+            );
+            selector.invalidate_failed_offering(offering_id).await;
         }
     }
 
@@ -89,11 +139,12 @@ where
         let status = pool.status.clone().unwrap_or_default();
         let phase = status.phase.clone().unwrap_or(NodePoolPhase::Pending);
 
-        // Check phase timeout
+        // Check phase timeout (skip for phases with infinite timeout)
         if let Some(entered_at) = &status.phase_entered_at {
             let elapsed = Utc::now().signed_duration_since(*entered_at);
             let timeout = phase_timeout(&phase);
-            if elapsed.num_seconds() > timeout as i64 {
+            // u64::MAX indicates no timeout (Ready, Failed, Deleted phases)
+            if timeout != u64::MAX && elapsed.num_seconds() > timeout as i64 {
                 // Check if cleanup is already in progress
                 if status.cleanup_in_progress {
                     debug!(pool = %name, "Cleanup already in progress, waiting");
@@ -301,15 +352,67 @@ where
                 .await;
         }
 
+        // Fetch offering details and persist immediately (required for node labeling).
+        // Persisting immediately prevents data loss if process crashes after fetch.
+        if status.gpu_model.is_none() {
+            let offering = match self.api.get_offering(&sc.offering_id).await? {
+                Some(o) => o,
+                None => {
+                    // Emit event for visibility before returning error
+                    if let Err(e) = self
+                        .k8s
+                        .create_node_pool_event(
+                            ns,
+                            &name,
+                            pool.metadata.uid.as_deref(),
+                            "Warning",
+                            "OfferingUnavailable",
+                            &format!("GPU offering {} is no longer available", sc.offering_id),
+                        )
+                        .await
+                    {
+                        warn!(pool = %name, error = %e, "Failed to emit OfferingUnavailable event");
+                    }
+                    return Err(AutoscalerError::SecureCloudApi(format!(
+                        "Offering {} not found or unavailable",
+                        sc.offering_id
+                    )));
+                }
+            };
+
+            status.offering_id = Some(sc.offering_id.clone());
+            status.gpu_model = Some(offering.gpu_type);
+            status.gpu_count = Some(offering.gpu_count);
+            status.gpu_memory_gb = Some(offering.gpu_memory_gb);
+            debug!(
+                pool = %name,
+                offering_id = ?status.offering_id,
+                gpu_model = ?status.gpu_model,
+                gpu_count = ?status.gpu_count,
+                "Stored GPU and offering info from API"
+            );
+
+            // Persist GPU metadata immediately to prevent loss on crash
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+        }
+
         // Start new rental if needed
         let external_ip = if let Some(ip) = &status.external_ip {
             ip.clone()
         } else {
             info!(pool = %name, offering = %sc.offering_id, "Starting rental");
-            let rental = self
-                .api
-                .start_rental(&sc.offering_id, &sc.ssh_key_id)
-                .await?;
+            let rental_result = self.api.start_rental(&sc.offering_id, &sc.ssh_key_id).await;
+
+            let rental = match rental_result {
+                Ok(r) => r,
+                Err(e) => {
+                    // Invalidate offering from cache on rental failure
+                    self.invalidate_offering_on_failure(&sc.offering_id).await;
+                    return Err(e);
+                }
+            };
 
             status.rental_id = Some(rental.rental_id.clone());
             status.external_ip = Some(rental.external_ip.clone());
@@ -324,12 +427,21 @@ where
         let node_id = resolve_node_id(pool, &status, Some(&external_ip))?;
         status.node_id = Some(node_id.clone());
 
-        // Register node with API
+        // Register node with API (include GPU info if available)
         let datacenter_id = pool
             .spec
             .datacenter_id
             .clone()
             .unwrap_or_else(|| "default".to_string());
+
+        let gpu_info = match (&status.gpu_model, status.gpu_count, status.gpu_memory_gb) {
+            (Some(model), Some(count), Some(memory)) => Some(crate::api::GpuInfo {
+                model: model.clone(),
+                count,
+                memory_gb: memory,
+            }),
+            _ => None,
+        };
 
         let reg_request = crate::api::NodeRegistrationRequest {
             node_id: node_id.clone(),
@@ -337,7 +449,7 @@ where
             managed_by: NodeManagedBy::Autoscaler.as_str().to_string(),
             rental_id: status.rental_id.clone(),
             external_ip: Some(external_ip),
-            gpu_info: None,
+            gpu_info,
         };
 
         let reg_response = self.api.register_node(reg_request).await?;
@@ -531,28 +643,62 @@ where
 
         info!(pool = %name, node = %k8s_node_name, "Waiting for node to become ready");
 
-        // Check if node exists and is ready
+        // Check if node exists
         match self.k8s.get_node(&k8s_node_name).await {
             Ok(node) => {
-                if is_node_ready(&node) {
-                    info!(pool = %name, node = %k8s_node_name, "Node is ready");
-
-                    // Add labels to the node
+                // Apply labels immediately when node is detected (before Ready).
+                // This prevents a race condition where pods may fail to schedule
+                // during the brief window between node Ready and label application.
+                if !status.labels_applied {
                     let mut labels = std::collections::BTreeMap::new();
                     labels.insert("basilica.ai/nodepool".to_string(), name.clone());
                     labels.insert(
                         "basilica.ai/managed-by".to_string(),
                         "autoscaler".to_string(),
                     );
-                    // Use resolved node_id (status for dynamic mode, spec for manual mode)
                     let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
                     if let Some(node_id) = resolved_node_id {
                         labels.insert("basilica.ai/node-id".to_string(), node_id.clone());
                     }
-                    self.k8s.add_node_labels(&k8s_node_name, &labels).await?;
+                    labels.extend(build_gpu_labels(pool, &status));
+
+                    if let Err(e) = self.k8s.add_node_labels(&k8s_node_name, &labels).await {
+                        warn!(pool = %name, node = %k8s_node_name, error = %e, "Failed to apply labels, will retry");
+                    } else {
+                        debug!(pool = %name, node = %k8s_node_name, "Applied GPU labels to node");
+                        status.labels_applied = true;
+                    }
+                }
+
+                // Wait for node to become Ready before transitioning
+                if is_node_ready(&node) {
+                    // Validate GPU labels are applied before transitioning to Ready.
+                    // Missing labels would cause pod scheduling failures.
+                    if !status.labels_applied {
+                        let expected_labels = build_gpu_labels(pool, &status);
+                        if !expected_labels.is_empty() {
+                            warn!(
+                                pool = %name,
+                                node = %k8s_node_name,
+                                "Node is ready but GPU labels not applied, retrying label application"
+                            );
+                            if let Err(e) = self
+                                .k8s
+                                .add_node_labels(&k8s_node_name, &expected_labels)
+                                .await
+                            {
+                                warn!(pool = %name, node = %k8s_node_name, error = %e, "Failed to apply GPU labels");
+                                self.k8s.update_node_pool_status(ns, &name, status).await?;
+                                return Ok(());
+                            }
+                            status.labels_applied = true;
+                        }
+                    }
+
+                    info!(pool = %name, node = %k8s_node_name, "Node is ready");
 
                     // Get node UID
-                    if let Some(uid) = node.metadata.uid {
+                    if let Some(uid) = node.metadata.uid.clone() {
                         status.node_uid = Some(uid);
                     }
 
@@ -609,6 +755,17 @@ where
                         .transition_phase(ns, &name, status, NodePoolPhase::Unhealthy)
                         .await;
                 }
+
+                // Verify and re-apply GPU labels (handles recovery from Unhealthy)
+                let expected_labels = build_gpu_labels(pool, &status);
+                if !expected_labels.is_empty() && labels_need_reapplication(&node, &expected_labels)
+                {
+                    debug!(pool = %name, node = %k8s_node_name, "Re-applying GPU labels");
+                    self.k8s
+                        .add_node_labels(&k8s_node_name, &expected_labels)
+                        .await?;
+                }
+
                 // Reset failure count on successful health check
                 status.failure_count = 0;
                 status.last_health_check_at = Some(Utc::now());
@@ -1034,6 +1191,55 @@ fn add_condition(
     }
 }
 
+/// Build the expected GPU labels for a node based on pool and status.
+fn build_gpu_labels(
+    pool: &NodePool,
+    status: &NodePoolStatus,
+) -> std::collections::BTreeMap<String, String> {
+    use crate::offering_matcher::{node_labels, normalize_gpu_model};
+
+    let mut labels = std::collections::BTreeMap::new();
+
+    if let Some(ref gpu_model) = status.gpu_model {
+        labels.insert(
+            node_labels::GPU_MODEL.to_string(),
+            normalize_gpu_model(gpu_model),
+        );
+    }
+    if let Some(gpu_count) = status.gpu_count {
+        labels.insert(node_labels::GPU_COUNT.to_string(), gpu_count.to_string());
+    }
+    if let Some(gpu_memory) = status.gpu_memory_gb {
+        labels.insert(
+            node_labels::GPU_MEMORY_GB.to_string(),
+            gpu_memory.to_string(),
+        );
+    }
+    // Prefer status.offering_id (set during dynamic provisioning), fallback to spec
+    if let Some(ref offering_id) = status.offering_id {
+        labels.insert(node_labels::OFFERING_ID.to_string(), offering_id.clone());
+    } else if let Some(ref sc) = pool.spec.secure_cloud {
+        labels.insert(node_labels::OFFERING_ID.to_string(), sc.offering_id.clone());
+    }
+
+    labels
+}
+
+/// Check if any expected labels are missing or have different values on the node.
+fn labels_need_reapplication(
+    node: &k8s_openapi::api::core::v1::Node,
+    expected: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let node_labels = node.metadata.labels.as_ref();
+    for (key, value) in expected {
+        let current = node_labels.and_then(|l| l.get(key));
+        if current != Some(value) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Generate a deterministic node ID based on pool name and IP address.
 /// This ensures idempotent node registration across reconciliation cycles.
 /// Uses SHA-256 for stable output across Rust versions (unlike DefaultHasher).
@@ -1107,5 +1313,120 @@ mod tests {
         let id1 = generate_deterministic_node_id("pool-1", "192.168.1.100");
         let id2 = generate_deterministic_node_id("pool-2", "192.168.1.100");
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_false_when_all_present() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [
+                        ("key1".to_string(), "value1".to_string()),
+                        ("key2".to_string(), "value2".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("key1".to_string(), "value1".to_string()),
+            ("key2".to_string(), "value2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(!labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_true_when_missing() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [("key1".to_string(), "value1".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("key1".to_string(), "value1".to_string()),
+            ("key2".to_string(), "value2".to_string()), // Missing
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_true_when_mismatched() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [
+                        ("key1".to_string(), "wrong_value".to_string()),
+                        ("key2".to_string(), "value2".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("key1".to_string(), "value1".to_string()), // Mismatched
+            ("key2".to_string(), "value2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_false_for_empty_expected() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [("key1".to_string(), "value1".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        assert!(!labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_handles_node_with_no_labels() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> =
+            [("key1".to_string(), "value1".to_string())]
+                .into_iter()
+                .collect();
+
+        assert!(labels_need_reapplication(&node, &expected));
     }
 }
