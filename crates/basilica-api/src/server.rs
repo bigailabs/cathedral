@@ -1021,6 +1021,7 @@ impl Server {
                     vip_cache,
                     vip_db,
                     config.pricing.secure_cloud_markup_percent,
+                    state.billing_client.clone(),
                 ));
 
                 tracing::info!("Starting initial VIP poll (mock mode)...");
@@ -1081,6 +1082,7 @@ impl Server {
                             vip_cache,
                             vip_db,
                             config.pricing.secure_cloud_markup_percent,
+                            state.billing_client.clone(),
                         ));
 
                         // Do initial poll immediately

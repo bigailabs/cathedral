@@ -6,6 +6,11 @@ edition = "2021"
 [dependencies]
 # Basilica dependencies
 basilica-common = { path = "../basilica-common" }
+basilica-billing = { path = "../basilica-billing" }
+basilica-protocol = { path = "../basilica-protocol" }
+
+# Protobuf types (for billing timestamps)
+prost-types = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

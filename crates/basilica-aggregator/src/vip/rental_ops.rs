@@ -85,11 +85,12 @@ pub async fn insert_vip_rental(
     // Insert into secure_cloud_rentals table
     // VIP rentals don't have a real provider or offering_id - use special values
     // VIP machine ID is stored in provider_instance_id with 'vip:' prefix
+    // Note: ssh_public_key is NULL for VIP rentals (SSH access managed externally by VIP team)
     sqlx::query(
         r#"
         INSERT INTO secure_cloud_rentals (
             id, user_id, provider, provider_instance_id, offering_id, instance_type,
-            location_code, status, hostname, ssh_key_id, ip_address, connection_info,
+            location_code, status, hostname, ssh_public_key, ip_address, connection_info,
             raw_response, error_message, created_at, updated_at, is_vip
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
@@ -105,7 +106,7 @@ pub async fn insert_vip_rental(
     .bind(&prepared.region) // location_code
     .bind("running") // status - VIP machines are always running
     .bind(format!("vip-{}", prepared.vip_machine_id)) // hostname
-    .bind::<Option<&str>>(None) // ssh_key_id - VIP doesn't use registered SSH keys (team manages manually)
+    .bind::<Option<&str>>(None) // ssh_public_key - VIP doesn't use registered SSH keys (team manages manually)
     .bind(&prepared.ssh_host) // ip_address
     .bind(serde_json::json!({
         "ssh_host": prepared.ssh_host,
@@ -174,17 +175,18 @@ pub async fn close_vip_rental(
 
     // 2. Archive to terminated_secure_cloud_rentals (if the table exists)
     // This uses INSERT ... SELECT pattern to copy the record
+    // Note: ssh_public_key replaces ssh_key_id after migration 017
     let archive_result = sqlx::query(
         r#"
         INSERT INTO terminated_secure_cloud_rentals (
             id, user_id, provider, provider_instance_id, offering_id, instance_type,
-            location_code, status, hostname, ssh_key_id, ip_address, connection_info,
+            location_code, status, hostname, ssh_public_key, ip_address, connection_info,
             raw_response, error_message, created_at, updated_at, stopped_at,
             stop_reason
         )
         SELECT
             id, user_id, provider, provider_instance_id, offering_id, instance_type,
-            location_code, status, hostname, ssh_key_id, ip_address, connection_info,
+            location_code, status, hostname, ssh_public_key, ip_address, connection_info,
             raw_response, error_message, created_at, updated_at, stopped_at,
             'vip_removed_from_csv'
         FROM secure_cloud_rentals

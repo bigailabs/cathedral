@@ -4,11 +4,13 @@ use crate::vip::{
     csv::{DataSourceError, VipDataSource},
     rental_ops::{
         close_vip_rental, get_vip_rental_by_machine_id, insert_vip_rental, prepare_vip_rental,
-        update_vip_rental_metadata, VipRentalError,
+        update_vip_rental_metadata, PreparedVipRental, VipRentalError,
     },
     types::{ValidVipMachine, VipConnectionInfo, VipCsvRow, VipDisplayInfo, VipRentalRecord},
 };
+use basilica_billing::BillingClient;
 use chrono::Utc;
+use rust_decimal::prelude::ToPrimitive;
 use sqlx::PgPool;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -45,6 +47,8 @@ pub struct VipPoller<D: VipDataSource> {
     db: PgPool,
     /// Markup percentage for VIP rentals (same as secure cloud)
     markup_percent: f64,
+    /// Billing client for registering/finalizing VIP rentals
+    billing_client: Option<Arc<BillingClient>>,
 }
 
 impl<D: VipDataSource> VipPoller<D> {
@@ -54,6 +58,7 @@ impl<D: VipDataSource> VipPoller<D> {
         cache: Arc<VipCache>,
         db: PgPool,
         markup_percent: f64,
+        billing_client: Option<Arc<BillingClient>>,
     ) -> Self {
         Self {
             config,
@@ -61,6 +66,7 @@ impl<D: VipDataSource> VipPoller<D> {
             cache,
             db,
             markup_percent,
+            billing_client,
         }
     }
 
@@ -272,12 +278,21 @@ impl<D: VipDataSource> VipPoller<D> {
             } else {
                 // Create new rental
                 let prepared = prepare_vip_rental(machine, self.markup_percent)?;
-                insert_vip_rental(&self.db, &prepared).await?;
 
-                // TODO: Call billing service to track rental
-                // This needs to be done in basilica-api where BillingClient is available
-                // For now, the rental is created in DB, billing will be handled when
-                // the VIP poller is wired up in basilica-api
+                // Register with billing service FIRST (before DB insert)
+                if self.billing_client.is_some() {
+                    if let Err(e) = self.register_with_billing(&prepared).await {
+                        tracing::error!(
+                            vip_machine_id = %machine.vip_machine_id,
+                            error = %e,
+                            "Failed to register VIP rental with billing - skipping"
+                        );
+                        return Ok(()); // Skip this machine, retry next poll
+                    }
+                }
+
+                // Now insert to DB (billing registration succeeded)
+                insert_vip_rental(&self.db, &prepared).await?;
 
                 let record = VipRentalRecord {
                     vip_machine_id: machine.vip_machine_id.clone(),
@@ -319,10 +334,14 @@ impl<D: VipDataSource> VipPoller<D> {
     async fn remove_stale_rental(&self, vip_machine_id: &str) -> Result<(), PollerError> {
         // Get rental info from cache
         if let Some(cached) = self.cache.get(vip_machine_id).await {
+            // Finalize billing first (best-effort, don't block on failure)
+            if self.billing_client.is_some() {
+                self.finalize_rental_billing(&cached.secure_cloud_rental_id)
+                    .await;
+            }
+
             // Close the rental in DB
             close_vip_rental(&self.db, &cached.secure_cloud_rental_id, vip_machine_id).await?;
-
-            // TODO: Finalize billing - needs BillingClient from basilica-api
 
             // Remove from cache
             self.cache.remove(vip_machine_id).await;
@@ -335,5 +354,100 @@ impl<D: VipDataSource> VipPoller<D> {
         }
 
         Ok(())
+    }
+
+    /// Register a new VIP rental with the billing service
+    async fn register_with_billing(
+        &self,
+        prepared: &PreparedVipRental,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use basilica_protocol::billing::{
+            track_rental_request::CloudType, GpuSpec, ResourceSpec, SecureCloudData,
+            TrackRentalRequest,
+        };
+
+        let billing_client = self
+            .billing_client
+            .as_ref()
+            .ok_or("No billing client configured")?;
+
+        let resource_spec = Some(ResourceSpec {
+            cpu_cores: prepared.vcpu_count,
+            memory_mb: u64::from(prepared.system_memory_gb) * 1024,
+            gpus: vec![GpuSpec {
+                model: prepared.gpu_type.clone(),
+                memory_mb: 0, // Not tracked for VIP
+                count: prepared.gpu_count,
+            }],
+            disk_gb: 0,
+            network_bandwidth_mbps: 0,
+        });
+
+        // Calculate per-GPU price from total marked-up rate
+        let base_price_per_gpu = prepared.marked_up_hourly_rate.to_f64().unwrap_or(0.0)
+            / prepared.gpu_count.max(1) as f64;
+
+        let track_request = TrackRentalRequest {
+            rental_id: prepared.rental_id.clone(),
+            user_id: prepared.assigned_user.clone(),
+            resource_spec,
+            start_time: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+            metadata: std::collections::HashMap::new(),
+            cloud_type: Some(CloudType::Secure(SecureCloudData {
+                provider_instance_id: format!("vip:{}", prepared.vip_machine_id),
+                provider: "vip".to_string(),
+                offering_id: format!("vip-{}", prepared.vip_machine_id),
+                base_price_per_gpu,
+                gpu_count: prepared.gpu_count,
+            })),
+        };
+
+        billing_client.track_rental(track_request).await?;
+
+        tracing::info!(
+            rental_id = %prepared.rental_id,
+            vip_machine_id = %prepared.vip_machine_id,
+            user_id = %prepared.assigned_user,
+            base_price_per_gpu = %base_price_per_gpu,
+            "Registered VIP rental with billing"
+        );
+
+        Ok(())
+    }
+
+    /// Finalize billing for a VIP rental (best-effort, logs on failure)
+    async fn finalize_rental_billing(&self, rental_id: &str) {
+        use basilica_protocol::billing::{FinalizeRentalRequest, RentalStatus};
+
+        let billing_client = match self.billing_client.as_ref() {
+            Some(client) => client,
+            None => return,
+        };
+
+        let end_time = prost_types::Timestamp::from(std::time::SystemTime::now());
+
+        let finalize_request = FinalizeRentalRequest {
+            rental_id: rental_id.to_string(),
+            end_time: Some(end_time),
+            termination_reason: "vip_removed_from_csv".to_string(),
+            target_status: RentalStatus::Stopped.into(),
+        };
+
+        match billing_client.finalize_rental(finalize_request).await {
+            Ok(response) => {
+                tracing::info!(
+                    rental_id = %rental_id,
+                    total_cost = %response.total_cost,
+                    "Finalized VIP rental billing"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    rental_id = %rental_id,
+                    error = %e,
+                    "Failed to finalize VIP rental billing - proceeding with closure"
+                );
+            }
+        }
     }
 }
