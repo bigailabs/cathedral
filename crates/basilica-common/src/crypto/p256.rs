@@ -3,9 +3,7 @@
 //! This module provides P256 key generation, signing, and verification functionality
 //! using the p256 crate with proper key formatting for PEM and DER formats.
 
-// Allow unused_assignments: ZeroizeOnDrop derive macro with #[zeroize(skip)] generates code
-// that triggers this lint as a false positive when fields are skipped from zeroization.
-#![allow(unused_assignments)]
+#![allow(unused_assignments)] // ZeroizeOnDrop derive generates assignments in Drop impl
 
 use crate::error::CryptoError;
 use p256::{

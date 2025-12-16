@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0]
+
+### Added
+- `bs` command alias as a shorthand for `basilica` (automatically created during `upgrade`)
+
+### Changed
+- SSH key discovery is now automatic - removed `ssh.key_path` and `ssh.private_key_path` config options
+- SSH public key is stored directly on rentals, allowing SSH access even after deleting the original key from your account
+
+### Fixed
+- Improved SSH retry logic and error messages with clearer retry guidance
+
 ## [0.8.0]
 
 ### Fixed

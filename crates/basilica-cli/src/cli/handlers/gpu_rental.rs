@@ -33,6 +33,9 @@ use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, warn};
 
+/// Maximum time to wait for rental to become active and SSH to be ready
+const RENTAL_READY_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Represents a GPU target for the `up` command
 #[derive(Debug, Clone)]
 pub struct GpuTarget(pub GpuCategory);
@@ -473,10 +476,26 @@ async fn handle_secure_cloud_rental_with_offering(
 
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
+            // Look up the private key for display
+            let private_key_path = {
+                let ssh_key = api_client
+                    .get_ssh_key()
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!(e)))?
+                    .ok_or_else(|| {
+                        CliError::Internal(
+                            eyre!("No SSH key registered with Basilica")
+                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                        )
+                    })?;
+
+                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                    .map_err(CliError::Internal)?
+            };
             display_secure_cloud_reconnection_instructions(
                 &response.rental_id,
                 ssh_cmd,
-                config,
+                &private_key_path,
                 "To connect to this rental:",
             )?;
         } else {
@@ -521,8 +540,8 @@ async fn handle_secure_cloud_rental_with_offering(
             match retry_ssh_connection(
                 &ssh_client,
                 &ssh_access,
-                Some(private_key_path),
-                Duration::from_secs(120),
+                private_key_path.clone(),
+                RENTAL_READY_TIMEOUT,
             )
             .await
             {
@@ -531,7 +550,7 @@ async fn handle_secure_cloud_rental_with_offering(
                     display_secure_cloud_reconnection_instructions(
                         &response.rental_id,
                         ssh_cmd,
-                        config,
+                        &private_key_path,
                         "To reconnect to this rental:",
                     )?;
                 }
@@ -540,7 +559,7 @@ async fn handle_secure_cloud_rental_with_offering(
                     display_secure_cloud_reconnection_instructions(
                         &response.rental_id,
                         ssh_cmd,
-                        config,
+                        &private_key_path,
                         "Try manually connecting using:",
                     )?;
                 }
@@ -642,10 +661,26 @@ async fn handle_community_cloud_rental_with_selection(
     };
 
     if options.detach {
+        // Look up the private key for display
+        let private_key_path = {
+            let ssh_key = api_client
+                .get_ssh_key()
+                .await
+                .map_err(|e| CliError::Internal(eyre!(e)))?
+                .ok_or_else(|| {
+                    CliError::Internal(
+                        eyre!("No SSH key registered with Basilica")
+                            .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+                    )
+                })?;
+
+            crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+                .map_err(CliError::Internal)?
+        };
         display_ssh_connection_instructions(
             &response.rental_id,
             ssh_creds,
-            config,
+            &private_key_path,
             "SSH connection options:",
         )?;
     } else {
@@ -681,8 +716,8 @@ async fn handle_community_cloud_rental_with_selection(
             match retry_ssh_connection(
                 &ssh_client,
                 &ssh_access,
-                Some(private_key_path),
-                Duration::from_secs(120),
+                private_key_path.clone(),
+                RENTAL_READY_TIMEOUT,
             )
             .await
             {
@@ -691,7 +726,7 @@ async fn handle_community_cloud_rental_with_selection(
                     display_ssh_connection_instructions(
                         &response.rental_id,
                         ssh_creds,
-                        config,
+                        &private_key_path,
                         "To reconnect to this rental:",
                     )?;
                 }
@@ -700,7 +735,7 @@ async fn handle_community_cloud_rental_with_selection(
                     display_ssh_connection_instructions(
                         &response.rental_id,
                         ssh_creds,
-                        config,
+                        &private_key_path,
                         "Try manually connecting using:",
                     )?;
                 }
@@ -1222,7 +1257,17 @@ pub async fn handle_status(
             if json {
                 json_output(&status)?;
             } else {
-                display_rental_status_with_details(&status, config);
+                // Try to find the private key for display
+                let private_key_path =
+                    api_client
+                        .get_ssh_key()
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|ssh_key| {
+                            crate::ssh::find_private_key_for_public_key(&ssh_key.public_key).ok()
+                        });
+                display_rental_status_with_details(&status, private_key_path.as_deref());
             }
         }
         ComputeCategory::SecureCloud => {
@@ -1687,6 +1732,7 @@ pub async fn handle_exec(
         rental_id,
         compute_type,
         ssh_command,
+        ssh_public_key,
     } = resolve_rental_with_ssh(target.as_deref(), &api_client).await?;
 
     debug!(
@@ -1706,22 +1752,17 @@ pub async fn handle_exec(
         username,
     };
 
-    // Fetch API-registered SSH key and find matching private key
+    // Find matching private key using the rental's stored public key
     let private_key_path = {
-        let ssh_key = api_client
-            .get_ssh_key()
-            .await
-            .map_err(|e| CliError::Internal(eyre!(e)))?
-            .ok_or_else(|| {
-                CliError::Internal(
-                    eyre!("No SSH key registered with Basilica")
-                        .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
-                        .note("SSH keys are required to connect to rentals"),
-                )
-            })?;
+        let public_key = ssh_public_key.ok_or_else(|| {
+            CliError::Internal(
+                eyre!("No SSH public key available for this rental")
+                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .note("SSH access requires the original key used during rental creation"),
+            )
+        })?;
 
-        crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-            .map_err(CliError::Internal)?
+        crate::ssh::find_private_key_for_public_key(&public_key).map_err(CliError::Internal)?
     };
 
     debug!("Using private key for exec: {}", private_key_path.display());
@@ -1729,7 +1770,7 @@ pub async fn handle_exec(
     // Use SSH client to execute command
     let ssh_client = SshClient::new(&config.ssh)?;
     ssh_client
-        .execute_command(&ssh_access, &command, Some(private_key_path))
+        .execute_command(&ssh_access, &command, private_key_path)
         .await?;
     Ok(())
 }
@@ -1748,6 +1789,7 @@ pub async fn handle_ssh(
         rental_id,
         compute_type,
         ssh_command,
+        ssh_public_key,
     } = resolve_rental_with_ssh(target.as_deref(), &api_client).await?;
 
     debug!(
@@ -1772,22 +1814,17 @@ pub async fn handle_ssh(
         username,
     };
 
-    // Fetch API-registered SSH key and find matching private key
+    // Find matching private key using the rental's stored public key
     let private_key_path = {
-        let ssh_key = api_client
-            .get_ssh_key()
-            .await
-            .map_err(|e| CliError::Internal(eyre!(e)))?
-            .ok_or_else(|| {
-                CliError::Internal(
-                    eyre!("No SSH key registered with Basilica")
-                        .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
-                        .note("SSH keys are required to connect to rentals"),
-                )
-            })?;
+        let public_key = ssh_public_key.ok_or_else(|| {
+            CliError::Internal(
+                eyre!("No SSH public key available for this rental")
+                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .note("SSH access requires the original key used during rental creation"),
+            )
+        })?;
 
-        crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-            .map_err(CliError::Internal)?
+        crate::ssh::find_private_key_for_public_key(&public_key).map_err(CliError::Internal)?
     };
 
     debug!("Using private key: {}", private_key_path.display());
@@ -1797,7 +1834,7 @@ pub async fn handle_ssh(
 
     // Open interactive session with port forwarding options
     ssh_client
-        .interactive_session_with_options(&ssh_access, &options, Some(private_key_path))
+        .interactive_session_with_options(&ssh_access, &options, private_key_path)
         .await?;
     Ok(())
 }
@@ -1849,6 +1886,7 @@ pub async fn handle_cp(
     // Resolve rental and fetch SSH credentials
     let RentalWithSsh {
         ssh_command: ssh_credentials,
+        ssh_public_key,
         ..
     } = resolve_rental_with_ssh(rental_id.as_deref(), &api_client).await?;
 
@@ -1860,22 +1898,17 @@ pub async fn handle_cp(
         username,
     };
 
-    // Fetch API-registered SSH key and find matching private key
+    // Find matching private key using the rental's stored public key
     let private_key_path = {
-        let ssh_key = api_client
-            .get_ssh_key()
-            .await
-            .map_err(|e| CliError::Internal(eyre!(e)))?
-            .ok_or_else(|| {
-                CliError::Internal(
-                    eyre!("No SSH key registered with Basilica")
-                        .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
-                        .note("SSH keys are required to connect to rentals"),
-                )
-            })?;
+        let public_key = ssh_public_key.ok_or_else(|| {
+            CliError::Internal(
+                eyre!("No SSH public key available for this rental")
+                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .note("SSH access requires the original key used during rental creation"),
+            )
+        })?;
 
-        crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-            .map_err(CliError::Internal)?
+        crate::ssh::find_private_key_for_public_key(&public_key).map_err(CliError::Internal)?
     };
 
     debug!(
@@ -1888,22 +1921,12 @@ pub async fn handle_cp(
 
     if is_upload {
         ssh_client
-            .upload_file(
-                &ssh_access,
-                &local_path,
-                &remote_path,
-                Some(private_key_path),
-            )
+            .upload_file(&ssh_access, &local_path, &remote_path, private_key_path)
             .await?;
         Ok(())
     } else {
         ssh_client
-            .download_file(
-                &ssh_access,
-                &remote_path,
-                &local_path,
-                Some(private_key_path),
-            )
+            .download_file(&ssh_access, &remote_path, &local_path, private_key_path)
             .await?;
         Ok(())
     }
@@ -1916,7 +1939,6 @@ async fn poll_rental_status(
     rental_id: &str,
     api_client: &basilica_sdk::BasilicaClient,
 ) -> Result<bool, CliError> {
-    const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
     const INITIAL_INTERVAL: Duration = Duration::from_secs(2);
     const MAX_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -1927,7 +1949,7 @@ async fn poll_rental_status(
 
     loop {
         // Check if we've exceeded the maximum wait time
-        if start_time.elapsed() > MAX_WAIT_TIME {
+        if start_time.elapsed() > RENTAL_READY_TIMEOUT {
             complete_spinner_and_clear(spinner);
             println!("The rental is not yet up. Please wait for a while and SSH manually using `basilica ssh`.");
             return Ok(false);
@@ -2005,7 +2027,6 @@ async fn poll_secure_cloud_rental_status(
     rental_id: &str,
     api_client: &basilica_sdk::BasilicaClient,
 ) -> Result<Option<basilica_sdk::types::SecureCloudRentalListItem>, CliError> {
-    const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
     const INITIAL_INTERVAL: Duration = Duration::from_secs(5);
     const MAX_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -2016,7 +2037,7 @@ async fn poll_secure_cloud_rental_status(
 
     loop {
         // Check if we've exceeded the maximum wait time
-        if start_time.elapsed() > MAX_WAIT_TIME {
+        if start_time.elapsed() > RENTAL_READY_TIMEOUT {
             complete_spinner_and_clear(spinner);
             println!("The rental is not yet up. Please wait for a while and SSH manually using `basilica ssh`.");
             return Ok(None);
@@ -2110,7 +2131,7 @@ async fn poll_secure_cloud_rental_status(
 async fn retry_ssh_connection(
     ssh_client: &SshClient,
     ssh_access: &SshAccess,
-    private_key_override: Option<PathBuf>,
+    private_key_path: PathBuf,
     max_wait: Duration,
 ) -> Result<(), CliError> {
     const INITIAL_INTERVAL: Duration = Duration::from_secs(2);
@@ -2125,19 +2146,19 @@ async fn retry_ssh_connection(
 
     loop {
         attempt += 1;
-        spinner.set_message("SSH not ready yet, retrying...");
+        spinner.set_message("Waiting for SSH...");
 
         // First test connectivity without starting an interactive session
         // This captures stderr so we don't print raw SSH errors
         match ssh_client
-            .test_connection(ssh_access, private_key_override.clone())
+            .test_connection(ssh_access, private_key_path.clone())
             .await
         {
             Ok(_) => {
                 // Connection test succeeded, now start the actual interactive session
                 complete_spinner_and_clear(spinner);
                 return ssh_client
-                    .interactive_session(ssh_access, private_key_override)
+                    .interactive_session(ssh_access, private_key_path)
                     .await
                     .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
             }
@@ -2146,15 +2167,15 @@ async fn retry_ssh_connection(
                 if start_time.elapsed() >= max_wait {
                     // Final attempt failed, return error
                     complete_spinner_error(spinner, "SSH connection failed");
+                    // Log the final error for debugging (raw SSH stderr preserved in logs)
+                    debug!("Final SSH connection attempt failed: {}", e);
                     return Err(CliError::Internal(
                         eyre!(
-                            "SSH connection failed after {} attempts over {}s: {}",
+                            "SSH connection failed after {} attempts over {}s",
                             attempt,
                             start_time.elapsed().as_secs(),
-                            e
                         )
-                        .suggestion("The SSH service may still be starting up")
-                        .note("Try connecting manually in a few moments"),
+                        .suggestion("The SSH service may not be ready yet. Wait a minute and try 'basilica ssh <rental_id>'"),
                     ));
                 }
 
@@ -2181,14 +2202,11 @@ async fn retry_ssh_connection(
 fn display_ssh_connection_instructions(
     rental_id: &str,
     ssh_credentials: &str,
-    config: &CliConfig,
+    private_key_path: &std::path::Path,
     message: &str,
 ) -> Result<(), CliError> {
     // Parse SSH credentials to get components
     let (host, port, username) = parse_ssh_credentials(ssh_credentials)?;
-
-    // Get the private key path from config
-    let private_key_path = &config.ssh.private_key_path;
 
     println!();
     print_info(message);
@@ -2226,14 +2244,11 @@ fn display_ssh_connection_instructions(
 fn display_secure_cloud_reconnection_instructions(
     rental_id: &str,
     ssh_command: &str,
-    config: &CliConfig,
+    private_key_path: &std::path::Path,
     message: &str,
 ) -> Result<(), CliError> {
     // Parse SSH command to get components
     let (host, port, username) = parse_ssh_credentials(ssh_command)?;
-
-    // Get the private key path from config
-    let private_key_path = &config.ssh.private_key_path;
 
     println!();
     print_info(message);
@@ -2277,7 +2292,7 @@ fn split_remote_path(path: &str) -> (Option<String>, String) {
 
 fn display_rental_status_with_details(
     status: &basilica_sdk::types::RentalStatusWithSshResponse,
-    config: &CliConfig,
+    private_key_path: Option<&std::path::Path>,
 ) {
     println!("Rental Status: {}", status.rental_id);
     println!("  Status: {:?}", status.status);
@@ -2306,8 +2321,6 @@ fn display_rental_status_with_details(
     // Display SSH connection instructions if available
     if let Some(ref ssh_credentials) = status.ssh_credentials {
         if let Ok((host, port, username)) = parse_ssh_credentials(ssh_credentials) {
-            let private_key_path = &config.ssh.private_key_path;
-
             println!();
             print_info("SSH Connection:");
             println!();
@@ -2323,19 +2336,30 @@ fn display_rental_status_with_details(
             println!();
 
             // Option 2: Using standard SSH command
-            println!("  2. Using standard SSH:");
-            println!(
-                "     {}",
-                console::style(format!(
-                    "ssh -i {} -p {} {}@{}",
-                    compress_path(private_key_path),
-                    port,
-                    username,
-                    host
-                ))
-                .cyan()
-                .bold()
-            );
+            if let Some(key_path) = private_key_path {
+                println!("  2. Using standard SSH:");
+                println!(
+                    "     {}",
+                    console::style(format!(
+                        "ssh -i {} -p {} {}@{}",
+                        compress_path(key_path),
+                        port,
+                        username,
+                        host
+                    ))
+                    .cyan()
+                    .bold()
+                );
+            } else {
+                println!("  2. Using standard SSH:");
+                println!(
+                    "     {}",
+                    console::style(format!("ssh -p {} {}@{}", port, username, host))
+                        .cyan()
+                        .bold()
+                );
+                println!("     {}", style("(private key not found locally)").yellow());
+            }
         }
     }
 }

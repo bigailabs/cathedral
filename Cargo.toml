@@ -16,6 +16,7 @@ members = [
   "crates/basilica-aggregator",
   "crates/basilica-operator",
   "crates/basilica-storage",
+  "crates/basilica-autoscaler",
 ]
 resolver = "2"
 
