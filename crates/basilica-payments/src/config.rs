@@ -139,6 +139,13 @@ pub struct ReconciliationConfig {
     pub estimated_fee_plancks: String,
     pub dry_run_mode: bool,
     pub max_retries: u32,
+    /// Maximum sweeps per cycle to prevent transaction flooding (default: 50)
+    #[serde(default = "default_max_sweeps_per_cycle")]
+    pub max_sweeps_per_cycle: u32,
+}
+
+fn default_max_sweeps_per_cycle() -> u32 {
+    50
 }
 
 fn deserialize_string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -278,6 +285,7 @@ impl Default for PaymentsConfig {
                 estimated_fee_plancks: "1000000".to_string(),
                 dry_run_mode: true,
                 max_retries: 3,
+                max_sweeps_per_cycle: 50,
             },
         }
     }
@@ -364,6 +372,41 @@ impl PaymentsConfig {
         if self.treasury.aead_key_hex.is_empty() {
             return Err(ConfigurationError::ValidationFailed {
                 details: "treasury.aead_key_hex must not be empty".to_string(),
+            });
+        }
+
+        // SECURITY: Reject default all-zeros AEAD key in production or when reconciliation is enabled
+        let is_default_key = self.treasury.aead_key_hex
+            == "0000000000000000000000000000000000000000000000000000000000000000";
+        if is_default_key {
+            if self.service.environment == "production" {
+                return Err(ConfigurationError::ValidationFailed {
+                    details: "SECURITY: Default AEAD key (all zeros) is not allowed in production. \
+                        Set PAYMENTS_TREASURY__AEAD_KEY_HEX to a secure 32-byte hex key."
+                        .to_string(),
+                });
+            }
+            if self.reconciliation.enabled {
+                return Err(ConfigurationError::ValidationFailed {
+                    details: "SECURITY: Default AEAD key (all zeros) is not allowed when reconciliation is enabled. \
+                        Set PAYMENTS_TREASURY__AEAD_KEY_HEX to a secure 32-byte hex key."
+                        .to_string(),
+                });
+            }
+        }
+
+        // Validate AEAD key format (must be 64 hex chars = 32 bytes)
+        if self.treasury.aead_key_hex.len() != 64 {
+            return Err(ConfigurationError::ValidationFailed {
+                details: format!(
+                    "treasury.aead_key_hex must be exactly 64 hex characters (32 bytes), got {}",
+                    self.treasury.aead_key_hex.len()
+                ),
+            });
+        }
+        if !self.treasury.aead_key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ConfigurationError::ValidationFailed {
+                details: "treasury.aead_key_hex must contain only hex characters (0-9, a-f, A-F)".to_string(),
             });
         }
 
@@ -549,5 +592,78 @@ mod tests {
         assert_eq!(config.minimum_threshold_plancks, "1000000000");
         assert_eq!(config.target_balance_plancks, "550000000");
         assert_eq!(config.estimated_fee_plancks, "50000000");
+    }
+
+    #[test]
+    fn test_default_aead_key_rejected_in_production() {
+        let mut config = PaymentsConfig::default();
+        config.service.environment = "production".to_string();
+        // Default config has all-zeros AEAD key
+
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Default AEAD key"));
+        assert!(err.to_string().contains("production"));
+    }
+
+    #[test]
+    fn test_default_aead_key_rejected_when_reconciliation_enabled() {
+        let mut config = PaymentsConfig::default();
+        config.service.environment = "development".to_string();
+        config.reconciliation.enabled = true;
+        config.reconciliation.coldwallet_address_ss58 =
+            "5FUE3WJ438ymnLYmSpkGcagFrFWaMBuVr28VMgZRAqTJD62e".to_string();
+
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Default AEAD key"));
+        assert!(err.to_string().contains("reconciliation"));
+    }
+
+    #[test]
+    fn test_valid_aead_key_accepted() {
+        let mut config = PaymentsConfig::default();
+        config.service.environment = "production".to_string();
+        config.treasury.aead_key_hex =
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string();
+
+        let result = config.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_invalid_aead_key_length_rejected() {
+        let mut config = PaymentsConfig::default();
+        config.treasury.aead_key_hex = "abcdef".to_string(); // Too short
+
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("64 hex characters"));
+    }
+
+    #[test]
+    fn test_invalid_aead_key_chars_rejected() {
+        let mut config = PaymentsConfig::default();
+        config.treasury.aead_key_hex =
+            "ghijkl0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_string();
+
+        let result = config.validate();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("hex characters"));
+    }
+
+    #[test]
+    fn test_default_aead_key_allowed_in_development_without_reconciliation() {
+        let mut config = PaymentsConfig::default();
+        config.service.environment = "development".to_string();
+        config.reconciliation.enabled = false;
+        // Default config has all-zeros AEAD key but development environment
+
+        let result = config.validate();
+        assert!(result.is_ok());
     }
 }
