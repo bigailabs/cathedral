@@ -128,10 +128,12 @@ impl From<datacrunch::Instance> for ProviderDeployment {
 
 impl From<hyperstack::VirtualMachine> for ProviderDeployment {
     fn from(vm: hyperstack::VirtualMachine) -> Self {
+        // Only use floating_ip for SSH access - fixed_ip is VPC-internal and not publicly routable
+        // The autoscaler will poll until floating_ip is assigned by Hyperstack
         Self {
             id: vm.id.to_string(),
             status: vm.status.clone(),
-            ip_address: vm.floating_ip.clone().or(vm.fixed_ip.clone()),
+            ip_address: vm.floating_ip.clone(),
             hostname: vm.name.clone(),
             instance_type: vm.flavor_name.clone(),
             ssh_key_id: vm.key_name.clone().unwrap_or_default(),
