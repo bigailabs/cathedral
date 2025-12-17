@@ -162,14 +162,45 @@ pub fn extract_short_gpu_model(nfd_product: &str) -> Cow<'static, str> {
         return Cow::Borrowed("unknown");
     }
 
+    // Case-insensitive matching by converting to uppercase
+    let product_upper = product.to_uppercase();
     for (pattern, short_name) in GPU_MODEL_PATTERNS {
-        if product.contains(pattern) {
+        if product_upper.contains(pattern) {
             return Cow::Borrowed(short_name);
         }
     }
 
     // Fallback: return sanitized original (replace spaces with hyphens)
     Cow::Owned(product.replace(' ', "-"))
+}
+
+/// Normalize a list of GPU model names for nodeAffinity matching.
+///
+/// Applies `extract_short_gpu_model` to each model in the list, converting
+/// user-specified formats like "A100-40GB" to normalized forms like "A100".
+/// Duplicates are removed while preserving order.
+///
+/// # Examples
+///
+/// ```
+/// use basilica_operator::labels::normalize_gpu_models;
+///
+/// let models = vec!["A100-40GB".to_string(), "H100-80GB".to_string()];
+/// let normalized = normalize_gpu_models(&models);
+/// assert_eq!(normalized, vec!["A100", "H100"]);
+///
+/// // Duplicates are removed
+/// let dupes = vec!["A100-40GB".to_string(), "A100-80GB".to_string()];
+/// let deduped = normalize_gpu_models(&dupes);
+/// assert_eq!(deduped, vec!["A100"]);
+/// ```
+pub fn normalize_gpu_models(models: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    models
+        .iter()
+        .map(|m| extract_short_gpu_model(m).into_owned())
+        .filter(|m| seen.insert(m.clone()))
+        .collect()
 }
 
 /// Convert GPU memory from MiB (NFD format) to GB (Basilica format).
@@ -417,6 +448,68 @@ mod tests {
             extract_short_gpu_model("  Tesla-A100-SXM4-80GB  ").as_ref(),
             "A100"
         );
+    }
+
+    #[test]
+    fn test_extract_short_gpu_model_case_insensitive() {
+        // Lowercase input should match uppercase patterns
+        assert_eq!(extract_short_gpu_model("a100-40gb").as_ref(), "A100");
+        assert_eq!(extract_short_gpu_model("h100-80gb").as_ref(), "H100");
+        assert_eq!(extract_short_gpu_model("v100").as_ref(), "V100");
+        assert_eq!(extract_short_gpu_model("rtx-4090").as_ref(), "RTX-4090");
+
+        // Mixed case
+        assert_eq!(
+            extract_short_gpu_model("Tesla-a100-SXM4-80GB").as_ref(),
+            "A100"
+        );
+        assert_eq!(
+            extract_short_gpu_model("nvidia-H100-80gb-HBM3").as_ref(),
+            "H100"
+        );
+    }
+
+    #[test]
+    fn test_normalize_gpu_models() {
+        // Models with memory suffixes should be normalized
+        let models = vec!["A100-40GB".to_string(), "H100-80GB".to_string()];
+        assert_eq!(normalize_gpu_models(&models), vec!["A100", "H100"]);
+
+        // Already short models should pass through
+        let short = vec!["A100".to_string(), "H100".to_string()];
+        assert_eq!(normalize_gpu_models(&short), vec!["A100", "H100"]);
+
+        // Empty input returns empty output
+        let empty: Vec<String> = vec![];
+        assert_eq!(normalize_gpu_models(&empty), Vec::<String>::new());
+
+        // Single model
+        let single = vec!["RTX-4090".to_string()];
+        assert_eq!(normalize_gpu_models(&single), vec!["RTX-4090"]);
+
+        // Mixed formats
+        let mixed = vec![
+            "Tesla-A100-SXM4-80GB".to_string(),
+            "V100".to_string(),
+            "NVIDIA-H100-80GB-HBM3".to_string(),
+        ];
+        assert_eq!(normalize_gpu_models(&mixed), vec!["A100", "V100", "H100"]);
+
+        // Deduplication: same model with different memory should deduplicate
+        let dupes = vec!["A100-40GB".to_string(), "A100-80GB".to_string()];
+        assert_eq!(normalize_gpu_models(&dupes), vec!["A100"]);
+
+        // Deduplication preserves order (first occurrence wins)
+        let order = vec![
+            "H100-80GB".to_string(),
+            "A100-40GB".to_string(),
+            "H100-40GB".to_string(),
+        ];
+        assert_eq!(normalize_gpu_models(&order), vec!["H100", "A100"]);
+
+        // Case insensitive deduplication
+        let case_dupes = vec!["a100-40gb".to_string(), "A100-80GB".to_string()];
+        assert_eq!(normalize_gpu_models(&case_dupes), vec!["A100"]);
     }
 
     #[test]
