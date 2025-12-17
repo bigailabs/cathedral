@@ -5,10 +5,10 @@ data "aws_region" "current" {}
 locals {
   # Generate log group name if not provided
   log_group_name = var.log_group_name != "" ? var.log_group_name : "/ecs/${var.name_prefix}-${var.task_name}"
-  
+
   # Generate family name
   family_name = "${var.name_prefix}-${var.task_name}"
-  
+
   # Prepare environment variables for container definition
   environment_vars = [
     for key, value in var.environment_variables : {
@@ -16,32 +16,32 @@ locals {
       value = tostring(value)
     }
   ]
-  
+
   # Container definition base
   container_definition = {
     name      = var.task_name
     image     = var.container_image
     essential = var.essential
-    
+
     # Optional command and entrypoint
     command    = length(var.container_command) > 0 ? var.container_command : null
     entryPoint = length(var.container_entrypoint) > 0 ? var.container_entrypoint : null
-    
+
     # Optional working directory
     workingDirectory = var.working_directory != "" ? var.working_directory : null
-    
+
     # Environment variables
     environment = length(local.environment_vars) > 0 ? local.environment_vars : null
-    
+
     # Secrets
     secrets = length(var.secrets) > 0 ? var.secrets : null
-    
+
     # Mount points
     mountPoints = length(var.mount_points) > 0 ? var.mount_points : null
-    
+
     # Ulimits
     ulimits = length(var.ulimits) > 0 ? var.ulimits : null
-    
+
     # Logging configuration
     logConfiguration = var.enable_logging ? {
       logDriver = "awslogs"
@@ -52,7 +52,7 @@ locals {
       }
     } : null
   }
-  
+
   # Remove null values from container definition
   container_definition_clean = {
     for k, v in local.container_definition : k => v if v != null
@@ -86,7 +86,7 @@ resource "aws_ecs_task_definition" "task" {
     content {
       name      = volume.value.name
       host_path = volume.value.host_path
-      
+
       dynamic "efs_volume_configuration" {
         for_each = volume.value.efs_volume_configuration != null ? [volume.value.efs_volume_configuration] : []
         content {

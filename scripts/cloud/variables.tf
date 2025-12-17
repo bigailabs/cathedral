@@ -181,3 +181,16 @@ variable "wireguard_servers" {
   description = "List of K3s servers with their WireGuard configurations"
   default     = []
 }
+
+# VPC Peering Configuration for K3s cluster connectivity
+variable "k3s_vpc_peering_connection_id" {
+  type        = string
+  description = "VPC peering connection ID for K3s cluster (created by orchestrator/cloud). Required for SSH connectivity from ECS API to K3s servers."
+  default     = ""
+}
+
+variable "k3s_vpc_cidr" {
+  type        = string
+  description = "CIDR block of the K3s VPC (e.g., 10.101.0.0/16). Required for routing traffic via VPC peering."
+  default     = ""
+}

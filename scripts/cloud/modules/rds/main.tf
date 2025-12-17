@@ -99,11 +99,11 @@ resource "aws_rds_cluster" "main" {
   }
 
   # Security
-  storage_encrypted   = true
-  deletion_protection = var.enable_deletion_protection
-  skip_final_snapshot = false
+  storage_encrypted         = true
+  deletion_protection       = var.enable_deletion_protection
+  skip_final_snapshot       = false
   final_snapshot_identifier = "${var.name_prefix}-aurora-final-snapshot-${formatdate("YYYY-MM-DD-hhmm", timestamp())}"
-  
+
   # Data API
   enable_http_endpoint = true
 
@@ -155,13 +155,13 @@ resource "aws_secretsmanager_secret" "db_credentials" {
 resource "aws_secretsmanager_secret_version" "db_credentials" {
   secret_id = aws_secretsmanager_secret.db_credentials.id
   secret_string = jsonencode({
-    username = var.db_username
-    password = var.db_password
-    engine   = "aurora-postgresql"
-    host     = aws_rds_cluster.main.endpoint
+    username    = var.db_username
+    password    = var.db_password
+    engine      = "aurora-postgresql"
+    host        = aws_rds_cluster.main.endpoint
     reader_host = aws_rds_cluster.main.reader_endpoint
-    port     = aws_rds_cluster.main.port
-    dbname   = aws_rds_cluster.main.database_name
+    port        = aws_rds_cluster.main.port
+    dbname      = aws_rds_cluster.main.database_name
   })
 }
 

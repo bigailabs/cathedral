@@ -61,6 +61,10 @@ module "networking" {
   vpc_cidr           = local.workspace_config.vpc_cidr
   availability_zones = local.workspace_config.availability_zones
 
+  # VPC peering to K3s cluster (for SSH connectivity from ECS to K3s servers)
+  k3s_vpc_peering_connection_id = var.k3s_vpc_peering_connection_id
+  k3s_vpc_cidr                  = var.k3s_vpc_cidr
+
   tags = local.common_tags
 }
 
