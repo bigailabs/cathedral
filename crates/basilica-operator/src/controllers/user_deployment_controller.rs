@@ -24,6 +24,7 @@ use crate::crd::user_deployment::{
     UserDeployment, UserDeploymentStatus,
 };
 use crate::k8s_client::K8sClient;
+use crate::labels::normalize_gpu_models;
 use anyhow::Result;
 use k8s_openapi::api::core::v1::Pod;
 use tracing::{debug, error};
@@ -428,7 +429,7 @@ fn build_node_affinity(gpu: &crate::crd::user_deployment::GpuSpec) -> Option<Aff
         NodeSelectorRequirement {
             key: "basilica.ai/gpu-model".to_string(),
             operator: "In".to_string(),
-            values: Some(gpu.model.clone()),
+            values: Some(normalize_gpu_models(&gpu.model)),
         },
     ];
 
@@ -908,6 +909,11 @@ impl UserDeploymentController {
             self.client
                 .patch_deployment(ns, &deployment_name, &desired_deployment)
                 .await?;
+
+            // Clean up stale ReplicaSets from previous rollouts.
+            // Old RS with 0 ready replicas and pending pods should be scaled to 0
+            // to prevent autoscaler from provisioning nodes for stale pods.
+            self.cleanup_stale_replica_sets(ns, &deployment_name).await;
         }
 
         let desired_service = render_service(instance_name, ns, spec.port);
@@ -1041,6 +1047,89 @@ impl UserDeploymentController {
             .await?;
 
         Ok(())
+    }
+
+    /// Clean up stale ReplicaSets from previous rollouts.
+    /// Scales down old RS with 0 ready replicas to prevent autoscaler from
+    /// provisioning nodes for pods with outdated nodeAffinity requirements.
+    async fn cleanup_stale_replica_sets(&self, ns: &str, deployment_name: &str) {
+        let replica_sets = match self
+            .client
+            .list_replica_sets_for_deployment(ns, deployment_name)
+            .await
+        {
+            Ok(rs) => rs,
+            Err(e) => {
+                debug!(
+                    deployment = %deployment_name,
+                    error = %e,
+                    "Failed to list ReplicaSets for cleanup"
+                );
+                return;
+            }
+        };
+
+        if replica_sets.len() <= 1 {
+            return;
+        }
+
+        // Find the current (newest) RS by looking at revision annotation
+        let newest_revision = replica_sets
+            .iter()
+            .filter_map(|rs| {
+                rs.metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("deployment.kubernetes.io/revision"))
+                    .and_then(|r| r.parse::<u64>().ok())
+            })
+            .max()
+            .unwrap_or(0);
+
+        for rs in &replica_sets {
+            let rs_name = match rs.metadata.name.as_ref() {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let revision = rs
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("deployment.kubernetes.io/revision"))
+                .and_then(|r| r.parse::<u64>().ok())
+                .unwrap_or(0);
+
+            // Skip the current RS
+            if revision == newest_revision {
+                continue;
+            }
+
+            let ready_replicas = rs
+                .status
+                .as_ref()
+                .and_then(|s| s.ready_replicas)
+                .unwrap_or(0);
+
+            let current_replicas = rs.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
+
+            // Scale down old RS with 0 ready replicas but non-zero desired
+            if ready_replicas == 0 && current_replicas > 0 {
+                debug!(
+                    deployment = %deployment_name,
+                    replica_set = %rs_name,
+                    revision = revision,
+                    "Scaling down stale ReplicaSet with 0 ready replicas"
+                );
+                if let Err(e) = self.client.scale_replica_set(ns, rs_name, 0).await {
+                    debug!(
+                        replica_set = %rs_name,
+                        error = %e,
+                        "Failed to scale down stale ReplicaSet"
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -1884,6 +1973,104 @@ mod tests {
         let resources = container.resources.as_ref().unwrap();
         let limits = resources.limits.as_ref().unwrap();
         assert_eq!(limits.get("nvidia.com/gpu").unwrap().0, "2");
+    }
+
+    #[test]
+    fn test_gpu_node_affinity_normalizes_model_names() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        // User specifies models with memory suffixes (e.g., from UI selection)
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "gpu-app".to_string(),
+            "pytorch:latest".to_string(),
+            1,
+            8080,
+            "/deployments/gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "4000m".to_string(),
+            memory: "16Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 1,
+                model: vec!["A100-40GB".to_string(), "H100-80GB".to_string()],
+                min_cuda_version: None,
+                min_gpu_memory_gb: None,
+            }),
+            cpu_request_ratio: 1.0,
+        });
+
+        let deployment = render_deployment("gpu-app", "u-user123", &spec, None).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+        let affinity = pod_spec.affinity.unwrap();
+        let node_affinity = affinity.node_affinity.unwrap();
+        let node_selector = node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .unwrap();
+        let exprs = node_selector.node_selector_terms[0]
+            .match_expressions
+            .as_ref()
+            .unwrap();
+
+        let gpu_model_expr = exprs
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-model")
+            .unwrap();
+
+        // Models should be normalized (memory suffix removed)
+        assert_eq!(
+            gpu_model_expr.values.as_ref().unwrap(),
+            &vec!["A100".to_string(), "H100".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_gpu_node_affinity_deduplicates_models() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        // User specifies same model with different memory sizes
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "gpu-app".to_string(),
+            "pytorch:latest".to_string(),
+            1,
+            8080,
+            "/deployments/gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "4000m".to_string(),
+            memory: "16Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 1,
+                model: vec!["A100-40GB".to_string(), "A100-80GB".to_string()],
+                min_cuda_version: None,
+                min_gpu_memory_gb: None,
+            }),
+            cpu_request_ratio: 1.0,
+        });
+
+        let deployment = render_deployment("gpu-app", "u-user123", &spec, None).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+        let affinity = pod_spec.affinity.unwrap();
+        let node_affinity = affinity.node_affinity.unwrap();
+        let node_selector = node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .unwrap();
+        let exprs = node_selector.node_selector_terms[0]
+            .match_expressions
+            .as_ref()
+            .unwrap();
+
+        let gpu_model_expr = exprs
+            .iter()
+            .find(|e| e.key == "basilica.ai/gpu-model")
+            .unwrap();
+
+        // Should be deduplicated to single "A100"
+        assert_eq!(
+            gpu_model_expr.values.as_ref().unwrap(),
+            &vec!["A100".to_string()]
+        );
     }
 
     #[test]

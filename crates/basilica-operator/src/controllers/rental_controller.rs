@@ -16,6 +16,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use crate::billing::{BillingClient, RuntimeMetrics};
 use crate::crd::gpu_rental::{AccessType, GpuRental, GpuRentalSpec, GpuRentalStatus, GpuSpec};
 use crate::k8s_client::K8sClient;
+use crate::labels::normalize_gpu_models;
 use crate::metrics as opmetrics;
 use crate::metrics_provider::{NoopRuntimeMetricsProvider, RuntimeMetricsProvider};
 use anyhow::Result;
@@ -149,7 +150,7 @@ fn build_node_affinity(gpu: &GpuSpec) -> Option<Affinity> {
         match_expressions.push(NodeSelectorRequirement {
             key: "basilica.ai/gpu-model".into(),
             operator: "In".into(),
-            values: Some(gpu.model.clone()),
+            values: Some(normalize_gpu_models(&gpu.model)),
         });
     }
 
