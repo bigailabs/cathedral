@@ -5,7 +5,7 @@ use governor::{
     state::{InMemoryState, NotKeyed},
     Quota, RateLimiter,
 };
-use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{Node, PersistentVolumeClaim, Pod, Secret, Service};
 use k8s_openapi::api::networking::v1::NetworkPolicy;
@@ -147,6 +147,15 @@ pub trait K8sClient: Send + Sync {
         name: &str,
         pdb: &PodDisruptionBudget,
     ) -> Result<PodDisruptionBudget>;
+
+    // ReplicaSet management for cleanup of stale rollouts
+    async fn list_replica_sets_for_deployment(
+        &self,
+        ns: &str,
+        deployment_name: &str,
+    ) -> Result<Vec<ReplicaSet>>;
+
+    async fn scale_replica_set(&self, ns: &str, name: &str, replicas: i32) -> Result<()>;
 }
 
 /// In-memory mock client implementing a subset of the Kubernetes API for tests.
@@ -169,6 +178,7 @@ pub struct MockK8sClient {
     evict_block: Arc<RwLock<std::collections::HashSet<String>>>,
     http_routes: Arc<RwLock<HashMap<String, HashMap<String, kube::core::DynamicObject>>>>,
     pdbs: Arc<RwLock<HashMap<String, HashMap<String, PodDisruptionBudget>>>>,
+    replica_sets: Arc<RwLock<HashMap<String, HashMap<String, ReplicaSet>>>>,
 }
 
 fn key(ns: &str) -> String {
@@ -714,6 +724,42 @@ impl K8sClient for MockK8sClient {
             .or_default()
             .insert(name.clone(), pdb.clone());
         Ok(pdb.clone())
+    }
+
+    async fn list_replica_sets_for_deployment(
+        &self,
+        ns: &str,
+        deployment_name: &str,
+    ) -> Result<Vec<ReplicaSet>> {
+        let map = self.replica_sets.read().await;
+        let rs_list = map
+            .get(ns)
+            .map(|m| {
+                m.values()
+                    .filter(|rs| {
+                        rs.metadata
+                            .owner_references
+                            .as_ref()
+                            .map(|refs| refs.iter().any(|r| r.name == deployment_name))
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(rs_list)
+    }
+
+    async fn scale_replica_set(&self, ns: &str, name: &str, replicas: i32) -> Result<()> {
+        let mut map = self.replica_sets.write().await;
+        if let Some(ns_map) = map.get_mut(ns) {
+            if let Some(rs) = ns_map.get_mut(name) {
+                if let Some(spec) = rs.spec.as_mut() {
+                    spec.replicas = Some(replicas);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1384,6 +1430,42 @@ impl K8sClient for KubeClient {
             Err(e) => Err(anyhow!(e)),
         }
     }
+
+    async fn list_replica_sets_for_deployment(
+        &self,
+        ns: &str,
+        deployment_name: &str,
+    ) -> Result<Vec<ReplicaSet>> {
+        use kube::api::ListParams;
+        let api: kube::Api<ReplicaSet> = self.api(ns);
+        let lp = ListParams::default();
+        let rs_list = api.list(&lp).await.map_err(|e| anyhow!(e))?;
+        Ok(rs_list
+            .items
+            .into_iter()
+            .filter(|rs| {
+                rs.metadata
+                    .owner_references
+                    .as_ref()
+                    .map(|refs| refs.iter().any(|r| r.name == deployment_name))
+                    .unwrap_or(false)
+            })
+            .collect())
+    }
+
+    async fn scale_replica_set(&self, ns: &str, name: &str, replicas: i32) -> Result<()> {
+        use kube::api::{Patch, PatchParams};
+        let api: kube::Api<ReplicaSet> = self.api(ns);
+        let patch = serde_json::json!({
+            "spec": {
+                "replicas": replicas
+            }
+        });
+        api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow!(e))
+    }
 }
 
 /// Rate-limited Kubernetes client wrapper.
@@ -1734,6 +1816,22 @@ impl K8sClient for RateLimitedKubeClient {
     ) -> Result<PodDisruptionBudget> {
         self.wait_for_permit().await;
         self.inner.patch_pdb(ns, name, pdb).await
+    }
+
+    async fn list_replica_sets_for_deployment(
+        &self,
+        ns: &str,
+        deployment_name: &str,
+    ) -> Result<Vec<ReplicaSet>> {
+        self.wait_for_permit().await;
+        self.inner
+            .list_replica_sets_for_deployment(ns, deployment_name)
+            .await
+    }
+
+    async fn scale_replica_set(&self, ns: &str, name: &str, replicas: i32) -> Result<()> {
+        self.wait_for_permit().await;
+        self.inner.scale_replica_set(ns, name, replicas).await
     }
 }
 
