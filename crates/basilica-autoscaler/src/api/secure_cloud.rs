@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -242,60 +243,102 @@ pub struct RentalInfo {
     pub hourly_cost: f64,
 }
 
+/// Response from listing secure cloud rentals
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct ListRentalsResponse {
+    rentals: Vec<RentalListItem>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    total_count: usize,
+}
+
+/// Rental list item from API (subset of fields we need)
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RentalListItem {
+    rental_id: String,
+    provider: String,
+    #[serde(default)]
+    provider_instance_id: Option<String>,
+    status: String,
+    #[serde(default)]
+    ip_address: Option<String>,
+    #[serde(default)]
+    hourly_cost: f64,
+}
+
 /// Node registration request
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeRegistrationRequest {
     pub node_id: String,
     pub datacenter_id: String,
-    pub managed_by: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rental_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub external_ip: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub gpu_info: Option<GpuInfo>,
+    pub gpu_specs: GpuSpecs,
 }
 
-/// GPU information for registration
+/// GPU specifications for node registration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct GpuInfo {
-    pub model: String,
+pub struct GpuSpecs {
     pub count: u32,
+    pub model: String,
     pub memory_gb: u32,
+    pub driver_version: String,
+    pub cuda_version: String,
 }
 
-/// Node registration response (idempotent)
+/// Node registration response from API
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct NodeRegistrationResponse {
     pub node_id: String,
-    pub wireguard: WireGuardConfigResponse,
+    pub k3s_url: String,
+    pub k3s_token: String,
     #[serde(default)]
-    pub already_registered: bool,
+    pub node_password: Option<String>,
+    pub node_labels: std::collections::HashMap<String, String>,
+    pub status: String,
+    #[serde(default)]
+    pub wireguard: Option<WireGuardConfigResponse>,
 }
 
 /// WireGuard configuration from API
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct WireGuardConfigResponse {
+    pub enabled: bool,
     pub node_ip: String,
-    pub server_endpoint: String,
     pub peers: Vec<WireGuardPeer>,
+    #[serde(default)]
+    pub persistent_keepalive: u32,
 }
 
 /// WireGuard peer configuration
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct WireGuardPeer {
-    pub public_key: String,
-    pub allowed_ips: String,
     pub endpoint: String,
+    pub public_key: String,
+    pub wireguard_ip: String,
+    pub vpc_subnet: String,
     #[serde(default)]
-    pub wireguard_ip: Option<String>,
-    #[serde(default)]
-    pub vpc_subnet: Option<String>,
+    pub route_pod_network: bool,
+}
+
+impl WireGuardPeer {
+    /// Compute allowed IPs for WireGuard config from peer fields.
+    /// Pod network (10.42.0.0/16) is ALWAYS added to all peers for HA.
+    /// WireGuard uses longest-prefix matching, so traffic routes to
+    /// whichever peer has an active handshake (prevents single point of failure).
+    pub fn allowed_ips(&self) -> String {
+        let ips = [
+            format!("{}/32", self.wireguard_ip),
+            self.vpc_subnet.clone(),
+            "10.42.0.0/16".to_string(),
+        ];
+        ips.join(", ")
+    }
 }
 
 /// WireGuard key registration request
@@ -331,6 +374,9 @@ pub trait SecureCloudApi: Send + Sync {
 
     /// Start a rental
     async fn start_rental(&self, offering_id: &str, ssh_key_id: &str) -> Result<RentalInfo>;
+
+    /// Get rental status (used to poll for IP address)
+    async fn get_rental(&self, rental_id: &str) -> Result<Option<RentalInfo>>;
 
     /// Stop a rental
     async fn stop_rental(&self, rental_id: &str) -> Result<()>;
@@ -540,6 +586,53 @@ impl SecureCloudApi for SecureCloudClient {
         result
     }
 
+    async fn get_rental(&self, rental_id: &str) -> Result<Option<RentalInfo>> {
+        self.check_circuit().await?;
+        let url = format!("{}/secure-cloud/rentals", self.base_url);
+        debug!("Fetching rental {} from list", rental_id);
+
+        let result = async {
+            let response = self
+                .client
+                .get(&url)
+                .header("Authorization", self.auth_header())
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(AutoscalerError::SecureCloudApi(format!(
+                    "Failed to list rentals: {} - {}",
+                    status, body
+                )));
+            }
+
+            let list_response: ListRentalsResponse = response.json().await?;
+            let rental = list_response
+                .rentals
+                .into_iter()
+                .find(|r| r.rental_id == rental_id);
+
+            Ok(rental.map(|r| RentalInfo {
+                rental_id: r.rental_id,
+                deployment_id: r.provider_instance_id.unwrap_or_default(),
+                provider: r.provider,
+                status: r.status,
+                ip_address: r.ip_address,
+                ssh_command: None,
+                hourly_cost: r.hourly_cost,
+            }))
+        }
+        .await;
+
+        match &result {
+            Ok(_) => self.circuit_breaker.record_success().await,
+            Err(_) => self.circuit_breaker.record_failure().await,
+        }
+        result
+    }
+
     async fn stop_rental(&self, rental_id: &str) -> Result<()> {
         self.check_circuit().await?;
         let url = format!("{}/secure-cloud/rentals/{}/stop", self.base_url, rental_id);
@@ -602,17 +695,15 @@ impl SecureCloudApi for SecureCloudClient {
             }
 
             let reg_response: NodeRegistrationResponse = response.json().await?;
-            if reg_response.already_registered {
-                info!(
-                    "Node {} was already registered, WG IP: {}",
-                    node_id, reg_response.wireguard.node_ip
-                );
-            } else {
-                info!(
-                    "Node {} registered, assigned WG IP: {}",
-                    node_id, reg_response.wireguard.node_ip
-                );
-            }
+            let wg_ip = reg_response
+                .wireguard
+                .as_ref()
+                .map(|w| w.node_ip.as_str())
+                .unwrap_or("none");
+            info!(
+                "Node {} registered, status: {}, WG IP: {}",
+                node_id, reg_response.status, wg_ip
+            );
             Ok(reg_response)
         }
         .await;
@@ -833,14 +924,18 @@ mod tests {
         let request = NodeRegistrationRequest {
             node_id: "test-node".to_string(),
             datacenter_id: "dc-1".to_string(),
-            managed_by: "autoscaler".to_string(),
-            rental_id: Some("rental-123".to_string()),
-            external_ip: None,
-            gpu_info: None,
+            gpu_specs: GpuSpecs {
+                count: 2,
+                model: "A100".to_string(),
+                memory_gb: 80,
+                driver_version: "535.104.05".to_string(),
+                cuda_version: "12.2".to_string(),
+            },
         };
 
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("test-node"));
-        assert!(json.contains("autoscaler"));
+        assert!(json.contains("gpu_specs"));
+        assert!(json.contains("A100"));
     }
 }

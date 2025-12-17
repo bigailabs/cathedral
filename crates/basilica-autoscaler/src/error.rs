@@ -76,6 +76,9 @@ pub enum AutoscalerError {
     #[error("Network validation failed: {0}")]
     NetworkValidation(String),
 
+    #[error("Connectivity check failed to {target}: {reason}")]
+    ConnectivityCheck { target: String, reason: String },
+
     #[error("API registration failed: {0}")]
     ApiRegistration(String),
 

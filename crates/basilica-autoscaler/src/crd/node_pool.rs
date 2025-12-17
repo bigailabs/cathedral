@@ -122,6 +122,14 @@ pub struct SecureCloudConfig {
 
     /// Reference to Secret containing the corresponding private key
     pub ssh_key_secret_ref: SecretRef,
+
+    /// SSH username for connecting to provisioned VMs (default: ubuntu)
+    #[serde(default = "default_cloud_ssh_user")]
+    pub ssh_user: String,
+}
+
+fn default_cloud_ssh_user() -> String {
+    "ubuntu".to_string()
 }
 
 /// K3s agent configuration
@@ -152,12 +160,18 @@ pub struct K3sConfig {
 }
 
 /// WireGuard configuration
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct WireGuardConfig {
     /// Enable WireGuard (default: true for remote nodes)
     #[serde(default = "default_wireguard_enabled")]
     pub enabled: bool,
+}
+
+impl Default for WireGuardConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 fn default_wireguard_enabled() -> bool {
@@ -485,6 +499,18 @@ pub struct NodePoolCondition {
     pub last_probe_time: Option<DateTime<Utc>>,
 }
 
+/// WireGuard peer for status storage
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WireGuardPeerStatus {
+    pub endpoint: String,
+    pub public_key: String,
+    pub wireguard_ip: String,
+    pub vpc_subnet: String,
+    #[serde(default)]
+    pub route_pod_network: bool,
+}
+
 /// WireGuard status
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -500,6 +526,10 @@ pub struct WireGuardStatus {
     /// Public endpoint
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+
+    /// Peers from registration (used to configure WireGuard)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<WireGuardPeerStatus>,
 }
 
 #[cfg(test)]

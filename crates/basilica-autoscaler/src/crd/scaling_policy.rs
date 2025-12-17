@@ -198,6 +198,17 @@ pub struct SecureCloudTemplate {
 
     /// Reference to Secret containing SSH private key
     pub ssh_key_secret_ref: SecretRef,
+
+    /// Datacenter ID for node registration (typically user ID)
+    pub datacenter_id: String,
+
+    /// SSH username for connecting to provisioned VMs (default: ubuntu)
+    #[serde(default = "default_cloud_ssh_user")]
+    pub ssh_user: String,
+}
+
+fn default_cloud_ssh_user() -> String {
+    "ubuntu".to_string()
 }
 
 fn default_min_gpu_count() -> u32 {
