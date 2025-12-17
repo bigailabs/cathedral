@@ -74,6 +74,9 @@ spec:
       # SSH key ID registered with your cloud provider
       sshKeyId: "default"
 
+      # Datacenter identifier for the cloud provider
+      datacenterId: "default"
+
       # Reference to SSH private key secret
       sshKeySecretRef:
         name: hyperstack-ssh-key

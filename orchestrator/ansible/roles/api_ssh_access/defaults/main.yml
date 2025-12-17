@@ -1,0 +1,9 @@
+---
+# API SSH access configuration
+
+# The username for API service SSH access
+api_ssh_username: "basilica-api"
+
+# Path to the public key file (on the control machine)
+# This should be the public key corresponding to the private key used by the API
+api_ssh_public_key_path: "~/.ssh/basilica_k3s_id_rsa.pub"

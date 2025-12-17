@@ -73,6 +73,7 @@ spec:
 
       # SSH key ID registered with your cloud provider
       sshKeyId: "35f0ab63-e983-40b0-b53d-953cf67b53d2"
+      datacenterId: "github|434149"
 
       # Reference to SSH private key secret
       sshKeySecretRef:

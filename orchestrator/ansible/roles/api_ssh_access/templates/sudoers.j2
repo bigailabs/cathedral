@@ -1,0 +1,13 @@
+# Sudoers configuration for {{ api_ssh_username }}
+# Restricted to commands required by Basilica API for K3s token management and WireGuard peer management
+
+{{ api_ssh_username }} ALL=(root) NOPASSWD: \
+    /usr/local/bin/k3s token delete *, \
+    /usr/local/bin/k3s kubectl *, \
+    /bin/cat /var/lib/rancher/k3s/server/token, \
+    /usr/bin/wg set wg0 peer * allowed-ips * persistent-keepalive *, \
+    /usr/bin/wg set wg0 peer * remove, \
+    /usr/bin/tee -a /etc/wireguard/wg0.conf, \
+    /usr/bin/awk *, \
+    /usr/bin/mv /tmp/wg0.conf.tmp /etc/wireguard/wg0.conf, \
+    /usr/bin/chmod 600 /etc/wireguard/wg0.conf

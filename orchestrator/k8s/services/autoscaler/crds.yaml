@@ -219,6 +219,10 @@ spec:
                     required:
                     - name
                     type: object
+                  sshUser:
+                    default: ubuntu
+                    description: 'SSH username for connecting to provisioned VMs (default: ubuntu)'
+                    type: string
                 required:
                 - offeringId
                 - sshKeyId
@@ -271,7 +275,7 @@ spec:
                 type: object
               wireguard:
                 default:
-                  enabled: false
+                  enabled: true
                 description: WireGuard configuration
                 properties:
                   enabled:
@@ -475,6 +479,29 @@ spec:
                     description: WireGuard IP assigned by API
                     nullable: true
                     type: string
+                  peers:
+                    description: Peers from registration (used to configure WireGuard)
+                    items:
+                      description: WireGuard peer for status storage
+                      properties:
+                        endpoint:
+                          type: string
+                        publicKey:
+                          type: string
+                        routePodNetwork:
+                          default: false
+                          type: boolean
+                        vpcSubnet:
+                          type: string
+                        wireguardIp:
+                          type: string
+                      required:
+                      - endpoint
+                      - publicKey
+                      - vpcSubnet
+                      - wireguardIp
+                      type: object
+                    type: array
                   publicKey:
                     description: Node's WireGuard public key
                     nullable: true
@@ -658,6 +685,9 @@ spec:
                     description: Secure Cloud configuration
                     nullable: true
                     properties:
+                      datacenterId:
+                        description: Datacenter ID for node registration (typically user ID)
+                        type: string
                       gpuType:
                         description: Preferred GPU type (e.g., RTX_4090, A100) for dynamic selection
                         nullable: true
@@ -705,7 +735,12 @@ spec:
                         required:
                         - name
                         type: object
+                      sshUser:
+                        default: ubuntu
+                        description: 'SSH username for connecting to provisioned VMs (default: ubuntu)'
+                        type: string
                     required:
+                    - datacenterId
                     - sshKeyId
                     - sshKeySecretRef
                     type: object
