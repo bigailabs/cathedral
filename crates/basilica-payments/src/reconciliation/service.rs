@@ -100,6 +100,16 @@ impl ReconciliationService {
         loop {
             ticker.tick().await;
 
+            // HIGH-07: Reconcile stale sweeps before starting new cycle
+            if let Err(e) = self.reconcile_stale_sweeps().await {
+                warn!("Stale sweep reconciliation failed: {}", e);
+            }
+
+            // HIGH-08: Monitor cold wallet balance
+            if let Err(e) = self.monitor_cold_wallet().await {
+                warn!("Cold wallet monitoring failed: {}", e);
+            }
+
             info!("Starting reconciliation sweep cycle");
 
             match self.sweep_cycle().await {
@@ -129,6 +139,7 @@ impl ReconciliationService {
 
     async fn sweep_cycle(&self) -> Result<SweepSummary> {
         let mut summary = SweepSummary::new();
+        let max_sweeps = self.config.max_sweeps_per_cycle as usize;
 
         let account_hexes = self
             .repos
@@ -137,9 +148,22 @@ impl ReconciliationService {
             .map_err(PaymentsError::Database)?;
 
         summary.total_checked = account_hexes.len();
-        info!("Checking {} deposit accounts", account_hexes.len());
+        info!(
+            "Checking {} deposit accounts (max {} sweeps per cycle)",
+            account_hexes.len(),
+            max_sweeps
+        );
 
         for account_hex in account_hexes {
+            // Rate limit: stop if we've reached max sweeps for this cycle
+            if summary.swept_count >= max_sweeps {
+                info!(
+                    "Rate limit reached: {} sweeps completed, deferring remaining accounts",
+                    summary.swept_count
+                );
+                break;
+            }
+
             match self.sweep_account(&account_hex).await {
                 Ok(Some(amount)) => {
                     summary.swept_count += 1;
@@ -230,9 +254,28 @@ impl ReconciliationService {
     async fn execute_sweep(
         &self,
         account_hex: &str,
-        balance_before: u128,
-        sweep_amount: u128,
+        initial_balance: u128,
+        initial_sweep_amount: u128,
     ) -> Result<()> {
+        let account_preview = account_hex.chars().take(8).collect::<String>();
+
+        // HIGH-03: Check for existing pending/submitted sweeps (idempotency)
+        if let Some(existing_id) = self
+            .repos
+            .get_pending_sweep(account_hex)
+            .await
+            .map_err(PaymentsError::Database)?
+        {
+            warn!(
+                "Skipping sweep for {}: pending sweep {} already exists",
+                account_preview, existing_id
+            );
+            return Err(PaymentsError::Reconciliation(format!(
+                "Pending sweep {} exists for account",
+                existing_id
+            )));
+        }
+
         let account_data = self
             .repos
             .get_by_account_hex(account_hex)
@@ -241,9 +284,45 @@ impl ReconciliationService {
             .ok_or_else(|| PaymentsError::Reconciliation("Account not found".into()))?;
 
         let (hotwallet_ss58, _, _, encrypted_mnemonic) = account_data;
+        let hotwallet_preview = hotwallet_ss58.chars().take(10).collect::<String>();
+        let coldwallet_preview = self
+            .config
+            .coldwallet_address_ss58
+            .chars()
+            .take(10)
+            .collect::<String>();
 
+        // CRITICAL-03: Re-verify balance before creating sweep record to minimize race window
+        let current_balance = self
+            .blockchain
+            .get_balance(account_hex)
+            .await
+            .context("Failed to re-verify balance")
+            .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
+
+        // Recalculate sweep amount based on current balance
+        let sweep_decision = self.calculator.calculate(current_balance);
+        let sweep_amount = match sweep_decision {
+            SweepDecision::Sweep { amount_plancks } => amount_plancks,
+            SweepDecision::Skip { reason } => {
+                info!(
+                    "Balance changed for {}: was {} plancks, now {} plancks. Skipping: {}",
+                    account_preview, initial_balance, current_balance, reason
+                );
+                return Ok(());
+            }
+        };
+
+        // Log if sweep amount changed significantly
+        if sweep_amount != initial_sweep_amount {
+            info!(
+                "Sweep amount adjusted for {}: {} -> {} plancks (balance: {} -> {})",
+                account_preview, initial_sweep_amount, sweep_amount, initial_balance, current_balance
+            );
+        }
+
+        // Create sweep record
         let mut tx = self.repos.begin().await.map_err(PaymentsError::Database)?;
-
         let sweep_id = self
             .repos
             .insert_sweep_tx(
@@ -251,22 +330,20 @@ impl ReconciliationService {
                 account_hex,
                 &hotwallet_ss58,
                 &self.config.coldwallet_address_ss58,
-                &balance_before.to_string(),
+                &current_balance.to_string(),
                 &sweep_amount.to_string(),
                 &self.config.estimated_fee_plancks,
                 self.config.dry_run_mode,
             )
             .await
             .map_err(PaymentsError::Database)?;
-
         tx.commit().await.map_err(PaymentsError::Database)?;
 
+        // Dry run mode - simulate without blockchain transaction
         if self.config.dry_run_mode {
             info!(
                 "DRY RUN: Would sweep {} plancks from {} to {}",
-                sweep_amount,
-                &hotwallet_ss58[0..10],
-                &self.config.coldwallet_address_ss58[0..10]
+                sweep_amount, hotwallet_preview, coldwallet_preview
             );
             let mut tx = self.repos.begin().await.map_err(PaymentsError::Database)?;
             self.repos
@@ -276,7 +353,7 @@ impl ReconciliationService {
                     SweepStatus::Confirmed,
                     Some("DRY_RUN"),
                     None,
-                    Some(&(balance_before - sweep_amount).to_string()),
+                    Some(&current_balance.saturating_sub(sweep_amount).to_string()),
                     None,
                 )
                 .await
@@ -285,38 +362,55 @@ impl ReconciliationService {
             return Ok(());
         }
 
+        // Decrypt keypair for signing
         let keypair = self
             .wallet_manager
             .decrypt_and_create_keypair(&encrypted_mnemonic)?;
 
+        // Execute blockchain transfer
         let receipt = self
             .blockchain
             .transfer(&keypair, &self.config.coldwallet_address_ss58, sweep_amount)
             .await;
 
+        // Update sweep status based on result
         match receipt {
             Ok(receipt) => {
-                info!("Transfer successful: tx_hash={}", receipt.tx_hash);
+                info!(
+                    "Transfer finalized: tx_hash={}, block_number={:?}",
+                    receipt.tx_hash, receipt.block_number
+                );
 
-                let balance_after = self.blockchain.get_balance(account_hex).await.unwrap_or(0);
+                let balance_after = match self.blockchain.get_balance(account_hex).await {
+                    Ok(balance) => balance,
+                    Err(e) => {
+                        warn!(
+                            "Failed to get post-sweep balance for {}: {} (sweep succeeded)",
+                            account_preview, e
+                        );
+                        0
+                    }
+                };
 
                 let mut tx = self.repos.begin().await.map_err(PaymentsError::Database)?;
                 self.repos
                     .update_sweep_status_tx(
                         &mut tx,
                         sweep_id,
-                        SweepStatus::Submitted,
+                        SweepStatus::Confirmed,
                         Some(&receipt.tx_hash),
-                        None,
+                        receipt.block_number,
                         Some(&balance_after.to_string()),
                         None,
                     )
                     .await
                     .map_err(PaymentsError::Database)?;
                 tx.commit().await.map_err(PaymentsError::Database)?;
+
+                Ok(())
             }
             Err(e) => {
-                warn!("Transfer failed: {}", e);
+                warn!("Transfer failed for {}: {}", account_preview, e);
 
                 let mut tx = self.repos.begin().await.map_err(PaymentsError::Database)?;
                 self.repos
@@ -333,8 +427,160 @@ impl ReconciliationService {
                     .map_err(PaymentsError::Database)?;
                 tx.commit().await.map_err(PaymentsError::Database)?;
 
-                return Err(e);
+                Err(e)
             }
+        }
+    }
+
+    /// HIGH-08: Monitor cold wallet balance for operational visibility
+    async fn monitor_cold_wallet(&self) -> Result<()> {
+        // Convert SS58 address to account hex for balance query
+        use subxt::ext::sp_core::crypto::Ss58Codec;
+
+        let coldwallet_public = sp_core::sr25519::Public::from_ss58check(
+            &self.config.coldwallet_address_ss58,
+        )
+        .map_err(|e| PaymentsError::Config(format!("Invalid cold wallet SS58: {}", e)))?;
+
+        let coldwallet_hex = hex::encode(coldwallet_public.0);
+
+        let balance = self
+            .blockchain
+            .get_balance(&coldwallet_hex)
+            .await
+            .map_err(|e| {
+                warn!("Failed to query cold wallet balance: {}", e);
+                e
+            })?;
+
+        let balance_tao = balance as f64 / 1e9;
+        let wallet_preview = self
+            .config
+            .coldwallet_address_ss58
+            .chars()
+            .take(10)
+            .collect::<String>();
+
+        info!(
+            "Cold wallet {} balance: {:.4} TAO ({} plancks)",
+            wallet_preview, balance_tao, balance
+        );
+
+        // Emit metrics if available
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .business_metrics()
+                .record_payment_processed(balance_tao, &[("type", "cold_wallet_balance")])
+                .await;
+        }
+
+        Ok(())
+    }
+
+    /// HIGH-07: Reconcile sweeps stuck in pending/submitted state
+    async fn reconcile_stale_sweeps(&self) -> Result<()> {
+        // Consider sweeps stale after 2x the sweep interval
+        let stale_threshold = (self.config.sweep_interval_seconds * 2) as i64;
+
+        let stale_sweeps = self
+            .repos
+            .list_stale_sweeps(stale_threshold)
+            .await
+            .map_err(PaymentsError::Database)?;
+
+        if stale_sweeps.is_empty() {
+            return Ok(());
+        }
+
+        info!(
+            "Found {} stale sweeps to reconcile (older than {}s)",
+            stale_sweeps.len(),
+            stale_threshold
+        );
+
+        for sweep in stale_sweeps {
+            let account_preview = sweep.account_hex.chars().take(8).collect::<String>();
+
+            // Check current balance on-chain
+            let current_balance = match self.blockchain.get_balance(&sweep.account_hex).await {
+                Ok(balance) => balance,
+                Err(e) => {
+                    warn!(
+                        "Failed to get balance for stale sweep {} (account {}): {}",
+                        sweep.id, account_preview, e
+                    );
+                    continue;
+                }
+            };
+
+            // Parse stored values - skip if parsing fails to avoid incorrect reconciliation
+            let balance_before: u128 = match sweep.balance_before_plancks.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        "Failed to parse balance_before for sweep {}: {}",
+                        sweep.id, e
+                    );
+                    continue;
+                }
+            };
+            let sweep_amount: u128 = match sweep.sweep_amount_plancks.parse() {
+                Ok(v) => v,
+                Err(e) => {
+                    error!(
+                        "Failed to parse sweep_amount for sweep {}: {}",
+                        sweep.id, e
+                    );
+                    continue;
+                }
+            };
+
+            // If balance dropped significantly, the sweep likely succeeded
+            let expected_balance_after = balance_before.saturating_sub(sweep_amount);
+            let balance_diff = balance_before.saturating_sub(current_balance);
+
+            // Consider sweep successful if balance dropped by at least 80% of sweep amount
+            let sweep_likely_succeeded = balance_diff >= (sweep_amount * 80 / 100);
+
+            let mut tx = self.repos.begin().await.map_err(PaymentsError::Database)?;
+
+            if sweep_likely_succeeded {
+                info!(
+                    "Stale sweep {} likely succeeded: balance dropped from {} to {} plancks",
+                    sweep.id, balance_before, current_balance
+                );
+                self.repos
+                    .update_sweep_status_tx(
+                        &mut tx,
+                        sweep.id,
+                        SweepStatus::Confirmed,
+                        sweep.tx_hash.as_deref(),
+                        sweep.block_number,
+                        Some(&current_balance.to_string()),
+                        Some("Reconciled: balance confirms sweep succeeded"),
+                    )
+                    .await
+                    .map_err(PaymentsError::Database)?;
+            } else {
+                info!(
+                    "Stale sweep {} likely failed: balance {} vs expected {} plancks",
+                    sweep.id, current_balance, expected_balance_after
+                );
+                self.repos
+                    .update_sweep_status_tx(
+                        &mut tx,
+                        sweep.id,
+                        SweepStatus::Failed,
+                        sweep.tx_hash.as_deref(),
+                        sweep.block_number,
+                        Some(&current_balance.to_string()),
+                        Some("Reconciled: timed out, marked failed for retry"),
+                    )
+                    .await
+                    .map_err(PaymentsError::Database)?;
+            }
+
+            tx.commit().await.map_err(PaymentsError::Database)?;
         }
 
         Ok(())
