@@ -76,6 +76,34 @@ pub struct BlockchainConfig {
     pub ss58_prefix: u16,
     pub connection_timeout_seconds: u64,
     pub retry_interval_seconds: u64,
+    /// Maximum consecutive failures before skipping to current block (default: 5)
+    #[serde(default = "default_max_block_retries")]
+    pub max_block_retries: u32,
+    /// Number of blocks kept by non-archive nodes (default: 256, ~51 minutes)
+    #[serde(default = "default_block_retention")]
+    pub block_retention_threshold: u32,
+    /// Maximum block gap before forcing skip to current (default: 300, ~1 hour)
+    #[serde(default = "default_max_block_gap")]
+    pub max_block_gap: u32,
+    /// Enable automatic reconnection on connection failures (default: true)
+    #[serde(default = "default_auto_reconnect")]
+    pub auto_reconnect: bool,
+}
+
+fn default_max_block_retries() -> u32 {
+    5
+}
+
+fn default_block_retention() -> u32 {
+    256
+}
+
+fn default_max_block_gap() -> u32 {
+    300
+}
+
+fn default_auto_reconnect() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -221,6 +249,10 @@ impl Default for PaymentsConfig {
                 ss58_prefix: 42,
                 connection_timeout_seconds: 30,
                 retry_interval_seconds: 5,
+                max_block_retries: 5,
+                block_retention_threshold: 256,
+                max_block_gap: 300,
+                auto_reconnect: true,
             },
             treasury: TreasuryConfig {
                 aead_key_hex: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -338,6 +370,27 @@ impl PaymentsConfig {
         if self.blockchain.websocket_url.is_empty() {
             return Err(ConfigurationError::ValidationFailed {
                 details: "blockchain.websocket_url must not be empty".to_string(),
+            });
+        }
+
+        if self.blockchain.max_block_retries == 0 {
+            return Err(ConfigurationError::ValidationFailed {
+                details: "blockchain.max_block_retries must be > 0".to_string(),
+            });
+        }
+
+        if self.blockchain.block_retention_threshold == 0 {
+            return Err(ConfigurationError::ValidationFailed {
+                details: "blockchain.block_retention_threshold must be > 0".to_string(),
+            });
+        }
+
+        if self.blockchain.max_block_gap < self.blockchain.block_retention_threshold {
+            return Err(ConfigurationError::ValidationFailed {
+                details: format!(
+                    "blockchain.max_block_gap ({}) should be >= block_retention_threshold ({})",
+                    self.blockchain.max_block_gap, self.blockchain.block_retention_threshold
+                ),
             });
         }
 

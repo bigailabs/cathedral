@@ -1,5 +1,8 @@
 use basilica_payments::{
-    blockchain::{client::BlockchainClient, local_treasury::LocalTreasury, monitor::ChainMonitor},
+    blockchain::{
+        client::BlockchainClient, local_treasury::LocalTreasury, monitor::ChainMonitor,
+        MonitorConfig,
+    },
     config::PaymentsConfig,
     domain::price::PriceConverter,
     grpc::payments_service::PaymentsServer as GrpcPaymentsServer,
@@ -189,9 +192,15 @@ async fn main() -> Result<()> {
     let mut endpoints = vec![cfg.blockchain.websocket_url.clone()];
     endpoints.extend(cfg.blockchain.fallback_websocket_urls.clone());
 
-    let monitor = ChainMonitor::new(repos.clone(), endpoints, metrics_system.clone())
-        .await
-        .context("Failed to initialize blockchain monitor")?;
+    let monitor_config = MonitorConfig::from(&cfg.blockchain);
+    let monitor = ChainMonitor::with_config(
+        repos.clone(),
+        endpoints,
+        metrics_system.clone(),
+        monitor_config,
+    )
+    .await
+    .context("Failed to initialize blockchain monitor")?;
 
     let blockchain_client = Arc::new(
         BlockchainClient::new(&cfg.blockchain.websocket_url)
