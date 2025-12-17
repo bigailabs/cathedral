@@ -2,8 +2,11 @@ use crate::reconciliation::{SkipReason, SweepDecision};
 
 pub struct SweepCalculator {
     minimum_threshold_plancks: u128,
+    #[allow(dead_code)]
     target_balance_plancks: u128,
+    #[allow(dead_code)]
     estimated_fee_plancks: u128,
+    required_reserve_plancks: u128,
 }
 
 impl SweepCalculator {
@@ -12,10 +15,15 @@ impl SweepCalculator {
         target_balance_plancks: u128,
         estimated_fee_plancks: u128,
     ) -> Self {
+        let required_reserve_plancks = target_balance_plancks
+            .checked_add(estimated_fee_plancks)
+            .expect("target_balance + estimated_fee overflow - invalid configuration");
+
         Self {
             minimum_threshold_plancks,
             target_balance_plancks,
             estimated_fee_plancks,
+            required_reserve_plancks,
         }
     }
 
@@ -26,19 +34,21 @@ impl SweepCalculator {
             };
         }
 
-        let required_reserve = self.target_balance_plancks + self.estimated_fee_plancks;
-
-        if current_balance_plancks <= required_reserve {
+        if current_balance_plancks <= self.required_reserve_plancks {
             return SweepDecision::Skip {
                 reason: SkipReason::InsufficientForFees,
             };
         }
 
-        let sweep_amount = current_balance_plancks - required_reserve;
+        let sweep_amount = current_balance_plancks - self.required_reserve_plancks;
 
         SweepDecision::Sweep {
             amount_plancks: sweep_amount,
         }
+    }
+
+    pub fn required_reserve(&self) -> u128 {
+        self.required_reserve_plancks
     }
 }
 

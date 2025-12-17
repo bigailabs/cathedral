@@ -32,7 +32,12 @@ pub trait ReconciliationRepo {
 
     async fn get_recent_sweep(&self, account_hex: &str, within_seconds: i64) -> Result<bool>;
 
+    async fn get_pending_sweep(&self, account_hex: &str) -> Result<Option<i64>>;
+
     async fn list_recent_sweeps(&self, limit: i64) -> Result<Vec<ReconciliationSweep>>;
+
+    /// List sweeps stuck in pending/submitted state older than threshold
+    async fn list_stale_sweeps(&self, stale_seconds: i64) -> Result<Vec<ReconciliationSweep>>;
 }
 
 #[async_trait::async_trait]
@@ -128,6 +133,21 @@ impl ReconciliationRepo for PgRepos {
         Ok(row.get("exists"))
     }
 
+    async fn get_pending_sweep(&self, account_hex: &str) -> Result<Option<i64>> {
+        let row = sqlx::query(
+            r#"SELECT id FROM reconciliation_sweeps
+               WHERE account_hex = $1
+               AND status IN ('pending', 'submitted')
+               ORDER BY initiated_at DESC
+               LIMIT 1"#,
+        )
+        .bind(account_hex)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get("id")))
+    }
+
     async fn list_recent_sweeps(&self, limit: i64) -> Result<Vec<ReconciliationSweep>> {
         let rows = sqlx::query(
             r#"SELECT id, account_hex, hotwallet_address_ss58, coldwallet_address_ss58,
@@ -139,6 +159,58 @@ impl ReconciliationRepo for PgRepos {
                LIMIT $1"#,
         )
         .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let sweeps = rows
+            .into_iter()
+            .map(|row| {
+                let status_str: String = row.get("status");
+                let status = match status_str.as_str() {
+                    "pending" => SweepStatus::Pending,
+                    "submitted" => SweepStatus::Submitted,
+                    "confirmed" => SweepStatus::Confirmed,
+                    "failed" => SweepStatus::Failed,
+                    _ => SweepStatus::Pending,
+                };
+
+                ReconciliationSweep {
+                    id: row.get("id"),
+                    account_hex: row.get("account_hex"),
+                    hotwallet_address_ss58: row.get("hotwallet_address_ss58"),
+                    coldwallet_address_ss58: row.get("coldwallet_address_ss58"),
+                    balance_before_plancks: row.get("balance_before_plancks"),
+                    sweep_amount_plancks: row.get("sweep_amount_plancks"),
+                    estimated_fee_plancks: row.get("estimated_fee_plancks"),
+                    balance_after_plancks: row.get("balance_after_plancks"),
+                    status,
+                    dry_run: row.get("dry_run"),
+                    tx_hash: row.get("tx_hash"),
+                    block_number: row.get("block_number"),
+                    error_message: row.get("error_message"),
+                    initiated_at: row.get("initiated_at"),
+                    completed_at: row.get("completed_at"),
+                }
+            })
+            .collect();
+
+        Ok(sweeps)
+    }
+
+    async fn list_stale_sweeps(&self, stale_seconds: i64) -> Result<Vec<ReconciliationSweep>> {
+        let rows = sqlx::query(
+            r#"SELECT id, account_hex, hotwallet_address_ss58, coldwallet_address_ss58,
+                      balance_before_plancks, sweep_amount_plancks, estimated_fee_plancks,
+                      balance_after_plancks, status, dry_run, tx_hash, block_number,
+                      error_message, initiated_at, completed_at
+               FROM reconciliation_sweeps
+               WHERE status IN ('pending', 'submitted')
+               AND initiated_at < now() - interval '1 second' * $1
+               AND dry_run = false
+               ORDER BY initiated_at ASC
+               LIMIT 100"#,
+        )
+        .bind(stale_seconds)
         .fetch_all(&self.pool)
         .await?;
 
