@@ -129,9 +129,9 @@ pub struct AggregatorConfig {
     /// GPU provider configurations
     pub providers: AggregatorProvidersConfig,
 
-    /// VIP configuration
+    /// VIP configuration (if present, VIP is enabled)
     #[serde(default)]
-    pub vip: basilica_aggregator::config::VipConfig,
+    pub vip: Option<basilica_aggregator::config::VipConfig>,
 }
 
 fn default_aggregator_ttl() -> u64 {
@@ -143,7 +143,7 @@ impl Default for AggregatorConfig {
         Self {
             ttl_seconds: default_aggregator_ttl(),
             providers: AggregatorProvidersConfig::default(),
-            vip: basilica_aggregator::config::VipConfig::default(),
+            vip: None,
         }
     }
 }

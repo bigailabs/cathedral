@@ -9,7 +9,7 @@ pub struct Config {
     pub providers: ProvidersConfig,
     pub database: DatabaseConfig,
     #[serde(default)]
-    pub vip: VipConfig,
+    pub vip: Option<VipConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -106,9 +106,6 @@ fn default_db_path() -> String {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VipConfig {
-    /// Feature flag to enable/disable VIP polling
-    #[serde(default)]
-    pub enabled: bool,
     /// Local CSV file path (for dev/testing)
     #[serde(default)]
     pub csv_file_path: Option<String>,
@@ -129,7 +126,6 @@ pub struct VipConfig {
 impl Default for VipConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             csv_file_path: None,
             s3_bucket: None,
             s3_key: None,
@@ -144,9 +140,9 @@ fn default_vip_poll_interval() -> u64 {
 }
 
 impl VipConfig {
-    /// Check if VIP is enabled and properly configured (mock, local CSV, or S3)
+    /// Check if VIP is properly configured (mock, local CSV, or S3)
     pub fn is_configured(&self) -> bool {
-        self.enabled && (self.is_mock_mode() || self.has_csv_source())
+        self.is_mock_mode() || self.has_csv_source()
     }
 
     /// Check if a CSV source is configured (local file or S3)
@@ -242,7 +238,7 @@ impl Config {
             database: DatabaseConfig {
                 path: default_db_path(),
             },
-            vip: VipConfig::default(),
+            vip: None,
         }
     }
 }
@@ -268,7 +264,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
-            vip: VipConfig::default(),
+            vip: None,
         };
 
         assert!(config.validate().is_err());
@@ -291,7 +287,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
-            vip: VipConfig::default(),
+            vip: None,
         };
 
         assert!(config.validate().is_err());
@@ -318,7 +314,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
-            vip: VipConfig::default(),
+            vip: None,
         };
 
         assert!(config.validate().is_ok());
@@ -345,7 +341,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
-            vip: VipConfig::default(),
+            vip: None,
         };
 
         assert!(config.validate().is_ok());

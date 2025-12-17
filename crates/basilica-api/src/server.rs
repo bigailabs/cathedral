@@ -990,16 +990,16 @@ impl Server {
             refresh_interval.as_secs()
         );
 
-        // Start VIP poller task if enabled
+        // Start VIP poller task if configured
         tracing::info!(
-            vip_enabled = config.aggregator.vip.enabled,
-            vip_mock_user_id = ?config.aggregator.vip.mock_user_id,
-            vip_is_configured = config.aggregator.vip.is_configured(),
-            vip_is_mock_mode = config.aggregator.vip.is_mock_mode(),
+            vip_configured = config.aggregator.vip.is_some(),
+            vip_mock_user_id = ?config.aggregator.vip.as_ref().and_then(|v| v.mock_user_id.clone()),
+            vip_is_configured = config.aggregator.vip.as_ref().map_or(false, |v| v.is_configured()),
+            vip_is_mock_mode = config.aggregator.vip.as_ref().map_or(false, |v| v.is_mock_mode()),
             "VIP configuration check"
         );
-        if config.aggregator.vip.is_configured() {
-            let vip_config = config.aggregator.vip.clone();
+        if let Some(vip_config) = config.aggregator.vip.as_ref().filter(|v| v.is_configured()) {
+            let vip_config = vip_config.clone();
             let vip_db = state.db.clone();
 
             if vip_config.is_mock_mode() {
