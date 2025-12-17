@@ -41,11 +41,11 @@ schemars = { version = "0.8", features = ["chrono"] }
 prometheus = "0.13"
 tokio-util = { version = "0.7", features = ["rt"] }
 
-# SSH (from workspace)
-async-ssh2-tokio = { workspace = true }
-
 # Internal crate
 basilica-common = { path = "../basilica-common" }
+
+# Temp file for SSH key management
+tempfile = { workspace = true }
 
 # YAML for script templates
 serde_yaml = "0.9"
@@ -58,5 +58,4 @@ base64 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 mockall = "0.12"
 tokio-test = "0.4"
-tempfile = { workspace = true }
 tower = { workspace = true }
