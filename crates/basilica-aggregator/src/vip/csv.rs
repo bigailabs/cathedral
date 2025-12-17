@@ -53,8 +53,19 @@ impl CsvDataSource {
 
     /// Create a data source from S3 bucket/key
     /// Uses AWS SDK default credential chain for authentication
-    pub async fn from_s3(bucket: String, key: String) -> Result<Self, DataSourceError> {
-        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    /// If region is provided, it overrides the default region from the credential chain
+    pub async fn from_s3(
+        bucket: String,
+        key: String,
+        region: Option<String>,
+    ) -> Result<Self, DataSourceError> {
+        let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+
+        if let Some(region) = region {
+            config_loader = config_loader.region(aws_sdk_s3::config::Region::new(region));
+        }
+
+        let config = config_loader.load().await;
         let client = S3Client::new(&config);
         Ok(Self {
             source: CsvSource::S3 {

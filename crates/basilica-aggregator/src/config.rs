@@ -115,6 +115,9 @@ pub struct VipConfig {
     /// S3 object key (for production)
     #[serde(default)]
     pub s3_key: Option<String>,
+    /// S3 region (for production, e.g., "us-east-2")
+    #[serde(default)]
+    pub s3_region: Option<String>,
     /// Polling interval in seconds (default: 60)
     #[serde(default = "default_vip_poll_interval")]
     pub poll_interval_secs: u64,
@@ -129,6 +132,7 @@ impl Default for VipConfig {
             csv_file_path: None,
             s3_bucket: None,
             s3_key: None,
+            s3_region: None,
             poll_interval_secs: default_vip_poll_interval(),
             mock_user_id: None,
         }

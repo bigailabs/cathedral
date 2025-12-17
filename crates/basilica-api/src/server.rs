@@ -994,8 +994,8 @@ impl Server {
         tracing::info!(
             vip_configured = config.aggregator.vip.is_some(),
             vip_mock_user_id = ?config.aggregator.vip.as_ref().and_then(|v| v.mock_user_id.clone()),
-            vip_is_configured = config.aggregator.vip.as_ref().map_or(false, |v| v.is_configured()),
-            vip_is_mock_mode = config.aggregator.vip.as_ref().map_or(false, |v| v.is_mock_mode()),
+            vip_is_configured = config.aggregator.vip.as_ref().is_some_and(|v| v.is_configured()),
+            vip_is_mock_mode = config.aggregator.vip.as_ref().is_some_and(|v| v.is_mock_mode()),
             "VIP configuration check"
         );
         if let Some(vip_config) = config.aggregator.vip.as_ref().filter(|v| v.is_configured()) {
@@ -1051,8 +1051,9 @@ impl Server {
                 let data_source_result = if vip_config.has_s3_source() {
                     let bucket = vip_config.s3_bucket.as_ref().unwrap();
                     let key = vip_config.s3_key.as_ref().unwrap();
-                    tracing::info!(bucket = %bucket, key = %key, "VIP: Using S3 CSV source");
-                    CsvDataSource::from_s3(bucket.clone(), key.clone()).await
+                    let region = vip_config.s3_region.clone();
+                    tracing::info!(bucket = %bucket, key = %key, region = ?region, "VIP: Using S3 CSV source");
+                    CsvDataSource::from_s3(bucket.clone(), key.clone(), region).await
                 } else if vip_config.has_local_csv() {
                     let file_path = vip_config.csv_file_path.as_ref().unwrap();
                     tracing::info!(file_path = %file_path, "VIP: Using local CSV file");
