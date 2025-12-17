@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use base64::prelude::*;
 use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
@@ -949,95 +950,12 @@ sudo sysctl --system > /dev/null 2>&1 || true
         }
 
         // Configure NVIDIA container runtime for K3s containerd
-        // Manually adds nvidia runtime config to K3s containerd template since nvidia-ctk
-        // writes to /etc/containerd/conf.d/ which K3s doesn't read.
+        // Uses base64 encoding to transfer the script, avoiding shell escaping issues
         // This must run AFTER K3s is installed since K3s creates its containerd config.
-        let nvidia_configure_cmd = r#"
-            CONFIG_DIR="/var/lib/rancher/k3s/agent/etc/containerd"
-            CONFIG_FILE="$CONFIG_DIR/config.toml"
-            TMPL_FILE="$CONFIG_DIR/config.toml.tmpl"
-
-            # Skip if no GPU or no K3s config
-            if [ ! -f "$CONFIG_FILE" ]; then
-                echo "K3s containerd config not found, skipping NVIDIA configuration"
-                exit 0
-            fi
-            if ! command -v nvidia-smi > /dev/null 2>&1; then
-                echo "nvidia-smi not found, skipping NVIDIA configuration"
-                exit 0
-            fi
-
-            # Check if nvidia is already set as default runtime (idempotency)
-            if grep -q 'default_runtime_name.*=.*nvidia' "$CONFIG_FILE"; then
-                echo "NVIDIA already set as default runtime in K3s containerd"
-                exit 0
-            fi
-
-            echo "Configuring NVIDIA runtime for K3s containerd..."
-
-            # Create template from current config if not exists
-            if [ ! -f "$TMPL_FILE" ]; then
-                sudo cp "$CONFIG_FILE" "$TMPL_FILE"
-            fi
-
-            # Determine config version and add nvidia runtime config directly
-            if grep -q 'version = 3' "$TMPL_FILE"; then
-                echo "Detected containerd v3 config"
-                RUNTIME_SECTION="plugins.'io.containerd.cri.v1.runtime'.containerd"
-            else
-                echo "Detected containerd v2 config"
-                RUNTIME_SECTION='plugins."io.containerd.grpc.v1.cri".containerd'
-            fi
-
-            # Add default_runtime_name if not present
-            if ! grep -q 'default_runtime_name' "$TMPL_FILE"; then
-                echo "Adding default_runtime_name = nvidia..."
-                sudo sed -i "/\[$RUNTIME_SECTION\]/a\\  default_runtime_name = \"nvidia\"" "$TMPL_FILE"
-            fi
-
-            # Add nvidia runtime if not present
-            if ! grep -q 'runtimes.*nvidia' "$TMPL_FILE"; then
-                echo "Adding nvidia runtime configuration..."
-                if grep -q 'version = 3' "$TMPL_FILE"; then
-                    # v3 format with single quotes
-                    cat << 'NVIDIA_V3' | sudo tee -a "$TMPL_FILE" > /dev/null
-
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'nvidia']
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'nvidia'.options]
-  BinaryName = "/usr/bin/nvidia-container-runtime"
-  SystemdCgroup = true
-NVIDIA_V3
-                else
-                    # v2 format with double quotes
-                    cat << 'NVIDIA_V2' | sudo tee -a "$TMPL_FILE" > /dev/null
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
-  runtime_type = "io.containerd.runc.v2"
-
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
-  BinaryName = "/usr/bin/nvidia-container-runtime"
-NVIDIA_V2
-                fi
-            fi
-
-            # Restart K3s agent to regenerate config from template
-            echo "Restarting K3s agent to apply changes..."
-            sudo systemctl restart k3s-agent
-            sleep 5
-
-            # Verify nvidia is set as default runtime
-            if grep -q 'default_runtime_name.*=.*nvidia' "$CONFIG_FILE"; then
-                echo "NVIDIA successfully set as default runtime in K3s containerd"
-            else
-                echo "Warning: default_runtime_name not set to nvidia after restart"
-                cat "$CONFIG_FILE"
-                exit 1
-            fi
-        "#;
+        let encoded_script = BASE64_STANDARD.encode(NVIDIA_CONFIGURE_SCRIPT);
+        let nvidia_configure_cmd = format!("echo '{}' | base64 -d | sudo bash", encoded_script);
         if let Err(e) = self
-            .execute_ssh_command(host, port, ssh_config, nvidia_configure_cmd)
+            .execute_ssh_command(host, port, ssh_config, &nvidia_configure_cmd)
             .await
         {
             warn!(host = %host, error = %e, "Failed to configure NVIDIA runtime for containerd");
@@ -1095,6 +1013,107 @@ NVIDIA_V2
         }
     }
 }
+
+/// NVIDIA container runtime configuration script for K3s containerd.
+/// This script is transferred to the node via base64 encoding to avoid shell escaping issues.
+const NVIDIA_CONFIGURE_SCRIPT: &str = r#"#!/bin/bash
+set -e
+
+CONFIG_DIR="/var/lib/rancher/k3s/agent/etc/containerd"
+CONFIG_FILE="$CONFIG_DIR/config.toml"
+TMPL_FILE="$CONFIG_DIR/config.toml.tmpl"
+
+# Skip if no GPU or no K3s config
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "K3s containerd config not found, skipping NVIDIA configuration"
+    exit 0
+fi
+if ! command -v nvidia-smi > /dev/null 2>&1; then
+    echo "nvidia-smi not found, skipping NVIDIA configuration"
+    exit 0
+fi
+
+# Check if nvidia is already set as default runtime (idempotency)
+if sudo grep -q 'default_runtime_name.*=.*nvidia' "$CONFIG_FILE"; then
+    echo "NVIDIA already set as default runtime in K3s containerd"
+    exit 0
+fi
+
+echo "Configuring NVIDIA runtime for K3s containerd..."
+
+# Create template from current config if not exists
+if [ ! -f "$TMPL_FILE" ]; then
+    sudo cp "$CONFIG_FILE" "$TMPL_FILE"
+fi
+
+# Detect config version
+if sudo grep -q 'version = 3' "$TMPL_FILE"; then
+    echo "Detected containerd v3 config"
+    IS_V3=true
+else
+    echo "Detected containerd v2 config"
+    IS_V3=false
+fi
+
+# For v3: Add containerd section with default_runtime_name before runtimes
+# For v2: The section already exists, just add the line
+if ! sudo grep -q 'default_runtime_name' "$TMPL_FILE"; then
+    echo "Adding default_runtime_name = nvidia..."
+    if [ "$IS_V3" = true ]; then
+        # v3: Find line number for runtimes.runc and insert containerd section before it
+        LINE=$(sudo grep -n 'containerd\.runtimes\.runc\]$' "$TMPL_FILE" | head -1 | cut -d: -f1)
+        if [ -n "$LINE" ]; then
+            sudo sed -i "${LINE}i\\[plugins.'io.containerd.cri.v1.runtime'.containerd]\\n  default_runtime_name = \"nvidia\"\\n" "$TMPL_FILE"
+        else
+            echo "Warning: Could not find runtimes.runc section"
+        fi
+    else
+        # v2: Add after existing containerd section
+        sudo sed -i '/\[plugins\."io\.containerd\.grpc\.v1\.cri"\.containerd\]/a\  default_runtime_name = "nvidia"' "$TMPL_FILE"
+    fi
+fi
+
+# Add nvidia runtime if not present
+if ! sudo grep -q "runtimes.*'nvidia'\|runtimes\.nvidia" "$TMPL_FILE"; then
+    echo "Adding nvidia runtime configuration..."
+    if [ "$IS_V3" = true ]; then
+        # v3 format with single quotes
+        cat << 'NVIDIA_V3' | sudo tee -a "$TMPL_FILE" > /dev/null
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'nvidia']
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.'nvidia'.options]
+  BinaryName = "/usr/bin/nvidia-container-runtime"
+  SystemdCgroup = true
+NVIDIA_V3
+    else
+        # v2 format with double quotes
+        cat << 'NVIDIA_V2' | sudo tee -a "$TMPL_FILE" > /dev/null
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+  runtime_type = "io.containerd.runc.v2"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+  BinaryName = "/usr/bin/nvidia-container-runtime"
+NVIDIA_V2
+    fi
+fi
+
+# Restart K3s agent to regenerate config from template
+echo "Restarting K3s agent to apply changes..."
+sudo systemctl restart k3s-agent
+sleep 5
+
+# Verify nvidia is set as default runtime
+if sudo grep -q 'default_runtime_name.*=.*nvidia' "$CONFIG_FILE"; then
+    echo "NVIDIA successfully set as default runtime in K3s containerd"
+else
+    echo "Warning: default_runtime_name not set to nvidia after restart"
+    sudo cat "$CONFIG_FILE"
+    exit 1
+fi
+"#;
 
 #[cfg(test)]
 mod tests {

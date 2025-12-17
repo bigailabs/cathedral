@@ -6,6 +6,7 @@ use kube::ResourceExt;
 use tracing::{debug, info, warn};
 
 use crate::api::SecureCloudApi;
+use crate::config::PendingPodFilterConfig;
 use crate::crd::{
     HealthCheckConfig, MetricsSnapshot, NodePool, NodePoolMode, NodePoolPhase, NodePoolSpec,
     ScalingPolicy, ScalingPolicyCondition, ScalingPolicySpec, ScalingPolicyStatus,
@@ -14,8 +15,9 @@ use crate::crd::{
 use crate::error::{AutoscalerError, Result};
 use crate::metrics::AutoscalerMetrics;
 use crate::offering_matcher::{
-    calculate_nodes_needed, group_pending_pods_by_requirements, has_gpu_node_affinity,
-    GpuRequirements, OfferingConstraints, OfferingSelector, PendingGpuPod,
+    calculate_nodes_needed, filter_pods_by_age, filter_pods_with_stale_affinity,
+    group_pending_pods_by_requirements, has_gpu_node_affinity, GpuRequirements,
+    OfferingConstraints, OfferingSelector, PendingGpuPod,
 };
 
 use super::k8s_client::AutoscalerK8sClient;
@@ -31,6 +33,7 @@ where
     api: Arc<A>,
     offering_selector: Arc<S>,
     metrics: Arc<AutoscalerMetrics>,
+    pending_pod_filter: PendingPodFilterConfig,
 }
 
 impl<K, A, S> Clone for ScalingPolicyController<K, A, S>
@@ -45,6 +48,7 @@ where
             api: Arc::clone(&self.api),
             offering_selector: Arc::clone(&self.offering_selector),
             metrics: Arc::clone(&self.metrics),
+            pending_pod_filter: self.pending_pod_filter.clone(),
         }
     }
 }
@@ -66,6 +70,23 @@ where
             api,
             offering_selector,
             metrics,
+            pending_pod_filter: PendingPodFilterConfig::default(),
+        }
+    }
+
+    pub fn with_pending_pod_filter(
+        k8s: Arc<K>,
+        api: Arc<A>,
+        offering_selector: Arc<S>,
+        metrics: Arc<AutoscalerMetrics>,
+        pending_pod_filter: PendingPodFilterConfig,
+    ) -> Self {
+        Self {
+            k8s,
+            api,
+            offering_selector,
+            metrics,
+            pending_pod_filter,
         }
     }
 
@@ -329,13 +350,16 @@ where
     async fn collect_metrics(&self, ns: &str) -> Result<(MetricsSnapshot, Vec<Pod>)> {
         let pending_pods = self.k8s.list_pending_pods().await?;
         let pending_gpu_pods: Vec<Pod> = pending_pods.into_iter().filter(requests_gpu).collect();
-        let pending_gpu_count = pending_gpu_pods.len() as u32;
 
         let nodes = self
             .k8s
             .list_nodes_with_label("nvidia.com/gpu", "true")
             .await
             .unwrap_or_default();
+
+        // Apply pending pod filters to prevent provisioning for stale pods
+        let filtered_gpu_pods = self.apply_pending_pod_filters(pending_gpu_pods, &nodes);
+        let pending_gpu_count = filtered_gpu_pods.len() as u32;
 
         let total_gpu_nodes = nodes.len() as u32;
         let healthy_gpu_nodes = nodes
@@ -374,7 +398,52 @@ where
             idle_nodes,
         };
 
-        Ok((metrics, pending_gpu_pods))
+        Ok((metrics, filtered_gpu_pods))
+    }
+
+    /// Apply filters to pending GPU pods to exclude:
+    /// 1. Pods that have been pending too long (max_pending_age_seconds)
+    /// 2. Pods whose normalized GPU model matches an existing node (stale nodeAffinity)
+    fn apply_pending_pod_filters(
+        &self,
+        pods: Vec<Pod>,
+        gpu_nodes: &[k8s_openapi::api::core::v1::Node],
+    ) -> Vec<Pod> {
+        let initial_count = pods.len();
+
+        // Filter by age
+        let after_age_filter =
+            filter_pods_by_age(pods, self.pending_pod_filter.max_pending_age_seconds);
+        let age_filtered = initial_count - after_age_filter.len();
+
+        // Filter by stale node affinity
+        let final_pods = if self.pending_pod_filter.skip_stale_node_affinity {
+            let after_stale_filter = filter_pods_with_stale_affinity(after_age_filter, gpu_nodes);
+            let stale_filtered = initial_count - age_filtered - after_stale_filter.len();
+
+            if age_filtered > 0 || stale_filtered > 0 {
+                debug!(
+                    initial = initial_count,
+                    age_filtered = age_filtered,
+                    stale_filtered = stale_filtered,
+                    remaining = after_stale_filter.len(),
+                    "Filtered pending GPU pods"
+                );
+            }
+            after_stale_filter
+        } else {
+            if age_filtered > 0 {
+                debug!(
+                    initial = initial_count,
+                    age_filtered = age_filtered,
+                    remaining = after_age_filter.len(),
+                    "Filtered pending GPU pods by age"
+                );
+            }
+            after_age_filter
+        };
+
+        final_pods
     }
 
     fn evaluate_scaling(

@@ -1353,6 +1353,7 @@ fn build_gpu_labels(
         sanitize_label_value(&datacenter),
     );
 
+    // GPU model label: normalized base model (e.g., "A100", "H100")
     if let Some(ref gpu_model) = status.gpu_model {
         labels.insert(
             node_labels::GPU_MODEL.to_string(),
