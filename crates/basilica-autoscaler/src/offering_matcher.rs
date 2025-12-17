@@ -22,6 +22,10 @@ pub mod node_labels {
     pub const GPU_MEMORY_GB: &str = "basilica.ai/gpu-memory-gb";
     /// Autoscaler-specific: tracks which offering provisioned this node
     pub const OFFERING_ID: &str = "basilica.ai/offering-id";
+    /// Node type (required by operator for validation)
+    pub const NODE_TYPE: &str = "basilica.ai/node-type";
+    /// Datacenter/region identifier (required by operator for validation)
+    pub const DATACENTER: &str = "basilica.ai/datacenter";
 }
 
 /// Pod labels for tracking GPU requirements (not for scheduling)
@@ -828,9 +832,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_cache_returns_offerings() {
-        let api = Arc::new(MockOfferingsApi::with_offerings(vec![
-            test_offering("test-1", "A100", 4, 40, 3.0, "test"),
-        ]));
+        let api = Arc::new(MockOfferingsApi::with_offerings(vec![test_offering(
+            "test-1", "A100", 4, 40, 3.0, "test",
+        )]));
 
         let matcher = OfferingMatcher::new(api, OfferingMatcherConfig::default());
 
@@ -961,6 +965,9 @@ mod tests {
         async fn start_rental(&self, _: &str, _: &str) -> Result<crate::api::RentalInfo> {
             unimplemented!()
         }
+        async fn get_rental(&self, _: &str) -> Result<Option<crate::api::RentalInfo>> {
+            unimplemented!()
+        }
         async fn stop_rental(&self, _: &str) -> Result<()> {
             unimplemented!()
         }
@@ -997,6 +1004,9 @@ mod tests {
             Ok(None)
         }
         async fn start_rental(&self, _: &str, _: &str) -> Result<crate::api::RentalInfo> {
+            unimplemented!()
+        }
+        async fn get_rental(&self, _: &str) -> Result<Option<crate::api::RentalInfo>> {
             unimplemented!()
         }
         async fn stop_rental(&self, _: &str) -> Result<()> {

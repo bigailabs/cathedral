@@ -4,11 +4,11 @@ use chrono::Utc;
 use kube::ResourceExt;
 use tracing::{debug, error, info, warn};
 
-use crate::api::SecureCloudApi;
+use crate::api::{SecureCloudApi, WireGuardPeer};
 use crate::config::{NetworkValidationConfig, PhaseTimeouts};
 use crate::crd::{
-    NodeManagedBy, NodePool, NodePoolCondition, NodePoolPhase, NodePoolStatus, WireGuardStatus,
-    FINALIZER,
+    NodeManagedBy, NodePool, NodePoolCondition, NodePoolPhase, NodePoolStatus, WireGuardPeerStatus,
+    WireGuardStatus, FINALIZER,
 };
 use crate::error::{AutoscalerError, Result};
 use crate::metrics::AutoscalerMetrics;
@@ -323,6 +323,7 @@ where
                     node_ip: Some(wg_ip.clone()),
                     public_key: annotations.get("basilica.ai/wireguard-pubkey").cloned(),
                     endpoint: None,
+                    peers: vec![],
                 });
                 status.internal_ip = Some(wg_ip.clone());
             }
@@ -398,9 +399,42 @@ where
                 .await?;
         }
 
-        // Start new rental if needed
-        let external_ip = if let Some(ip) = &status.external_ip {
-            ip.clone()
+        // Start new rental if needed, or reuse existing one
+        // CRITICAL: Check rental_id first to prevent duplicate rentals on retry
+        let external_ip = if let Some(rental_id) = &status.rental_id {
+            // Rental already exists from previous attempt - reuse it
+            debug!(pool = %name, rental_id = %rental_id, "Reusing existing rental from previous attempt");
+
+            // If we have the IP cached, use it; otherwise poll the API
+            if let Some(ip) = status.external_ip.clone() {
+                ip
+            } else {
+                // Poll API for IP address (VM may still be starting)
+                info!(pool = %name, rental_id = %rental_id, "Polling for IP address");
+                match self.api.get_rental(rental_id).await? {
+                    Some(rental) if rental.ip_address.is_some() => {
+                        let ip = rental.ip_address.clone().unwrap();
+                        status.external_ip = Some(ip.clone());
+                        self.k8s
+                            .update_node_pool_status(ns, &name, status.clone())
+                            .await?;
+                        info!(pool = %name, ip = %ip, "IP address acquired");
+                        ip
+                    }
+                    Some(_) => {
+                        debug!(pool = %name, "IP not yet available, will retry");
+                        return Err(AutoscalerError::SecureCloudApi(
+                            "IP address not yet available, waiting for VM to be ready".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(AutoscalerError::SecureCloudApi(format!(
+                            "Rental {} not found",
+                            rental_id
+                        )));
+                    }
+                }
+            }
         } else {
             info!(pool = %name, offering = %sc.offering_id, "Starting rental");
             let rental_result = self.api.start_rental(&sc.offering_id, &sc.ssh_key_id).await;
@@ -420,45 +454,86 @@ where
             status.provider_id = Some(rental.deployment_id.clone());
             self.metrics.record_rental_started(&name, &rental.provider);
 
-            rental.ip_address.clone().unwrap_or_default()
+            // CRITICAL: Persist rental_id immediately to prevent duplicate rentals
+            // If node registration fails later, we can retry without creating new VMs
+            info!(pool = %name, rental_id = %rental.rental_id, "Persisting rental_id to status");
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+
+            // If IP is not yet available, return error to retry in Provisioning phase
+            // Cloud providers (Hyperstack) assign floating IPs asynchronously
+            match rental.ip_address {
+                Some(ip) => ip,
+                None => {
+                    info!(pool = %name, "Rental created but IP not yet available, will retry");
+                    return Err(AutoscalerError::SecureCloudApi(
+                        "IP address not yet available, waiting for VM to be ready".to_string(),
+                    ));
+                }
+            }
         };
 
         // Generate deterministic node_id based on external IP and persist it
         let node_id = resolve_node_id(pool, &status, Some(&external_ip))?;
         status.node_id = Some(node_id.clone());
 
-        // Register node with API (include GPU info if available)
+        // Register node with API
         let datacenter_id = pool
             .spec
             .datacenter_id
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
-        let gpu_info = match (&status.gpu_model, status.gpu_count, status.gpu_memory_gb) {
-            (Some(model), Some(count), Some(memory)) => Some(crate::api::GpuInfo {
-                model: model.clone(),
-                count,
-                memory_gb: memory,
-            }),
-            _ => None,
+        // Build GPU specs from status (defaults for values not yet discovered)
+        let gpu_specs = crate::api::GpuSpecs {
+            count: status.gpu_count.unwrap_or(1),
+            model: status
+                .gpu_model
+                .clone()
+                .unwrap_or_else(|| "GPU".to_string()),
+            memory_gb: status.gpu_memory_gb.unwrap_or(0),
+            driver_version: status
+                .driver_version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            cuda_version: status
+                .cuda_version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
         };
 
         let reg_request = crate::api::NodeRegistrationRequest {
             node_id: node_id.clone(),
             datacenter_id,
-            managed_by: NodeManagedBy::Autoscaler.as_str().to_string(),
-            rental_id: status.rental_id.clone(),
-            external_ip: Some(external_ip),
-            gpu_info,
+            gpu_specs,
         };
 
         let reg_response = self.api.register_node(reg_request).await?;
+        let wg_node_ip = reg_response.wireguard.as_ref().map(|w| w.node_ip.clone());
+        let wg_peers: Vec<WireGuardPeerStatus> = reg_response
+            .wireguard
+            .as_ref()
+            .map(|w| {
+                w.peers
+                    .iter()
+                    .map(|p| WireGuardPeerStatus {
+                        endpoint: p.endpoint.clone(),
+                        public_key: p.public_key.clone(),
+                        wireguard_ip: p.wireguard_ip.clone(),
+                        vpc_subnet: p.vpc_subnet.clone(),
+                        route_pod_network: p.route_pod_network,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         status.wireguard = Some(WireGuardStatus {
-            node_ip: Some(reg_response.wireguard.node_ip),
+            node_ip: wg_node_ip.clone(),
             public_key: None,
             endpoint: None,
+            peers: wg_peers,
         });
-        status.internal_ip = status.wireguard.as_ref().and_then(|w| w.node_ip.clone());
+        status.internal_ip = wg_node_ip;
         status.provisioned_at = Some(Utc::now());
 
         self.transition_phase(ns, &name, status, NodePoolPhase::Configuring)
@@ -469,10 +544,38 @@ where
         &self,
         ns: &str,
         pool: &NodePool,
-        status: NodePoolStatus,
+        mut status: NodePoolStatus,
     ) -> Result<()> {
         let name = pool.name_any();
         info!(pool = %name, "Configuring node via SSH");
+
+        // Ensure we have external IP - poll if missing (handles edge case from pre-fix NodePools)
+        if status.external_ip.is_none() {
+            if let Some(rental_id) = &status.rental_id {
+                info!(pool = %name, rental_id = %rental_id, "Polling for external IP");
+                match self.api.get_rental(rental_id).await? {
+                    Some(rental) if rental.ip_address.is_some() => {
+                        let ip = rental.ip_address.clone().unwrap();
+                        status.external_ip = Some(ip.clone());
+                        self.k8s
+                            .update_node_pool_status(ns, &name, status.clone())
+                            .await?;
+                        info!(pool = %name, ip = %ip, "External IP acquired");
+                    }
+                    Some(_) => {
+                        return Err(AutoscalerError::SecureCloudApi(
+                            "External IP not yet available".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(AutoscalerError::SecureCloudApi(format!(
+                            "Rental {} not found",
+                            rental_id
+                        )));
+                    }
+                }
+            }
+        }
 
         let ssh_config = self.get_ssh_config(ns, pool).await?;
         let (host, port) = self.get_ssh_endpoint(pool, &status)?;
@@ -527,10 +630,25 @@ where
             .register_wireguard_key(&node_id, &public_key)
             .await?;
 
-        // Get peers and configure
-        let peers = self.api.get_peers(&node_id).await?;
+        // Use peers from registration response (stored in status)
+        let peers: Vec<WireGuardPeer> = wg_status
+            .peers
+            .iter()
+            .map(|p| WireGuardPeer {
+                endpoint: p.endpoint.clone(),
+                public_key: p.public_key.clone(),
+                wireguard_ip: p.wireguard_ip.clone(),
+                vpc_subnet: p.vpc_subnet.clone(),
+                route_pod_network: p.route_pod_network,
+            })
+            .collect();
+
+        if peers.is_empty() {
+            warn!(pool = %name, "No peers in registration response, WireGuard may not route traffic");
+        }
+
         self.provisioner
-            .configure_wireguard_peers(&host, port, &ssh_config, &peers)
+            .configure_wireguard_peers(&host, port, &ssh_config, &peers, &node_ip)
             .await?;
 
         // Update status
@@ -1076,17 +1194,17 @@ where
             AutoscalerError::InvalidConfiguration("SSH key is not valid UTF-8".to_string())
         })?;
 
-        let username = pool
-            .spec
-            .ssh
-            .as_ref()
-            .map(|s| s.user.clone())
-            .unwrap_or_else(|| "root".to_string());
+        let username = if let Some(ssh) = &pool.spec.ssh {
+            ssh.user.clone()
+        } else if let Some(sc) = &pool.spec.secure_cloud {
+            sc.ssh_user.clone()
+        } else {
+            "ubuntu".to_string()
+        };
 
         Ok(crate::provisioner::SshConnectionConfig {
             username,
             private_key,
-            passphrase: None,
         })
     }
 
@@ -1191,6 +1309,26 @@ fn add_condition(
     }
 }
 
+/// Sanitize a value for use as a Kubernetes label value.
+/// K8s labels must match: (([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?
+fn sanitize_label_value(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Trim leading/trailing non-alphanumeric chars
+    sanitized
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string()
+}
+
 /// Build the expected GPU labels for a node based on pool and status.
 fn build_gpu_labels(
     pool: &NodePool,
@@ -1199,6 +1337,21 @@ fn build_gpu_labels(
     use crate::offering_matcher::{node_labels, normalize_gpu_model};
 
     let mut labels = std::collections::BTreeMap::new();
+
+    // Required labels for operator validation
+    labels.insert(node_labels::NODE_TYPE.to_string(), "gpu".to_string());
+
+    // Datacenter: prefer spec.datacenter_id, fallback to provider name from status
+    let datacenter = pool
+        .spec
+        .datacenter_id
+        .clone()
+        .or_else(|| status.provider.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    labels.insert(
+        node_labels::DATACENTER.to_string(),
+        sanitize_label_value(&datacenter),
+    );
 
     if let Some(ref gpu_model) = status.gpu_model {
         labels.insert(

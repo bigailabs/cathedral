@@ -131,6 +131,31 @@ where
 
         match decision {
             ScalingDecision::ScaleUp(count) => {
+                // Block scale-up if there are NodePools already provisioning
+                // This prevents creating duplicate VMs while waiting for node registration
+                if provisioning_count > 0 {
+                    debug!(
+                        policy = %name,
+                        provisioning = provisioning_count,
+                        "Scale-up blocked: waiting for {} NodePool(s) to finish provisioning",
+                        provisioning_count
+                    );
+                    add_condition(
+                        &mut status,
+                        "Scaling",
+                        "False",
+                        "WaitingForProvisioning",
+                        &format!(
+                            "Waiting for {} NodePool(s) to finish provisioning",
+                            provisioning_count
+                        ),
+                    );
+                    self.k8s
+                        .update_scaling_policy_status(ns, &name, status)
+                        .await?;
+                    return Ok(());
+                }
+
                 if self.can_scale_up(&status, &policy.spec.scale_up) {
                     // Get resourceVersion for optimistic locking
                     let resource_version = policy
@@ -874,11 +899,18 @@ where
         );
 
         // Build SecureCloudConfig from template with the specific offering_id
-        let secure_cloud = template.secure_cloud.as_ref().map(|sc| SecureCloudConfig {
-            offering_id: offering_id.to_string(),
-            ssh_key_id: sc.ssh_key_id.clone(),
-            ssh_key_secret_ref: sc.ssh_key_secret_ref.clone(),
-        });
+        let (secure_cloud, datacenter_id) = match template.secure_cloud.as_ref() {
+            Some(sc) => (
+                Some(SecureCloudConfig {
+                    offering_id: offering_id.to_string(),
+                    ssh_key_id: sc.ssh_key_id.clone(),
+                    ssh_key_secret_ref: sc.ssh_key_secret_ref.clone(),
+                    ssh_user: sc.ssh_user.clone(),
+                }),
+                Some(sc.datacenter_id.clone()),
+            ),
+            None => (None, None),
+        };
 
         let spec = NodePoolSpec {
             mode: NodePoolMode::Dynamic,
@@ -889,7 +921,7 @@ where
             health_check: HealthCheckConfig::default(),
             lifecycle: template.lifecycle.clone(),
             node_id: None,
-            datacenter_id: None,
+            datacenter_id,
             node_password: None,
             adopt_existing: false,
         };
