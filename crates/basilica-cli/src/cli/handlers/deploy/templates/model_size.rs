@@ -17,8 +17,8 @@ pub struct GpuRequirements {
     pub recommended_gpu: String,
 }
 
-/// Default GPU memory for available GPUs (16GB for RTX A4000)
-const DEFAULT_GPU_MEMORY_GB: u32 = 16;
+/// Default GPU memory for available GPUs (40GB for A100)
+const DEFAULT_GPU_MEMORY_GB: u32 = 40;
 
 /// Regex pattern for extracting parameter count from model names
 /// Matches patterns like "7b", "70b", "0.5b", "1.5b", "7B", etc.
@@ -116,13 +116,10 @@ fn calculate_gpu_count(required_memory_gb: u32, gpu_memory_gb: u32) -> u32 {
 }
 
 /// Recommend GPU based on memory requirements
+/// Returns canonical GPU model names that match autoscaler offerings
 fn recommend_gpu(memory_gb: u32) -> String {
-    if memory_gb <= 16 {
-        "NVIDIA-RTX-A4000".to_string()
-    } else if memory_gb <= 40 {
-        "A100-40GB".to_string()
-    } else if memory_gb <= 80 {
-        "A100-80GB".to_string()
+    if memory_gb <= 80 {
+        "A100".to_string()
     } else {
         "H100".to_string()
     }
@@ -169,19 +166,20 @@ mod tests {
         assert!(reqs.memory_gb <= 16);
 
         let reqs = estimate_gpu_requirements("meta-llama/Llama-2-7b");
-        assert_eq!(reqs.gpu_count, 1); // 16GB fits in 1x16GB GPU
+        assert_eq!(reqs.gpu_count, 1); // 16GB fits in 1x40GB A100 GPU
         assert_eq!(reqs.memory_gb, 16);
 
+        // 70b model requires ~168GB, with 40GB A100s that's 5 GPUs (168/40 = 4.2, ceil = 5)
         let reqs = estimate_gpu_requirements("meta-llama/Llama-2-70b");
-        assert!(reqs.gpu_count >= 8); // 168GB needs multiple GPUs
+        assert!(reqs.gpu_count >= 5);
     }
 
     #[test]
     fn test_recommend_gpu() {
-        assert_eq!(recommend_gpu(8), "NVIDIA-RTX-A4000");
-        assert_eq!(recommend_gpu(16), "NVIDIA-RTX-A4000");
-        assert_eq!(recommend_gpu(32), "A100-40GB");
-        assert_eq!(recommend_gpu(64), "A100-80GB");
+        assert_eq!(recommend_gpu(8), "A100");
+        assert_eq!(recommend_gpu(16), "A100");
+        assert_eq!(recommend_gpu(32), "A100");
+        assert_eq!(recommend_gpu(64), "A100");
         assert_eq!(recommend_gpu(160), "H100");
     }
 }

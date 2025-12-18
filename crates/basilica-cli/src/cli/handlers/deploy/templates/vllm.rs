@@ -12,9 +12,8 @@ use basilica_sdk::types::{
     PersistentStorageSpec, ProbeConfig, ResourceRequirements, StorageBackend, StorageSpec,
 };
 use basilica_sdk::BasilicaClient;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
+use super::common::{create_with_retry, parse_env_vars, wait_for_ready, WaitResult};
 use super::model_size::estimate_gpu_requirements;
 
 /// Default vLLM Docker image
@@ -25,12 +24,6 @@ const DEFAULT_MODEL: &str = "Qwen/Qwen3-0.6B";
 
 /// Default port for vLLM OpenAI API
 const VLLM_PORT: u32 = 8000;
-
-/// Maximum retries for transient failures
-const MAX_RETRIES: u32 = 3;
-
-/// Initial retry delay
-const INITIAL_RETRY_DELAY_MS: u64 = 500;
 
 /// Handle vLLM deployment
 pub async fn handle_vllm_deploy(
@@ -120,7 +113,7 @@ pub async fn handle_vllm_deploy(
 
     // Wait for ready if not detached
     if !common.detach {
-        let result = wait_for_ready(client, &actual_name, common.timeout).await?;
+        let result = wait_for_ready(client, &actual_name, common.timeout, "vLLM").await?;
 
         match result {
             WaitResult::Ready(deployment) => {
@@ -238,25 +231,6 @@ fn build_vllm_command(model: &str, opts: &VllmOptions) -> (Vec<String>, Vec<Stri
     (vec!["vllm".to_string()], args)
 }
 
-/// Parse KEY=VALUE environment variable strings
-fn parse_env_vars(env: &[String]) -> Result<HashMap<String, String>, DeployError> {
-    let mut map = HashMap::new();
-
-    for entry in env {
-        let mut parts = entry.splitn(2, '=');
-        let key = parts.next().ok_or_else(|| DeployError::Validation {
-            message: format!("Invalid env var format: '{}'", entry),
-        })?;
-        let value = parts.next().ok_or_else(|| DeployError::Validation {
-            message: format!("Invalid env var format: '{}'. Use KEY=VALUE", entry),
-        })?;
-
-        map.insert(key.to_string(), value.to_string());
-    }
-
-    Ok(map)
-}
-
 /// Build resource requirements for vLLM
 fn build_vllm_resources(
     gpu_count: u32,
@@ -327,153 +301,6 @@ fn build_vllm_health_check() -> HealthCheckConfig {
             timeout_seconds: 5,
             failure_threshold: 60, // Allow up to 10 minutes for model loading
         }),
-    }
-}
-
-/// Create deployment with exponential backoff retry
-async fn create_with_retry(
-    client: &BasilicaClient,
-    request: CreateDeploymentRequest,
-) -> Result<DeploymentResponse, CliError> {
-    use rand::Rng;
-
-    let mut last_error = None;
-    let mut delay = Duration::from_millis(INITIAL_RETRY_DELAY_MS);
-
-    for attempt in 0..MAX_RETRIES {
-        match client.create_deployment(request.clone()).await {
-            Ok(response) => return Ok(response),
-            Err(e) if is_quota_exceeded(&e) => {
-                return Err(CliError::Deploy(DeployError::QuotaExceeded {
-                    message: extract_quota_message(&e),
-                }));
-            }
-            Err(e) if e.is_retryable() => {
-                last_error = Some(e);
-                if attempt < MAX_RETRIES - 1 {
-                    let jitter_factor = rand::thread_rng().gen_range(0.75..1.25);
-                    let jittered_delay = delay.mul_f64(jitter_factor);
-                    tokio::time::sleep(jittered_delay).await;
-                    delay *= 2;
-                }
-            }
-            Err(e) => return Err(CliError::Api(e)),
-        }
-    }
-
-    Err(CliError::Api(last_error.unwrap()))
-}
-
-/// Check if API error indicates quota exceeded
-fn is_quota_exceeded(error: &basilica_sdk::error::ApiError) -> bool {
-    match error {
-        basilica_sdk::error::ApiError::QuotaExceeded { .. } => true,
-        basilica_sdk::error::ApiError::ApiResponse { status, message } => {
-            *status == 403
-                || *status == 429
-                || message.to_lowercase().contains("quota")
-                || message.to_lowercase().contains("limit exceeded")
-        }
-        _ => false,
-    }
-}
-
-/// Extract quota message from API error
-fn extract_quota_message(error: &basilica_sdk::error::ApiError) -> String {
-    match error {
-        basilica_sdk::error::ApiError::QuotaExceeded { message } => message.clone(),
-        basilica_sdk::error::ApiError::ApiResponse { message, .. } => message.clone(),
-        _ => error.to_string(),
-    }
-}
-
-/// Result of waiting for deployment
-enum WaitResult {
-    Ready(Box<DeploymentResponse>),
-    Failed(String),
-    Timeout,
-}
-
-/// Wait for deployment to become ready
-async fn wait_for_ready(
-    client: &BasilicaClient,
-    name: &str,
-    timeout_secs: u32,
-) -> Result<WaitResult, CliError> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(timeout_secs as u64);
-    let mut last_phase: Option<String> = None;
-    let mut spinner = create_spinner("Waiting for vLLM deployment...");
-
-    loop {
-        if start.elapsed() > timeout {
-            complete_spinner_and_clear(spinner);
-            return Ok(WaitResult::Timeout);
-        }
-
-        let status = client.get_deployment(name).await.map_err(CliError::Api)?;
-
-        // Update phase display
-        if let Some(ref phase) = status.phase {
-            if last_phase.as_ref() != Some(phase) {
-                complete_spinner_and_clear(spinner);
-
-                let phase_msg = format_phase_message(phase);
-                print_info(&phase_msg);
-
-                spinner = create_spinner(&format!(
-                    "Phase: {} ({}/{})",
-                    phase, status.replicas.ready, status.replicas.desired
-                ));
-
-                last_phase = Some(phase.clone());
-            }
-        }
-
-        // Check terminal states
-        if status.state == "Active" && status.replicas.ready >= status.replicas.desired {
-            complete_spinner_and_clear(spinner);
-            return Ok(WaitResult::Ready(Box::new(status)));
-        }
-
-        if status.state == "Failed" {
-            complete_spinner_and_clear(spinner);
-            let reason = status
-                .message
-                .unwrap_or_else(|| "Unknown error".to_string());
-            return Ok(WaitResult::Failed(reason));
-        }
-
-        if status.state == "Terminating" || status.phase.as_deref() == Some("terminating") {
-            complete_spinner_and_clear(spinner);
-            return Ok(WaitResult::Failed(
-                "Deployment is being terminated".to_string(),
-            ));
-        }
-
-        // Dynamic sleep based on phase
-        let sleep_duration = match status.phase.as_deref() {
-            Some("scheduling") | Some("pulling") => Duration::from_secs(10),
-            Some("storage_sync") => Duration::from_secs(3),
-            _ => Duration::from_secs(5),
-        };
-
-        tokio::time::sleep(sleep_duration).await;
-    }
-}
-
-/// Format human-readable phase message
-fn format_phase_message(phase: &str) -> String {
-    match phase {
-        "pending" => "Deployment created, waiting for scheduler...".to_string(),
-        "scheduling" => "Finding suitable GPU node...".to_string(),
-        "pulling" => "Pulling vLLM container image...".to_string(),
-        "initializing" => "Running init containers...".to_string(),
-        "storage_sync" => "Syncing model cache storage...".to_string(),
-        "starting" => "Starting vLLM server (loading model)...".to_string(),
-        "health_check" => "Running health checks...".to_string(),
-        "ready" => "vLLM server ready!".to_string(),
-        _ => format!("Phase: {}", phase),
     }
 }
 

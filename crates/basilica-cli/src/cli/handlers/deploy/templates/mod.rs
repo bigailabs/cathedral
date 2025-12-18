@@ -4,6 +4,7 @@
 //! - vLLM: OpenAI-compatible LLM inference server
 //! - SGLang: Fast LLM inference with RadixAttention
 
+pub mod common;
 pub mod model_size;
 pub mod sglang;
 pub mod vllm;
