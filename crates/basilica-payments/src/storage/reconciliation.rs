@@ -1,7 +1,37 @@
 use super::{PgRepos, PgTx};
 use crate::reconciliation::{ReconciliationSweep, SweepStatus};
-use sqlx::{types::Decimal, Result, Row};
+use sqlx::{postgres::PgRow, types::Decimal, Result, Row};
 use std::str::FromStr;
+
+/// Convert a database row to a ReconciliationSweep struct
+fn row_to_sweep(row: PgRow) -> ReconciliationSweep {
+    let status_str: String = row.get("status");
+    let status = match status_str.as_str() {
+        "pending" => SweepStatus::Pending,
+        "submitted" => SweepStatus::Submitted,
+        "confirmed" => SweepStatus::Confirmed,
+        "failed" => SweepStatus::Failed,
+        _ => SweepStatus::Pending,
+    };
+
+    ReconciliationSweep {
+        id: row.get("id"),
+        account_hex: row.get("account_hex"),
+        hotwallet_address_ss58: row.get("hotwallet_address_ss58"),
+        coldwallet_address_ss58: row.get("coldwallet_address_ss58"),
+        balance_before_plancks: row.get("balance_before_plancks"),
+        sweep_amount_plancks: row.get("sweep_amount_plancks"),
+        estimated_fee_plancks: row.get("estimated_fee_plancks"),
+        balance_after_plancks: row.get("balance_after_plancks"),
+        status,
+        dry_run: row.get("dry_run"),
+        tx_hash: row.get("tx_hash"),
+        block_number: row.get("block_number"),
+        error_message: row.get("error_message"),
+        initiated_at: row.get("initiated_at"),
+        completed_at: row.get("completed_at"),
+    }
+}
 
 #[async_trait::async_trait]
 pub trait ReconciliationRepo {
@@ -162,37 +192,7 @@ impl ReconciliationRepo for PgRepos {
         .fetch_all(&self.pool)
         .await?;
 
-        let sweeps = rows
-            .into_iter()
-            .map(|row| {
-                let status_str: String = row.get("status");
-                let status = match status_str.as_str() {
-                    "pending" => SweepStatus::Pending,
-                    "submitted" => SweepStatus::Submitted,
-                    "confirmed" => SweepStatus::Confirmed,
-                    "failed" => SweepStatus::Failed,
-                    _ => SweepStatus::Pending,
-                };
-
-                ReconciliationSweep {
-                    id: row.get("id"),
-                    account_hex: row.get("account_hex"),
-                    hotwallet_address_ss58: row.get("hotwallet_address_ss58"),
-                    coldwallet_address_ss58: row.get("coldwallet_address_ss58"),
-                    balance_before_plancks: row.get("balance_before_plancks"),
-                    sweep_amount_plancks: row.get("sweep_amount_plancks"),
-                    estimated_fee_plancks: row.get("estimated_fee_plancks"),
-                    balance_after_plancks: row.get("balance_after_plancks"),
-                    status,
-                    dry_run: row.get("dry_run"),
-                    tx_hash: row.get("tx_hash"),
-                    block_number: row.get("block_number"),
-                    error_message: row.get("error_message"),
-                    initiated_at: row.get("initiated_at"),
-                    completed_at: row.get("completed_at"),
-                }
-            })
-            .collect();
+        let sweeps = rows.into_iter().map(row_to_sweep).collect();
 
         Ok(sweeps)
     }
@@ -214,37 +214,7 @@ impl ReconciliationRepo for PgRepos {
         .fetch_all(&self.pool)
         .await?;
 
-        let sweeps = rows
-            .into_iter()
-            .map(|row| {
-                let status_str: String = row.get("status");
-                let status = match status_str.as_str() {
-                    "pending" => SweepStatus::Pending,
-                    "submitted" => SweepStatus::Submitted,
-                    "confirmed" => SweepStatus::Confirmed,
-                    "failed" => SweepStatus::Failed,
-                    _ => SweepStatus::Pending,
-                };
-
-                ReconciliationSweep {
-                    id: row.get("id"),
-                    account_hex: row.get("account_hex"),
-                    hotwallet_address_ss58: row.get("hotwallet_address_ss58"),
-                    coldwallet_address_ss58: row.get("coldwallet_address_ss58"),
-                    balance_before_plancks: row.get("balance_before_plancks"),
-                    sweep_amount_plancks: row.get("sweep_amount_plancks"),
-                    estimated_fee_plancks: row.get("estimated_fee_plancks"),
-                    balance_after_plancks: row.get("balance_after_plancks"),
-                    status,
-                    dry_run: row.get("dry_run"),
-                    tx_hash: row.get("tx_hash"),
-                    block_number: row.get("block_number"),
-                    error_message: row.get("error_message"),
-                    initiated_at: row.get("initiated_at"),
-                    completed_at: row.get("completed_at"),
-                }
-            })
-            .collect();
+        let sweeps = rows.into_iter().map(row_to_sweep).collect();
 
         Ok(sweeps)
     }
