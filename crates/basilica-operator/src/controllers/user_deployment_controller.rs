@@ -541,14 +541,20 @@ pub fn render_deployment(
             gpu.count.to_string(),
         );
         if !gpu.model.is_empty() {
+            // Use underscore as delimiter since commas are invalid in K8s label values
             labels.insert(
                 "gpu-request.basilica.ai/model".to_string(),
-                gpu.model.join(","),
+                gpu.model.join("_"),
             );
         }
         // Annotation with full GPU requirements (JSON) for autoscaler
-        if let Ok(json) = serde_json::to_string(gpu) {
-            annotations.insert("autoscaler.basilica.ai/gpu-requirements".to_string(), json);
+        match serde_json::to_string(gpu) {
+            Ok(json) => {
+                annotations.insert("autoscaler.basilica.ai/gpu-requirements".to_string(), json);
+            }
+            Err(e) => {
+                debug!("Failed to serialize GPU spec to JSON: {}", e);
+            }
         }
     }
 
@@ -2071,6 +2077,56 @@ mod tests {
             gpu_model_expr.values.as_ref().unwrap(),
             &vec!["A10040GB".to_string()]
         );
+    }
+
+    #[test]
+    fn test_render_deployment_multi_model_gpu_labels_valid() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "multi-gpu-app".to_string(),
+            "pytorch:latest".to_string(),
+            1,
+            8080,
+            "/deployments/multi-gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "4000m".to_string(),
+            memory: "16Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 2,
+                model: vec!["A100".to_string(), "H100".to_string()],
+                min_cuda_version: None,
+                min_gpu_memory_gb: None,
+            }),
+            cpu_request_ratio: 1.0,
+        });
+
+        let deployment = render_deployment("multi-gpu-app", "u-user123", &spec, None).unwrap();
+        let template = deployment.spec.unwrap().template;
+        let template_meta = template.metadata.unwrap();
+        let labels = template_meta.labels.unwrap();
+        let annotations = template_meta.annotations.unwrap();
+
+        // Verify the GPU model label uses underscore (not comma) as delimiter
+        let gpu_model_label = labels.get("gpu-request.basilica.ai/model").unwrap();
+        assert_eq!(gpu_model_label, "A100_H100");
+        assert!(
+            !gpu_model_label.contains(','),
+            "Label must not contain commas (invalid in K8s labels)"
+        );
+
+        // Verify the GPU count label
+        let gpu_count_label = labels.get("gpu-request.basilica.ai/count").unwrap();
+        assert_eq!(gpu_count_label, "2");
+
+        // Verify the annotation contains full JSON with GPU requirements
+        let gpu_annotation = annotations
+            .get("autoscaler.basilica.ai/gpu-requirements")
+            .unwrap();
+        assert!(gpu_annotation.contains("\"count\":2"));
+        assert!(gpu_annotation.contains("\"model\":[\"A100\",\"H100\"]"));
     }
 
     #[test]
