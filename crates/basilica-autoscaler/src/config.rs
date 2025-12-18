@@ -178,6 +178,9 @@ pub struct PendingPodFilterConfig {
     /// Whether to skip pods whose normalized GPU model matches an existing node.
     /// This prevents provisioning for pods with stale nodeAffinity requirements.
     pub skip_stale_node_affinity: bool,
+    /// Whether to skip pods from deployments that have failing sibling pods.
+    /// This prevents provisioning for deployments stuck in CrashLoopBackOff/ImagePullBackOff.
+    pub skip_failing_deployments: bool,
 }
 
 impl PendingPodFilterConfig {
@@ -185,10 +188,14 @@ impl PendingPodFilterConfig {
         Self {
             max_pending_age_seconds: parse_u64_env(
                 "BASILICA_AUTOSCALER_MAX_PENDING_AGE_SECS",
-                600, // 10 minutes default
+                1200, // 20 minutes default
             ),
             skip_stale_node_affinity: parse_bool_env(
                 "BASILICA_AUTOSCALER_SKIP_STALE_NODE_AFFINITY",
+                true,
+            ),
+            skip_failing_deployments: parse_bool_env(
+                "BASILICA_AUTOSCALER_SKIP_FAILING_DEPLOYMENTS",
                 true,
             ),
         }
@@ -198,8 +205,9 @@ impl PendingPodFilterConfig {
 impl Default for PendingPodFilterConfig {
     fn default() -> Self {
         Self {
-            max_pending_age_seconds: 600,
+            max_pending_age_seconds: 1200,
             skip_stale_node_affinity: true,
+            skip_failing_deployments: true,
         }
     }
 }
@@ -216,6 +224,8 @@ impl PhaseTimeouts {
     pub const WAITING_FOR_NODE: u64 = 300; // 5 min
     pub const DRAINING: u64 = 900; // 15 min (PDB wait)
     pub const TERMINATING: u64 = 120; // 2 min
+    /// Auto-cleanup timeout for Failed NodePools (stops rental, deletes CR)
+    pub const FAILED_GC_TIMEOUT: u64 = 600; // 10 min
 }
 
 fn parse_duration_env(key: &str, default_secs: u64) -> Duration {
