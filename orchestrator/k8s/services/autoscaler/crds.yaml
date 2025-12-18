@@ -560,6 +560,34 @@ spec:
                 default: true
                 description: Enable/disable autoscaling
                 type: boolean
+              imagePrepull:
+                description: Image pre-pull configuration for faster container starts
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Enable/disable image pre-pulling
+                    type: boolean
+                  images:
+                    default: []
+                    description: Images to pre-pull on warm pool nodes
+                    items:
+                      description: Image to pre-pull on warm pool nodes
+                      properties:
+                        name:
+                          description: Full image name with tag (e.g., "vllm/vllm-openai:latest")
+                          type: string
+                        sizeEstimateGb:
+                          default: 0
+                          description: Estimated image size in GB (used for capacity planning)
+                          format: uint32
+                          minimum: 0.0
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
               maxNodes:
                 default: 10
                 description: Maximum number of GPU nodes
@@ -842,6 +870,50 @@ spec:
                     minimum: 0.0
                     type: integer
                 type: object
+              warmPool:
+                description: Warm pool configuration for proactive capacity reservation
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Enable/disable warm pool
+                    type: boolean
+                  maxIdleCostPerHour:
+                    default: 10.0
+                    description: Maximum hourly spend on idle nodes (USD)
+                    format: double
+                    type: number
+                  maxIdleNodes:
+                    default: 3
+                    description: Maximum idle nodes regardless of VRAM target
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  minIdleVramGb:
+                    default: 80
+                    description: 'Target idle VRAM capacity in GB. Example: 160 = 2x A100-80GB nodes or 2x H100-80GB nodes'
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  preferredGpuTypes:
+                    default: []
+                    description: Preferred GPU types for warm pool (in priority order)
+                    items:
+                      type: string
+                    type: array
+                  scaleDownThresholdPercent:
+                    default: 120
+                    description: 'Scale down when idle VRAM exceeds this percentage of target (default: 120)'
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  scaleUpThresholdPercent:
+                    default: 80
+                    description: 'Scale up when idle VRAM falls below this percentage of target (default: 80)'
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
             type: object
           status:
             description: ScalingPolicy status
@@ -955,6 +1027,70 @@ spec:
                 format: uint32
                 minimum: 0.0
                 type: integer
+              warmPool:
+                description: Warm pool status (VRAM accounting and capacity info)
+                nullable: true
+                properties:
+                  allocatedVramGb:
+                    default: 0
+                    description: Allocated VRAM (pods running on warm pool nodes) (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  estimatedHourlyCost:
+                    default: 0.0
+                    description: Estimated hourly cost of current warm pool (USD)
+                    format: double
+                    type: number
+                  idleNodeNames:
+                    default: []
+                    description: List of idle warm pool node names
+                    items:
+                      type: string
+                    type: array
+                  idleNodes:
+                    default: 0
+                    description: Current number of idle warm pool nodes
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  idleVramGb:
+                    default: 0
+                    description: Idle VRAM available for new workloads (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  scaleDownThresholdGb:
+                    default: 0
+                    description: Scale-down threshold (GB) - scale down when idle VRAM exceeds this
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  scaleUpThresholdGb:
+                    default: 0
+                    description: Scale-up threshold (GB) - scale up when idle VRAM falls below this
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  targetNodes:
+                    default: 0
+                    description: Target number of warm pool nodes
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  targetVramGb:
+                    default: 0
+                    description: Target VRAM from configuration (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  totalVramGb:
+                    default: 0
+                    description: Total VRAM across all warm pool nodes (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
             type: object
         required:
         - spec

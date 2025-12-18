@@ -63,6 +63,41 @@ spec:
     collectionIntervalSeconds: 30
     evaluationIntervalSeconds: 60
 
+  # Warm pool configuration for proactive capacity reservation
+  # Maintains idle GPU capacity to serve workloads immediately (<10s)
+  # instead of waiting for node provisioning (3-5 minutes)
+  warmPool:
+    # Enable warm pool capacity reservation
+    enabled: true
+    # Target minimum idle VRAM in GB across warm pool nodes
+    minIdleVramGb: 160
+    # Maximum number of idle warm pool nodes
+    maxIdleNodes: 3
+    # Maximum hourly cost for idle warm pool in USD
+    maxIdleCostPerHour: 15.0
+    # Preferred GPU types for warm pool (ordered by preference)
+    # preferredGpuTypes:
+    #   - A100
+    #   - H100
+    #   - L40S
+    # Preferred GPU types for warm pool (empty = select by cheapest cost)
+    preferredGpuTypes: []
+    # Hysteresis thresholds to prevent scaling flapping
+    # Scale up when idle VRAM falls below 80% of target
+    scaleUpThresholdPercent: 80
+    # Scale down when idle VRAM exceeds 120% of target
+    scaleDownThresholdPercent: 120
+
+  # Image pre-pull configuration for warm pool nodes
+  # Pre-pulls common images to reduce container startup time
+  imagePrepull:
+    enabled: true
+    images:
+      - name: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+        sizeEstimateGb: 8
+      - name: vllm/vllm-openai:v0.6.0
+        sizeEstimateGb: 12
+
   # Node template for dynamically provisioned nodes
   nodeTemplate:
     # Secure Cloud configuration for dynamic provisioning
