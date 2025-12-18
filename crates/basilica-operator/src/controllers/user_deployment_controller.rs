@@ -2017,10 +2017,10 @@ mod tests {
             .find(|e| e.key == "basilica.ai/gpu-model")
             .unwrap();
 
-        // Models should be normalized (memory suffix removed)
+        // Models should be normalized (uppercase, alphanumeric only)
         assert_eq!(
             gpu_model_expr.values.as_ref().unwrap(),
-            &vec!["A100".to_string(), "H100".to_string()]
+            &vec!["A10040GB".to_string(), "H10080GB".to_string()]
         );
     }
 
@@ -2028,7 +2028,7 @@ mod tests {
     fn test_gpu_node_affinity_deduplicates_models() {
         use crate::crd::user_deployment::GpuSpec;
 
-        // User specifies same model with different memory sizes
+        // User specifies same model with different case (case-insensitive deduplication)
         let spec = UserDeploymentSpec::new(
             "user123".to_string(),
             "gpu-app".to_string(),
@@ -2042,7 +2042,7 @@ mod tests {
             memory: "16Gi".to_string(),
             gpus: Some(GpuSpec {
                 count: 1,
-                model: vec!["A100-40GB".to_string(), "A100-80GB".to_string()],
+                model: vec!["A100-40GB".to_string(), "a100-40gb".to_string()],
                 min_cuda_version: None,
                 min_gpu_memory_gb: None,
             }),
@@ -2066,10 +2066,10 @@ mod tests {
             .find(|e| e.key == "basilica.ai/gpu-model")
             .unwrap();
 
-        // Should be deduplicated to single "A100"
+        // Should be deduplicated since both normalize to same value (case-insensitive)
         assert_eq!(
             gpu_model_expr.values.as_ref().unwrap(),
-            &vec!["A100".to_string()]
+            &vec!["A10040GB".to_string()]
         );
     }
 

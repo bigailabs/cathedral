@@ -604,7 +604,10 @@ mod tests {
 
         let result = labels_extract_nfd(&labels);
 
-        assert_eq!(result.get(basilica::GPU_MODEL), Some(&"A100".to_string()));
+        assert_eq!(
+            result.get(basilica::GPU_MODEL),
+            Some(&"TESLAA100SXM480GB".to_string())
+        );
         assert_eq!(result.get(basilica::GPU_COUNT), Some(&"8".to_string()));
         assert_eq!(result.get(basilica::GPU_MEMORY_GB), Some(&"80".to_string()));
         assert_eq!(
@@ -779,7 +782,7 @@ mod tests {
             .unwrap();
         assert_eq!(profile.spec.provider, "datacenter");
         assert_eq!(profile.spec.region, "dc-1");
-        assert_eq!(profile.spec.gpu.model, "A100");
+        assert_eq!(profile.spec.gpu.model, "TESLAA100SXM480GB");
         assert_eq!(profile.spec.gpu.count, 4);
         assert_eq!(profile.spec.gpu.memory_gb, 80);
         assert_eq!(profile.spec.cpu.cores, 64);
@@ -793,7 +796,7 @@ mod tests {
         // NFD-derived Basilica labels
         assert_eq!(
             node_labels.get(basilica::GPU_MODEL),
-            Some(&"A100".to_string())
+            Some(&"TESLAA100SXM480GB".to_string())
         );
         assert_eq!(node_labels.get(basilica::GPU_COUNT), Some(&"4".to_string()));
         assert_eq!(
