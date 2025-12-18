@@ -79,7 +79,10 @@ impl BlockchainClient {
         let account_preview = account_hex.chars().take(8).collect::<String>();
 
         let Some(account_info) = result else {
-            debug!("Account {} not found on chain, returning 0 balance", account_preview);
+            debug!(
+                "Account {} not found on chain, returning 0 balance",
+                account_preview
+            );
             return Ok(0);
         };
 

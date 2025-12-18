@@ -381,9 +381,10 @@ impl PaymentsConfig {
         if is_default_key {
             if self.service.environment == "production" {
                 return Err(ConfigurationError::ValidationFailed {
-                    details: "SECURITY: Default AEAD key (all zeros) is not allowed in production. \
+                    details:
+                        "SECURITY: Default AEAD key (all zeros) is not allowed in production. \
                         Set PAYMENTS_TREASURY__AEAD_KEY_HEX to a secure 32-byte hex key."
-                        .to_string(),
+                            .to_string(),
                 });
             }
             if self.reconciliation.enabled {
@@ -404,9 +405,15 @@ impl PaymentsConfig {
                 ),
             });
         }
-        if !self.treasury.aead_key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !self
+            .treasury
+            .aead_key_hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+        {
             return Err(ConfigurationError::ValidationFailed {
-                details: "treasury.aead_key_hex must contain only hex characters (0-9, a-f, A-F)".to_string(),
+                details: "treasury.aead_key_hex must contain only hex characters (0-9, a-f, A-F)"
+                    .to_string(),
             });
         }
 

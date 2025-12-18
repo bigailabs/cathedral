@@ -1027,18 +1027,13 @@ where
         Ok(())
     }
 
-    async fn handle_failed(
-        &self,
-        ns: &str,
-        pool: &NodePool,
-        status: NodePoolStatus,
-    ) -> Result<()> {
+    async fn handle_failed(&self, ns: &str, pool: &NodePool, status: NodePoolStatus) -> Result<()> {
         use crate::config::PhaseTimeouts;
 
         let name = pool.name_any();
 
         // Check if we've been in Failed state long enough for auto-cleanup
-        let should_gc = status.phase_entered_at.as_ref().map_or(false, |entered_at| {
+        let should_gc = status.phase_entered_at.as_ref().is_some_and(|entered_at| {
             let elapsed = Utc::now().signed_duration_since(*entered_at);
             elapsed.num_seconds() > PhaseTimeouts::FAILED_GC_TIMEOUT as i64
         });

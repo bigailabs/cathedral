@@ -317,7 +317,11 @@ impl ReconciliationService {
         if sweep_amount != initial_sweep_amount {
             info!(
                 "Sweep amount adjusted for {}: {} -> {} plancks (balance: {} -> {})",
-                account_preview, initial_sweep_amount, sweep_amount, initial_balance, current_balance
+                account_preview,
+                initial_sweep_amount,
+                sweep_amount,
+                initial_balance,
+                current_balance
             );
         }
 
@@ -437,10 +441,9 @@ impl ReconciliationService {
         // Convert SS58 address to account hex for balance query
         use subxt::ext::sp_core::crypto::Ss58Codec;
 
-        let coldwallet_public = sp_core::sr25519::Public::from_ss58check(
-            &self.config.coldwallet_address_ss58,
-        )
-        .map_err(|e| PaymentsError::Config(format!("Invalid cold wallet SS58: {}", e)))?;
+        let coldwallet_public =
+            sp_core::sr25519::Public::from_ss58check(&self.config.coldwallet_address_ss58)
+                .map_err(|e| PaymentsError::Config(format!("Invalid cold wallet SS58: {}", e)))?;
 
         let coldwallet_hex = hex::encode(coldwallet_public.0);
 
@@ -527,10 +530,7 @@ impl ReconciliationService {
             let sweep_amount: u128 = match sweep.sweep_amount_plancks.parse() {
                 Ok(v) => v,
                 Err(e) => {
-                    error!(
-                        "Failed to parse sweep_amount for sweep {}: {}",
-                        sweep.id, e
-                    );
+                    error!("Failed to parse sweep_amount for sweep {}: {}", sweep.id, e);
                     continue;
                 }
             };
