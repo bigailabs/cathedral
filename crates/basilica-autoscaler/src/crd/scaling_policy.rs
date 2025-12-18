@@ -42,6 +42,14 @@ pub struct ScalingPolicySpec {
     #[serde(default)]
     pub scale_down: ScaleDownConfig,
 
+    /// Warm pool configuration for proactive capacity reservation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_pool: Option<WarmPoolConfig>,
+
+    /// Image pre-pull configuration for faster container starts
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_prepull: Option<ImagePrepullConfig>,
+
     /// Node template for dynamic provisioning
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_template: Option<NodeTemplate>,
@@ -145,6 +153,101 @@ fn default_gpu_threshold() -> f32 {
 }
 fn default_zero_pods_duration() -> u32 {
     300
+}
+
+/// Warm pool configuration for proactive capacity reservation.
+/// Maintains idle VRAM capacity to serve incoming workloads immediately.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmPoolConfig {
+    /// Enable/disable warm pool
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Target idle VRAM capacity in GB.
+    /// Example: 160 = 2x A100-80GB nodes or 2x H100-80GB nodes
+    #[serde(default = "default_min_idle_vram_gb")]
+    pub min_idle_vram_gb: u32,
+
+    /// Maximum idle nodes regardless of VRAM target
+    #[serde(default = "default_max_idle_nodes")]
+    pub max_idle_nodes: u32,
+
+    /// Maximum hourly spend on idle nodes (USD)
+    #[serde(default = "default_max_idle_cost_per_hour")]
+    pub max_idle_cost_per_hour: f64,
+
+    /// Preferred GPU types for warm pool (in priority order)
+    #[serde(default)]
+    pub preferred_gpu_types: Vec<String>,
+
+    /// Scale up when idle VRAM falls below this percentage of target (default: 80)
+    #[serde(default = "default_scale_up_threshold_percent")]
+    pub scale_up_threshold_percent: u32,
+
+    /// Scale down when idle VRAM exceeds this percentage of target (default: 120)
+    #[serde(default = "default_scale_down_threshold_percent")]
+    pub scale_down_threshold_percent: u32,
+}
+
+impl Default for WarmPoolConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_idle_vram_gb: default_min_idle_vram_gb(),
+            max_idle_nodes: default_max_idle_nodes(),
+            max_idle_cost_per_hour: default_max_idle_cost_per_hour(),
+            preferred_gpu_types: Vec::new(),
+            scale_up_threshold_percent: default_scale_up_threshold_percent(),
+            scale_down_threshold_percent: default_scale_down_threshold_percent(),
+        }
+    }
+}
+
+fn default_min_idle_vram_gb() -> u32 {
+    80 // 1x A100-80GB equivalent
+}
+
+fn default_max_idle_nodes() -> u32 {
+    3
+}
+
+fn default_max_idle_cost_per_hour() -> f64 {
+    10.0
+}
+
+fn default_scale_up_threshold_percent() -> u32 {
+    80
+}
+
+fn default_scale_down_threshold_percent() -> u32 {
+    120
+}
+
+/// Image pre-pull configuration for faster container starts on warm pool nodes
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[derive(Default)]
+pub struct ImagePrepullConfig {
+    /// Enable/disable image pre-pulling
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Images to pre-pull on warm pool nodes
+    #[serde(default)]
+    pub images: Vec<PrepullImage>,
+}
+
+/// Image to pre-pull on warm pool nodes
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepullImage {
+    /// Full image name with tag (e.g., "vllm/vllm-openai:latest")
+    pub name: String,
+
+    /// Estimated image size in GB (used for capacity planning)
+    #[serde(default)]
+    pub size_estimate_gb: u32,
 }
 
 /// Node template for dynamic provisioning
@@ -280,6 +383,10 @@ pub struct ScalingPolicyStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<MetricsSnapshot>,
 
+    /// Warm pool status (VRAM accounting and capacity info)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_pool: Option<WarmPoolStatus>,
+
     /// Kubernetes conditions
     #[serde(default)]
     pub conditions: Vec<ScalingPolicyCondition>,
@@ -287,6 +394,51 @@ pub struct ScalingPolicyStatus {
     /// Observed generation
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+}
+
+/// Warm pool status with VRAM accounting
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmPoolStatus {
+    /// Total VRAM across all warm pool nodes (GB)
+    #[serde(default)]
+    pub total_vram_gb: u32,
+
+    /// Allocated VRAM (pods running on warm pool nodes) (GB)
+    #[serde(default)]
+    pub allocated_vram_gb: u32,
+
+    /// Idle VRAM available for new workloads (GB)
+    #[serde(default)]
+    pub idle_vram_gb: u32,
+
+    /// Target VRAM from configuration (GB)
+    #[serde(default)]
+    pub target_vram_gb: u32,
+
+    /// Scale-up threshold (GB) - scale up when idle VRAM falls below this
+    #[serde(default)]
+    pub scale_up_threshold_gb: u32,
+
+    /// Scale-down threshold (GB) - scale down when idle VRAM exceeds this
+    #[serde(default)]
+    pub scale_down_threshold_gb: u32,
+
+    /// Target number of warm pool nodes
+    #[serde(default)]
+    pub target_nodes: u32,
+
+    /// Current number of idle warm pool nodes
+    #[serde(default)]
+    pub idle_nodes: u32,
+
+    /// Estimated hourly cost of current warm pool (USD)
+    #[serde(default)]
+    pub estimated_hourly_cost: f64,
+
+    /// List of idle warm pool node names
+    #[serde(default)]
+    pub idle_node_names: Vec<String>,
 }
 
 /// Current metrics snapshot
