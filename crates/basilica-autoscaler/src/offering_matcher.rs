@@ -713,6 +713,99 @@ pub fn filter_pods_with_stale_affinity(
         .collect()
 }
 
+/// Reasons indicating a pod container is in a failing state
+const FAILING_WAIT_REASONS: &[&str] = &[
+    "CrashLoopBackOff",
+    "ImagePullBackOff",
+    "ErrImagePull",
+    "CreateContainerError",
+    "CreateContainerConfigError",
+    "InvalidImageName",
+];
+
+/// Check if a pod has any container in a failing state
+fn is_pod_failing(pod: &Pod) -> bool {
+    let status = match &pod.status {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Check init container statuses
+    if let Some(init_statuses) = &status.init_container_statuses {
+        for cs in init_statuses {
+            if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
+                if let Some(reason) = &waiting.reason {
+                    if FAILING_WAIT_REASONS.contains(&reason.as_str()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Check container statuses
+    if let Some(statuses) = &status.container_statuses {
+        for cs in statuses {
+            if let Some(waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
+                if let Some(reason) = &waiting.reason {
+                    if FAILING_WAIT_REASONS.contains(&reason.as_str()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Get the owner UID from a pod's ownerReferences (typically ReplicaSet)
+fn get_pod_owner_uid(pod: &Pod) -> Option<String> {
+    pod.metadata
+        .owner_references
+        .as_ref()
+        .and_then(|refs| refs.first())
+        .map(|r| r.uid.clone())
+}
+
+/// Filter out pending pods whose deployment has sibling pods in a failing state.
+/// If a deployment has pods in CrashLoopBackOff/ImagePullBackOff, don't provision
+/// new nodes for additional pending pods from that deployment.
+pub fn filter_pods_from_failing_deployments(
+    pending_pods: Vec<Pod>,
+    all_namespace_pods: &[Pod],
+) -> Vec<Pod> {
+    // Build a set of owner UIDs that have failing pods
+    let failing_owner_uids: std::collections::HashSet<String> = all_namespace_pods
+        .iter()
+        .filter(|p| is_pod_failing(p))
+        .filter_map(get_pod_owner_uid)
+        .collect();
+
+    if failing_owner_uids.is_empty() {
+        return pending_pods;
+    }
+
+    pending_pods
+        .into_iter()
+        .filter(|pod| {
+            let owner_uid = get_pod_owner_uid(pod);
+            match owner_uid {
+                Some(uid) if failing_owner_uids.contains(&uid) => {
+                    tracing::debug!(
+                        pod = pod.metadata.name.as_deref().unwrap_or("unknown"),
+                        ns = pod.metadata.namespace.as_deref().unwrap_or("unknown"),
+                        owner_uid = %uid,
+                        "Skipping pod from failing deployment"
+                    );
+                    false
+                }
+                _ => true,
+            }
+        })
+        .collect()
+}
+
 /// Extract raw GPU model values from pod's nodeAffinity (not normalized)
 fn extract_raw_gpu_models_from_affinity(pod: &Pod) -> Vec<String> {
     pod.spec
@@ -1288,5 +1381,129 @@ mod tests {
         assert_eq!(models.len(), 2);
         assert!(models.contains(&"A100-40GB".to_string()));
         assert!(models.contains(&"H100-80GB".to_string()));
+    }
+
+    fn test_pod_with_owner(name: &str, ns: &str, owner_uid: &str) -> Pod {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(ns.to_string()),
+                owner_references: Some(vec![OwnerReference {
+                    api_version: "apps/v1".to_string(),
+                    kind: "ReplicaSet".to_string(),
+                    name: "test-rs".to_string(),
+                    uid: owner_uid.to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn test_failing_pod(name: &str, ns: &str, owner_uid: &str, reason: &str) -> Pod {
+        use k8s_openapi::api::core::v1::{
+            ContainerState, ContainerStateWaiting, ContainerStatus, PodStatus,
+        };
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(ns.to_string()),
+                owner_references: Some(vec![OwnerReference {
+                    api_version: "apps/v1".to_string(),
+                    kind: "ReplicaSet".to_string(),
+                    name: "test-rs".to_string(),
+                    uid: owner_uid.to_string(),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    state: Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some(reason.to_string()),
+                            message: Some("Test failure".to_string()),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_is_pod_failing_crash_loop() {
+        let pod = test_failing_pod("pod1", "ns1", "uid1", "CrashLoopBackOff");
+        assert!(is_pod_failing(&pod));
+    }
+
+    #[test]
+    fn test_is_pod_failing_image_pull() {
+        let pod = test_failing_pod("pod1", "ns1", "uid1", "ImagePullBackOff");
+        assert!(is_pod_failing(&pod));
+    }
+
+    #[test]
+    fn test_is_pod_failing_healthy_pod() {
+        let pod = test_pod_with_owner("pod1", "ns1", "uid1");
+        assert!(!is_pod_failing(&pod));
+    }
+
+    #[test]
+    fn test_filter_pods_from_failing_deployments_keeps_healthy() {
+        let pending = vec![test_pod_with_owner("pending1", "ns1", "uid1")];
+        let all_pods = vec![
+            test_pod_with_owner("running1", "ns1", "uid1"),
+            test_pod_with_owner("running2", "ns1", "uid2"),
+        ];
+
+        let filtered = filter_pods_from_failing_deployments(pending, &all_pods);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_pods_from_failing_deployments_removes_failing() {
+        let pending = vec![
+            test_pod_with_owner("pending1", "ns1", "uid1"),
+            test_pod_with_owner("pending2", "ns1", "uid2"),
+        ];
+        let all_pods = vec![
+            test_failing_pod("failing1", "ns1", "uid1", "CrashLoopBackOff"),
+            test_pod_with_owner("healthy1", "ns1", "uid2"),
+        ];
+
+        let filtered = filter_pods_from_failing_deployments(pending, &all_pods);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].metadata.name.as_deref().unwrap(), "pending2");
+    }
+
+    #[test]
+    fn test_filter_pods_from_failing_deployments_empty_all_pods() {
+        let pending = vec![test_pod_with_owner("pending1", "ns1", "uid1")];
+        let all_pods: Vec<Pod> = vec![];
+
+        let filtered = filter_pods_from_failing_deployments(pending, &all_pods);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn test_filter_pods_from_failing_deployments_different_owners() {
+        let pending = vec![test_pod_with_owner("pending1", "ns1", "uid1")];
+        let all_pods = vec![test_failing_pod(
+            "failing1",
+            "ns1",
+            "uid2",
+            "CrashLoopBackOff",
+        )];
+
+        let filtered = filter_pods_from_failing_deployments(pending, &all_pods);
+        assert_eq!(filtered.len(), 1); // Different owner, so pending is kept
     }
 }
