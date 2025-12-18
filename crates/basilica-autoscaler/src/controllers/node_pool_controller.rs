@@ -202,7 +202,7 @@ where
             NodePoolPhase::Draining => self.handle_draining(ns, pool, status).await,
             NodePoolPhase::Terminating => self.handle_terminating(ns, pool, status).await,
             NodePoolPhase::Failed => self.handle_failed(ns, pool, status).await,
-            NodePoolPhase::Deleted => Ok(()),
+            NodePoolPhase::Deleted => self.handle_deleted(ns, pool, status).await,
         }
     }
 
@@ -1018,17 +1018,107 @@ where
         }
 
         self.transition_phase(ns, &name, status, NodePoolPhase::Deleted)
-            .await
+            .await?;
+
+        // Delete the NodePool CR to trigger finalizer removal
+        info!(pool = %name, "Deleting NodePool CR");
+        self.k8s.delete_node_pool(ns, &name).await?;
+
+        Ok(())
     }
 
     async fn handle_failed(
         &self,
-        _ns: &str,
+        ns: &str,
         pool: &NodePool,
-        _status: NodePoolStatus,
+        status: NodePoolStatus,
+    ) -> Result<()> {
+        use crate::config::PhaseTimeouts;
+
+        let name = pool.name_any();
+
+        // Check if we've been in Failed state long enough for auto-cleanup
+        let should_gc = status.phase_entered_at.as_ref().map_or(false, |entered_at| {
+            let elapsed = Utc::now().signed_duration_since(*entered_at);
+            elapsed.num_seconds() > PhaseTimeouts::FAILED_GC_TIMEOUT as i64
+        });
+
+        if !should_gc {
+            debug!(pool = %name, "Node pool in failed state, waiting for GC timeout or manual deletion");
+            return Ok(());
+        }
+
+        info!(pool = %name, "Failed NodePool exceeded GC timeout, cleaning up resources");
+
+        // Stop rental if exists
+        if let Some(rental_id) = &status.rental_id {
+            info!(pool = %name, rental_id = %rental_id, "Stopping rental for failed NodePool");
+            if let Err(e) = self.api.stop_rental(rental_id).await {
+                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental during GC");
+            }
+            self.metrics.record_rental_stopped(&name);
+        }
+
+        // Deregister node if registered
+        let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+        if let Some(node_id) = resolved_node_id {
+            if let Err(e) = self.api.deregister_node(node_id).await {
+                warn!(pool = %name, node_id = %node_id, error = %e, "Failed to deregister node during GC");
+            }
+        }
+
+        // Delete K8s node if it was created
+        if let Some(node_name) = &status.node_name {
+            if let Err(e) = self.k8s.delete_node(node_name).await {
+                warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node during GC");
+            }
+        }
+
+        // Delete the NodePool CR to trigger finalizer removal
+        info!(pool = %name, "Deleting failed NodePool CR after GC");
+        self.k8s.delete_node_pool(ns, &name).await?;
+
+        Ok(())
+    }
+
+    async fn handle_deleted(
+        &self,
+        ns: &str,
+        pool: &NodePool,
+        status: NodePoolStatus,
     ) -> Result<()> {
         let name = pool.name_any();
-        debug!(pool = %name, "Node pool in failed state, waiting for manual intervention or deletion");
+
+        // NodePool reached Deleted phase but CR still exists (stuck from before fix).
+        // Ensure resources are cleaned up and delete the CR.
+        info!(pool = %name, "Cleaning up stuck Deleted NodePool");
+
+        // Stop rental if it somehow still exists
+        if let Some(rental_id) = &status.rental_id {
+            if let Err(e) = self.api.stop_rental(rental_id).await {
+                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental for Deleted NodePool");
+            }
+        }
+
+        // Deregister node if registered
+        let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+        if let Some(node_id) = resolved_node_id {
+            if let Err(e) = self.api.deregister_node(node_id).await {
+                warn!(pool = %name, node_id = %node_id, error = %e, "Failed to deregister node for Deleted NodePool");
+            }
+        }
+
+        // Delete K8s node if it exists
+        if let Some(node_name) = &status.node_name {
+            if let Err(e) = self.k8s.delete_node(node_name).await {
+                warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node for Deleted NodePool");
+            }
+        }
+
+        // Delete the NodePool CR to trigger finalizer removal
+        info!(pool = %name, "Deleting Deleted NodePool CR");
+        self.k8s.delete_node_pool(ns, &name).await?;
+
         Ok(())
     }
 
