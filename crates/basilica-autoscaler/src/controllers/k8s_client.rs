@@ -21,6 +21,7 @@ pub trait AutoscalerK8sClient: Send + Sync {
     ) -> Result<()>;
     async fn add_node_pool_finalizer(&self, ns: &str, name: &str) -> Result<()>;
     async fn remove_node_pool_finalizer(&self, ns: &str, name: &str) -> Result<()>;
+    async fn delete_node_pool(&self, ns: &str, name: &str) -> Result<()>;
 
     // ScalingPolicy CRD operations
     async fn get_scaling_policy(&self, ns: &str, name: &str) -> Result<ScalingPolicy>;
@@ -68,6 +69,7 @@ pub trait AutoscalerK8sClient: Send + Sync {
     // Pod operations
     async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>>;
     async fn list_pending_pods(&self) -> Result<Vec<Pod>>;
+    async fn list_pods_in_namespace(&self, ns: &str) -> Result<Vec<Pod>>;
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool>;
 
     // Secret operations
@@ -206,6 +208,13 @@ impl AutoscalerK8sClient for KubeClient {
 
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
+        Ok(())
+    }
+
+    async fn delete_node_pool(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::{Api, DeleteParams};
+        let api: Api<NodePool> = Api::namespaced(self.client.clone(), ns);
+        api.delete(name, &DeleteParams::default()).await?;
         Ok(())
     }
 
@@ -415,6 +424,14 @@ impl AutoscalerK8sClient for KubeClient {
         let api: Api<Pod> = Api::all(self.client.clone());
         let lp = ListParams::default().fields("status.phase=Pending");
         let list = api.list(&lp).await?;
+        Ok(list.items)
+    }
+
+    async fn list_pods_in_namespace(&self, ns: &str) -> Result<Vec<Pod>> {
+        use kube::api::ListParams;
+        use kube::Api;
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+        let list = api.list(&ListParams::default()).await?;
         Ok(list.items)
     }
 
