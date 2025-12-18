@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod offering_matcher;
 pub mod provisioner;
 pub mod runtime;
+pub mod warm_pool;
 
 pub use config::AutoscalerConfig;
 pub use error::{AutoscalerError, Result};
