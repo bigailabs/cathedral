@@ -52,6 +52,16 @@ pub struct AutoscalerMetrics {
 
     // Insufficient offering metric
     insufficient_offering_total: IntCounter,
+
+    // Warm pool metrics
+    warm_pool_total_vram_gb: IntGaugeVec,
+    warm_pool_allocated_vram_gb: IntGaugeVec,
+    warm_pool_idle_vram_gb: IntGaugeVec,
+    warm_pool_target_vram_gb: IntGaugeVec,
+    warm_pool_idle_nodes: IntGaugeVec,
+    warm_pool_target_nodes: IntGaugeVec,
+    warm_pool_cost_per_hour: prometheus::GaugeVec,
+    warm_pool_scale_decisions_total: IntCounterVec,
 }
 
 impl AutoscalerMetrics {
@@ -235,6 +245,79 @@ impl AutoscalerMetrics {
         )
         .unwrap();
 
+        // Warm pool metrics
+        let warm_pool_total_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_total_vram_gb",
+                "Total VRAM across all warm pool nodes in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_allocated_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_allocated_vram_gb",
+                "Allocated VRAM on warm pool nodes in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_idle_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_idle_vram_gb",
+                "Idle VRAM available on warm pool nodes in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_target_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_target_vram_gb",
+                "Target idle VRAM for warm pool in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_idle_nodes = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_idle_nodes",
+                "Number of idle warm pool nodes",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_target_nodes = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_target_nodes",
+                "Target number of warm pool nodes",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_cost_per_hour = prometheus::GaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_cost_per_hour",
+                "Estimated hourly cost of warm pool in USD",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_scale_decisions_total = IntCounterVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_scale_decisions_total",
+                "Total warm pool scaling decisions",
+            ),
+            &["policy", "decision"],
+        )
+        .unwrap();
+
         // Register all metrics
         registry
             .register(Box::new(node_pools_total.clone()))
@@ -299,6 +382,30 @@ impl AutoscalerMetrics {
         registry
             .register(Box::new(insufficient_offering_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(warm_pool_total_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_allocated_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_idle_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_target_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_idle_nodes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_target_nodes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_cost_per_hour.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_scale_decisions_total.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -325,6 +432,14 @@ impl AutoscalerMetrics {
             cache_hits_total,
             cache_misses_total,
             insufficient_offering_total,
+            warm_pool_total_vram_gb,
+            warm_pool_allocated_vram_gb,
+            warm_pool_idle_vram_gb,
+            warm_pool_target_vram_gb,
+            warm_pool_idle_nodes,
+            warm_pool_target_nodes,
+            warm_pool_cost_per_hour,
+            warm_pool_scale_decisions_total,
         }
     }
 
@@ -436,6 +551,38 @@ impl AutoscalerMetrics {
 
     pub fn record_insufficient_offering(&self) {
         self.insufficient_offering_total.inc();
+    }
+
+    /// Set warm pool VRAM and node metrics from WarmPoolStatus
+    pub fn set_warm_pool_metrics(&self, policy: &str, status: &crate::crd::WarmPoolStatus) {
+        self.warm_pool_total_vram_gb
+            .with_label_values(&[policy])
+            .set(status.total_vram_gb as i64);
+        self.warm_pool_allocated_vram_gb
+            .with_label_values(&[policy])
+            .set(status.allocated_vram_gb as i64);
+        self.warm_pool_idle_vram_gb
+            .with_label_values(&[policy])
+            .set(status.idle_vram_gb as i64);
+        self.warm_pool_target_vram_gb
+            .with_label_values(&[policy])
+            .set(status.target_vram_gb as i64);
+        self.warm_pool_idle_nodes
+            .with_label_values(&[policy])
+            .set(status.idle_nodes as i64);
+        self.warm_pool_target_nodes
+            .with_label_values(&[policy])
+            .set(status.target_nodes as i64);
+        self.warm_pool_cost_per_hour
+            .with_label_values(&[policy])
+            .set(status.estimated_hourly_cost);
+    }
+
+    /// Record a warm pool scaling decision
+    pub fn record_warm_pool_scale_decision(&self, policy: &str, decision: &str) {
+        self.warm_pool_scale_decisions_total
+            .with_label_values(&[policy, decision])
+            .inc();
     }
 
     /// Export metrics in Prometheus text format
