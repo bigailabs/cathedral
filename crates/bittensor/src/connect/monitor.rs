@@ -95,13 +95,14 @@ impl BlockchainMonitor {
 
     /// Get transfers from a specific block number
     pub async fn get_transfers_at_block(&self, block_number: u32) -> Result<Vec<TransferInfo>> {
+        // Acquire locks in consistent order (client first, then rpc_methods) to prevent deadlock
+        let client = self.client.read().await;
         let rpc_methods = self.rpc_methods.read().await;
         let block_hash = rpc_methods
             .chain_get_block_hash(Some(block_number.into()))
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
 
-        let client = self.client.read().await;
         let block = client.blocks().at(block_hash).await?;
         Self::get_transfers_from_block(&client, block).await
     }
