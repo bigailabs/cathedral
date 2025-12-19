@@ -32,10 +32,12 @@ Environment Variables:
 """
 
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Optional
 
 import click
@@ -47,6 +49,11 @@ from rich.table import Table
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
 MARKUP_FACTOR = Decimal("1.10")  # 10% markup to remove (base_price = total_revenue / 1.10)
 DEFAULT_NETUID = 39
+
+# Derive proto path from script location
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_PROTO_PATH = REPO_ROOT / "crates" / "basilica-protocol" / "proto"
 
 
 @dataclass
@@ -100,8 +107,9 @@ class PaymentSummary:
 class BillingClient:
     """Client for interacting with the billing gRPC service via grpcurl."""
 
-    def __init__(self, endpoint: str):
+    def __init__(self, endpoint: str, proto_path: Path):
         self.endpoint = endpoint
+        self.proto_path = proto_path
 
     def get_unpaid_summaries(
         self, period_start: str, period_end: str, limit: int = 1000
@@ -116,7 +124,10 @@ class BillingClient:
         result = subprocess.run(
             [
                 "grpcurl",
-                "-plaintext",
+                "-import-path",
+                str(self.proto_path),
+                "-proto",
+                "billing.proto",
                 "-d",
                 json.dumps(request),
                 self.endpoint,
@@ -178,7 +189,10 @@ class BillingClient:
         result = subprocess.run(
             [
                 "grpcurl",
-                "-plaintext",
+                "-import-path",
+                str(self.proto_path),
+                "-proto",
+                "billing.proto",
                 "-d",
                 json.dumps(request),
                 self.endpoint,
@@ -201,6 +215,7 @@ class MinerPaymentProcessor:
     def __init__(
         self,
         billing_endpoint: str,
+        proto_path: Path,
         network: str,
         wallet_name: str,
         wallet_path: str,
@@ -208,7 +223,7 @@ class MinerPaymentProcessor:
         netuid: int,
         dry_run: bool,
     ):
-        self.billing_client = BillingClient(billing_endpoint)
+        self.billing_client = BillingClient(billing_endpoint, proto_path)
         self.network = network
         self.wallet_name = wallet_name
         self.wallet_path = wallet_path
@@ -283,10 +298,6 @@ class MinerPaymentProcessor:
         Returns:
             Tuple of (alpha_amount, alpha_per_tao_rate). Rate is None if conversion failed.
         """
-        if self.dry_run:
-            # In dry run, just return TAO amount as placeholder (1:1 rate)
-            return tao_amount, None
-
         try:
             import bittensor as bt
 
@@ -492,6 +503,12 @@ class MinerPaymentProcessor:
     help="Billing gRPC endpoint",
 )
 @click.option(
+    "--proto-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=DEFAULT_PROTO_PATH,
+    help=f"Path to proto files (default: {DEFAULT_PROTO_PATH})",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     help="Show summary without making payments",
@@ -510,6 +527,7 @@ def main(
     wallet_path: str,
     network: str,
     billing_endpoint: str,
+    proto_path: Path,
     dry_run: bool,
     auto_approve: bool,
 ):
@@ -521,10 +539,12 @@ def main(
     console.print(f"Token: {token_type.upper()}")
     console.print(f"Subnet: {netuid}")
     console.print(f"Network: {network}")
+    console.print(f"Endpoint: {billing_endpoint}")
     console.print("")
 
     processor = MinerPaymentProcessor(
         billing_endpoint=billing_endpoint,
+        proto_path=proto_path,
         network=network,
         wallet_name=wallet_name,
         wallet_path=wallet_path,
