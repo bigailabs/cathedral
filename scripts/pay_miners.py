@@ -17,14 +17,16 @@
 """
 Basilica Miner Payment Script
 
-Pay miners based on miner_revenue_summary data for a given time period.
-Supports both TAO and Alpha token payments on the Bittensor network.
+Pay miners based on miner_revenue_summary data. Automatically detects the next
+unpaid period from the database to ensure payments align exactly with
+pre-computed period boundaries.
 
 Usage:
-    ./pay_miners.py --period-start 2024-01-01 --period-end 2024-01-31 --token-type tao
-    ./pay_miners.py --period-start 2024-01-01 --period-end 2024-01-31 --token-type alpha
-    ./pay_miners.py --dry-run --period-start 2024-01-01 --period-end 2024-01-31 --token-type tao
-    ./pay_miners.py --auto-approve --period-start 2024-01-01 --period-end 2024-01-31 --token-type tao
+    ./pay_miners.py --token-type tao
+    ./pay_miners.py --token-type alpha
+    ./pay_miners.py --dry-run --token-type tao
+    ./pay_miners.py --auto-approve --token-type tao
+    ./pay_miners.py --token-type tao --force  # When multiple unpaid periods exist
 
 Environment Variables:
     BILLING_GRPC_ENDPOINT: gRPC endpoint for billing service (default: localhost:50051)
@@ -111,73 +113,81 @@ class BillingClient:
         self.endpoint = endpoint
         self.proto_path = proto_path
 
-    def get_unpaid_summaries(
-        self, period_start: str, period_end: str, limit: int = 1000
-    ) -> list[MinerRevenueSummary]:
-        """Fetch unpaid miner revenue summaries from the billing service."""
-        request = {
-            "period_start": period_start,
-            "period_end": period_end,
-            "limit": limit,
-        }
+    def get_all_unpaid_summaries(self) -> list[MinerRevenueSummary]:
+        """Fetch ALL unpaid miner revenue summaries (no date filter) using pagination."""
+        all_summaries: list[MinerRevenueSummary] = []
+        offset = 0
+        limit = 1000  # Max allowed by the service
 
-        result = subprocess.run(
-            [
-                "grpcurl",
-                "-import-path",
-                str(self.proto_path),
-                "-proto",
-                "billing.proto",
-                "-d",
-                json.dumps(request),
-                self.endpoint,
-                "basilica.billing.v1.BillingService/GetUnpaidMinerRevenueSummary",
-            ],
-            capture_output=True,
-            text=True,
-        )
+        while True:
+            request = {"limit": limit, "offset": offset}
 
-        if result.returncode != 0:
-            raise RuntimeError(f"gRPC call failed: {result.stderr}")
-
-        if not result.stdout.strip():
-            return []
-
-        data = json.loads(result.stdout)
-        summaries = []
-
-        for s in data.get("summaries", []):
-            summaries.append(
-                MinerRevenueSummary(
-                    id=s.get("id", ""),
-                    node_id=s.get("nodeId", ""),
-                    validator_id=s.get("validatorId", ""),
-                    miner_uid=int(s.get("minerUid", 0)),
-                    miner_hotkey=s.get("minerHotkey", ""),
-                    period_start=s.get("periodStart", ""),
-                    period_end=s.get("periodEnd", ""),
-                    total_rentals=int(s.get("totalRentals", 0)),
-                    completed_rentals=int(s.get("completedRentals", 0)),
-                    failed_rentals=int(s.get("failedRentals", 0)),
-                    total_revenue=Decimal(s.get("totalRevenue", "0")),
-                    total_hours=Decimal(s.get("totalHours", "0")),
-                    avg_hourly_rate=(
-                        Decimal(s["avgHourlyRate"]) if s.get("avgHourlyRate") else None
-                    ),
-                    avg_rental_duration_hours=(
-                        Decimal(s["avgRentalDurationHours"])
-                        if s.get("avgRentalDurationHours")
-                        else None
-                    ),
-                    computed_at=s.get("computedAt", ""),
-                    computation_version=int(s.get("computationVersion", 0)),
-                    created_at=s.get("createdAt", ""),
-                    paid=s.get("paid", False),
-                    tx_hash=s.get("txHash", ""),
-                )
+            result = subprocess.run(
+                [
+                    "grpcurl",
+                    "-import-path",
+                    str(self.proto_path),
+                    "-proto",
+                    "billing.proto",
+                    "-d",
+                    json.dumps(request),
+                    self.endpoint,
+                    "basilica.billing.v1.BillingService/GetUnpaidMinerRevenueSummary",
+                ],
+                capture_output=True,
+                text=True,
             )
 
-        return summaries
+            if result.returncode != 0:
+                raise RuntimeError(f"gRPC call failed: {result.stderr}")
+
+            if not result.stdout.strip():
+                break
+
+            data = json.loads(result.stdout)
+            batch = data.get("summaries", [])
+
+            if not batch:
+                break
+
+            for s in batch:
+                all_summaries.append(
+                    MinerRevenueSummary(
+                        id=s.get("id", ""),
+                        node_id=s.get("nodeId", ""),
+                        validator_id=s.get("validatorId", ""),
+                        miner_uid=int(s.get("minerUid", 0)),
+                        miner_hotkey=s.get("minerHotkey", ""),
+                        period_start=s.get("periodStart", ""),
+                        period_end=s.get("periodEnd", ""),
+                        total_rentals=int(s.get("totalRentals", 0)),
+                        completed_rentals=int(s.get("completedRentals", 0)),
+                        failed_rentals=int(s.get("failedRentals", 0)),
+                        total_revenue=Decimal(s.get("totalRevenue", "0")),
+                        total_hours=Decimal(s.get("totalHours", "0")),
+                        avg_hourly_rate=(
+                            Decimal(s["avgHourlyRate"]) if s.get("avgHourlyRate") else None
+                        ),
+                        avg_rental_duration_hours=(
+                            Decimal(s["avgRentalDurationHours"])
+                            if s.get("avgRentalDurationHours")
+                            else None
+                        ),
+                        computed_at=s.get("computedAt", ""),
+                        computation_version=int(s.get("computationVersion", 0)),
+                        created_at=s.get("createdAt", ""),
+                        paid=s.get("paid", False),
+                        tx_hash=s.get("txHash", ""),
+                    )
+                )
+
+            # If we got fewer than limit, we've reached the end
+            if len(batch) < limit:
+                break
+
+            offset += limit
+
+        return all_summaries
 
     def mark_as_paid(self, summary_id: str, tx_hash: str) -> bool:
         """Mark a miner revenue summary as paid."""
@@ -335,26 +345,26 @@ class MinerPaymentProcessor:
         table.add_column("Revenue (USD)", justify="right")
         table.add_column("Base Price (USD)", justify="right")
         table.add_column(f"Amount ({summary.token_type.upper()})", justify="right")
-
-        # Add USD equivalent column for Alpha payments
-        if summary.token_type == "alpha" and summary.alpha_price_usd is not None:
-            table.add_column("Token Value (USD)", justify="right", style="green")
+        table.add_column("Token Value (USD)", justify="right", style="green")
 
         for payment in sorted(
             summary.payments, key=lambda p: p.base_price_usd, reverse=True
         ):
+            # Calculate USD value based on token type
+            if summary.token_type == "alpha" and summary.alpha_price_usd is not None:
+                usd_value = payment.amount_tokens * summary.alpha_price_usd
+            else:
+                # For TAO, use the TAO price
+                usd_value = payment.amount_tokens * summary.tao_price_usd
+
             row = [
                 payment.summary.id[:8] + "...",
                 payment.summary.miner_hotkey[:16] + "...",
                 f"${payment.summary.total_revenue:.4f}",
                 f"${payment.base_price_usd:.4f}",
                 f"{payment.amount_tokens:.6f}",
+                f"${usd_value:.4f}",
             ]
-
-            # Add USD equivalent for Alpha
-            if summary.token_type == "alpha" and summary.alpha_price_usd is not None:
-                usd_value = payment.amount_tokens * summary.alpha_price_usd
-                row.append(f"${usd_value:.4f}")
 
             table.add_row(*row)
 
@@ -366,6 +376,13 @@ class MinerPaymentProcessor:
             f"  Total {summary.token_type.upper()}: {summary.total_tokens:.6f}"
         )
 
+        # Calculate total token value in USD
+        if summary.token_type == "alpha" and summary.alpha_price_usd is not None:
+            total_token_value = summary.total_tokens * summary.alpha_price_usd
+        else:
+            total_token_value = summary.total_tokens * summary.tao_price_usd
+        self.console.print(f"  Total Token Value (USD): ${total_token_value:.4f}")
+
         # Show pricing information
         self.console.print(f"\n[bold]Pricing:[/bold]")
         self.console.print(f"  TAO/USD: ${summary.tao_price_usd:.2f}")
@@ -373,8 +390,6 @@ class MinerPaymentProcessor:
         if summary.token_type == "alpha":
             if summary.alpha_price_usd is not None:
                 self.console.print(f"  Alpha/USD: ${summary.alpha_price_usd:.6f}")
-                total_token_value = summary.total_tokens * summary.alpha_price_usd
-                self.console.print(f"  Total Alpha Value: ${total_token_value:.4f}")
             else:
                 self.console.print("  Alpha/USD: [yellow]Not available (dry run)[/yellow]")
 
@@ -460,20 +475,15 @@ class MinerPaymentProcessor:
 
 @click.command()
 @click.option(
-    "--period-start",
-    required=True,
-    help="Start date (YYYY-MM-DD)",
-)
-@click.option(
-    "--period-end",
-    required=True,
-    help="End date (YYYY-MM-DD)",
-)
-@click.option(
     "--token-type",
     type=click.Choice(["tao", "alpha"]),
     required=True,
     help="Token type for payment",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force payment of earliest period when multiple unpaid periods exist",
 )
 @click.option(
     "--netuid",
@@ -519,9 +529,8 @@ class MinerPaymentProcessor:
     help="Skip confirmation prompt (for cron jobs)",
 )
 def main(
-    period_start: str,
-    period_end: str,
     token_type: str,
+    force: bool,
     netuid: int,
     wallet_name: str,
     wallet_path: str,
@@ -535,13 +544,57 @@ def main(
     console = Console()
 
     console.print("[bold]Basilica Miner Payment Script[/bold]")
-    console.print(f"Period: {period_start} to {period_end}")
     console.print(f"Token: {token_type.upper()}")
     console.print(f"Subnet: {netuid}")
     console.print(f"Network: {network}")
     console.print(f"Endpoint: {billing_endpoint}")
     console.print("")
 
+    # Create billing client for period detection
+    billing_client = BillingClient(billing_endpoint, proto_path)
+
+    # Fetch all unpaid summaries to detect periods
+    console.print("Fetching unpaid revenue summaries...")
+    try:
+        all_summaries = billing_client.get_all_unpaid_summaries()
+    except Exception as e:
+        console.print(f"[red]Error fetching summaries: {e}[/red]")
+        sys.exit(1)
+
+    if not all_summaries:
+        console.print("[yellow]No unpaid revenue summaries found.[/yellow]")
+        sys.exit(0)
+
+    # Extract distinct periods and group summaries
+    periods: dict[tuple[str, str], list[MinerRevenueSummary]] = {}
+    for s in all_summaries:
+        key = (s.period_start, s.period_end)
+        if key not in periods:
+            periods[key] = []
+        periods[key].append(s)
+
+    sorted_periods = sorted(periods.keys(), key=lambda p: p[0])  # Sort by start date
+
+    # Display found periods
+    console.print(f"\n[bold]Found {len(sorted_periods)} unpaid period(s):[/bold]")
+    for start, end in sorted_periods:
+        period_summaries = periods[(start, end)]
+        revenue = sum(s.total_revenue for s in period_summaries)
+        console.print(f"  {start} to {end}: {len(period_summaries)} miners, ${revenue:.2f} revenue")
+
+    # Fail if multiple periods and not forced
+    if len(sorted_periods) > 1 and not force:
+        console.print("\n[red]Error: Multiple unpaid periods found.[/red]")
+        console.print("Use --force to pay the earliest period.")
+        sys.exit(1)
+
+    # Select earliest period
+    period_start, period_end = sorted_periods[0]
+    summaries = periods[(period_start, period_end)]
+    console.print(f"\n[green]Selected period: {period_start} to {period_end}[/green]")
+    console.print(f"Found {len(summaries)} unpaid records")
+
+    # Create processor for payments
     processor = MinerPaymentProcessor(
         billing_endpoint=billing_endpoint,
         proto_path=proto_path,
@@ -554,29 +607,13 @@ def main(
     )
 
     # Fetch TAO price
-    console.print("Fetching TAO/USD price...")
+    console.print("\nFetching TAO/USD price...")
     try:
         tao_price = processor.fetch_tao_price()
         console.print(f"TAO Price: ${tao_price:.2f}")
     except Exception as e:
         console.print(f"[red]Error fetching TAO price: {e}[/red]")
         sys.exit(1)
-
-    # Fetch unpaid summaries
-    console.print(f"\nFetching unpaid revenue summaries...")
-    try:
-        summaries = processor.billing_client.get_unpaid_summaries(
-            period_start, period_end
-        )
-    except Exception as e:
-        console.print(f"[red]Error fetching summaries: {e}[/red]")
-        sys.exit(1)
-
-    if not summaries:
-        console.print("[yellow]No unpaid revenue summaries found for this period.[/yellow]")
-        sys.exit(0)
-
-    console.print(f"Found {len(summaries)} unpaid records")
 
     # Calculate payments
     payment_summary = processor.calculate_payments(summaries, tao_price)
