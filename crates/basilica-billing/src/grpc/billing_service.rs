@@ -20,12 +20,11 @@ use basilica_protocol::billing::{
     ApplyCreditsResponse, FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
     GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, GetMinerRevenueSummaryRequest,
     GetMinerRevenueSummaryResponse, GetRentalStatusRequest, GetRentalStatusResponse,
-    GetUnpaidMinerRevenueSummaryRequest, GetUnpaidMinerRevenueSummaryResponse,
-    IngestResponse, MarkMinerRevenuePaidRequest, MarkMinerRevenuePaidResponse,
-    RefreshMinerRevenueSummaryRequest, RefreshMinerRevenueSummaryResponse,
-    RentalStatus, TelemetryData, TrackRentalRequest, TrackRentalResponse,
-    UpdateRentalStatusRequest, UpdateRentalStatusResponse, UsageDataPoint, UsageReportRequest,
-    UsageReportResponse, UsageSummary,
+    GetUnpaidMinerRevenueSummaryRequest, GetUnpaidMinerRevenueSummaryResponse, IngestResponse,
+    MarkMinerRevenuePaidRequest, MarkMinerRevenuePaidResponse, RefreshMinerRevenueSummaryRequest,
+    RefreshMinerRevenueSummaryResponse, RentalStatus, TelemetryData, TrackRentalRequest,
+    TrackRentalResponse, UpdateRentalStatusRequest, UpdateRentalStatusResponse, UsageDataPoint,
+    UsageReportRequest, UsageReportResponse, UsageSummary,
 };
 
 use rust_decimal::prelude::*;
@@ -1291,8 +1290,9 @@ impl BillingService for BillingServiceImpl {
         // Parse date strings (YYYY-MM-DD format)
         if !req.period_start.is_empty() {
             let period_start_date =
-                chrono::NaiveDate::parse_from_str(&req.period_start, "%Y-%m-%d")
-                    .map_err(|_| Status::invalid_argument("period_start must be in YYYY-MM-DD format"))?;
+                chrono::NaiveDate::parse_from_str(&req.period_start, "%Y-%m-%d").map_err(|_| {
+                    Status::invalid_argument("period_start must be in YYYY-MM-DD format")
+                })?;
             filter.period_start = Some(
                 period_start_date
                     .and_hms_opt(0, 0, 0)
@@ -1428,19 +1428,13 @@ impl BillingService for BillingServiceImpl {
         match result {
             Ok(updated) => {
                 if updated {
-                    info!(
-                        "Successfully marked miner revenue summary {} as paid",
-                        id
-                    );
+                    info!("Successfully marked miner revenue summary {} as paid", id);
                     Ok(Response::new(MarkMinerRevenuePaidResponse {
                         success: true,
                         error_message: String::new(),
                     }))
                 } else {
-                    warn!(
-                        "Miner revenue summary {} not found or already paid",
-                        id
-                    );
+                    warn!("Miner revenue summary {} not found or already paid", id);
                     Ok(Response::new(MarkMinerRevenuePaidResponse {
                         success: false,
                         error_message: "Record not found or already paid".to_string(),

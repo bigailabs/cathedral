@@ -230,7 +230,10 @@ impl MinerRevenueOperations for MinerRevenueService {
         let updated = self.repository.mark_summary_paid(id, tx_hash).await?;
 
         if updated {
-            info!("Marked miner revenue summary {} as paid (tx: {})", id, tx_hash);
+            info!(
+                "Marked miner revenue summary {} as paid (tx: {})",
+                id, tx_hash
+            );
         } else {
             warn!(
                 "Failed to mark miner revenue summary {} as paid: not found or already paid",
