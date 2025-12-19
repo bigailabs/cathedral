@@ -89,7 +89,8 @@ class PaymentInfo:
 
     summary: MinerRevenueSummary
     base_price_usd: Decimal  # After removing markup
-    amount_tokens: Decimal
+    tao_amount: Decimal  # Original TAO amount (used for staking)
+    amount_tokens: Decimal  # Alpha amount (for display) or TAO if token_type=tao
     tx_hash: Optional[str] = None
 
 
@@ -99,7 +100,8 @@ class PaymentSummary:
 
     payments: list[PaymentInfo] = field(default_factory=list)
     total_usd: Decimal = Decimal("0")
-    total_tokens: Decimal = Decimal("0")
+    total_tao: Decimal = Decimal("0")  # Total TAO to be staked
+    total_tokens: Decimal = Decimal("0")  # Total tokens (alpha or TAO depending on token_type)
     tao_price_usd: Decimal = Decimal("0")
     alpha_price_usd: Optional[Decimal] = None  # Alpha/USD price (derived from TAO/USD and Alpha/TAO)
     token_type: str = "tao"
@@ -288,11 +290,13 @@ class MinerPaymentProcessor:
             payment_info = PaymentInfo(
                 summary=summary,
                 base_price_usd=base_price_usd,
+                tao_amount=tao_amount,
                 amount_tokens=amount_tokens,
             )
 
             payment_summary.payments.append(payment_info)
             payment_summary.total_usd += base_price_usd
+            payment_summary.total_tao += tao_amount
             payment_summary.total_tokens += amount_tokens
 
         # Calculate Alpha/USD price if we have the Alpha/TAO rate
@@ -429,18 +433,18 @@ class MinerPaymentProcessor:
                     success = self.subtensor.transfer(
                         wallet=self.wallet,
                         dest=payment.summary.miner_hotkey,
-                        amount=bt.Balance.from_tao(float(payment.amount_tokens)),
+                        amount=bt.Balance.from_tao(float(payment.tao_amount)),
                         wait_for_inclusion=True,
                         wait_for_finalization=True,
                     )
                 else:
-                    # Alpha transfer - stake to the miner's hotkey on the subnet
-                    # Note: Direct alpha transfer may not be supported - using stake instead
+                    # Alpha stake - stake TAO to the miner's hotkey on the subnet
+                    # add_stake takes TAO amount and converts to alpha internally
                     success = self.subtensor.add_stake(
                         wallet=self.wallet,
                         hotkey_ss58=payment.summary.miner_hotkey,
                         netuid=summary.netuid,
-                        amount=bt.Balance.from_tao(float(payment.amount_tokens)),
+                        amount=bt.Balance.from_tao(float(payment.tao_amount)),
                         wait_for_inclusion=True,
                         wait_for_finalization=True,
                     )
