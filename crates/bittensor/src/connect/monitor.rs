@@ -3,8 +3,16 @@
 //! Simple, robust implementation following KISS principle.
 
 use anyhow::Result;
+use std::sync::Arc;
+use subxt::backend::legacy::LegacyRpcMethods;
+use subxt::backend::rpc::RpcClient;
 use subxt::{OnlineClient, PolkadotConfig};
+use tokio::sync::RwLock;
 use tracing::{debug, info};
+
+fn is_insecure_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("ws://") || endpoint.starts_with("http://")
+}
 
 /// Transfer event data
 #[derive(Debug, Clone)]
@@ -18,66 +26,93 @@ pub struct TransferInfo {
 
 /// Simple blockchain monitor for Bittensor transfers
 pub struct BlockchainMonitor {
-    client: OnlineClient<PolkadotConfig>,
+    client: Arc<RwLock<OnlineClient<PolkadotConfig>>>,
+    rpc_methods: Arc<RwLock<LegacyRpcMethods<PolkadotConfig>>>,
     endpoint: String,
 }
 
 impl BlockchainMonitor {
     /// Connect to blockchain endpoint
     pub async fn new(endpoint: &str) -> Result<Self> {
-        let is_insecure = endpoint.starts_with("ws://") || endpoint.starts_with("http://");
-        let client = if is_insecure {
-            debug!("Using insecure connection for endpoint: {}", endpoint);
-            OnlineClient::<PolkadotConfig>::from_insecure_url(endpoint).await?
-        } else {
-            OnlineClient::<PolkadotConfig>::from_url(endpoint).await?
-        };
+        let client = Self::create_client(endpoint).await?;
+        let rpc_methods = Self::create_rpc_methods(endpoint).await?;
         Ok(Self {
-            client,
+            client: Arc::new(RwLock::new(client)),
+            rpc_methods: Arc::new(RwLock::new(rpc_methods)),
             endpoint: endpoint.to_string(),
         })
     }
 
+    /// Create a new OnlineClient for the endpoint
+    async fn create_client(endpoint: &str) -> Result<OnlineClient<PolkadotConfig>> {
+        if is_insecure_endpoint(endpoint) {
+            debug!("Using insecure connection for endpoint: {}", endpoint);
+            Ok(OnlineClient::<PolkadotConfig>::from_insecure_url(endpoint).await?)
+        } else {
+            Ok(OnlineClient::<PolkadotConfig>::from_url(endpoint).await?)
+        }
+    }
+
+    /// Create RPC methods client for the endpoint
+    async fn create_rpc_methods(endpoint: &str) -> Result<LegacyRpcMethods<PolkadotConfig>> {
+        let rpc = if is_insecure_endpoint(endpoint) {
+            RpcClient::from_insecure_url(endpoint).await?
+        } else {
+            RpcClient::from_url(endpoint).await?
+        };
+        Ok(LegacyRpcMethods::new(rpc))
+    }
+
+    /// Reconnect to the blockchain endpoint
+    pub async fn reconnect(&self) -> Result<()> {
+        info!("Reconnecting to blockchain at: {}", self.endpoint);
+        let new_client = Self::create_client(&self.endpoint).await?;
+        let new_rpc_methods = Self::create_rpc_methods(&self.endpoint).await?;
+
+        // Update both clients atomically under write locks
+        let mut client_guard = self.client.write().await;
+        let mut rpc_guard = self.rpc_methods.write().await;
+        *client_guard = new_client;
+        *rpc_guard = new_rpc_methods;
+
+        info!("Successfully reconnected to blockchain");
+        Ok(())
+    }
+
     /// Get current block number
     pub async fn get_current_block(&self) -> Result<u32> {
-        let block = self.client.blocks().at_latest().await?;
+        let client = self.client.read().await;
+        let block = client.blocks().at_latest().await?;
         Ok(block.number())
     }
 
     /// Get transfers from latest block
     pub async fn get_latest_transfers(&self) -> Result<Vec<TransferInfo>> {
-        let block = self.client.blocks().at_latest().await?;
-        self.get_transfers_from_block(block).await
+        let client = self.client.read().await;
+        let block = client.blocks().at_latest().await?;
+        Self::get_transfers_from_block(&client, block).await
     }
 
     /// Get transfers from a specific block number
     pub async fn get_transfers_at_block(&self, block_number: u32) -> Result<Vec<TransferInfo>> {
-        use subxt::backend::legacy::LegacyRpcMethods;
-        use subxt::backend::rpc::RpcClient;
-
-        let is_insecure =
-            self.endpoint.starts_with("ws://") || self.endpoint.starts_with("http://");
-        let rpc = if is_insecure {
-            RpcClient::from_insecure_url(&self.endpoint).await?
-        } else {
-            RpcClient::from_url(&self.endpoint).await?
-        };
-
-        let rpc_methods = LegacyRpcMethods::<PolkadotConfig>::new(rpc);
+        // Acquire locks in consistent order (client first, then rpc_methods) to prevent deadlock
+        let client = self.client.read().await;
+        let rpc_methods = self.rpc_methods.read().await;
         let block_hash = rpc_methods
             .chain_get_block_hash(Some(block_number.into()))
             .await?
             .ok_or_else(|| anyhow::anyhow!("Block {} not found", block_number))?;
 
-        let block = self.client.blocks().at(block_hash).await?;
-        self.get_transfers_from_block(block).await
+        let block = client.blocks().at(block_hash).await?;
+        Self::get_transfers_from_block(&client, block).await
     }
 
     /// Extract transfers from a block
     async fn get_transfers_from_block(
-        &self,
+        client: &OnlineClient<PolkadotConfig>,
         block: subxt::blocks::Block<PolkadotConfig, OnlineClient<PolkadotConfig>>,
     ) -> Result<Vec<TransferInfo>> {
+        let _ = client; // Used for type consistency, block already contains client ref
         let mut transfers = Vec::new();
         let block_num = block.number();
         let events = block.events().await?;
@@ -176,6 +211,24 @@ impl BlockchainMonitor {
                 last_block = current_block;
             }
         }
+    }
+
+    /// Get the endpoint URL
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Check if a block is likely too old to be available on non-archive nodes.
+    /// Non-archive nodes typically keep ~256 blocks (~51 minutes at 12s/block).
+    pub fn is_block_likely_pruned(
+        current_block: u32,
+        target_block: u32,
+        retention_blocks: u32,
+    ) -> bool {
+        if target_block > current_block {
+            return false;
+        }
+        current_block - target_block > retention_blocks
     }
 }
 

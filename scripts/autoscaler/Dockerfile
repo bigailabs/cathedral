@@ -49,8 +49,9 @@ RUN apt-get update && apt-get install -y \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r basilica && useradd -r -g basilica basilica
+# Create non-root user with explicit UID/GID 1000 to match K8s runAsUser.
+# System ssh requires a valid /etc/passwd entry for the running user.
+RUN groupadd -g 1000 basilica && useradd -u 1000 -g basilica -m basilica
 
 # Copy the built binary
 ARG BUILD_MODE=release

@@ -72,12 +72,13 @@ async fn validate_deployment_prerequisites(
         .await?;
 
     if !capacity.has_capacity {
-        return Err(ApiError::InvalidRequest {
-            message: format!(
-                "Insufficient cluster capacity: {}",
-                capacity.message.unwrap_or_else(|| "unknown".to_string())
-            ),
-        });
+        // Log warning but allow deployment to proceed - pod will go Pending
+        // and the autoscaler can provision additional capacity
+        tracing::warn!(
+            namespace = namespace,
+            reason = %capacity.message.as_deref().unwrap_or("unknown"),
+            "Insufficient cluster capacity - deployment will be pending until capacity is available"
+        );
     }
 
     // P1-6: Validate image pull credentials for private registries
@@ -356,14 +357,14 @@ async fn validate_scale_capacity(
         .await?;
 
     if !capacity.has_capacity {
-        return Err(ApiError::InvalidRequest {
-            message: format!(
-                "Insufficient cluster capacity to scale from {} to {} replicas: {}",
-                current_replicas,
-                new_replicas,
-                capacity.message.unwrap_or_else(|| "unknown".to_string())
-            ),
-        });
+        // Log warning but allow scale to proceed - new pods will go Pending
+        // and the autoscaler can provision additional capacity
+        tracing::warn!(
+            current_replicas = current_replicas,
+            new_replicas = new_replicas,
+            reason = %capacity.message.as_deref().unwrap_or("unknown"),
+            "Insufficient cluster capacity for scale operation - new pods will be pending until capacity is available"
+        );
     }
 
     Ok(())

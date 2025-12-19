@@ -85,31 +85,53 @@ resource "aws_nat_gateway" "main" {
 }
 
 # Route table for public subnets
+# Using separate aws_route resources to prevent overwriting externally-added routes (e.g., VPC peering)
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-public-rt"
   })
+
+  lifecycle {
+    ignore_changes = [route]
+  }
+}
+
+resource "aws_route" "public_internet" {
+  route_table_id         = aws_route_table.public.id
+  destination_cidr_block = "0.0.0.0/0"
+  gateway_id             = aws_internet_gateway.main.id
 }
 
 # Route table for private subnets
+# Using separate aws_route resources to prevent overwriting externally-added routes (e.g., VPC peering)
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.main.id
-  }
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-private-rt"
   })
+
+  lifecycle {
+    ignore_changes = [route]
+  }
+}
+
+resource "aws_route" "private_nat" {
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.main.id
+}
+
+# Route to K3s VPC via VPC peering (for SSH to K3s servers from ECS)
+# This route is managed here to ensure it survives Terraform applies
+resource "aws_route" "private_to_k3s" {
+  count = var.k3s_vpc_peering_connection_id != "" && var.k3s_vpc_cidr != "" ? 1 : 0
+
+  route_table_id            = aws_route_table.private.id
+  destination_cidr_block    = var.k3s_vpc_cidr
+  vpc_peering_connection_id = var.k3s_vpc_peering_connection_id
 }
 
 # Route table for database subnets
@@ -196,11 +218,11 @@ resource "aws_security_group" "ecs_tasks" {
   }
 
   ingress {
-    from_port       = 50051
-    to_port         = 50061
-    protocol        = "tcp"
-    cidr_blocks     = [var.vpc_cidr]
-    description     = "gRPC from VPC"
+    from_port   = 50051
+    to_port     = 50061
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+    description = "gRPC from VPC"
   }
 
   ingress {

@@ -139,6 +139,31 @@ const GPU_MODEL_PATTERNS: &[(&str, &str)] = &[
     ("RTX 3080", "RTX-3080"),
 ];
 
+/// Normalize GPU model name for consistent matching.
+/// Removes non-alphanumeric characters and converts to uppercase.
+/// This matches the autoscaler's normalization for consistency.
+///
+/// # Examples
+///
+/// ```
+/// use basilica_operator::labels::normalize_gpu_model;
+///
+/// assert_eq!(normalize_gpu_model("A100-40GB"), "A10040GB");
+/// assert_eq!(normalize_gpu_model("H100"), "H100");
+/// assert_eq!(normalize_gpu_model("rtx-4090"), "RTX4090");
+/// ```
+pub fn normalize_gpu_model(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return "UNKNOWN".to_string();
+    }
+    trimmed
+        .to_uppercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
 /// Extract short GPU model name from NFD full product name.
 ///
 /// NFD provides full product names like "Tesla-A100-SXM4-80GB" or "NVIDIA-H100-80GB-HBM3".
@@ -162,14 +187,45 @@ pub fn extract_short_gpu_model(nfd_product: &str) -> Cow<'static, str> {
         return Cow::Borrowed("unknown");
     }
 
+    // Case-insensitive matching by converting to uppercase
+    let product_upper = product.to_uppercase();
     for (pattern, short_name) in GPU_MODEL_PATTERNS {
-        if product.contains(pattern) {
+        if product_upper.contains(pattern) {
             return Cow::Borrowed(short_name);
         }
     }
 
     // Fallback: return sanitized original (replace spaces with hyphens)
     Cow::Owned(product.replace(' ', "-"))
+}
+
+/// Normalize a list of GPU model names for nodeAffinity matching.
+///
+/// Applies `normalize_gpu_model` to each model in the list, converting
+/// user-specified formats to normalized forms (uppercase, alphanumeric only).
+/// Duplicates are removed while preserving order.
+///
+/// # Examples
+///
+/// ```
+/// use basilica_operator::labels::normalize_gpu_models;
+///
+/// let models = vec!["A100-40GB".to_string(), "H100-80GB".to_string()];
+/// let normalized = normalize_gpu_models(&models);
+/// assert_eq!(normalized, vec!["A10040GB", "H10080GB"]);
+///
+/// // Duplicates are removed
+/// let dupes = vec!["A100-40GB".to_string(), "a100-40gb".to_string()];
+/// let deduped = normalize_gpu_models(&dupes);
+/// assert_eq!(deduped, vec!["A10040GB"]);
+/// ```
+pub fn normalize_gpu_models(models: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    models
+        .iter()
+        .map(|m| normalize_gpu_model(m))
+        .filter(|m| seen.insert(m.clone()))
+        .collect()
 }
 
 /// Convert GPU memory from MiB (NFD format) to GB (Basilica format).
@@ -253,8 +309,8 @@ pub fn extract_nfd_labels(labels: &BTreeMap<String, String>) -> BTreeMap<String,
     // GPU model: nvidia.com/gpu.product -> basilica.ai/gpu-model
     if let Some(nfd_product) = labels.get(nfd::GPU_PRODUCT) {
         if labels.get(basilica::GPU_MODEL).is_none() {
-            let short_model = extract_short_gpu_model(nfd_product);
-            normalized.insert(basilica::GPU_MODEL.to_string(), short_model.into_owned());
+            let model = normalize_gpu_model(nfd_product);
+            normalized.insert(basilica::GPU_MODEL.to_string(), model);
         }
     }
 
@@ -420,6 +476,86 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_short_gpu_model_case_insensitive() {
+        // Lowercase input should match uppercase patterns
+        assert_eq!(extract_short_gpu_model("a100-40gb").as_ref(), "A100");
+        assert_eq!(extract_short_gpu_model("h100-80gb").as_ref(), "H100");
+        assert_eq!(extract_short_gpu_model("v100").as_ref(), "V100");
+        assert_eq!(extract_short_gpu_model("rtx-4090").as_ref(), "RTX-4090");
+
+        // Mixed case
+        assert_eq!(
+            extract_short_gpu_model("Tesla-a100-SXM4-80GB").as_ref(),
+            "A100"
+        );
+        assert_eq!(
+            extract_short_gpu_model("nvidia-H100-80gb-HBM3").as_ref(),
+            "H100"
+        );
+    }
+
+    #[test]
+    fn test_normalize_gpu_model() {
+        // Uppercase + alphanumeric only
+        assert_eq!(normalize_gpu_model("A100-40GB"), "A10040GB");
+        assert_eq!(normalize_gpu_model("H100"), "H100");
+        assert_eq!(normalize_gpu_model("rtx-4090"), "RTX4090");
+        assert_eq!(
+            normalize_gpu_model("Tesla-A100-SXM4-80GB"),
+            "TESLAA100SXM480GB"
+        );
+        assert_eq!(normalize_gpu_model("  a100  "), "A100");
+        assert_eq!(normalize_gpu_model(""), "UNKNOWN");
+        assert_eq!(normalize_gpu_model("   "), "UNKNOWN");
+    }
+
+    #[test]
+    fn test_normalize_gpu_models() {
+        // Models should be normalized (uppercase, alphanumeric only)
+        let models = vec!["A100-40GB".to_string(), "H100-80GB".to_string()];
+        assert_eq!(normalize_gpu_models(&models), vec!["A10040GB", "H10080GB"]);
+
+        // Already normalized models should pass through
+        let short = vec!["A100".to_string(), "H100".to_string()];
+        assert_eq!(normalize_gpu_models(&short), vec!["A100", "H100"]);
+
+        // Empty input returns empty output
+        let empty: Vec<String> = vec![];
+        assert_eq!(normalize_gpu_models(&empty), Vec::<String>::new());
+
+        // Single model
+        let single = vec!["RTX-4090".to_string()];
+        assert_eq!(normalize_gpu_models(&single), vec!["RTX4090"]);
+
+        // Mixed formats
+        let mixed = vec![
+            "Tesla-A100-SXM4-80GB".to_string(),
+            "V100".to_string(),
+            "NVIDIA-H100-80GB-HBM3".to_string(),
+        ];
+        assert_eq!(
+            normalize_gpu_models(&mixed),
+            vec!["TESLAA100SXM480GB", "V100", "NVIDIAH10080GBHBM3"]
+        );
+
+        // Deduplication: case insensitive
+        let dupes = vec!["A100-40GB".to_string(), "a100-40gb".to_string()];
+        assert_eq!(normalize_gpu_models(&dupes), vec!["A10040GB"]);
+
+        // Deduplication preserves order (first occurrence wins)
+        let order = vec![
+            "H100-80GB".to_string(),
+            "A100-40GB".to_string(),
+            "H100-80GB".to_string(),
+        ];
+        assert_eq!(normalize_gpu_models(&order), vec!["H10080GB", "A10040GB"]);
+
+        // Case insensitive deduplication
+        let case_dupes = vec!["a100-40gb".to_string(), "A100-40GB".to_string()];
+        assert_eq!(normalize_gpu_models(&case_dupes), vec!["A10040GB"]);
+    }
+
+    #[test]
     fn test_mib_to_gb() {
         assert_eq!(mib_to_gb("81920"), Some(80)); // 80 GB
         assert_eq!(mib_to_gb("40960"), Some(40)); // 40 GB
@@ -507,7 +643,10 @@ mod tests {
 
         let result = extract_nfd_labels(&labels);
 
-        assert_eq!(result.get(basilica::GPU_MODEL), Some(&"A100".to_string()));
+        assert_eq!(
+            result.get(basilica::GPU_MODEL),
+            Some(&"TESLAA100SXM480GB".to_string())
+        );
         assert_eq!(result.get(basilica::GPU_COUNT), Some(&"8".to_string()));
         assert_eq!(result.get(basilica::GPU_MEMORY_GB), Some(&"80".to_string()));
         assert_eq!(
@@ -577,7 +716,10 @@ mod tests {
 
         let result = extract_nfd_labels(&labels);
 
-        assert_eq!(result.get(basilica::GPU_MODEL), Some(&"A100".to_string()));
+        assert_eq!(
+            result.get(basilica::GPU_MODEL),
+            Some(&"TESLAA100SXM480GB".to_string())
+        );
         assert_eq!(result.get(basilica::NODE_TYPE), Some(&"gpu".to_string()));
         // Other labels should not be present
         assert!(!result.contains_key(basilica::GPU_COUNT));
@@ -611,7 +753,10 @@ mod tests {
         // Original labels preserved
         assert_eq!(merged.get(basilica::DATACENTER), Some(&"dc-1".to_string()));
         // NFD-derived labels added
-        assert_eq!(merged.get(basilica::GPU_MODEL), Some(&"H100".to_string()));
+        assert_eq!(
+            merged.get(basilica::GPU_MODEL),
+            Some(&"NVIDIAH10080GBHBM3".to_string())
+        );
         assert_eq!(merged.get(basilica::GPU_COUNT), Some(&"8".to_string()));
         // Original NFD labels still present
         assert_eq!(

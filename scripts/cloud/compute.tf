@@ -274,9 +274,11 @@ module "payments_service" {
   }
 
   # Secrets from AWS Secrets Manager
+  # NOTE: Double underscore (__) is required for nested config fields
+  # treasury.aead_key_hex -> PAYMENTS_TREASURY__AEAD_KEY_HEX
   secrets = [
     {
-      name      = "PAYMENTS_AEAD_KEY_HEX"
+      name      = "PAYMENTS_TREASURY__AEAD_KEY_HEX"
       valueFrom = aws_secretsmanager_secret.payments_aead_key.arn
     }
   ]

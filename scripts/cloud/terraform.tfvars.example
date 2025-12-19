@@ -105,3 +105,13 @@ deployments_alb_dns_name = "your-deployments-alb-dns-name"
 # API key for Hyperstack GPU provider
 # Get your API key from: https://infrahub-api.nexgencloud.com/
 hyperstack_api_key = "your-hyperstack-api-key"
+
+# =============================================================================
+# VPC PEERING CONFIGURATION (Required for K3s SSH connectivity)
+# =============================================================================
+# These values come from the orchestrator/cloud Terraform outputs
+# Run: cd orchestrator/cloud && terraform output
+# k3s_vpc_peering_connection_id is the VPC peering connection ID
+# k3s_vpc_cidr is the CIDR block of the K3s VPC (e.g., 10.101.0.0/16)
+k3s_vpc_peering_connection_id = ""
+k3s_vpc_cidr                  = ""

@@ -142,12 +142,12 @@ resource "aws_ecs_task_definition" "main" {
         name      = "db-init"
         image     = var.init_container.image
         essential = false
-        
+
         command = length(var.init_container.command) > 0 ? var.init_container.command : null
-        
+
         environment = var.init_container.environment
         secrets     = var.init_container.secrets
-        
+
         logConfiguration = var.enable_logging ? {
           logDriver = "awslogs"
           options = {
@@ -163,7 +163,7 @@ resource "aws_ecs_task_definition" "main" {
       {
         name  = var.service_name
         image = var.container_image
-        
+
         # Depend on init container if enabled
         dependsOn = var.init_container.enabled ? [
           {
@@ -217,7 +217,7 @@ resource "aws_ecs_task_definition" "main" {
           timeout     = 10
           retries     = 3
           startPeriod = 90
-        } : {
+          } : {
           command = [
             "CMD-SHELL",
             "wget --spider -q http://localhost:${var.container_port}${var.health_check_path} || exit 1"

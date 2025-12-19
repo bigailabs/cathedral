@@ -40,6 +40,28 @@ pub struct AutoscalerMetrics {
     // Leader election metrics
     is_leader: IntGauge,
     leader_transitions_total: IntCounter,
+
+    // Offering selection metrics
+    offering_selection_total: IntCounterVec,
+    no_matching_offering_total: IntCounterVec,
+    offering_selection_duration_seconds: Histogram,
+
+    // Cache metrics
+    cache_hits_total: IntCounter,
+    cache_misses_total: IntCounter,
+
+    // Insufficient offering metric
+    insufficient_offering_total: IntCounter,
+
+    // Warm pool metrics
+    warm_pool_total_vram_gb: IntGaugeVec,
+    warm_pool_allocated_vram_gb: IntGaugeVec,
+    warm_pool_idle_vram_gb: IntGaugeVec,
+    warm_pool_target_vram_gb: IntGaugeVec,
+    warm_pool_idle_nodes: IntGaugeVec,
+    warm_pool_target_nodes: IntGaugeVec,
+    warm_pool_cost_per_hour: prometheus::GaugeVec,
+    warm_pool_scale_decisions_total: IntCounterVec,
 }
 
 impl AutoscalerMetrics {
@@ -176,6 +198,126 @@ impl AutoscalerMetrics {
         )
         .unwrap();
 
+        // Offering selection metrics
+        let offering_selection_total = IntCounterVec::new(
+            Opts::new(
+                "autoscaler_offering_selection_total",
+                "Total number of GPU offering selections",
+            ),
+            &["policy", "offering_id", "gpu_type"],
+        )
+        .unwrap();
+
+        let no_matching_offering_total = IntCounterVec::new(
+            Opts::new(
+                "autoscaler_no_matching_offering_total",
+                "Total number of times no matching GPU offering was found",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let offering_selection_duration_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "autoscaler_offering_selection_duration_seconds",
+                "Duration of GPU offering selection in seconds",
+            )
+            .buckets(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]),
+        )
+        .unwrap();
+
+        // Cache metrics
+        let cache_hits_total = IntCounter::new(
+            "autoscaler_cache_hits_total",
+            "Total number of offering cache hits",
+        )
+        .unwrap();
+
+        let cache_misses_total = IntCounter::new(
+            "autoscaler_cache_misses_total",
+            "Total number of offering cache misses",
+        )
+        .unwrap();
+
+        let insufficient_offering_total = IntCounter::new(
+            "autoscaler_insufficient_offering_total",
+            "Total number of times an offering had fewer GPUs than requested",
+        )
+        .unwrap();
+
+        // Warm pool metrics
+        let warm_pool_total_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_total_vram_gb",
+                "Total VRAM across all warm pool nodes in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_allocated_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_allocated_vram_gb",
+                "Allocated VRAM on warm pool nodes in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_idle_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_idle_vram_gb",
+                "Idle VRAM available on warm pool nodes in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_target_vram_gb = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_target_vram_gb",
+                "Target idle VRAM for warm pool in GB",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_idle_nodes = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_idle_nodes",
+                "Number of idle warm pool nodes",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_target_nodes = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_target_nodes",
+                "Target number of warm pool nodes",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_cost_per_hour = prometheus::GaugeVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_cost_per_hour",
+                "Estimated hourly cost of warm pool in USD",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
+        let warm_pool_scale_decisions_total = IntCounterVec::new(
+            Opts::new(
+                "autoscaler_warm_pool_scale_decisions_total",
+                "Total warm pool scaling decisions",
+            ),
+            &["policy", "decision"],
+        )
+        .unwrap();
+
         // Register all metrics
         registry
             .register(Box::new(node_pools_total.clone()))
@@ -222,6 +364,48 @@ impl AutoscalerMetrics {
         registry
             .register(Box::new(leader_transitions_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(offering_selection_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(no_matching_offering_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(offering_selection_duration_seconds.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(cache_hits_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(cache_misses_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(insufficient_offering_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_total_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_allocated_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_idle_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_target_vram_gb.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_idle_nodes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_target_nodes.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_cost_per_hour.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(warm_pool_scale_decisions_total.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -242,6 +426,20 @@ impl AutoscalerMetrics {
             provisioning_duration_seconds,
             is_leader,
             leader_transitions_total,
+            offering_selection_total,
+            no_matching_offering_total,
+            offering_selection_duration_seconds,
+            cache_hits_total,
+            cache_misses_total,
+            insufficient_offering_total,
+            warm_pool_total_vram_gb,
+            warm_pool_allocated_vram_gb,
+            warm_pool_idle_vram_gb,
+            warm_pool_target_vram_gb,
+            warm_pool_idle_nodes,
+            warm_pool_target_nodes,
+            warm_pool_cost_per_hour,
+            warm_pool_scale_decisions_total,
         }
     }
 
@@ -324,6 +522,67 @@ impl AutoscalerMetrics {
 
     pub fn observe_provisioning_duration(&self, duration_secs: f64) {
         self.provisioning_duration_seconds.observe(duration_secs);
+    }
+
+    pub fn record_offering_selection(&self, policy: &str, offering_id: &str, gpu_type: &str) {
+        self.offering_selection_total
+            .with_label_values(&[policy, offering_id, gpu_type])
+            .inc();
+    }
+
+    pub fn record_no_matching_offering(&self, policy: &str) {
+        self.no_matching_offering_total
+            .with_label_values(&[policy])
+            .inc();
+    }
+
+    pub fn observe_offering_selection_duration(&self, duration_secs: f64) {
+        self.offering_selection_duration_seconds
+            .observe(duration_secs);
+    }
+
+    pub fn record_cache_hit(&self) {
+        self.cache_hits_total.inc();
+    }
+
+    pub fn record_cache_miss(&self) {
+        self.cache_misses_total.inc();
+    }
+
+    pub fn record_insufficient_offering(&self) {
+        self.insufficient_offering_total.inc();
+    }
+
+    /// Set warm pool VRAM and node metrics from WarmPoolStatus
+    pub fn set_warm_pool_metrics(&self, policy: &str, status: &crate::crd::WarmPoolStatus) {
+        self.warm_pool_total_vram_gb
+            .with_label_values(&[policy])
+            .set(status.total_vram_gb as i64);
+        self.warm_pool_allocated_vram_gb
+            .with_label_values(&[policy])
+            .set(status.allocated_vram_gb as i64);
+        self.warm_pool_idle_vram_gb
+            .with_label_values(&[policy])
+            .set(status.idle_vram_gb as i64);
+        self.warm_pool_target_vram_gb
+            .with_label_values(&[policy])
+            .set(status.target_vram_gb as i64);
+        self.warm_pool_idle_nodes
+            .with_label_values(&[policy])
+            .set(status.idle_nodes as i64);
+        self.warm_pool_target_nodes
+            .with_label_values(&[policy])
+            .set(status.target_nodes as i64);
+        self.warm_pool_cost_per_hour
+            .with_label_values(&[policy])
+            .set(status.estimated_hourly_cost);
+    }
+
+    /// Record a warm pool scaling decision
+    pub fn record_warm_pool_scale_decision(&self, policy: &str, decision: &str) {
+        self.warm_pool_scale_decisions_total
+            .with_label_values(&[policy, decision])
+            .inc();
     }
 
     /// Export metrics in Prometheus text format
