@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2025-12-19
+
+### Added
+- `deploy_vllm()` method for one-line vLLM inference server deployments
+- `deploy_sglang()` method for one-line SGLang inference server deployments
+- GPU requirements auto-detection based on model size via `templates/model_size.py`
+- Support for all vLLM options: `tensor_parallel_size`, `dtype`, `quantization`, `gpu_memory_utilization`, etc.
+- Support for all SGLang options: `context_length`, `mem_fraction_static`, etc.
+- Auto-configured persistent storage for HuggingFace model caching
+- Auto-generated deployment names from model identifiers
+
 ## [0.9.0] - 2025-12-09
 
 ### Added
@@ -119,7 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline API documentation
 - Example code for common workflows
 
-[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...HEAD
+[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.10.0...HEAD
+[0.10.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...basilica-sdk-python-v0.10.0
 [0.9.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.8.0...basilica-sdk-python-v0.9.0
 [0.8.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.7.0...basilica-sdk-python-v0.8.0
 [0.7.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.6.0...basilica-sdk-python-v0.7.0
