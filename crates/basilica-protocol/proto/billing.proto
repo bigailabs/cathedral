@@ -25,6 +25,10 @@ service BillingService {
     rpc RefreshMinerRevenueSummary(RefreshMinerRevenueSummaryRequest) returns (RefreshMinerRevenueSummaryResponse);
     rpc GetMinerRevenueSummary(GetMinerRevenueSummaryRequest) returns (GetMinerRevenueSummaryResponse);
 
+    // Miner payment operations
+    rpc GetUnpaidMinerRevenueSummary(GetUnpaidMinerRevenueSummaryRequest) returns (GetUnpaidMinerRevenueSummaryResponse);
+    rpc MarkMinerRevenuePaid(MarkMinerRevenuePaidRequest) returns (MarkMinerRevenuePaidResponse);
+
     // Rental status lookup (for credit exhaustion monitoring)
     rpc GetRentalStatus(GetRentalStatusRequest) returns (GetRentalStatusResponse);
 }
@@ -337,4 +341,32 @@ message MinerRevenueSummary {
     google.protobuf.Timestamp computed_at = 13;
     uint32 computation_version = 14;
     google.protobuf.Timestamp created_at = 15;
+
+    // Payment tracking
+    bool paid = 18;
+    string tx_hash = 19; // Blockchain transaction hash (nullable)
+}
+
+// Miner Payment Messages
+
+message GetUnpaidMinerRevenueSummaryRequest {
+    string period_start = 1; // Start date in YYYY-MM-DD format (inclusive)
+    string period_end = 2;   // End date in YYYY-MM-DD format (inclusive)
+    uint32 limit = 3;
+    uint32 offset = 4;
+}
+
+message GetUnpaidMinerRevenueSummaryResponse {
+    repeated MinerRevenueSummary summaries = 1;
+    uint64 total_count = 2;
+}
+
+message MarkMinerRevenuePaidRequest {
+    string id = 1;      // UUID of the miner_revenue_summary record
+    string tx_hash = 2; // Blockchain transaction hash for this payment
+}
+
+message MarkMinerRevenuePaidResponse {
+    bool success = 1;
+    string error_message = 2;
 }
