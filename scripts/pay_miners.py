@@ -2,8 +2,8 @@
 # /// script
 # requires-python = ">=3.13"
 # dependencies = [
-#   "bittensor>=9.0.0",
-#   "bittensor-wallet>=2.0.0",
+#   "bittensor>=10.0.0",
+#   "bittensor-wallet>=4.0.0",
 #   "click>=8.1.0",
 #   "grpcio>=1.60.0",
 #   "grpcio-tools>=1.60.0",
@@ -44,6 +44,7 @@ from typing import Optional
 
 import click
 import requests
+from async_substrate_interface.async_substrate import ResultHandler
 from rich.console import Console
 from rich.table import Table
 
@@ -430,9 +431,9 @@ class MinerPaymentProcessor:
 
                 if summary.token_type == "tao":
                     # TAO transfer
-                    success = self.subtensor.transfer(
+                    response = self.subtensor.transfer(
                         wallet=self.wallet,
-                        dest=payment.summary.miner_hotkey,
+                        destination_ss58=payment.summary.miner_hotkey,
                         amount=bt.Balance.from_tao(float(payment.tao_amount)),
                         wait_for_inclusion=True,
                         wait_for_finalization=True,
@@ -440,7 +441,7 @@ class MinerPaymentProcessor:
                 else:
                     # Alpha stake - stake TAO to the miner's hotkey on the subnet
                     # add_stake takes TAO amount and converts to alpha internally
-                    success = self.subtensor.add_stake(
+                    response = self.subtensor.add_stake(
                         wallet=self.wallet,
                         hotkey_ss58=payment.summary.miner_hotkey,
                         netuid=summary.netuid,
@@ -449,13 +450,10 @@ class MinerPaymentProcessor:
                         wait_for_finalization=True,
                     )
 
-                if success:
-                    # Get transaction hash from the result
-                    tx_hash = (
-                        success.extrinsic_hash
-                        if hasattr(success, "extrinsic_hash")
-                        else str(success)
-                    )
+                if response.success:
+                    if response.extrinsic_receipt is None:
+                        raise RuntimeError("Success but no extrinsic_receipt")
+                    tx_hash = response.extrinsic_receipt.extrinsic_hash
                     payment.tx_hash = tx_hash
                     self.console.print(f"  [green]Success: {tx_hash}[/green]")
 
@@ -469,7 +467,7 @@ class MinerPaymentProcessor:
                             f"  [yellow]Warning: Failed to mark as paid: {e}[/yellow]"
                         )
                 else:
-                    self.console.print(f"  [red]Transfer failed[/red]")
+                    self.console.print(f"  [red]Transfer failed: {response.message}[/red]")
 
             except Exception as e:
                 self.console.print(f"  [red]Error: {e}[/red]")

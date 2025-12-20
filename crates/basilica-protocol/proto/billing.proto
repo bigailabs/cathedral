@@ -330,7 +330,7 @@ message MinerRevenueSummary {
     uint32 total_rentals = 6;
     uint32 completed_rentals = 7;
     uint32 failed_rentals = 8;
-    string total_revenue = 9; // Decimal string (TAO)
+    string total_revenue = 9; // Decimal string (USD)
     string total_hours = 10; // Decimal string
 
     // Computed metrics
