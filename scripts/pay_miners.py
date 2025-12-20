@@ -34,9 +34,9 @@ Environment Variables:
 """
 
 import json
-import os
 import subprocess
 import sys
+import traceback
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -44,9 +44,275 @@ from typing import Optional
 
 import click
 import requests
-from async_substrate_interface.async_substrate import ResultHandler
 from rich.console import Console
 from rich.table import Table
+
+
+# =============================================================================
+# Exception Hierarchy for Payment Errors
+# =============================================================================
+
+
+@dataclass
+class PaymentContext:
+    """Rich context for payment errors to enable debugging and reconciliation."""
+
+    summary_id: Optional[str] = None
+    miner_hotkey: Optional[str] = None
+    miner_uid: Optional[int] = None
+    tao_amount: Optional[Decimal] = None
+    usd_amount: Optional[Decimal] = None
+    tx_hash: Optional[str] = None
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
+    token_type: Optional[str] = None
+    netuid: Optional[int] = None
+    payments_completed: int = 0
+    payments_total: int = 0
+
+
+class PaymentError(Exception):
+    """Base exception for all payment script errors."""
+
+    def __init__(
+        self,
+        message: str,
+        operation: str,
+        context: Optional[PaymentContext] = None,
+        original_error: Optional[Exception] = None,
+        exit_code: int = 1,
+    ):
+        self.message = message
+        self.operation = operation
+        self.context = context or PaymentContext()
+        self.original_error = original_error
+        self.exit_code = exit_code
+        super().__init__(message)
+
+    def format_for_console(self, console: Console) -> None:
+        """Print rich formatted error to console."""
+        console.print(f"\n[bold red]{'=' * 60}[/bold red]")
+        console.print(f"[bold red]PAYMENT ERROR: {self.operation.upper()}[/bold red]")
+        console.print(f"[bold red]{'=' * 60}[/bold red]")
+        console.print(f"\n[red]Error:[/red] {self.message}")
+
+        if self.original_error:
+            console.print(
+                f"[red]Cause:[/red] {type(self.original_error).__name__}: {self.original_error}"
+            )
+
+        ctx = self.context
+        if ctx.summary_id:
+            console.print(f"\n[bold]Payment Context:[/bold]")
+            console.print(f"  Summary ID: {ctx.summary_id}")
+        if ctx.miner_hotkey:
+            console.print(f"  Miner Hotkey: {ctx.miner_hotkey}")
+        if ctx.miner_uid is not None:
+            console.print(f"  Miner UID: {ctx.miner_uid}")
+        if ctx.tao_amount:
+            console.print(f"  TAO Amount: {ctx.tao_amount}")
+        if ctx.usd_amount:
+            console.print(f"  USD Amount: ${ctx.usd_amount}")
+        if ctx.tx_hash:
+            console.print(f"  [yellow]TX Hash: {ctx.tx_hash}[/yellow]")
+        if ctx.period_start and ctx.period_end:
+            console.print(f"  Period: {ctx.period_start} to {ctx.period_end}")
+        if ctx.payments_total > 0:
+            console.print(
+                f"\n[bold]Progress:[/bold] {ctx.payments_completed}/{ctx.payments_total} payments completed before failure"
+            )
+
+        console.print(f"[bold red]{'=' * 60}[/bold red]\n")
+
+
+class WalletError(PaymentError):
+    """Raised when wallet operations fail (unlock, initialization)."""
+
+    def __init__(
+        self,
+        message: str,
+        wallet_name: str,
+        wallet_path: str,
+        original_error: Optional[Exception] = None,
+    ):
+        super().__init__(
+            message=message,
+            operation="wallet_unlock",
+            original_error=original_error,
+            exit_code=2,
+        )
+        self.wallet_name = wallet_name
+        self.wallet_path = wallet_path
+
+    def format_for_console(self, console: Console) -> None:
+        super().format_for_console(console)
+        console.print("[bold]Recovery:[/bold]")
+        console.print(f"  1. Check wallet exists: {self.wallet_path}/{self.wallet_name}")
+        console.print("  2. Verify wallet password is correct")
+        console.print("  3. Ensure wallet is not corrupted")
+        console.print("  4. Script can be safely rerun after fixing wallet issues")
+
+
+class SubtensorConnectionError(PaymentError):
+    """Raised when connection to Bittensor network fails."""
+
+    def __init__(
+        self,
+        message: str,
+        network: str,
+        original_error: Optional[Exception] = None,
+    ):
+        super().__init__(
+            message=message,
+            operation="subtensor_connect",
+            original_error=original_error,
+            exit_code=3,
+        )
+        self.network = network
+
+    def format_for_console(self, console: Console) -> None:
+        super().format_for_console(console)
+        console.print("[bold]Recovery:[/bold]")
+        console.print(f"  1. Check network connectivity to {self.network}")
+        console.print("  2. Verify the Bittensor network is operational")
+        console.print("  3. Try again with --network flag if using wrong network")
+        console.print("  4. Script can be safely rerun after network issues resolve")
+
+
+class TransferError(PaymentError):
+    """Raised when a blockchain transfer fails."""
+
+    def __init__(
+        self,
+        message: str,
+        context: PaymentContext,
+        original_error: Optional[Exception] = None,
+    ):
+        super().__init__(
+            message=message,
+            operation="blockchain_transfer",
+            context=context,
+            original_error=original_error,
+            exit_code=4,
+        )
+
+    def format_for_console(self, console: Console) -> None:
+        super().format_for_console(console)
+        console.print("[bold]Recovery:[/bold]")
+        console.print("  1. Check wallet balance is sufficient")
+        console.print("  2. Verify miner hotkey is valid and registered")
+        console.print("  3. Script can be safely rerun - this payment was NOT made")
+        console.print(
+            f"  4. {self.context.payments_completed} prior payment(s) in this run are complete"
+        )
+
+
+class MarkAsPaidError(PaymentError):
+    """
+    CRITICAL: Raised when mark_as_paid fails AFTER successful blockchain transfer.
+
+    This is the most dangerous error state - money has been transferred but
+    the database record was not updated. Rerunning the script will cause
+    double-payment.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        context: PaymentContext,
+        original_error: Optional[Exception] = None,
+    ):
+        super().__init__(
+            message=message,
+            operation="mark_as_paid",
+            context=context,
+            original_error=original_error,
+            exit_code=5,
+        )
+
+    def format_for_console(self, console: Console) -> None:
+        ctx = self.context
+        console.print(f"\n[bold red on white]{'!' * 60}[/bold red on white]")
+        console.print(
+            "[bold red on white]  CRITICAL: BLOCKCHAIN PAYMENT SUCCEEDED BUT DATABASE UPDATE FAILED  [/bold red on white]"
+        )
+        console.print(f"[bold red on white]{'!' * 60}[/bold red on white]")
+
+        console.print(f"\n[red]Error:[/red] {self.message}")
+        if self.original_error:
+            console.print(
+                f"[red]Cause:[/red] {type(self.original_error).__name__}: {self.original_error}"
+            )
+
+        console.print(f"\n[bold yellow]PAYMENT WAS SUCCESSFUL:[/bold yellow]")
+        console.print(f"  TX Hash: [green]{ctx.tx_hash}[/green]")
+        console.print(f"  Miner Hotkey: {ctx.miner_hotkey}")
+        console.print(f"  Amount: {ctx.tao_amount} TAO (${ctx.usd_amount} USD)")
+
+        console.print(f"\n[bold]DATABASE RECORD NOT UPDATED:[/bold]")
+        console.print(f"  Summary ID: {ctx.summary_id}")
+
+        console.print(
+            f"\n[bold red]DO NOT RERUN THIS SCRIPT WITHOUT MANUAL INTERVENTION![/bold red]"
+        )
+        console.print("[bold]Required Manual Steps:[/bold]")
+        console.print("  1. Verify the transaction on-chain using the TX hash above")
+        console.print("  2. Manually mark this record as paid in the database:")
+        console.print(
+            f'     grpcurl -d \'{{"id": "{ctx.summary_id}", "tx_hash": "{ctx.tx_hash}"}}\' \\'
+        )
+        console.print(
+            "       localhost:50051 basilica.billing.v1.BillingService/MarkMinerRevenuePaid"
+        )
+        console.print("  3. Only then rerun the script for remaining payments")
+
+        console.print(
+            f"\n[bold]Progress:[/bold] {ctx.payments_completed}/{ctx.payments_total} payments completed before failure"
+        )
+        console.print(f"[bold red]{'!' * 60}[/bold red]\n")
+
+
+class PriceError(PaymentError):
+    """Raised when TAO price fetch fails."""
+
+    def __init__(self, message: str, original_error: Optional[Exception] = None):
+        super().__init__(
+            message=message,
+            operation="fetch_tao_price",
+            original_error=original_error,
+            exit_code=6,
+        )
+
+    def format_for_console(self, console: Console) -> None:
+        super().format_for_console(console)
+        console.print("[bold]Recovery:[/bold]")
+        console.print("  1. Check internet connectivity")
+        console.print("  2. Verify CoinGecko API is accessible")
+        console.print("  3. Script can be safely rerun - no payments were made")
+
+
+class BillingServiceError(PaymentError):
+    """Raised when billing service operations fail."""
+
+    def __init__(
+        self,
+        message: str,
+        operation: str,
+        original_error: Optional[Exception] = None,
+    ):
+        super().__init__(
+            message=message,
+            operation=operation,
+            original_error=original_error,
+            exit_code=7,
+        )
+
+    def format_for_console(self, console: Console) -> None:
+        super().format_for_console(console)
+        console.print("[bold]Recovery:[/bold]")
+        console.print("  1. Check billing service is running")
+        console.print("  2. Verify gRPC endpoint is correct")
+        console.print("  3. Script can be safely rerun")
 
 # Constants
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3/simple/price?ids=bittensor&vs_currencies=usd"
@@ -142,12 +408,22 @@ class BillingClient:
             )
 
             if result.returncode != 0:
-                raise RuntimeError(f"gRPC call failed: {result.stderr}")
+                raise BillingServiceError(
+                    message=f"gRPC call failed: {result.stderr}",
+                    operation="get_unpaid_summaries",
+                )
 
             if not result.stdout.strip():
                 break
 
-            data = json.loads(result.stdout)
+            try:
+                data = json.loads(result.stdout)
+            except json.JSONDecodeError as e:
+                raise BillingServiceError(
+                    message=f"Invalid JSON response from billing service: {result.stdout[:200]}...",
+                    operation="get_unpaid_summaries",
+                    original_error=e,
+                )
             batch = data.get("summaries", [])
 
             if not batch:
@@ -216,9 +492,19 @@ class BillingClient:
         )
 
         if result.returncode != 0:
-            raise RuntimeError(f"gRPC call failed: {result.stderr}")
+            raise BillingServiceError(
+                message=f"gRPC call failed: {result.stderr}",
+                operation="mark_as_paid",
+            )
 
-        data = json.loads(result.stdout)
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            raise BillingServiceError(
+                message=f"Invalid JSON response from mark_as_paid: {result.stdout[:200]}...",
+                operation="mark_as_paid",
+                original_error=e,
+            )
         return data.get("success", False)
 
 
@@ -254,10 +540,21 @@ class MinerPaymentProcessor:
         try:
             response = requests.get(COINGECKO_API_URL, timeout=10)
             response.raise_for_status()
+        except requests.RequestException as e:
+            raise PriceError(
+                message="Failed to fetch TAO price from CoinGecko",
+                original_error=e,
+            )
+
+        try:
             data = response.json()
-            return Decimal(str(data["bittensor"]["usd"]))
-        except Exception as e:
-            raise RuntimeError(f"Failed to fetch TAO price: {e}")
+            price = data["bittensor"]["usd"]
+            return Decimal(str(price))
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            raise PriceError(
+                message=f"Invalid response from CoinGecko API: {response.text[:200]}...",
+                original_error=e,
+            )
 
     def calculate_payments(
         self, summaries: list[MinerRevenueSummary], tao_price: Decimal
@@ -401,7 +698,14 @@ class MinerPaymentProcessor:
         self.console.print(f"  Subnet: {summary.netuid}")
 
     def execute_payments(self, summary: PaymentSummary) -> int:
-        """Execute blockchain transfers for each payment."""
+        """Execute blockchain transfers for each payment.
+
+        Raises:
+            WalletError: If wallet cannot be unlocked
+            SubtensorConnectionError: If connection to Bittensor fails
+            TransferError: If a blockchain transfer fails
+            MarkAsPaidError: CRITICAL - If database update fails after successful transfer
+        """
         if self.dry_run:
             self.console.print(
                 "[yellow]DRY RUN - No actual transfers will be made[/yellow]"
@@ -411,26 +715,58 @@ class MinerPaymentProcessor:
         import bittensor as bt
         from bittensor_wallet import Wallet
 
-        # Initialize wallet
-        self.console.print(f"Loading wallet '{self.wallet_name}' from {self.wallet_path}...")
-        self.wallet = Wallet(name=self.wallet_name, path=self.wallet_path)
-        self.wallet.unlock_coldkey()
+        # Initialize wallet with proper error handling
+        try:
+            self.console.print(
+                f"Loading wallet '{self.wallet_name}' from {self.wallet_path}..."
+            )
+            self.wallet = Wallet(name=self.wallet_name, path=self.wallet_path)
+            self.wallet.unlock_coldkey()
+        except Exception as e:
+            raise WalletError(
+                message=f"Failed to unlock wallet '{self.wallet_name}'",
+                wallet_name=self.wallet_name,
+                wallet_path=self.wallet_path,
+                original_error=e,
+            )
 
-        # Connect to subtensor
-        self.console.print(f"Connecting to {self.network}...")
-        self.subtensor = bt.Subtensor(network=self.network)
+        # Connect to subtensor with proper error handling
+        try:
+            self.console.print(f"Connecting to {self.network}...")
+            self.subtensor = bt.Subtensor(network=self.network)
+        except Exception as e:
+            raise SubtensorConnectionError(
+                message=f"Failed to connect to Bittensor network '{self.network}'",
+                network=self.network,
+                original_error=e,
+            )
 
         successful_payments = 0
 
         for payment in summary.payments:
-            try:
-                self.console.print(
-                    f"Transferring {payment.amount_tokens:.6f} {summary.token_type.upper()} "
-                    f"to {payment.summary.miner_hotkey[:16]}..."
-                )
+            # Build rich context for this payment (used in error reporting)
+            context = PaymentContext(
+                summary_id=payment.summary.id,
+                miner_hotkey=payment.summary.miner_hotkey,
+                miner_uid=payment.summary.miner_uid,
+                tao_amount=payment.tao_amount,
+                usd_amount=payment.base_price_usd,
+                period_start=payment.summary.period_start,
+                period_end=payment.summary.period_end,
+                token_type=summary.token_type,
+                netuid=summary.netuid,
+                payments_completed=successful_payments,
+                payments_total=len(summary.payments),
+            )
 
+            self.console.print(
+                f"Transferring {payment.amount_tokens:.6f} {summary.token_type.upper()} "
+                f"to {payment.summary.miner_hotkey[:16]}..."
+            )
+
+            # Execute blockchain transfer
+            try:
                 if summary.token_type == "tao":
-                    # TAO transfer
                     response = self.subtensor.transfer(
                         wallet=self.wallet,
                         destination_ss58=payment.summary.miner_hotkey,
@@ -439,8 +775,6 @@ class MinerPaymentProcessor:
                         wait_for_finalization=True,
                     )
                 else:
-                    # Alpha stake - stake TAO to the miner's hotkey on the subnet
-                    # add_stake takes TAO amount and converts to alpha internally
                     response = self.subtensor.add_stake(
                         wallet=self.wallet,
                         hotkey_ss58=payment.summary.miner_hotkey,
@@ -449,28 +783,49 @@ class MinerPaymentProcessor:
                         wait_for_inclusion=True,
                         wait_for_finalization=True,
                     )
-
-                if response.success:
-                    if response.extrinsic_receipt is None:
-                        raise RuntimeError("Success but no extrinsic_receipt")
-                    tx_hash = response.extrinsic_receipt.extrinsic_hash
-                    payment.tx_hash = tx_hash
-                    self.console.print(f"  [green]Success: {tx_hash}[/green]")
-
-                    # Mark as paid in billing service
-                    try:
-                        self.billing_client.mark_as_paid(payment.summary.id, tx_hash)
-                        self.console.print(f"  [green]Marked as paid in billing[/green]")
-                        successful_payments += 1
-                    except Exception as e:
-                        self.console.print(
-                            f"  [yellow]Warning: Failed to mark as paid: {e}[/yellow]"
-                        )
-                else:
-                    self.console.print(f"  [red]Transfer failed: {response.message}[/red]")
-
             except Exception as e:
-                self.console.print(f"  [red]Error: {e}[/red]")
+                raise TransferError(
+                    message=f"Blockchain transfer failed for miner {payment.summary.miner_hotkey[:16]}...",
+                    context=context,
+                    original_error=e,
+                )
+
+            if not response.success:
+                raise TransferError(
+                    message=f"Transfer rejected: {response.message}",
+                    context=context,
+                )
+
+            # Extract transaction hash
+            if response.extrinsic_receipt is None:
+                raise TransferError(
+                    message="Transfer succeeded but no extrinsic_receipt returned",
+                    context=context,
+                )
+
+            tx_hash = response.extrinsic_receipt.extrinsic_hash
+            payment.tx_hash = tx_hash
+            context.tx_hash = tx_hash
+            self.console.print(f"  [green]Success: {tx_hash}[/green]")
+
+            # CRITICAL: Mark as paid - MUST NOT FAIL SILENTLY
+            # If this fails, we have a double-payment risk on rerun
+            try:
+                mark_result = self.billing_client.mark_as_paid(
+                    payment.summary.id, tx_hash
+                )
+                if not mark_result:
+                    raise RuntimeError("mark_as_paid returned False - record not updated")
+                self.console.print(f"  [green]Marked as paid in billing[/green]")
+                successful_payments += 1
+            except Exception as e:
+                # CRITICAL ERROR: Payment was made but database not updated
+                # Script MUST stop here to prevent double-payment on rerun
+                raise MarkAsPaidError(
+                    message="Failed to mark payment as paid in billing service",
+                    context=context,
+                    original_error=e,
+                )
 
         return successful_payments
 
@@ -545,6 +900,50 @@ def main(
     """Pay miners based on miner_revenue_summary data."""
     console = Console()
 
+    try:
+        _run_payment_flow(
+            console=console,
+            token_type=token_type,
+            force=force,
+            netuid=netuid,
+            wallet_name=wallet_name,
+            wallet_path=wallet_path,
+            network=network,
+            billing_endpoint=billing_endpoint,
+            proto_path=proto_path,
+            dry_run=dry_run,
+            auto_approve=auto_approve,
+        )
+    except PaymentError as e:
+        e.format_for_console(console)
+        sys.exit(e.exit_code)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Payment interrupted by user.[/yellow]")
+        console.print(
+            "[yellow]Some payments may have been made. Check transaction logs before rerunning.[/yellow]"
+        )
+        sys.exit(130)
+    except Exception as e:
+        console.print(f"\n[bold red]Unexpected error: {e}[/bold red]")
+        console.print(f"[red]Type: {type(e).__name__}[/red]")
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        sys.exit(1)
+
+
+def _run_payment_flow(
+    console: Console,
+    token_type: str,
+    force: bool,
+    netuid: int,
+    wallet_name: str,
+    wallet_path: str,
+    network: str,
+    billing_endpoint: str,
+    proto_path: Path,
+    dry_run: bool,
+    auto_approve: bool,
+) -> None:
+    """Run the payment flow. Raises PaymentError subclasses on failure."""
     console.print("[bold]Basilica Miner Payment Script[/bold]")
     console.print(f"Token: {token_type.upper()}")
     console.print(f"Subnet: {netuid}")
@@ -557,11 +956,7 @@ def main(
 
     # Fetch all unpaid summaries to detect periods
     console.print("Fetching unpaid revenue summaries...")
-    try:
-        all_summaries = billing_client.get_all_unpaid_summaries()
-    except Exception as e:
-        console.print(f"[red]Error fetching summaries: {e}[/red]")
-        sys.exit(1)
+    all_summaries = billing_client.get_all_unpaid_summaries()
 
     if not all_summaries:
         console.print("[yellow]No unpaid revenue summaries found.[/yellow]")
@@ -582,7 +977,9 @@ def main(
     for start, end in sorted_periods:
         period_summaries = periods[(start, end)]
         revenue = sum(s.total_revenue for s in period_summaries)
-        console.print(f"  {start} to {end}: {len(period_summaries)} miners, ${revenue:.2f} revenue")
+        console.print(
+            f"  {start} to {end}: {len(period_summaries)} miners, ${revenue:.2f} revenue"
+        )
 
     # Fail if multiple periods and not forced
     if len(sorted_periods) > 1 and not force:
@@ -610,12 +1007,8 @@ def main(
 
     # Fetch TAO price
     console.print("\nFetching TAO/USD price...")
-    try:
-        tao_price = processor.fetch_tao_price()
-        console.print(f"TAO Price: ${tao_price:.2f}")
-    except Exception as e:
-        console.print(f"[red]Error fetching TAO price: {e}[/red]")
-        sys.exit(1)
+    tao_price = processor.fetch_tao_price()
+    console.print(f"TAO Price: ${tao_price:.2f}")
 
     # Calculate payments
     payment_summary = processor.calculate_payments(summaries, tao_price)
