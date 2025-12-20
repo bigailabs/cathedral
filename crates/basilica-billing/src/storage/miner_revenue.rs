@@ -37,6 +37,19 @@ pub struct MinerRevenueSummary {
     pub computed_at: DateTime<Utc>,
     pub computation_version: i32,
     pub created_at: DateTime<Utc>,
+
+    // Payment tracking
+    pub paid: bool,
+    pub tx_hash: Option<String>,
+}
+
+/// Represents an existing period that overlaps with a requested calculation
+#[derive(Debug, Clone)]
+pub struct OverlappingPeriod {
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub computed_at: DateTime<Utc>,
+    pub row_count: i64,
 }
 
 /// Filter criteria for querying miner revenue summaries
@@ -52,6 +65,15 @@ pub struct MinerRevenueSummaryFilter {
     pub period_end: Option<DateTime<Utc>>,
     pub computed_at: Option<DateTime<Utc>>,
     pub latest_only: bool,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Filter criteria for querying unpaid miner revenue summaries
+#[derive(Debug, Clone, Default)]
+pub struct UnpaidMinerRevenueSummaryFilter {
+    pub period_start: Option<DateTime<Utc>>,
+    pub period_end: Option<DateTime<Utc>>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -75,6 +97,27 @@ pub trait MinerRevenueRepository: Send + Sync {
 
     /// Get total count of summaries matching filter (for pagination)
     async fn count_summaries(&self, filter: &MinerRevenueSummaryFilter) -> Result<i64>;
+
+    /// Check for existing summaries that overlap with the requested period
+    async fn find_overlapping_periods(
+        &self,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<Vec<OverlappingPeriod>>;
+
+    /// Get unpaid miner revenue summaries for payment processing
+    async fn get_unpaid_summaries(
+        &self,
+        filter: &UnpaidMinerRevenueSummaryFilter,
+    ) -> Result<Vec<MinerRevenueSummary>>;
+
+    /// Get total count of unpaid summaries matching filter (for pagination)
+    async fn count_unpaid_summaries(&self, filter: &UnpaidMinerRevenueSummaryFilter)
+        -> Result<i64>;
+
+    /// Mark a miner revenue summary as paid with the given transaction hash
+    /// Returns true if the record was updated, false if it was already paid or not found
+    async fn mark_summary_paid(&self, id: Uuid, tx_hash: &str) -> Result<bool>;
 }
 
 pub struct SqlMinerRevenueRepository {
@@ -109,6 +152,8 @@ impl SqlMinerRevenueRepository {
             computed_at: row.get("computed_at"),
             computation_version: row.get("computation_version"),
             created_at: row.get("created_at"),
+            paid: row.get("paid"),
+            tx_hash: row.get("tx_hash"),
         }
     }
 }
@@ -147,7 +192,8 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
                 id, node_id, validator_id, miner_uid, miner_hotkey, period_start, period_end,
                 total_rentals, completed_rentals, failed_rentals,
                 total_revenue, total_hours, avg_hourly_rate,
-                avg_rental_duration_hours, computed_at, computation_version, created_at
+                avg_rental_duration_hours, computed_at, computation_version, created_at,
+                paid, tx_hash
             FROM billing.miner_revenue_summary
             WHERE 1=1
             "#,
@@ -399,6 +445,166 @@ impl MinerRevenueRepository for SqlMinerRevenueRepository {
 
         Ok(count)
     }
+
+    async fn find_overlapping_periods(
+        &self,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+    ) -> Result<Vec<OverlappingPeriod>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT period_start, period_end, computed_at, COUNT(*) as row_count
+            FROM billing.miner_revenue_summary
+            WHERE period_start <= $2
+              AND period_end >= $1
+            GROUP BY period_start, period_end, computed_at
+            ORDER BY period_start
+            "#,
+        )
+        .bind(period_start)
+        .bind(period_end)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "find_overlapping_periods".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(rows
+            .iter()
+            .map(|row| OverlappingPeriod {
+                period_start: row.get("period_start"),
+                period_end: row.get("period_end"),
+                computed_at: row.get("computed_at"),
+                row_count: row.get("row_count"),
+            })
+            .collect())
+    }
+
+    async fn get_unpaid_summaries(
+        &self,
+        filter: &UnpaidMinerRevenueSummaryFilter,
+    ) -> Result<Vec<MinerRevenueSummary>> {
+        let mut query = String::from(
+            r#"
+            SELECT
+                id, node_id, validator_id, miner_uid, miner_hotkey, period_start, period_end,
+                total_rentals, completed_rentals, failed_rentals,
+                total_revenue, total_hours, avg_hourly_rate,
+                avg_rental_duration_hours, computed_at, computation_version, created_at,
+                paid, tx_hash
+            FROM billing.miner_revenue_summary
+            WHERE paid = FALSE
+            "#,
+        );
+
+        let mut param_idx = 1;
+
+        if filter.period_start.is_some() {
+            query.push_str(&format!(" AND period_start >= ${}", param_idx));
+            param_idx += 1;
+        }
+
+        if filter.period_end.is_some() {
+            query.push_str(&format!(" AND period_end <= ${}", param_idx));
+        }
+
+        query.push_str(" ORDER BY period_start, miner_hotkey");
+
+        if let Some(limit) = filter.limit {
+            query.push_str(&format!(" LIMIT {}", limit));
+        }
+
+        if let Some(offset) = filter.offset {
+            query.push_str(&format!(" OFFSET {}", offset));
+        }
+
+        let mut sql_query = sqlx::query(&query);
+
+        if let Some(period_start) = filter.period_start {
+            sql_query = sql_query.bind(period_start);
+        }
+
+        if let Some(period_end) = filter.period_end {
+            sql_query = sql_query.bind(period_end);
+        }
+
+        let rows =
+            sql_query
+                .fetch_all(self.pool())
+                .await
+                .map_err(|e| BillingError::DatabaseError {
+                    operation: "get_unpaid_miner_revenue_summaries".to_string(),
+                    source: Box::new(e),
+                })?;
+
+        Ok(rows.iter().map(Self::summary_from_row).collect())
+    }
+
+    async fn count_unpaid_summaries(
+        &self,
+        filter: &UnpaidMinerRevenueSummaryFilter,
+    ) -> Result<i64> {
+        let mut query = String::from(
+            r#"
+            SELECT COUNT(*)
+            FROM billing.miner_revenue_summary
+            WHERE paid = FALSE
+            "#,
+        );
+
+        let mut param_idx = 1;
+
+        if filter.period_start.is_some() {
+            query.push_str(&format!(" AND period_start >= ${}", param_idx));
+            param_idx += 1;
+        }
+
+        if filter.period_end.is_some() {
+            query.push_str(&format!(" AND period_end <= ${}", param_idx));
+        }
+
+        let mut sql_query = sqlx::query_scalar(&query);
+
+        if let Some(period_start) = filter.period_start {
+            sql_query = sql_query.bind(period_start);
+        }
+
+        if let Some(period_end) = filter.period_end {
+            sql_query = sql_query.bind(period_end);
+        }
+
+        let count =
+            sql_query
+                .fetch_one(self.pool())
+                .await
+                .map_err(|e| BillingError::DatabaseError {
+                    operation: "count_unpaid_miner_revenue_summaries".to_string(),
+                    source: Box::new(e),
+                })?;
+
+        Ok(count)
+    }
+
+    async fn mark_summary_paid(&self, id: Uuid, tx_hash: &str) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE billing.miner_revenue_summary
+            SET paid = TRUE, tx_hash = $2
+            WHERE id = $1 AND paid = FALSE
+            "#,
+        )
+        .bind(id)
+        .bind(tx_hash)
+        .execute(self.pool())
+        .await
+        .map_err(|e| BillingError::DatabaseError {
+            operation: "mark_miner_revenue_paid".to_string(),
+            source: Box::new(e),
+        })?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -438,11 +644,14 @@ mod tests {
             computed_at: Utc::now(),
             computation_version: 1,
             created_at: Utc::now(),
+            paid: false,
+            tx_hash: None,
         };
 
         let cloned = summary.clone();
         assert_eq!(summary.id, cloned.id);
         assert_eq!(summary.node_id, cloned.node_id);
         assert_eq!(summary.miner_hotkey, cloned.miner_hotkey);
+        assert_eq!(summary.paid, cloned.paid);
     }
 }

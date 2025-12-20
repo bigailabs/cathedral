@@ -4,20 +4,21 @@ use chrono::Utc;
 use kube::ResourceExt;
 use tracing::{debug, error, info, warn};
 
-use crate::api::SecureCloudApi;
+use crate::api::{SecureCloudApi, WireGuardPeer};
 use crate::config::{NetworkValidationConfig, PhaseTimeouts};
 use crate::crd::{
-    NodeManagedBy, NodePool, NodePoolCondition, NodePoolPhase, NodePoolStatus, WireGuardStatus,
-    FINALIZER,
+    NodeManagedBy, NodePool, NodePoolCondition, NodePoolPhase, NodePoolStatus, WireGuardPeerStatus,
+    WireGuardStatus, FINALIZER,
 };
 use crate::error::{AutoscalerError, Result};
 use crate::metrics::AutoscalerMetrics;
+use crate::offering_matcher::{MaybeOfferingSelector, OfferingSelector};
 use crate::provisioner::NodeProvisioner;
 
 use super::k8s_client::AutoscalerK8sClient;
 
 /// NodePool controller handles the lifecycle of GPU node pools
-pub struct NodePoolController<K, A, P>
+pub struct NodePoolController<K, A, P, S = ()>
 where
     K: AutoscalerK8sClient,
     A: SecureCloudApi,
@@ -28,9 +29,10 @@ where
     provisioner: Arc<P>,
     metrics: Arc<AutoscalerMetrics>,
     network_validation_config: NetworkValidationConfig,
+    offering_selector: Option<Arc<S>>,
 }
 
-impl<K, A, P> Clone for NodePoolController<K, A, P>
+impl<K, A, P, S> Clone for NodePoolController<K, A, P, S>
 where
     K: AutoscalerK8sClient,
     A: SecureCloudApi,
@@ -43,11 +45,12 @@ where
             provisioner: Arc::clone(&self.provisioner),
             metrics: Arc::clone(&self.metrics),
             network_validation_config: self.network_validation_config.clone(),
+            offering_selector: self.offering_selector.clone(),
         }
     }
 }
 
-impl<K, A, P> NodePoolController<K, A, P>
+impl<K, A, P> NodePoolController<K, A, P, ()>
 where
     K: AutoscalerK8sClient,
     A: SecureCloudApi,
@@ -66,6 +69,53 @@ where
             provisioner,
             metrics,
             network_validation_config,
+            offering_selector: None,
+        }
+    }
+}
+
+impl<K, A, P, S> NodePoolController<K, A, P, S>
+where
+    K: AutoscalerK8sClient,
+    A: SecureCloudApi,
+    P: NodeProvisioner,
+    S: OfferingSelector,
+{
+    pub fn with_offering_selector(
+        k8s: Arc<K>,
+        api: Arc<A>,
+        provisioner: Arc<P>,
+        metrics: Arc<AutoscalerMetrics>,
+        network_validation_config: NetworkValidationConfig,
+        offering_selector: Arc<S>,
+    ) -> Self {
+        Self {
+            k8s,
+            api,
+            provisioner,
+            metrics,
+            network_validation_config,
+            offering_selector: Some(offering_selector),
+        }
+    }
+}
+
+impl<K, A, P, S> NodePoolController<K, A, P, S>
+where
+    K: AutoscalerK8sClient,
+    A: SecureCloudApi,
+    P: NodeProvisioner,
+    S: MaybeOfferingSelector,
+{
+    /// Invalidate an offering from the cache after a rental failure.
+    /// Only has effect if the controller was created with an offering selector.
+    async fn invalidate_offering_on_failure(&self, offering_id: &str) {
+        if let Some(selector) = &self.offering_selector {
+            warn!(
+                offering_id = %offering_id,
+                "Rental failed, invalidating offering from cache"
+            );
+            selector.invalidate_failed_offering(offering_id).await;
         }
     }
 
@@ -89,11 +139,12 @@ where
         let status = pool.status.clone().unwrap_or_default();
         let phase = status.phase.clone().unwrap_or(NodePoolPhase::Pending);
 
-        // Check phase timeout
+        // Check phase timeout (skip for phases with infinite timeout)
         if let Some(entered_at) = &status.phase_entered_at {
             let elapsed = Utc::now().signed_duration_since(*entered_at);
             let timeout = phase_timeout(&phase);
-            if elapsed.num_seconds() > timeout as i64 {
+            // u64::MAX indicates no timeout (Ready, Failed, Deleted phases)
+            if timeout != u64::MAX && elapsed.num_seconds() > timeout as i64 {
                 // Check if cleanup is already in progress
                 if status.cleanup_in_progress {
                     debug!(pool = %name, "Cleanup already in progress, waiting");
@@ -151,7 +202,7 @@ where
             NodePoolPhase::Draining => self.handle_draining(ns, pool, status).await,
             NodePoolPhase::Terminating => self.handle_terminating(ns, pool, status).await,
             NodePoolPhase::Failed => self.handle_failed(ns, pool, status).await,
-            NodePoolPhase::Deleted => Ok(()),
+            NodePoolPhase::Deleted => self.handle_deleted(ns, pool, status).await,
         }
     }
 
@@ -272,6 +323,7 @@ where
                     node_ip: Some(wg_ip.clone()),
                     public_key: annotations.get("basilica.ai/wireguard-pubkey").cloned(),
                     endpoint: None,
+                    peers: vec![],
                 });
                 status.internal_ip = Some(wg_ip.clone());
             }
@@ -301,23 +353,125 @@ where
                 .await;
         }
 
-        // Start new rental if needed
-        let external_ip = if let Some(ip) = &status.external_ip {
-            ip.clone()
+        // Fetch offering details and persist immediately (required for node labeling).
+        // Persisting immediately prevents data loss if process crashes after fetch.
+        if status.gpu_model.is_none() {
+            let offering = match self.api.get_offering(&sc.offering_id).await? {
+                Some(o) => o,
+                None => {
+                    // Emit event for visibility before returning error
+                    if let Err(e) = self
+                        .k8s
+                        .create_node_pool_event(
+                            ns,
+                            &name,
+                            pool.metadata.uid.as_deref(),
+                            "Warning",
+                            "OfferingUnavailable",
+                            &format!("GPU offering {} is no longer available", sc.offering_id),
+                        )
+                        .await
+                    {
+                        warn!(pool = %name, error = %e, "Failed to emit OfferingUnavailable event");
+                    }
+                    return Err(AutoscalerError::SecureCloudApi(format!(
+                        "Offering {} not found or unavailable",
+                        sc.offering_id
+                    )));
+                }
+            };
+
+            status.offering_id = Some(sc.offering_id.clone());
+            status.gpu_model = Some(offering.gpu_type.clone());
+            status.gpu_count = Some(offering.gpu_count);
+            status.gpu_memory_gb = Some(offering.gpu_memory_gb());
+            debug!(
+                pool = %name,
+                offering_id = ?status.offering_id,
+                gpu_model = ?status.gpu_model,
+                gpu_count = ?status.gpu_count,
+                "Stored GPU and offering info from API"
+            );
+
+            // Persist GPU metadata immediately to prevent loss on crash
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+        }
+
+        // Start new rental if needed, or reuse existing one
+        // CRITICAL: Check rental_id first to prevent duplicate rentals on retry
+        let external_ip = if let Some(rental_id) = &status.rental_id {
+            // Rental already exists from previous attempt - reuse it
+            debug!(pool = %name, rental_id = %rental_id, "Reusing existing rental from previous attempt");
+
+            // If we have the IP cached, use it; otherwise poll the API
+            if let Some(ip) = status.external_ip.clone() {
+                ip
+            } else {
+                // Poll API for IP address (VM may still be starting)
+                info!(pool = %name, rental_id = %rental_id, "Polling for IP address");
+                match self.api.get_rental(rental_id).await? {
+                    Some(rental) if rental.ip_address.is_some() => {
+                        let ip = rental.ip_address.clone().unwrap();
+                        status.external_ip = Some(ip.clone());
+                        self.k8s
+                            .update_node_pool_status(ns, &name, status.clone())
+                            .await?;
+                        info!(pool = %name, ip = %ip, "IP address acquired");
+                        ip
+                    }
+                    Some(_) => {
+                        debug!(pool = %name, "IP not yet available, will retry");
+                        return Err(AutoscalerError::SecureCloudApi(
+                            "IP address not yet available, waiting for VM to be ready".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(AutoscalerError::SecureCloudApi(format!(
+                            "Rental {} not found",
+                            rental_id
+                        )));
+                    }
+                }
+            }
         } else {
             info!(pool = %name, offering = %sc.offering_id, "Starting rental");
-            let rental = self
-                .api
-                .start_rental(&sc.offering_id, &sc.ssh_key_id)
-                .await?;
+            let rental_result = self.api.start_rental(&sc.offering_id, &sc.ssh_key_id).await;
+
+            let rental = match rental_result {
+                Ok(r) => r,
+                Err(e) => {
+                    // Invalidate offering from cache on rental failure
+                    self.invalidate_offering_on_failure(&sc.offering_id).await;
+                    return Err(e);
+                }
+            };
 
             status.rental_id = Some(rental.rental_id.clone());
-            status.external_ip = Some(rental.external_ip.clone());
+            status.external_ip = rental.ip_address.clone();
             status.provider = Some(rental.provider.clone());
-            status.provider_id = Some(rental.provider_id.clone());
+            status.provider_id = Some(rental.deployment_id.clone());
             self.metrics.record_rental_started(&name, &rental.provider);
 
-            rental.external_ip
+            // CRITICAL: Persist rental_id immediately to prevent duplicate rentals
+            // If node registration fails later, we can retry without creating new VMs
+            info!(pool = %name, rental_id = %rental.rental_id, "Persisting rental_id to status");
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+
+            // If IP is not yet available, return error to retry in Provisioning phase
+            // Cloud providers (Hyperstack) assign floating IPs asynchronously
+            match rental.ip_address {
+                Some(ip) => ip,
+                None => {
+                    info!(pool = %name, "Rental created but IP not yet available, will retry");
+                    return Err(AutoscalerError::SecureCloudApi(
+                        "IP address not yet available, waiting for VM to be ready".to_string(),
+                    ));
+                }
+            }
         };
 
         // Generate deterministic node_id based on external IP and persist it
@@ -331,22 +485,55 @@ where
             .clone()
             .unwrap_or_else(|| "default".to_string());
 
+        // Build GPU specs from status (defaults for values not yet discovered)
+        let gpu_specs = crate::api::GpuSpecs {
+            count: status.gpu_count.unwrap_or(1),
+            model: status
+                .gpu_model
+                .clone()
+                .unwrap_or_else(|| "GPU".to_string()),
+            memory_gb: status.gpu_memory_gb.unwrap_or(0),
+            driver_version: status
+                .driver_version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            cuda_version: status
+                .cuda_version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+        };
+
         let reg_request = crate::api::NodeRegistrationRequest {
             node_id: node_id.clone(),
             datacenter_id,
-            managed_by: NodeManagedBy::Autoscaler.as_str().to_string(),
-            rental_id: status.rental_id.clone(),
-            external_ip: Some(external_ip),
-            gpu_info: None,
+            gpu_specs,
         };
 
         let reg_response = self.api.register_node(reg_request).await?;
+        let wg_node_ip = reg_response.wireguard.as_ref().map(|w| w.node_ip.clone());
+        let wg_peers: Vec<WireGuardPeerStatus> = reg_response
+            .wireguard
+            .as_ref()
+            .map(|w| {
+                w.peers
+                    .iter()
+                    .map(|p| WireGuardPeerStatus {
+                        endpoint: p.endpoint.clone(),
+                        public_key: p.public_key.clone(),
+                        wireguard_ip: p.wireguard_ip.clone(),
+                        vpc_subnet: p.vpc_subnet.clone(),
+                        route_pod_network: p.route_pod_network,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         status.wireguard = Some(WireGuardStatus {
-            node_ip: Some(reg_response.wireguard.node_ip),
+            node_ip: wg_node_ip.clone(),
             public_key: None,
             endpoint: None,
+            peers: wg_peers,
         });
-        status.internal_ip = status.wireguard.as_ref().and_then(|w| w.node_ip.clone());
+        status.internal_ip = wg_node_ip;
         status.provisioned_at = Some(Utc::now());
 
         self.transition_phase(ns, &name, status, NodePoolPhase::Configuring)
@@ -357,10 +544,38 @@ where
         &self,
         ns: &str,
         pool: &NodePool,
-        status: NodePoolStatus,
+        mut status: NodePoolStatus,
     ) -> Result<()> {
         let name = pool.name_any();
         info!(pool = %name, "Configuring node via SSH");
+
+        // Ensure we have external IP - poll if missing (handles edge case from pre-fix NodePools)
+        if status.external_ip.is_none() {
+            if let Some(rental_id) = &status.rental_id {
+                info!(pool = %name, rental_id = %rental_id, "Polling for external IP");
+                match self.api.get_rental(rental_id).await? {
+                    Some(rental) if rental.ip_address.is_some() => {
+                        let ip = rental.ip_address.clone().unwrap();
+                        status.external_ip = Some(ip.clone());
+                        self.k8s
+                            .update_node_pool_status(ns, &name, status.clone())
+                            .await?;
+                        info!(pool = %name, ip = %ip, "External IP acquired");
+                    }
+                    Some(_) => {
+                        return Err(AutoscalerError::SecureCloudApi(
+                            "External IP not yet available".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(AutoscalerError::SecureCloudApi(format!(
+                            "Rental {} not found",
+                            rental_id
+                        )));
+                    }
+                }
+            }
+        }
 
         let ssh_config = self.get_ssh_config(ns, pool).await?;
         let (host, port) = self.get_ssh_endpoint(pool, &status)?;
@@ -415,10 +630,25 @@ where
             .register_wireguard_key(&node_id, &public_key)
             .await?;
 
-        // Get peers and configure
-        let peers = self.api.get_peers(&node_id).await?;
+        // Use peers from registration response (stored in status)
+        let peers: Vec<WireGuardPeer> = wg_status
+            .peers
+            .iter()
+            .map(|p| WireGuardPeer {
+                endpoint: p.endpoint.clone(),
+                public_key: p.public_key.clone(),
+                wireguard_ip: p.wireguard_ip.clone(),
+                vpc_subnet: p.vpc_subnet.clone(),
+                route_pod_network: p.route_pod_network,
+            })
+            .collect();
+
+        if peers.is_empty() {
+            warn!(pool = %name, "No peers in registration response, WireGuard may not route traffic");
+        }
+
         self.provisioner
-            .configure_wireguard_peers(&host, port, &ssh_config, &peers)
+            .configure_wireguard_peers(&host, port, &ssh_config, &peers, &node_ip)
             .await?;
 
         // Update status
@@ -531,28 +761,62 @@ where
 
         info!(pool = %name, node = %k8s_node_name, "Waiting for node to become ready");
 
-        // Check if node exists and is ready
+        // Check if node exists
         match self.k8s.get_node(&k8s_node_name).await {
             Ok(node) => {
-                if is_node_ready(&node) {
-                    info!(pool = %name, node = %k8s_node_name, "Node is ready");
-
-                    // Add labels to the node
+                // Apply labels immediately when node is detected (before Ready).
+                // This prevents a race condition where pods may fail to schedule
+                // during the brief window between node Ready and label application.
+                if !status.labels_applied {
                     let mut labels = std::collections::BTreeMap::new();
                     labels.insert("basilica.ai/nodepool".to_string(), name.clone());
                     labels.insert(
                         "basilica.ai/managed-by".to_string(),
                         "autoscaler".to_string(),
                     );
-                    // Use resolved node_id (status for dynamic mode, spec for manual mode)
                     let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
                     if let Some(node_id) = resolved_node_id {
                         labels.insert("basilica.ai/node-id".to_string(), node_id.clone());
                     }
-                    self.k8s.add_node_labels(&k8s_node_name, &labels).await?;
+                    labels.extend(build_gpu_labels(pool, &status));
+
+                    if let Err(e) = self.k8s.add_node_labels(&k8s_node_name, &labels).await {
+                        warn!(pool = %name, node = %k8s_node_name, error = %e, "Failed to apply labels, will retry");
+                    } else {
+                        debug!(pool = %name, node = %k8s_node_name, "Applied GPU labels to node");
+                        status.labels_applied = true;
+                    }
+                }
+
+                // Wait for node to become Ready before transitioning
+                if is_node_ready(&node) {
+                    // Validate GPU labels are applied before transitioning to Ready.
+                    // Missing labels would cause pod scheduling failures.
+                    if !status.labels_applied {
+                        let expected_labels = build_gpu_labels(pool, &status);
+                        if !expected_labels.is_empty() {
+                            warn!(
+                                pool = %name,
+                                node = %k8s_node_name,
+                                "Node is ready but GPU labels not applied, retrying label application"
+                            );
+                            if let Err(e) = self
+                                .k8s
+                                .add_node_labels(&k8s_node_name, &expected_labels)
+                                .await
+                            {
+                                warn!(pool = %name, node = %k8s_node_name, error = %e, "Failed to apply GPU labels");
+                                self.k8s.update_node_pool_status(ns, &name, status).await?;
+                                return Ok(());
+                            }
+                            status.labels_applied = true;
+                        }
+                    }
+
+                    info!(pool = %name, node = %k8s_node_name, "Node is ready");
 
                     // Get node UID
-                    if let Some(uid) = node.metadata.uid {
+                    if let Some(uid) = node.metadata.uid.clone() {
                         status.node_uid = Some(uid);
                     }
 
@@ -609,6 +873,17 @@ where
                         .transition_phase(ns, &name, status, NodePoolPhase::Unhealthy)
                         .await;
                 }
+
+                // Verify and re-apply GPU labels (handles recovery from Unhealthy)
+                let expected_labels = build_gpu_labels(pool, &status);
+                if !expected_labels.is_empty() && labels_need_reapplication(&node, &expected_labels)
+                {
+                    debug!(pool = %name, node = %k8s_node_name, "Re-applying GPU labels");
+                    self.k8s
+                        .add_node_labels(&k8s_node_name, &expected_labels)
+                        .await?;
+                }
+
                 // Reset failure count on successful health check
                 status.failure_count = 0;
                 status.last_health_check_at = Some(Utc::now());
@@ -743,17 +1018,102 @@ where
         }
 
         self.transition_phase(ns, &name, status, NodePoolPhase::Deleted)
-            .await
+            .await?;
+
+        // Delete the NodePool CR to trigger finalizer removal
+        info!(pool = %name, "Deleting NodePool CR");
+        self.k8s.delete_node_pool(ns, &name).await?;
+
+        Ok(())
     }
 
-    async fn handle_failed(
+    async fn handle_failed(&self, ns: &str, pool: &NodePool, status: NodePoolStatus) -> Result<()> {
+        use crate::config::PhaseTimeouts;
+
+        let name = pool.name_any();
+
+        // Check if we've been in Failed state long enough for auto-cleanup
+        let should_gc = status.phase_entered_at.as_ref().is_some_and(|entered_at| {
+            let elapsed = Utc::now().signed_duration_since(*entered_at);
+            elapsed.num_seconds() > PhaseTimeouts::FAILED_GC_TIMEOUT as i64
+        });
+
+        if !should_gc {
+            debug!(pool = %name, "Node pool in failed state, waiting for GC timeout or manual deletion");
+            return Ok(());
+        }
+
+        info!(pool = %name, "Failed NodePool exceeded GC timeout, cleaning up resources");
+
+        // Stop rental if exists
+        if let Some(rental_id) = &status.rental_id {
+            info!(pool = %name, rental_id = %rental_id, "Stopping rental for failed NodePool");
+            if let Err(e) = self.api.stop_rental(rental_id).await {
+                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental during GC");
+            }
+            self.metrics.record_rental_stopped(&name);
+        }
+
+        // Deregister node if registered
+        let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+        if let Some(node_id) = resolved_node_id {
+            if let Err(e) = self.api.deregister_node(node_id).await {
+                warn!(pool = %name, node_id = %node_id, error = %e, "Failed to deregister node during GC");
+            }
+        }
+
+        // Delete K8s node if it was created
+        if let Some(node_name) = &status.node_name {
+            if let Err(e) = self.k8s.delete_node(node_name).await {
+                warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node during GC");
+            }
+        }
+
+        // Delete the NodePool CR to trigger finalizer removal
+        info!(pool = %name, "Deleting failed NodePool CR after GC");
+        self.k8s.delete_node_pool(ns, &name).await?;
+
+        Ok(())
+    }
+
+    async fn handle_deleted(
         &self,
-        _ns: &str,
+        ns: &str,
         pool: &NodePool,
-        _status: NodePoolStatus,
+        status: NodePoolStatus,
     ) -> Result<()> {
         let name = pool.name_any();
-        debug!(pool = %name, "Node pool in failed state, waiting for manual intervention or deletion");
+
+        // NodePool reached Deleted phase but CR still exists (stuck from before fix).
+        // Ensure resources are cleaned up and delete the CR.
+        info!(pool = %name, "Cleaning up stuck Deleted NodePool");
+
+        // Stop rental if it somehow still exists
+        if let Some(rental_id) = &status.rental_id {
+            if let Err(e) = self.api.stop_rental(rental_id).await {
+                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental for Deleted NodePool");
+            }
+        }
+
+        // Deregister node if registered
+        let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
+        if let Some(node_id) = resolved_node_id {
+            if let Err(e) = self.api.deregister_node(node_id).await {
+                warn!(pool = %name, node_id = %node_id, error = %e, "Failed to deregister node for Deleted NodePool");
+            }
+        }
+
+        // Delete K8s node if it exists
+        if let Some(node_name) = &status.node_name {
+            if let Err(e) = self.k8s.delete_node(node_name).await {
+                warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node for Deleted NodePool");
+            }
+        }
+
+        // Delete the NodePool CR to trigger finalizer removal
+        info!(pool = %name, "Deleting Deleted NodePool CR");
+        self.k8s.delete_node_pool(ns, &name).await?;
+
         Ok(())
     }
 
@@ -919,17 +1279,17 @@ where
             AutoscalerError::InvalidConfiguration("SSH key is not valid UTF-8".to_string())
         })?;
 
-        let username = pool
-            .spec
-            .ssh
-            .as_ref()
-            .map(|s| s.user.clone())
-            .unwrap_or_else(|| "root".to_string());
+        let username = if let Some(ssh) = &pool.spec.ssh {
+            ssh.user.clone()
+        } else if let Some(sc) = &pool.spec.secure_cloud {
+            sc.ssh_user.clone()
+        } else {
+            "ubuntu".to_string()
+        };
 
         Ok(crate::provisioner::SshConnectionConfig {
             username,
             private_key,
-            passphrase: None,
         })
     }
 
@@ -1034,6 +1394,91 @@ fn add_condition(
     }
 }
 
+/// Sanitize a value for use as a Kubernetes label value.
+/// K8s labels must match: (([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?
+fn sanitize_label_value(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Trim leading/trailing non-alphanumeric chars
+    sanitized
+        .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+        .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_string()
+}
+
+/// Build the expected GPU labels for a node based on pool and status.
+fn build_gpu_labels(
+    pool: &NodePool,
+    status: &NodePoolStatus,
+) -> std::collections::BTreeMap<String, String> {
+    use crate::offering_matcher::{node_labels, normalize_gpu_model};
+
+    let mut labels = std::collections::BTreeMap::new();
+
+    // Required labels for operator validation
+    labels.insert(node_labels::NODE_TYPE.to_string(), "gpu".to_string());
+
+    // Datacenter: prefer spec.datacenter_id, fallback to provider name from status
+    let datacenter = pool
+        .spec
+        .datacenter_id
+        .clone()
+        .or_else(|| status.provider.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    labels.insert(
+        node_labels::DATACENTER.to_string(),
+        sanitize_label_value(&datacenter),
+    );
+
+    // GPU model label: normalized base model (e.g., "A100", "H100")
+    if let Some(ref gpu_model) = status.gpu_model {
+        labels.insert(
+            node_labels::GPU_MODEL.to_string(),
+            normalize_gpu_model(gpu_model),
+        );
+    }
+    if let Some(gpu_count) = status.gpu_count {
+        labels.insert(node_labels::GPU_COUNT.to_string(), gpu_count.to_string());
+    }
+    if let Some(gpu_memory) = status.gpu_memory_gb {
+        labels.insert(
+            node_labels::GPU_MEMORY_GB.to_string(),
+            gpu_memory.to_string(),
+        );
+    }
+    // Prefer status.offering_id (set during dynamic provisioning), fallback to spec
+    if let Some(ref offering_id) = status.offering_id {
+        labels.insert(node_labels::OFFERING_ID.to_string(), offering_id.clone());
+    } else if let Some(ref sc) = pool.spec.secure_cloud {
+        labels.insert(node_labels::OFFERING_ID.to_string(), sc.offering_id.clone());
+    }
+
+    labels
+}
+
+/// Check if any expected labels are missing or have different values on the node.
+fn labels_need_reapplication(
+    node: &k8s_openapi::api::core::v1::Node,
+    expected: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let node_labels = node.metadata.labels.as_ref();
+    for (key, value) in expected {
+        let current = node_labels.and_then(|l| l.get(key));
+        if current != Some(value) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Generate a deterministic node ID based on pool name and IP address.
 /// This ensures idempotent node registration across reconciliation cycles.
 /// Uses SHA-256 for stable output across Rust versions (unlike DefaultHasher).
@@ -1107,5 +1552,120 @@ mod tests {
         let id1 = generate_deterministic_node_id("pool-1", "192.168.1.100");
         let id2 = generate_deterministic_node_id("pool-2", "192.168.1.100");
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_false_when_all_present() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [
+                        ("key1".to_string(), "value1".to_string()),
+                        ("key2".to_string(), "value2".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("key1".to_string(), "value1".to_string()),
+            ("key2".to_string(), "value2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(!labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_true_when_missing() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [("key1".to_string(), "value1".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("key1".to_string(), "value1".to_string()),
+            ("key2".to_string(), "value2".to_string()), // Missing
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_true_when_mismatched() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [
+                        ("key1".to_string(), "wrong_value".to_string()),
+                        ("key2".to_string(), "value2".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> = [
+            ("key1".to_string(), "value1".to_string()), // Mismatched
+            ("key2".to_string(), "value2".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_returns_false_for_empty_expected() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: Some(
+                    [("key1".to_string(), "value1".to_string())]
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        assert!(!labels_need_reapplication(&node, &expected));
+    }
+
+    #[test]
+    fn labels_need_reapplication_handles_node_with_no_labels() {
+        let node = k8s_openapi::api::core::v1::Node {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                labels: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let expected: std::collections::BTreeMap<String, String> =
+            [("key1".to_string(), "value1".to_string())]
+                .into_iter()
+                .collect();
+
+        assert!(labels_need_reapplication(&node, &expected));
     }
 }

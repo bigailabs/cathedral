@@ -10,6 +10,7 @@ pub struct AutoscalerConfig {
     pub metrics: MetricsServerConfig,
     pub ssh: SshConfig,
     pub network_validation: NetworkValidationConfig,
+    pub pending_pod_filter: PendingPodFilterConfig,
 }
 
 impl AutoscalerConfig {
@@ -23,6 +24,7 @@ impl AutoscalerConfig {
             metrics: MetricsServerConfig::from_env(),
             ssh: SshConfig::from_env(),
             network_validation: NetworkValidationConfig::from_env(),
+            pending_pod_filter: PendingPodFilterConfig::from_env(),
         }
     }
 }
@@ -167,6 +169,49 @@ impl NetworkValidationConfig {
     }
 }
 
+/// Pending pod filter configuration
+#[derive(Clone, Debug)]
+pub struct PendingPodFilterConfig {
+    /// Maximum age in seconds for pending pods to be considered for scaling.
+    /// Pods older than this will be ignored to prevent infinite retry loops.
+    pub max_pending_age_seconds: u64,
+    /// Whether to skip pods whose normalized GPU model matches an existing node.
+    /// This prevents provisioning for pods with stale nodeAffinity requirements.
+    pub skip_stale_node_affinity: bool,
+    /// Whether to skip pods from deployments that have failing sibling pods.
+    /// This prevents provisioning for deployments stuck in CrashLoopBackOff/ImagePullBackOff.
+    pub skip_failing_deployments: bool,
+}
+
+impl PendingPodFilterConfig {
+    fn from_env() -> Self {
+        Self {
+            max_pending_age_seconds: parse_u64_env(
+                "BASILICA_AUTOSCALER_MAX_PENDING_AGE_SECS",
+                1200, // 20 minutes default
+            ),
+            skip_stale_node_affinity: parse_bool_env(
+                "BASILICA_AUTOSCALER_SKIP_STALE_NODE_AFFINITY",
+                true,
+            ),
+            skip_failing_deployments: parse_bool_env(
+                "BASILICA_AUTOSCALER_SKIP_FAILING_DEPLOYMENTS",
+                true,
+            ),
+        }
+    }
+}
+
+impl Default for PendingPodFilterConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_age_seconds: 1200,
+            skip_stale_node_affinity: true,
+            skip_failing_deployments: true,
+        }
+    }
+}
+
 /// Phase timeout configuration (seconds)
 pub struct PhaseTimeouts;
 
@@ -179,6 +224,8 @@ impl PhaseTimeouts {
     pub const WAITING_FOR_NODE: u64 = 300; // 5 min
     pub const DRAINING: u64 = 900; // 15 min (PDB wait)
     pub const TERMINATING: u64 = 120; // 2 min
+    /// Auto-cleanup timeout for Failed NodePools (stops rental, deletes CR)
+    pub const FAILED_GC_TIMEOUT: u64 = 600; // 10 min
 }
 
 fn parse_duration_env(key: &str, default_secs: u64) -> Duration {
@@ -200,6 +247,13 @@ fn parse_u32_env(key: &str, default: u32) -> u32 {
     std::env::var(key)
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(default)
+}
+
+fn parse_u64_env(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(default)
 }
 

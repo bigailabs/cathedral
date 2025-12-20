@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use k8s_openapi::api::core::v1::{Node, Pod, Secret};
+use k8s_openapi::api::core::v1::{Event, Node, ObjectReference, Pod, Secret};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use std::collections::BTreeMap;
 
 use crate::crd::{NodePool, NodePoolStatus, ScalingPolicy, ScalingPolicyStatus};
@@ -20,6 +21,7 @@ pub trait AutoscalerK8sClient: Send + Sync {
     ) -> Result<()>;
     async fn add_node_pool_finalizer(&self, ns: &str, name: &str) -> Result<()>;
     async fn remove_node_pool_finalizer(&self, ns: &str, name: &str) -> Result<()>;
+    async fn delete_node_pool(&self, ns: &str, name: &str) -> Result<()>;
 
     // ScalingPolicy CRD operations
     async fn get_scaling_policy(&self, ns: &str, name: &str) -> Result<ScalingPolicy>;
@@ -67,10 +69,34 @@ pub trait AutoscalerK8sClient: Send + Sync {
     // Pod operations
     async fn list_pods_on_node(&self, node_name: &str) -> Result<Vec<Pod>>;
     async fn list_pending_pods(&self) -> Result<Vec<Pod>>;
+    async fn list_pods_in_namespace(&self, ns: &str) -> Result<Vec<Pod>>;
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool>;
 
     // Secret operations
     async fn get_secret(&self, ns: &str, name: &str) -> Result<Secret>;
+
+    // Event operations
+    /// Create a Kubernetes event for a pod to provide user visibility into autoscaler decisions
+    async fn create_pod_event(
+        &self,
+        pod_ns: &str,
+        pod_name: &str,
+        pod_uid: Option<&str>,
+        event_type: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<()>;
+
+    /// Create a Kubernetes event for a NodePool to provide visibility into lifecycle events
+    async fn create_node_pool_event(
+        &self,
+        ns: &str,
+        pool_name: &str,
+        pool_uid: Option<&str>,
+        event_type: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<()>;
 }
 
 /// Real Kubernetes client implementation
@@ -182,6 +208,13 @@ impl AutoscalerK8sClient for KubeClient {
 
         api.patch(name, &PatchParams::default(), &Patch::Merge(&patch))
             .await?;
+        Ok(())
+    }
+
+    async fn delete_node_pool(&self, ns: &str, name: &str) -> Result<()> {
+        use kube::api::{Api, DeleteParams};
+        let api: Api<NodePool> = Api::namespaced(self.client.clone(), ns);
+        api.delete(name, &DeleteParams::default()).await?;
         Ok(())
     }
 
@@ -394,6 +427,14 @@ impl AutoscalerK8sClient for KubeClient {
         Ok(list.items)
     }
 
+    async fn list_pods_in_namespace(&self, ns: &str) -> Result<Vec<Pod>> {
+        use kube::api::ListParams;
+        use kube::Api;
+        let api: Api<Pod> = Api::namespaced(self.client.clone(), ns);
+        let list = api.list(&ListParams::default()).await?;
+        Ok(list.items)
+    }
+
     async fn evict_pod(&self, ns: &str, name: &str, grace_seconds: Option<i64>) -> Result<bool> {
         use k8s_openapi::api::policy::v1::Eviction;
         use k8s_openapi::apimachinery::pkg::apis::meta::v1::{DeleteOptions, ObjectMeta};
@@ -431,6 +472,104 @@ impl AutoscalerK8sClient for KubeClient {
         use kube::Api;
         let api: Api<Secret> = Api::namespaced(self.client.clone(), ns);
         api.get(name).await.map_err(Into::into)
+    }
+
+    async fn create_pod_event(
+        &self,
+        pod_ns: &str,
+        pod_name: &str,
+        pod_uid: Option<&str>,
+        event_type: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<()> {
+        use chrono::Utc;
+        use kube::api::{Api, PostParams};
+
+        let api: Api<Event> = Api::namespaced(self.client.clone(), pod_ns);
+        let now = Utc::now();
+        let event_name = format!("{}.{}", pod_name, now.timestamp_nanos_opt().unwrap_or(0));
+
+        let event = Event {
+            metadata: ObjectMeta {
+                name: Some(event_name),
+                namespace: Some(pod_ns.to_string()),
+                ..Default::default()
+            },
+            involved_object: ObjectReference {
+                api_version: Some("v1".to_string()),
+                kind: Some("Pod".to_string()),
+                name: Some(pod_name.to_string()),
+                namespace: Some(pod_ns.to_string()),
+                uid: pod_uid.map(|s| s.to_string()),
+                ..Default::default()
+            },
+            type_: Some(event_type.to_string()),
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+            first_timestamp: None,
+            last_timestamp: None,
+            event_time: Some(MicroTime(now)),
+            reporting_component: Some("basilica-autoscaler".to_string()),
+            reporting_instance: Some(
+                std::env::var("HOSTNAME").unwrap_or_else(|_| "autoscaler".to_string()),
+            ),
+            action: Some("Scheduling".to_string()),
+            count: Some(1),
+            ..Default::default()
+        };
+
+        api.create(&PostParams::default(), &event).await?;
+        Ok(())
+    }
+
+    async fn create_node_pool_event(
+        &self,
+        ns: &str,
+        pool_name: &str,
+        pool_uid: Option<&str>,
+        event_type: &str,
+        reason: &str,
+        message: &str,
+    ) -> Result<()> {
+        use chrono::Utc;
+        use kube::api::{Api, PostParams};
+
+        let api: Api<Event> = Api::namespaced(self.client.clone(), ns);
+        let now = Utc::now();
+        let event_name = format!("{}.{}", pool_name, now.timestamp_nanos_opt().unwrap_or(0));
+
+        let event = Event {
+            metadata: ObjectMeta {
+                name: Some(event_name),
+                namespace: Some(ns.to_string()),
+                ..Default::default()
+            },
+            involved_object: ObjectReference {
+                api_version: Some("autoscaler.basilica.ai/v1alpha1".to_string()),
+                kind: Some("NodePool".to_string()),
+                name: Some(pool_name.to_string()),
+                namespace: Some(ns.to_string()),
+                uid: pool_uid.map(|s| s.to_string()),
+                ..Default::default()
+            },
+            type_: Some(event_type.to_string()),
+            reason: Some(reason.to_string()),
+            message: Some(message.to_string()),
+            first_timestamp: None,
+            last_timestamp: None,
+            event_time: Some(MicroTime(now)),
+            reporting_component: Some("basilica-autoscaler".to_string()),
+            reporting_instance: Some(
+                std::env::var("HOSTNAME").unwrap_or_else(|_| "autoscaler".to_string()),
+            ),
+            action: Some("Provisioning".to_string()),
+            count: Some(1),
+            ..Default::default()
+        };
+
+        api.create(&PostParams::default(), &event).await?;
+        Ok(())
     }
 }
 

@@ -148,7 +148,33 @@ pub async fn list_secure_cloud_rentals(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Query secure_cloud_rentals table for this user, JOIN with gpu_offerings for resource specs
+    // 1. Query secure_cloud_rentals table for this user to get rental IDs
+    let rental_ids: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, status FROM secure_cloud_rentals WHERE user_id = $1")
+            .bind(&auth.user_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to query rental IDs: {}", e);
+                ApiError::Internal {
+                    message: "Failed to fetch rentals".to_string(),
+                }
+            })?;
+
+    // 2. Refresh active rentals from provider to get latest IP/status
+    for (rental_id, status) in &rental_ids {
+        if status == "running" || status == "provisioning" || status == "pending" {
+            if let Err(e) = state.aggregator_service.get_deployment(rental_id).await {
+                tracing::debug!(
+                    "Failed to refresh rental {} from provider (may be expected): {}",
+                    rental_id,
+                    e
+                );
+            }
+        }
+    }
+
+    // 3. Re-query with fresh data, JOIN with gpu_offerings for resource specs
     let rentals: Vec<RentalQueryRow> = sqlx::query_as(
         "SELECT r.id, r.provider, r.provider_instance_id, r.offering_id, r.instance_type, \
          r.location_code, r.status, r.ip_address, r.created_at, r.stopped_at, \
@@ -169,7 +195,7 @@ pub async fn list_secure_cloud_rentals(
         }
     })?;
 
-    // 2. Get offerings from aggregator to enrich with GPU details
+    // 4. Get offerings from aggregator to enrich with GPU details
     let offerings = state
         .aggregator_service
         .get_offerings()
@@ -183,7 +209,7 @@ pub async fn list_secure_cloud_rentals(
     let offerings_map: std::collections::HashMap<_, _> =
         offerings.iter().map(|o| (o.id.as_str(), o)).collect();
 
-    // 3. Get accumulated costs from billing service
+    // 5. Get accumulated costs from billing service
     let cost_map: std::collections::HashMap<String, String> =
         if let Some(ref billing_client) = state.billing_client {
             match billing_client
@@ -204,7 +230,7 @@ pub async fn list_secure_cloud_rentals(
             std::collections::HashMap::new()
         };
 
-    // 4. Build response items by joining rental data with offering data
+    // 6. Build response items by joining rental data with offering data
     let rental_items: Vec<SecureCloudRentalListItem> = rentals
         .into_iter()
         .map(

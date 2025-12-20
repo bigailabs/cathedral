@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: image-prepuller
+  namespace: basilica-autoscaler
+  labels:
+    app: image-prepuller
+    app.kubernetes.io/name: image-prepuller
+    app.kubernetes.io/component: gpu-optimization
+    app.kubernetes.io/managed-by: basilica-autoscaler
+spec:
+  selector:
+    matchLabels:
+      app: image-prepuller
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 100%
+  template:
+    metadata:
+      labels:
+        app: image-prepuller
+    spec:
+      nodeSelector:
+        basilica.ai/node-type: gpu
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: pull-pytorch
+          image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+          imagePullPolicy: IfNotPresent
+          command: ["echo", "Image pulled"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+        - name: pull-vllm
+          image: vllm/vllm-openai:v0.6.0
+          imagePullPolicy: IfNotPresent
+          command: ["echo", "Image pulled"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 1m
+              memory: 4Mi
+            limits:
+              cpu: 10m
+              memory: 16Mi
+      terminationGracePeriodSeconds: 5
+      priorityClassName: system-cluster-critical
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-prepuller-config
+  namespace: basilica-autoscaler
+  labels:
+    app: image-prepuller
+data:
+  images: |
+    pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+    vllm/vllm-openai:v0.6.0

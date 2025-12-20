@@ -1,9 +1,13 @@
 use crate::error::{BillingError, Result};
-use crate::storage::{MinerRevenueRepository, MinerRevenueSummary, MinerRevenueSummaryFilter};
+use crate::storage::{
+    MinerRevenueRepository, MinerRevenueSummary, MinerRevenueSummaryFilter,
+    UnpaidMinerRevenueSummaryFilter,
+};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 /// Operations for miner revenue reconciliation
 #[async_trait]
@@ -21,6 +25,15 @@ pub trait MinerRevenueOperations: Send + Sync {
         &self,
         filter: MinerRevenueSummaryFilter,
     ) -> Result<(Vec<MinerRevenueSummary>, i64)>;
+
+    /// Get unpaid miner revenue summaries for payment processing
+    async fn get_unpaid_summaries(
+        &self,
+        filter: UnpaidMinerRevenueSummaryFilter,
+    ) -> Result<(Vec<MinerRevenueSummary>, i64)>;
+
+    /// Mark a miner revenue summary as paid with the given transaction hash
+    async fn mark_as_paid(&self, id: Uuid, tx_hash: &str) -> Result<bool>;
 }
 
 /// Service for managing miner revenue reconciliation
@@ -75,6 +88,33 @@ impl MinerRevenueOperations for MinerRevenueService {
                 message: format!(
                     "Computation version must be >= 1, got {}",
                     computation_version
+                ),
+            });
+        }
+
+        // Check for overlapping periods
+        let overlaps = self
+            .repository
+            .find_overlapping_periods(period_start, period_end)
+            .await?;
+        if !overlaps.is_empty() {
+            let overlap_details: Vec<String> = overlaps
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{} to {} (computed {})",
+                        o.period_start.format("%Y-%m-%d"),
+                        o.period_end.format("%Y-%m-%d"),
+                        o.computed_at.format("%Y-%m-%d %H:%M:%S")
+                    )
+                })
+                .collect();
+            return Err(BillingError::InvalidState {
+                message: format!(
+                    "Cannot calculate for {} to {}: overlaps with existing periods: {}",
+                    period_start.format("%Y-%m-%d"),
+                    period_end.format("%Y-%m-%d"),
+                    overlap_details.join(", ")
                 ),
             });
         }
@@ -137,6 +177,71 @@ impl MinerRevenueOperations for MinerRevenueService {
         );
 
         Ok((summaries, total_count))
+    }
+
+    async fn get_unpaid_summaries(
+        &self,
+        filter: UnpaidMinerRevenueSummaryFilter,
+    ) -> Result<(Vec<MinerRevenueSummary>, i64)> {
+        // Validate period if provided
+        if let (Some(start), Some(end)) = (filter.period_start, filter.period_end) {
+            Self::validate_period(start, end)?;
+        }
+
+        // Validate pagination
+        if let Some(limit) = filter.limit {
+            if !(1..=1000).contains(&limit) {
+                return Err(BillingError::InvalidState {
+                    message: format!("Limit must be between 1 and 1000, got {}", limit),
+                });
+            }
+        }
+
+        if let Some(offset) = filter.offset {
+            if offset < 0 {
+                return Err(BillingError::InvalidState {
+                    message: format!("Offset must be >= 0, got {}", offset),
+                });
+            }
+        }
+
+        // Fetch unpaid summaries and count in parallel
+        let summaries_future = self.repository.get_unpaid_summaries(&filter);
+        let count_future = self.repository.count_unpaid_summaries(&filter);
+
+        let (summaries, total_count) = tokio::try_join!(summaries_future, count_future)?;
+
+        info!(
+            "Retrieved {} unpaid miner revenue summaries (total: {})",
+            summaries.len(),
+            total_count
+        );
+
+        Ok((summaries, total_count))
+    }
+
+    async fn mark_as_paid(&self, id: Uuid, tx_hash: &str) -> Result<bool> {
+        if tx_hash.is_empty() {
+            return Err(BillingError::InvalidState {
+                message: "Transaction hash cannot be empty".to_string(),
+            });
+        }
+
+        let updated = self.repository.mark_summary_paid(id, tx_hash).await?;
+
+        if updated {
+            info!(
+                "Marked miner revenue summary {} as paid (tx: {})",
+                id, tx_hash
+            );
+        } else {
+            warn!(
+                "Failed to mark miner revenue summary {} as paid: not found or already paid",
+                id
+            );
+        }
+
+        Ok(updated)
     }
 }
 

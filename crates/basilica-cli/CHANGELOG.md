@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0]
+
+### Added
+- `basilica deploy vllm` command for deploying vLLM inference servers
+  - Configurable tensor parallelism, dtype, and quantization options
+  - Automatic GPU requirement detection based on model names
+  - HuggingFace model cache storage configuration
+- `basilica deploy sglang` command for deploying SGLang inference servers
+  - Configurable context length and memory fraction settings
+  - Same model-based GPU detection as vLLM
+- SSH key ID is now displayed in `ssh-keys list` output for easier key management
+
+### Changed
+- Default GPU for model sizing recommendations updated from RTX A4000 (16GB) to A100 (40GB)
+- GPU recommendations now use canonical A100/H100 model names
+
 ## [0.9.0]
 
 ### Added

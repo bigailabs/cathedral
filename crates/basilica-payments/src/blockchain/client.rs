@@ -76,50 +76,58 @@ impl BlockchainClient {
             .context("Failed to fetch account data")
             .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
 
-        if let Some(account_info) = result {
-            let value = account_info
-                .to_value()
-                .context("Failed to decode account info")
-                .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
+        let account_preview = account_hex.chars().take(8).collect::<String>();
 
-            let account_preview = account_hex.chars().take(8).collect::<String>();
-
-            // Extract balance from AccountInfo structure: { data: { free: u128, ... }, ... }
-            if let Some(data_field) = value.at("data") {
-                if let Some(free_balance) = data_field.at("free").and_then(|v| v.as_u128()) {
-                    debug!("Balance for {}: {} plancks", account_preview, free_balance);
-                    return Ok(free_balance);
-                }
-            }
-
-            // Fallback: try string parsing if structure parsing fails
-            let value_str = format!("{:?}", value);
-            debug!("Could not parse AccountInfo structure for {}, trying string fallback. Debug output: {}", account_preview, value_str);
-
-            if let Some(start) = value_str.find("free: ") {
-                let rest = &value_str[start + 6..];
-                if let Some(end) = rest
-                    .find(',')
-                    .or_else(|| rest.find(' ').or_else(|| rest.find('}')))
-                {
-                    let balance_str = &rest[..end];
-                    if let Ok(balance) = balance_str.trim().parse::<u128>() {
-                        debug!(
-                            "Balance for {} (via fallback): {} plancks",
-                            account_preview, balance
-                        );
-                        return Ok(balance);
-                    }
-                }
-            }
-
-            info!(
-                "Failed to parse balance for {}. AccountInfo structure: {:?}",
-                account_preview, value
+        let Some(account_info) = result else {
+            debug!(
+                "Account {} not found on chain, returning 0 balance",
+                account_preview
             );
+            return Ok(0);
+        };
+
+        let value = account_info
+            .to_value()
+            .context("Failed to decode account info")
+            .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
+
+        // Extract balance from AccountInfo structure: { data: { free: u128, ... }, ... }
+        if let Some(data_field) = value.at("data") {
+            if let Some(free_balance) = data_field.at("free").and_then(|v| v.as_u128()) {
+                debug!("Balance for {}: {} plancks", account_preview, free_balance);
+                return Ok(free_balance);
+            }
         }
 
-        Ok(0)
+        // Fallback: try string parsing if structure parsing fails
+        let value_str = format!("{:?}", value);
+        debug!(
+            "Could not parse AccountInfo structure for {}, trying string fallback",
+            account_preview
+        );
+
+        if let Some(start) = value_str.find("free: ") {
+            let rest = &value_str[start + 6..];
+            if let Some(end) = rest
+                .find(',')
+                .or_else(|| rest.find(' ').or_else(|| rest.find('}')))
+            {
+                let balance_str = &rest[..end];
+                if let Ok(balance) = balance_str.trim().parse::<u128>() {
+                    debug!(
+                        "Balance for {} (via fallback): {} plancks",
+                        account_preview, balance
+                    );
+                    return Ok(balance);
+                }
+            }
+        }
+
+        Err(PaymentsError::Blockchain(format!(
+            "Failed to parse balance for account {}. AccountInfo structure could not be decoded. \
+             This may indicate a chain metadata mismatch.",
+            account_preview
+        )))
     }
 
     pub async fn transfer(
@@ -164,18 +172,37 @@ impl BlockchainClient {
         let tx_hash = format!("0x{}", hex::encode(progress.extrinsic_hash()));
         info!("Transaction submitted: {}", tx_hash);
 
-        let events = progress
-            .wait_for_finalized_success()
+        // Wait for finalization first to get block info
+        let tx_in_block = progress
+            .wait_for_finalized()
             .await
             .context("Failed to wait for block finalization")
             .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
 
-        let block_hash = events.extrinsic_hash();
-        info!("Transaction finalized with hash: {:?}", block_hash);
+        let block_hash = format!("0x{}", hex::encode(tx_in_block.block_hash()));
+        let block_number = client
+            .blocks()
+            .at(tx_in_block.block_hash())
+            .await
+            .map(|b| b.number() as i64)
+            .ok();
+
+        // Verify transaction success by waiting for events
+        let _events = tx_in_block
+            .wait_for_success()
+            .await
+            .context("Transaction failed during finalization")
+            .map_err(|e| PaymentsError::Blockchain(e.to_string()))?;
+
+        info!(
+            "Transaction finalized: block_hash={}, block_number={:?}",
+            block_hash, block_number
+        );
 
         Ok(TransferReceipt {
             tx_hash,
-            block_hash: format!("0x{}", hex::encode(block_hash)),
+            block_hash,
+            block_number,
             status: TransferStatus::Finalized,
         })
     }
@@ -189,6 +216,7 @@ impl BlockchainClient {
 pub struct TransferReceipt {
     pub tx_hash: String,
     pub block_hash: String,
+    pub block_number: Option<i64>,
     pub status: TransferStatus,
 }
 

@@ -153,7 +153,7 @@ variable "requires_compatibilities" {
 variable "volumes" {
   description = "List of volumes to mount in the task"
   type = list(object({
-    name = string
+    name      = string
     host_path = optional(string)
     efs_volume_configuration = optional(object({
       file_system_id     = string
@@ -177,7 +177,7 @@ variable "mount_points" {
 variable "ulimits" {
   description = "List of ulimits to set in the container"
   type = list(object({
-    name      = string
+    name       = string
     soft_limit = number
     hard_limit = number
   }))

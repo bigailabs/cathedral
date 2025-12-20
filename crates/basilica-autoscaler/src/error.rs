@@ -76,6 +76,9 @@ pub enum AutoscalerError {
     #[error("Network validation failed: {0}")]
     NetworkValidation(String),
 
+    #[error("Connectivity check failed to {target}: {reason}")]
+    ConnectivityCheck { target: String, reason: String },
+
     #[error("API registration failed: {0}")]
     ApiRegistration(String),
 
@@ -88,8 +91,12 @@ pub enum AutoscalerError {
     #[error("Rental stop failed: {0}")]
     RentalStop(String),
 
-    #[error("GPU offering not found matching criteria")]
-    NoMatchingOffering,
+    #[error("No GPU offering found matching requirements: {gpu_count} GPUs, models: {models:?}, min_memory: {min_memory_gb:?}GB")]
+    NoMatchingOffering {
+        gpu_count: u32,
+        models: Vec<String>,
+        min_memory_gb: Option<u32>,
+    },
 
     #[error("IP exhaustion: no available IPs in range")]
     IpExhaustion,
@@ -115,6 +122,12 @@ pub enum AutoscalerError {
 
     #[error("Circuit breaker open: {0}")]
     CircuitBreakerOpen(String),
+
+    #[error("API timeout: {operation} exceeded {timeout_secs}s")]
+    ApiTimeout {
+        operation: String,
+        timeout_secs: u64,
+    },
 
     #[error("Kubernetes API error: {0}")]
     KubeApi(#[from] kube::Error),
@@ -144,6 +157,8 @@ impl AutoscalerError {
                 | Self::Http(_)
                 | Self::SecureCloudApi(_)
                 | Self::LeaderElection(_)
+                | Self::NoMatchingOffering { .. }
+                | Self::ApiTimeout { .. }
         )
     }
 
@@ -154,7 +169,6 @@ impl AutoscalerError {
             Self::InvalidConfiguration(_)
                 | Self::NodeAlreadyExists { .. }
                 | Self::ScaleDownNotAllowed { .. }
-                | Self::NoMatchingOffering
                 | Self::IpExhaustion
         )
     }

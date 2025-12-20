@@ -402,6 +402,7 @@ pub async fn handle_list_ssh_keys(client: &BasilicaClient) -> Result<(), CliErro
         Some(key) => {
             println!("{}", style("Registered SSH Key:").bold());
             println!();
+            println!("  ID:         {}", style(&key.id).cyan());
             println!("  Name:       {}", style(&key.name).cyan());
             println!(
                 "  Created:    {}",

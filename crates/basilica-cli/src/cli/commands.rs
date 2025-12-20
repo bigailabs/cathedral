@@ -733,4 +733,138 @@ pub enum DeployAction {
         #[arg(long)]
         replicas: u32,
     },
+
+    /// Deploy vLLM inference server
+    #[command(name = "vllm")]
+    Vllm {
+        /// HuggingFace model ID (default: Qwen/Qwen3-0.6B)
+        model: Option<String>,
+
+        #[command(flatten)]
+        common: TemplateCommonOptions,
+
+        #[command(flatten)]
+        vllm: VllmOptions,
+    },
+
+    /// Deploy SGLang inference server
+    #[command(name = "sglang")]
+    Sglang {
+        /// HuggingFace model ID (default: Qwen/Qwen2.5-0.5B-Instruct)
+        model: Option<String>,
+
+        #[command(flatten)]
+        common: TemplateCommonOptions,
+
+        #[command(flatten)]
+        sglang: SglangOptions,
+    },
+}
+
+/// Common options for deployment templates (vLLM, SGLang, etc.)
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct TemplateCommonOptions {
+    /// Deployment name (auto-generated if not specified)
+    #[arg(short, long)]
+    pub name: Option<String>,
+
+    /// Number of GPUs (auto-detected if not specified)
+    #[arg(long)]
+    pub gpu: Option<u32>,
+
+    /// GPU model requirements (e.g., "A100", "H100")
+    #[arg(long)]
+    pub gpu_model: Vec<String>,
+
+    /// Memory allocation (default: 16Gi)
+    #[arg(long, default_value = "16Gi")]
+    pub memory: String,
+
+    /// Disable persistent storage cache
+    #[arg(long)]
+    pub no_storage: bool,
+
+    /// Time-to-live in seconds
+    #[arg(long)]
+    pub ttl: Option<u32>,
+
+    /// Deployment timeout in seconds
+    #[arg(long, default_value = "600")]
+    pub timeout: u32,
+
+    /// Environment variables (KEY=VALUE)
+    #[arg(short, long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// Don't wait for deployment to be ready
+    #[arg(long)]
+    pub detach: bool,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// vLLM-specific deployment options
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct VllmOptions {
+    /// Tensor parallel size (number of GPUs for parallelism)
+    #[arg(long)]
+    pub tensor_parallel_size: Option<u32>,
+
+    /// Maximum model length (sequence length)
+    #[arg(long)]
+    pub max_model_len: Option<u32>,
+
+    /// Model dtype (auto, float16, bfloat16, float32)
+    #[arg(long)]
+    pub dtype: Option<String>,
+
+    /// Quantization method (awq, gptq, squeezellm, fp8)
+    #[arg(long)]
+    pub quantization: Option<String>,
+
+    /// OpenAI API model name
+    #[arg(long)]
+    pub served_model_name: Option<String>,
+
+    /// API key for authentication
+    #[arg(long)]
+    pub api_key: Option<String>,
+
+    /// GPU memory utilization (0.0-1.0)
+    #[arg(long)]
+    pub gpu_memory_utilization: Option<f32>,
+
+    /// Disable CUDA graphs (use eager mode)
+    #[arg(long)]
+    pub enforce_eager: bool,
+
+    /// Trust remote code from HuggingFace
+    #[arg(long)]
+    pub trust_remote_code: bool,
+}
+
+/// SGLang-specific deployment options
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct SglangOptions {
+    /// Tensor parallel size (number of GPUs for parallelism)
+    #[arg(long)]
+    pub tensor_parallel_size: Option<u32>,
+
+    /// Maximum context length
+    #[arg(long)]
+    pub context_length: Option<u32>,
+
+    /// Quantization method
+    #[arg(long)]
+    pub quantization: Option<String>,
+
+    /// Static memory fraction (0.0-1.0)
+    #[arg(long)]
+    pub mem_fraction_static: Option<f32>,
+
+    /// Trust remote code from HuggingFace
+    #[arg(long)]
+    pub trust_remote_code: bool,
 }

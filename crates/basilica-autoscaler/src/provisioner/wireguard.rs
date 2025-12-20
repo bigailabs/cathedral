@@ -86,18 +86,19 @@ pub fn generate_wg_config(
     private_key: &str,
     address: &str,
     listen_port: u16,
-    interface_name: &str,
+    _interface_name: &str,
     peers: &[WireGuardPeer],
 ) -> String {
+    // Generate config without PostUp/PostDown - iptables rules are handled
+    // once during install_wireguard() to avoid duplicate rules on restart
     let mut config = format!(
         r#"[Interface]
 PrivateKey = {}
 Address = {}/16
 ListenPort = {}
-PostUp = iptables -A FORWARD -i {} -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-PostDown = iptables -D FORWARD -i {} -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+MTU = 1420
 "#,
-        private_key, address, listen_port, interface_name, interface_name
+        private_key, address, listen_port
     );
 
     for peer in peers {
@@ -109,7 +110,9 @@ AllowedIPs = {}
 Endpoint = {}
 PersistentKeepalive = 25
 "#,
-            peer.public_key, peer.allowed_ips, peer.endpoint
+            peer.public_key,
+            peer.allowed_ips(),
+            peer.endpoint
         ));
     }
 
@@ -157,6 +160,7 @@ pub fn parse_wg_show_output(output: &str) -> Vec<WireGuardPeerStatus> {
 
 #[derive(Debug, Clone)]
 pub struct WireGuardPeerStatus {
+    #[allow(dead_code)] // Used in tests
     pub public_key: String,
     pub endpoint: Option<String>,
     pub latest_handshake: Option<String>,
@@ -175,16 +179,18 @@ mod tests {
             "wg0",
             &[WireGuardPeer {
                 public_key: "peer_pubkey".to_string(),
-                allowed_ips: "10.200.0.0/24".to_string(),
                 endpoint: "1.2.3.4:51820".to_string(),
-                wireguard_ip: None,
-                vpc_subnet: None,
+                wireguard_ip: "10.200.0.1".to_string(),
+                vpc_subnet: "10.200.0.0/24".to_string(),
+                route_pod_network: false,
             }],
         );
 
         assert!(config.contains("test_private_key"));
         assert!(config.contains("10.200.0.5/16"));
+        assert!(config.contains("MTU = 1420"));
         assert!(config.contains("peer_pubkey"));
+        assert!(config.contains("10.42.0.0/16")); // Pod network always routed
     }
 
     #[test]

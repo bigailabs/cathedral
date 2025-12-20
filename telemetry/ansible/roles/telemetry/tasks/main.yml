@@ -149,22 +149,21 @@
     group: root
     mode: 0755
 
-- name: Create cron job for daily disk cleanup
+- name: Create cron job for hourly disk cleanup check
   cron:
     name: "Basilica telemetry disk cleanup"
     minute: "0"
-    hour: "2"
-    job: "{{ basilica_telemetry_dir }}/scripts/disk_cleanup.sh"
+    hour: "*"
+    job: "{{ basilica_telemetry_dir }}/scripts/disk_cleanup.sh >> /var/log/basilica/disk_cleanup_cron.log 2>&1"
     user: root
     state: present
 
-- name: Create cron job for weekly Docker system prune
+- name: Create cron job for daily Docker system prune
   cron:
-    name: "Docker system prune weekly"
+    name: "Docker system prune daily"
     minute: "0"
     hour: "3"
-    weekday: "0"
-    job: "docker system prune -f --volumes --filter 'until=336h' >> /var/log/basilica/docker_prune.log 2>&1"
+    job: "docker system prune -f --filter 'until=24h' >> /var/log/basilica/docker_prune.log 2>&1"
     user: root
     state: present
 

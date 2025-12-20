@@ -16,6 +16,7 @@ use crate::crd::basilica_job::{
     Resources as JobResources,
 };
 use crate::k8s_client::K8sClient;
+use crate::labels::normalize_gpu_models;
 use crate::metrics as opmetrics;
 use crate::metrics_provider::{NoopRuntimeMetricsProvider, RuntimeMetricsProvider};
 use anyhow::Result;
@@ -110,7 +111,7 @@ fn build_node_affinity(gpu: &JobGpuSpec) -> Option<Affinity> {
         match_expressions.push(NodeSelectorRequirement {
             key: "basilica.ai/gpu-model".into(),
             operator: "In".into(),
-            values: Some(gpu.model.clone()),
+            values: Some(normalize_gpu_models(&gpu.model)),
         });
     }
 

@@ -9,6 +9,7 @@ use crate::progress::{complete_spinner_and_clear, create_spinner};
 
 mod create;
 mod helpers;
+pub mod templates;
 mod validation;
 
 /// Handle all deploy subcommands (matches existing handler pattern)
@@ -37,6 +38,16 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
         Some(DeployAction::Scale { name, replicas }) => {
             handle_scale(&client, &name, replicas).await
         }
+        Some(DeployAction::Vllm {
+            model,
+            common,
+            vllm,
+        }) => templates::handle_vllm_deploy(&client, model, common, vllm).await,
+        Some(DeployAction::Sglang {
+            model,
+            common,
+            sglang,
+        }) => templates::handle_sglang_deploy(&client, model, common, sglang).await,
         None => {
             if let Some(source) = cmd.source.clone() {
                 create::handle_create(&client, &source, cmd).await

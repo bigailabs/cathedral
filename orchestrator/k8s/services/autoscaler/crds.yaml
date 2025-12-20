@@ -219,6 +219,10 @@ spec:
                     required:
                     - name
                     type: object
+                  sshUser:
+                    default: ubuntu
+                    description: 'SSH username for connecting to provisioned VMs (default: ubuntu)'
+                    type: string
                 required:
                 - offeringId
                 - sshKeyId
@@ -271,7 +275,7 @@ spec:
                 type: object
               wireguard:
                 default:
-                  enabled: false
+                  enabled: true
                 description: WireGuard configuration
                 properties:
                   enabled:
@@ -377,6 +381,10 @@ spec:
                 format: date-time
                 nullable: true
                 type: string
+              labelsApplied:
+                default: false
+                description: Whether GPU labels have been applied to the K8s node. Used to track label application state and avoid race conditions.
+                type: boolean
               lastError:
                 description: Last error message
                 nullable: true
@@ -410,6 +418,10 @@ spec:
                 format: int64
                 nullable: true
                 type: integer
+              offeringId:
+                description: GPU offering ID (for dynamic mode)
+                nullable: true
+                type: string
               phase:
                 description: Current phase
                 enum:
@@ -467,6 +479,29 @@ spec:
                     description: WireGuard IP assigned by API
                     nullable: true
                     type: string
+                  peers:
+                    description: Peers from registration (used to configure WireGuard)
+                    items:
+                      description: WireGuard peer for status storage
+                      properties:
+                        endpoint:
+                          type: string
+                        publicKey:
+                          type: string
+                        routePodNetwork:
+                          default: false
+                          type: boolean
+                        vpcSubnet:
+                          type: string
+                        wireguardIp:
+                          type: string
+                      required:
+                      - endpoint
+                      - publicKey
+                      - vpcSubnet
+                      - wireguardIp
+                      type: object
+                    type: array
                   publicKey:
                     description: Node's WireGuard public key
                     nullable: true
@@ -525,6 +560,34 @@ spec:
                 default: true
                 description: Enable/disable autoscaling
                 type: boolean
+              imagePrepull:
+                description: Image pre-pull configuration for faster container starts
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Enable/disable image pre-pulling
+                    type: boolean
+                  images:
+                    default: []
+                    description: Images to pre-pull on warm pool nodes
+                    items:
+                      description: Image to pre-pull on warm pool nodes
+                      properties:
+                        name:
+                          description: Full image name with tag (e.g., "vllm/vllm-openai:latest")
+                          type: string
+                        sizeEstimateGb:
+                          default: 0
+                          description: Estimated image size in GB (used for capacity planning)
+                          format: uint32
+                          minimum: 0.0
+                          type: integer
+                      required:
+                      - name
+                      type: object
+                    type: array
+                type: object
               maxNodes:
                 default: 10
                 description: Maximum number of GPU nodes
@@ -650,27 +713,34 @@ spec:
                     description: Secure Cloud configuration
                     nullable: true
                     properties:
+                      datacenterId:
+                        description: Datacenter ID for node registration (typically user ID)
+                        type: string
                       gpuType:
-                        description: Preferred GPU type (e.g., RTX_4090, A100)
+                        description: Preferred GPU type (e.g., RTX_4090, A100) for dynamic selection
                         nullable: true
                         type: string
                       maxHourlyRate:
-                        description: Maximum acceptable hourly rate
+                        description: Maximum acceptable hourly rate for dynamic selection
                         format: double
                         nullable: true
                         type: number
                       minGpuCount:
                         default: 1
-                        description: Minimum GPUs per node
+                        description: Minimum GPUs per node for dynamic selection
                         format: uint32
                         minimum: 0.0
                         type: integer
+                      offeringId:
+                        description: GPU offering ID from Basilica API. If not specified, the autoscaler will dynamically select an offering based on pending pod GPU requirements.
+                        nullable: true
+                        type: string
                       preferredProvider:
-                        description: Preferred provider
+                        description: Preferred provider for dynamic selection
                         nullable: true
                         type: string
                       region:
-                        description: Preferred region
+                        description: Preferred region for dynamic selection
                         nullable: true
                         type: string
                       sshKeyId:
@@ -693,12 +763,47 @@ spec:
                         required:
                         - name
                         type: object
+                      sshUser:
+                        default: ubuntu
+                        description: 'SSH username for connecting to provisioned VMs (default: ubuntu)'
+                        type: string
                     required:
+                    - datacenterId
                     - sshKeyId
                     - sshKeySecretRef
                     type: object
                 required:
                 - k3s
+                type: object
+              offeringConstraints:
+                description: Constraints for dynamic offering selection
+                nullable: true
+                properties:
+                  allowModelFallback:
+                    default: false
+                    description: Allow fallback to any available offering when requested model not found When true, if exact model match fails, will select cheapest offering meeting GPU count and other constraints (ignoring model requirement)
+                    type: boolean
+                  fallbackOfferingId:
+                    description: Fallback offering ID if no dynamic match found
+                    nullable: true
+                    type: string
+                  maxHourlyRate:
+                    description: Maximum acceptable hourly rate
+                    format: double
+                    nullable: true
+                    type: number
+                  providers:
+                    default: []
+                    description: Preferred providers (empty = any)
+                    items:
+                      type: string
+                    type: array
+                  regions:
+                    description: Preferred regions (empty = any)
+                    items:
+                      type: string
+                    nullable: true
+                    type: array
                 type: object
               scaleDown:
                 default:
@@ -761,6 +866,50 @@ spec:
                   pendingPodThreshold:
                     default: 1
                     description: Number of pending GPU pods to trigger scale-up
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
+              warmPool:
+                description: Warm pool configuration for proactive capacity reservation
+                nullable: true
+                properties:
+                  enabled:
+                    default: false
+                    description: Enable/disable warm pool
+                    type: boolean
+                  maxIdleCostPerHour:
+                    default: 10.0
+                    description: Maximum hourly spend on idle nodes (USD)
+                    format: double
+                    type: number
+                  maxIdleNodes:
+                    default: 3
+                    description: Maximum idle nodes regardless of VRAM target
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  minIdleVramGb:
+                    default: 80
+                    description: 'Target idle VRAM capacity in GB. Example: 160 = 2x A100-80GB nodes or 2x H100-80GB nodes'
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  preferredGpuTypes:
+                    default: []
+                    description: Preferred GPU types for warm pool (in priority order)
+                    items:
+                      type: string
+                    type: array
+                  scaleDownThresholdPercent:
+                    default: 120
+                    description: 'Scale down when idle VRAM exceeds this percentage of target (default: 120)'
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  scaleUpThresholdPercent:
+                    default: 80
+                    description: 'Scale up when idle VRAM falls below this percentage of target (default: 80)'
                     format: uint32
                     minimum: 0.0
                     type: integer
@@ -878,6 +1027,70 @@ spec:
                 format: uint32
                 minimum: 0.0
                 type: integer
+              warmPool:
+                description: Warm pool status (VRAM accounting and capacity info)
+                nullable: true
+                properties:
+                  allocatedVramGb:
+                    default: 0
+                    description: Allocated VRAM (pods running on warm pool nodes) (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  estimatedHourlyCost:
+                    default: 0.0
+                    description: Estimated hourly cost of current warm pool (USD)
+                    format: double
+                    type: number
+                  idleNodeNames:
+                    default: []
+                    description: List of idle warm pool node names
+                    items:
+                      type: string
+                    type: array
+                  idleNodes:
+                    default: 0
+                    description: Current number of idle warm pool nodes
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  idleVramGb:
+                    default: 0
+                    description: Idle VRAM available for new workloads (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  scaleDownThresholdGb:
+                    default: 0
+                    description: Scale-down threshold (GB) - scale down when idle VRAM exceeds this
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  scaleUpThresholdGb:
+                    default: 0
+                    description: Scale-up threshold (GB) - scale up when idle VRAM falls below this
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  targetNodes:
+                    default: 0
+                    description: Target number of warm pool nodes
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  targetVramGb:
+                    default: 0
+                    description: Target VRAM from configuration (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  totalVramGb:
+                    default: 0
+                    description: Total VRAM across all warm pool nodes (GB)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                type: object
             type: object
         required:
         - spec

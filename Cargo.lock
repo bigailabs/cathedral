@@ -2419,7 +2419,6 @@ name = "basilica-autoscaler"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-ssh2-tokio",
  "async-trait",
  "axum 0.7.9",
  "base64 0.21.7",
@@ -2497,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "basilica-cli"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "axum 0.7.9",
  "base64 0.21.7",
@@ -2520,6 +2519,7 @@ dependencies = [
  "indicatif",
  "oauth2",
  "rand 0.8.5",
+ "regex",
  "reqwest 0.11.27",
  "rust_decimal",
  "self_update",
@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "basilica-sdk"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "base64 0.21.7",
  "basilica-aggregator",
@@ -2717,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "basilica-sdk-python"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "basilica-sdk",
  "basilica-validator",

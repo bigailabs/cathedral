@@ -59,9 +59,11 @@ spec:
         - name: NVIDIA_MIG_MONITOR_DEVICES
           value: "all"
         - name: DEVICE_LIST_STRATEGY
-          value: "envvar"
+          value: "volume-mounts"
         - name: DEVICE_ID_STRATEGY
           value: "uuid"
+        - name: PASS_DEVICE_SPECS
+          value: "true"
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -77,7 +79,13 @@ spec:
         volumeMounts:
         - name: device-plugin
           mountPath: /var/lib/kubelet/device-plugins
+        - name: nvidia-driver
+          mountPath: /dev/char
+          readOnly: true
       volumes:
       - name: device-plugin
         hostPath:
           path: /var/lib/kubelet/device-plugins
+      - name: nvidia-driver
+        hostPath:
+          path: /dev/char
