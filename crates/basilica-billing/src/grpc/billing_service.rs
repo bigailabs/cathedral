@@ -1168,21 +1168,25 @@ impl BillingService for BillingServiceImpl {
             filter.miner_hotkeys = Some(req.miner_hotkeys);
         }
 
-        if let Some(period_start) = req.period_start {
-            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                period_start.seconds,
-                period_start.nanos as u32,
-            )
-            .ok_or_else(|| Status::invalid_argument("Invalid period_start timestamp"))?;
+        if !req.period_start.is_empty() {
+            let period_start_date =
+                chrono::NaiveDate::parse_from_str(&req.period_start, "%Y-%m-%d").map_err(|_| {
+                    Status::invalid_argument("period_start must be in YYYY-MM-DD format")
+                })?;
+            let dt = period_start_date
+                .and_hms_opt(0, 0, 0)
+                .expect("valid time")
+                .and_utc();
             filter.period_start = Some(dt);
         }
 
-        if let Some(period_end) = req.period_end {
-            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
-                period_end.seconds,
-                period_end.nanos as u32,
-            )
-            .ok_or_else(|| Status::invalid_argument("Invalid period_end timestamp"))?;
+        if !req.period_end.is_empty() {
+            let period_end_date = chrono::NaiveDate::parse_from_str(&req.period_end, "%Y-%m-%d")
+                .map_err(|_| Status::invalid_argument("period_end must be in YYYY-MM-DD format"))?;
+            let dt = period_end_date
+                .and_hms_micro_opt(23, 59, 59, 999_999)
+                .expect("valid time")
+                .and_utc();
             filter.period_end = Some(dt);
         }
 

@@ -446,12 +446,12 @@ pub struct GetMinerRevenueSummaryRequest {
     /// Filter by specific validator IDs
     #[prost(string, repeated, tag = "2")]
     pub validator_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// Filter by period start
-    #[prost(message, optional, tag = "3")]
-    pub period_start: ::core::option::Option<::prost_types::Timestamp>,
-    /// Filter by period end
-    #[prost(message, optional, tag = "4")]
-    pub period_end: ::core::option::Option<::prost_types::Timestamp>,
+    /// Filter by period start (YYYY-MM-DD format)
+    #[prost(string, tag = "3")]
+    pub period_start: ::prost::alloc::string::String,
+    /// Filter by period end (YYYY-MM-DD format)
+    #[prost(string, tag = "4")]
+    pub period_end: ::prost::alloc::string::String,
     /// Get snapshot from specific computation time
     #[prost(message, optional, tag = "5")]
     pub computed_at: ::core::option::Option<::prost_types::Timestamp>,
@@ -511,7 +511,7 @@ pub struct MinerRevenueSummary {
     pub completed_rentals: u32,
     #[prost(uint32, tag = "8")]
     pub failed_rentals: u32,
-    /// Decimal string (TAO)
+    /// Decimal string (USD)
     #[prost(string, tag = "9")]
     pub total_revenue: ::prost::alloc::string::String,
     /// Decimal string

@@ -294,8 +294,8 @@ message GetMinerRevenueSummaryRequest {
     // Filter criteria (all optional)
     repeated string node_ids = 1; // Filter by specific node IDs
     repeated string validator_ids = 2; // Filter by specific validator IDs
-    google.protobuf.Timestamp period_start = 3; // Filter by period start
-    google.protobuf.Timestamp period_end = 4; // Filter by period end
+    string period_start = 3; // Filter by period start (YYYY-MM-DD format)
+    string period_end = 4;   // Filter by period end (YYYY-MM-DD format)
     google.protobuf.Timestamp computed_at = 5; // Get snapshot from specific computation time
     bool latest_only = 6; // Only return most recent computation for each (node, validator, period)
 
