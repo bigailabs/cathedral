@@ -422,10 +422,8 @@ where
                         ip
                     }
                     Some(_) => {
-                        debug!(pool = %name, "IP not yet available, will retry");
-                        return Err(AutoscalerError::SecureCloudApi(
-                            "IP address not yet available, waiting for VM to be ready".to_string(),
-                        ));
+                        debug!(pool = %name, "IP not yet available, will retry on next reconcile");
+                        return Ok(());
                     }
                     None => {
                         return Err(AutoscalerError::SecureCloudApi(format!(
@@ -461,15 +459,15 @@ where
                 .update_node_pool_status(ns, &name, status.clone())
                 .await?;
 
-            // If IP is not yet available, return error to retry in Provisioning phase
-            // Cloud providers (Hyperstack) assign floating IPs asynchronously
+            // If IP is not yet available, return Ok to allow cache to update before retry.
+            // CRITICAL: Do NOT return Err here - error backoff retries within milliseconds,
+            // before the K8s cache updates with rental_id, causing duplicate rentals.
+            // Returning Ok uses success_interval (~10s) which gives cache time to sync.
             match rental.ip_address {
                 Some(ip) => ip,
                 None => {
-                    info!(pool = %name, "Rental created but IP not yet available, will retry");
-                    return Err(AutoscalerError::SecureCloudApi(
-                        "IP address not yet available, waiting for VM to be ready".to_string(),
-                    ));
+                    info!(pool = %name, "Rental created but IP not yet available, will retry on next reconcile");
+                    return Ok(());
                 }
             }
         };
@@ -729,7 +727,7 @@ where
         let k3s_token = self.get_k3s_token(ns, pool).await?;
 
         // Install K3s agent
-        let k8s_node_name = self
+        let join_result = self
             .provisioner
             .install_k3s_agent(
                 &host,
@@ -741,7 +739,9 @@ where
             )
             .await?;
 
-        status.node_name = Some(k8s_node_name);
+        status.node_name = Some(join_result.node_name);
+        status.cuda_version = join_result.cuda_version;
+        status.driver_version = join_result.driver_version;
         status.joined_at = Some(Utc::now());
 
         self.transition_phase(ns, &name, status, NodePoolPhase::WaitingForNode)
@@ -1200,11 +1200,26 @@ where
         mut status: NodePoolStatus,
         new_phase: NodePoolPhase,
     ) -> Result<()> {
-        info!(pool = %name, from = ?status.phase, to = ?new_phase, "Phase transition");
+        let now = Utc::now();
+        let old_phase = status.phase.clone();
+
+        // Calculate duration in previous phase if we have phase_entered_at
+        let duration_ms = status
+            .phase_entered_at
+            .map(|entered| now.signed_duration_since(entered).num_milliseconds())
+            .unwrap_or(0);
+
+        info!(
+            pool = %name,
+            phase_from = ?old_phase,
+            phase_to = ?new_phase,
+            duration_ms = duration_ms,
+            "NodePool phase transition"
+        );
         self.metrics.record_phase_transition(name, &new_phase);
 
         status.phase = Some(new_phase);
-        status.phase_entered_at = Some(Utc::now());
+        status.phase_entered_at = Some(now);
         status.last_error = None;
 
         self.k8s.update_node_pool_status(ns, name, status).await
@@ -1217,12 +1232,27 @@ where
         mut status: NodePoolStatus,
         message: &str,
     ) -> Result<()> {
-        error!(pool = %name, message = %message, "Transitioning to Failed");
+        let now = Utc::now();
+        let old_phase = status.phase.clone();
+
+        let duration_ms = status
+            .phase_entered_at
+            .map(|entered| now.signed_duration_since(entered).num_milliseconds())
+            .unwrap_or(0);
+
+        error!(
+            pool = %name,
+            phase_from = ?old_phase,
+            phase_to = ?NodePoolPhase::Failed,
+            duration_ms = duration_ms,
+            error = %message,
+            "NodePool phase transition to Failed"
+        );
         self.metrics
             .record_phase_transition(name, &NodePoolPhase::Failed);
 
         status.phase = Some(NodePoolPhase::Failed);
-        status.phase_entered_at = Some(Utc::now());
+        status.phase_entered_at = Some(now);
         status.last_error = Some(message.to_string());
 
         add_condition(&mut status, "Failed", "True", "PhaseFailed", message);
