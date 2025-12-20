@@ -32,8 +32,10 @@ static PARAM_REGEX: LazyLock<Regex> =
 pub fn estimate_gpu_requirements(model: &str) -> GpuRequirements {
     let model_lower = model.to_lowercase();
 
-    // Extract parameter count from model name
-    let memory_gb = if let Some(params) = extract_param_count(&model_lower) {
+    // Check for known MoE/flagship models first (param extraction doesn't work for these)
+    let memory_gb = if let Some(mem) = check_known_moe_models(&model_lower) {
+        mem
+    } else if let Some(params) = extract_param_count(&model_lower) {
         estimate_memory_from_params(params)
     } else {
         estimate_from_model_family(&model_lower)
@@ -47,6 +49,32 @@ pub fn estimate_gpu_requirements(model: &str) -> GpuRequirements {
         memory_gb,
         recommended_gpu,
     }
+}
+
+/// Check for known MoE and flagship models with specific requirements
+/// Returns memory requirement if model is recognized, None otherwise
+fn check_known_moe_models(model: &str) -> Option<u32> {
+    // DeepSeek-V3.1: 671B MoE, requires 8x H100 (640GB)
+    if model.contains("deepseek-v3") {
+        return Some(640);
+    }
+
+    // Qwen3-235B-A22B (Qwen3-Max): 235B total / 22B active MoE, requires 4x H100 (320GB)
+    if model.contains("qwen3-235b") || model.contains("qwen3-max") {
+        return Some(320);
+    }
+
+    // MiniMax-M2: 230B total / 10B active MoE, requires 4x H100 (320GB)
+    if model.contains("minimax-m2") {
+        return Some(320);
+    }
+
+    // Kimi-K2-Thinking: 1T total / 32B active MoE, requires 2x H100 (160GB)
+    if model.contains("kimi-k2") {
+        return Some(160);
+    }
+
+    None
 }
 
 /// Extract billion parameter count from model name
@@ -181,5 +209,32 @@ mod tests {
         assert_eq!(recommend_gpu(32), "A100");
         assert_eq!(recommend_gpu(64), "A100");
         assert_eq!(recommend_gpu(160), "H100");
+    }
+
+    #[test]
+    fn test_moe_flagship_models() {
+        // DeepSeek-V3.1: 8x H100 (640GB)
+        let reqs = estimate_gpu_requirements("deepseek-ai/DeepSeek-V3.1");
+        assert_eq!(reqs.memory_gb, 640);
+        assert_eq!(reqs.gpu_count, 8);
+        assert_eq!(reqs.recommended_gpu, "H100");
+
+        // Qwen3-235B-A22B (Qwen3-Max): 4x H100 (320GB)
+        let reqs = estimate_gpu_requirements("Qwen/Qwen3-235B-A22B-Instruct-2507");
+        assert_eq!(reqs.memory_gb, 320);
+        assert_eq!(reqs.gpu_count, 8);
+        assert_eq!(reqs.recommended_gpu, "H100");
+
+        // MiniMax-M2: 4x H100 (320GB)
+        let reqs = estimate_gpu_requirements("MiniMaxAI/MiniMax-M2");
+        assert_eq!(reqs.memory_gb, 320);
+        assert_eq!(reqs.gpu_count, 8);
+        assert_eq!(reqs.recommended_gpu, "H100");
+
+        // Kimi-K2-Thinking: 2x H100 (160GB)
+        let reqs = estimate_gpu_requirements("moonshotai/Kimi-K2-Thinking");
+        assert_eq!(reqs.memory_gb, 160);
+        assert_eq!(reqs.gpu_count, 4);
+        assert_eq!(reqs.recommended_gpu, "H100");
     }
 }
