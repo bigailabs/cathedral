@@ -22,6 +22,17 @@ pub struct SshConnectionConfig {
     pub private_key: String,
 }
 
+/// Result from K3s agent installation containing node info and GPU versions
+#[derive(Clone, Debug)]
+pub struct K3sJoinResult {
+    /// Kubernetes node name (hostname)
+    pub node_name: String,
+    /// CUDA version detected on the node (e.g., "12.4")
+    pub cuda_version: Option<String>,
+    /// NVIDIA driver version detected on the node (e.g., "550.54.14")
+    pub driver_version: Option<String>,
+}
+
 /// Trait for node provisioning operations
 #[async_trait]
 pub trait NodeProvisioner: Send + Sync {
@@ -80,7 +91,7 @@ pub trait NodeProvisioner: Send + Sync {
         k3s_config: &K3sConfig,
         token: &str,
         node_id: &str,
-    ) -> Result<String>; // Returns k8s node name
+    ) -> Result<K3sJoinResult>;
 
     /// Execute lifecycle script (preJoinScript or postJoinScript)
     async fn execute_lifecycle_script(
@@ -855,7 +866,7 @@ sudo sysctl --system > /dev/null 2>&1 || true
         k3s_config: &K3sConfig,
         token: &str,
         node_id: &str,
-    ) -> Result<String> {
+    ) -> Result<K3sJoinResult> {
         info!(host = %host, "Installing K3s agent");
 
         // Get hostname for node registration
@@ -979,7 +990,24 @@ sudo sysctl --system > /dev/null 2>&1 || true
         self.validate_mtu_settings(host, port, ssh_config).await?;
 
         info!(host = %host, node_name = %hostname, "K3s agent installed and verified");
-        Ok(hostname)
+
+        // Return node info with detected versions
+        let cuda = if cuda_version == "unknown" {
+            None
+        } else {
+            Some(cuda_version)
+        };
+        let driver = if driver_version == "unknown" {
+            None
+        } else {
+            Some(driver_version)
+        };
+
+        Ok(K3sJoinResult {
+            node_name: hostname,
+            cuda_version: cuda,
+            driver_version: driver,
+        })
     }
 
     async fn execute_lifecycle_script(
