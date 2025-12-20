@@ -198,9 +198,12 @@ impl BillingServiceImpl {
         date_str: &str,
         field_name: &str,
         start_of_day: bool,
-    ) -> Result<chrono::DateTime<chrono::Utc>, Status> {
+    ) -> Result<chrono::DateTime<chrono::Utc>, Box<Status>> {
         let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
-            Status::invalid_argument(format!("{} must be in YYYY-MM-DD format", field_name))
+            Box::new(Status::invalid_argument(format!(
+                "{} must be in YYYY-MM-DD format",
+                field_name
+            )))
         })?;
 
         let dt = if start_of_day {
@@ -1235,19 +1238,15 @@ impl BillingService for BillingServiceImpl {
         }
 
         if !req.period_start.is_empty() {
-            filter.period_start = Some(Self::parse_period_date(
-                &req.period_start,
-                "period_start",
-                true,
-            )?);
+            filter.period_start = Some(
+                Self::parse_period_date(&req.period_start, "period_start", true).map_err(|e| *e)?,
+            );
         }
 
         if !req.period_end.is_empty() {
-            filter.period_end = Some(Self::parse_period_date(
-                &req.period_end,
-                "period_end",
-                false,
-            )?);
+            filter.period_end = Some(
+                Self::parse_period_date(&req.period_end, "period_end", false).map_err(|e| *e)?,
+            );
         }
 
         if let Some(computed_at) = req.computed_at {
@@ -1315,19 +1314,15 @@ impl BillingService for BillingServiceImpl {
 
         // Parse date strings (YYYY-MM-DD format)
         if !req.period_start.is_empty() {
-            filter.period_start = Some(Self::parse_period_date(
-                &req.period_start,
-                "period_start",
-                true,
-            )?);
+            filter.period_start = Some(
+                Self::parse_period_date(&req.period_start, "period_start", true).map_err(|e| *e)?,
+            );
         }
 
         if !req.period_end.is_empty() {
-            filter.period_end = Some(Self::parse_period_date(
-                &req.period_end,
-                "period_end",
-                false,
-            )?);
+            filter.period_end = Some(
+                Self::parse_period_date(&req.period_end, "period_end", false).map_err(|e| *e)?,
+            );
         }
 
         // Validate period_start is not after period_end when both are provided
