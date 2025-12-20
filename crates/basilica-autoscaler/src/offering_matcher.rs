@@ -1536,7 +1536,10 @@ mod tests {
         use std::collections::BTreeMap;
 
         let mut requests = BTreeMap::new();
-        requests.insert("nvidia.com/gpu".to_string(), Quantity(gpu_count.to_string()));
+        requests.insert(
+            "nvidia.com/gpu".to_string(),
+            Quantity(gpu_count.to_string()),
+        );
 
         let match_expressions = vec![NodeSelectorRequirement {
             key: "basilica.ai/gpu-model".to_string(),

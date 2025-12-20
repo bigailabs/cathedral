@@ -784,9 +784,7 @@ where
             return Ok(false);
         }
 
-        let count = idle_nodes
-            .len()
-            .min(spec.scale_down.decrement as usize) as u32;
+        let count = idle_nodes.len().min(spec.scale_down.decrement as usize) as u32;
 
         info!(
             policy = %policy_name,

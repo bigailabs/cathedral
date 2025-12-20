@@ -24,11 +24,17 @@ pub const WARM_POOL_LABEL: &str = "basilica.ai/warm-pool";
 #[kube(printcolumn = r#"{"name":"GPU", "type":"string", "jsonPath":".status.gpuModel"}"#)]
 #[kube(printcolumn = r#"{"name":"GPUs", "type":"integer", "jsonPath":".status.gpuCount"}"#)]
 #[kube(printcolumn = r#"{"name":"VRAM", "type":"integer", "jsonPath":".status.gpuMemoryGb"}"#)]
-#[kube(printcolumn = r#"{"name":"Warm", "type":"string", "jsonPath":".metadata.labels.basilica\\.ai/warm-pool"}"#)]
+#[kube(
+    printcolumn = r#"{"name":"Warm", "type":"string", "jsonPath":".metadata.labels.basilica\\.ai/warm-pool"}"#
+)]
 #[kube(printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#)]
 #[kube(printcolumn = r#"{"name":"Mode", "type":"string", "jsonPath":".spec.mode", "priority":1}"#)]
-#[kube(printcolumn = r#"{"name":"Provider", "type":"string", "jsonPath":".status.provider", "priority":1}"#)]
-#[kube(printcolumn = r#"{"name":"CUDA", "type":"string", "jsonPath":".status.cudaVersion", "priority":1}"#)]
+#[kube(
+    printcolumn = r#"{"name":"Provider", "type":"string", "jsonPath":".status.provider", "priority":1}"#
+)]
+#[kube(
+    printcolumn = r#"{"name":"CUDA", "type":"string", "jsonPath":".status.cudaVersion", "priority":1}"#
+)]
 #[serde(rename_all = "camelCase")]
 pub struct NodePoolSpec {
     /// Provisioning mode: Manual or Dynamic
