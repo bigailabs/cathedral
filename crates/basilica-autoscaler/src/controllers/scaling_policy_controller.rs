@@ -11,7 +11,7 @@ use crate::config::PendingPodFilterConfig;
 use crate::crd::{
     HealthCheckConfig, MetricsSnapshot, NodePool, NodePoolMode, NodePoolPhase, NodePoolSpec,
     ScalingPolicy, ScalingPolicyCondition, ScalingPolicySpec, ScalingPolicyStatus,
-    SecureCloudConfig, WarmPoolConfig, WireGuardConfig,
+    SecureCloudConfig, WarmPoolConfig, WireGuardConfig, WARM_POOL_LABEL,
 };
 use crate::error::{AutoscalerError, Result};
 use crate::metrics::AutoscalerMetrics;
@@ -117,26 +117,19 @@ where
         let current_nodes = node_pools.len() as u32;
         status.current_nodes = current_nodes;
 
-        // Protect against stuck pending_scale_up: count NodePools in provisioning phases
+        // Protect against stuck pending_scale_up: count NodePools in provisioning phases.
+        // IMPORTANT: NodePools without status (newly created) are counted as provisioning
+        // to prevent race conditions where scale-up happens before NodePoolController
+        // has a chance to set the initial phase.
         let provisioning_count = node_pools
             .iter()
             .filter(|p| {
                 p.status
                     .as_ref()
                     .and_then(|s| s.phase.as_ref())
-                    .map(|phase| {
-                        matches!(
-                            phase,
-                            NodePoolPhase::Pending
-                                | NodePoolPhase::Provisioning
-                                | NodePoolPhase::Configuring
-                                | NodePoolPhase::InstallingWireGuard
-                                | NodePoolPhase::ValidatingNetwork
-                                | NodePoolPhase::JoiningCluster
-                                | NodePoolPhase::WaitingForNode
-                        )
-                    })
-                    .unwrap_or(false)
+                    .map(|phase| phase.is_provisioning())
+                    // NodePool has no status yet - treat as provisioning (newly created)
+                    .unwrap_or(true)
             })
             .count() as u32;
 
@@ -176,6 +169,12 @@ where
                             provisioning_count
                         ),
                     );
+
+                    // Even when scale-up is blocked, evaluate idle-time scale-down
+                    // for non-warm-pool nodes to prevent cost waste from idle nodes
+                    self.try_idle_scale_down(ns, &name, &policy.spec, &node_pools, &mut status)
+                        .await?;
+
                     self.k8s
                         .update_scaling_policy_status(ns, &name, status)
                         .await?;
@@ -275,6 +274,9 @@ where
                     }
                 } else {
                     debug!(policy = %name, "Scale up blocked by cooldown");
+                    // Even when scale-up is blocked by cooldown, evaluate idle-time scale-down
+                    self.try_idle_scale_down(ns, &name, &policy.spec, &node_pools, &mut status)
+                        .await?;
                 }
             }
             ScalingDecision::ScaleDown(count) => {
@@ -363,61 +365,11 @@ where
                 }
 
                 // Evaluate idle-time-based scale-down for non-warm-pool nodes
-                if self.can_scale_down(&status, &policy.spec.scale_down) {
-                    let pods_by_node = self.collect_pods_by_node(&node_pools).await;
-                    let idle_nodes = Self::find_idle_nodes_for_scale_down(
-                        &node_pools,
-                        &pods_by_node,
-                        policy.spec.scale_down.idle_timeout_seconds,
-                    );
+                let scaled_down = self
+                    .try_idle_scale_down(ns, &name, &policy.spec, &node_pools, &mut status)
+                    .await?;
 
-                    if !idle_nodes.is_empty() {
-                        let count = idle_nodes
-                            .len()
-                            .min(policy.spec.scale_down.decrement as usize)
-                            as u32;
-                        info!(
-                            policy = %name,
-                            idle_nodes = ?idle_nodes,
-                            count = count,
-                            "Idle-time scale-down triggered"
-                        );
-
-                        // Get non-warm-pool node pools for scale-down
-                        let non_warm_pools: Vec<_> = node_pools
-                            .iter()
-                            .filter(|p| {
-                                !p.metadata
-                                    .labels
-                                    .as_ref()
-                                    .and_then(|l| l.get("basilica.ai/warm-pool"))
-                                    .map(|v| v == "true")
-                                    .unwrap_or(false)
-                            })
-                            .cloned()
-                            .collect();
-
-                        self.scale_down(ns, &non_warm_pools, count).await?;
-                        status.last_scale_down_time = Some(Utc::now());
-                        add_condition(
-                            &mut status,
-                            "Scaling",
-                            "True",
-                            "IdleScaleDown",
-                            &format!("Scaling down {} idle node(s)", count),
-                        );
-                        self.metrics
-                            .record_scale_event(&name, "idle_scale_down", count);
-                    } else {
-                        add_condition(
-                            &mut status,
-                            "Scaling",
-                            "False",
-                            "Stable",
-                            "Cluster is operating within desired parameters",
-                        );
-                    }
-                } else {
+                if !scaled_down {
                     add_condition(
                         &mut status,
                         "Scaling",
@@ -509,6 +461,33 @@ where
                     "Warm pool scale-up triggered"
                 );
 
+                // Use optimistic locking to prevent race conditions between concurrent reconciles.
+                // Without this, multiple reconciles can see the same state and all decide to scale up.
+                let resource_version = policy
+                    .metadata
+                    .resource_version
+                    .as_deref()
+                    .unwrap_or_default();
+
+                let acquired = self
+                    .k8s
+                    .try_increment_pending_scale_up(
+                        ns,
+                        policy_name,
+                        resource_version,
+                        status.pending_scale_up,
+                        count,
+                    )
+                    .await?;
+
+                if !acquired {
+                    debug!(
+                        policy = %policy_name,
+                        "Warm pool scale-up conflict, another reconcile is handling it"
+                    );
+                    return Ok(());
+                }
+
                 // Select offering for warm pool
                 let offering = Self::select_warm_pool_offering(&available_offerings, config)
                     .ok_or_else(|| {
@@ -527,6 +506,9 @@ where
                     true, // is_warm_pool = true
                 )
                 .await?;
+
+                // Update pending_scale_up in status (already incremented atomically above)
+                status.pending_scale_up = status.pending_scale_up.saturating_add(count);
 
                 add_condition(
                     status,
@@ -552,22 +534,11 @@ where
                 // Select warm pool nodes for removal (prefer idle warm pool nodes)
                 let warm_nodes: Vec<_> = node_pools
                     .iter()
-                    .filter(|p| {
-                        p.metadata
-                            .labels
-                            .as_ref()
-                            .and_then(|l| l.get("basilica.ai/warm-pool"))
-                            .map(|v| v == "true")
-                            .unwrap_or(false)
-                    })
+                    .filter(|p| p.is_warm_pool())
+                    .cloned()
                     .collect();
 
-                self.scale_down(
-                    ns,
-                    &warm_nodes.iter().map(|p| (*p).clone()).collect::<Vec<_>>(),
-                    count,
-                )
-                .await?;
+                self.scale_down(ns, &warm_nodes, count).await?;
 
                 add_condition(
                     status,
@@ -786,6 +757,63 @@ where
             }
         }
         true
+    }
+
+    /// Evaluate and apply idle-time-based scale-down for non-warm-pool nodes.
+    /// Returns true if scale-down was performed, false otherwise.
+    async fn try_idle_scale_down(
+        &self,
+        ns: &str,
+        policy_name: &str,
+        spec: &ScalingPolicySpec,
+        node_pools: &[NodePool],
+        status: &mut ScalingPolicyStatus,
+    ) -> Result<bool> {
+        if !self.can_scale_down(status, &spec.scale_down) {
+            return Ok(false);
+        }
+
+        let pods_by_node = self.collect_pods_by_node(node_pools).await;
+        let idle_nodes = Self::find_idle_nodes_for_scale_down(
+            node_pools,
+            &pods_by_node,
+            spec.scale_down.idle_timeout_seconds,
+        );
+
+        if idle_nodes.is_empty() {
+            return Ok(false);
+        }
+
+        let count = idle_nodes
+            .len()
+            .min(spec.scale_down.decrement as usize) as u32;
+
+        info!(
+            policy = %policy_name,
+            idle_nodes = ?idle_nodes,
+            count = count,
+            "Idle-time scale-down triggered"
+        );
+
+        let non_warm_pools: Vec<_> = node_pools
+            .iter()
+            .filter(|p| !p.is_warm_pool())
+            .cloned()
+            .collect();
+
+        self.scale_down(ns, &non_warm_pools, count).await?;
+        status.last_scale_down_time = Some(Utc::now());
+        add_condition(
+            status,
+            "Scaling",
+            "True",
+            "IdleScaleDown",
+            &format!("Scaling down {} idle node(s)", count),
+        );
+        self.metrics
+            .record_scale_event(policy_name, "idle_scale_down", count);
+
+        Ok(true)
     }
 
     async fn get_managed_node_pools(&self, ns: &str, policy_name: &str) -> Result<Vec<NodePool>> {
@@ -1305,14 +1333,6 @@ where
         node_pools
             .iter()
             .filter(|p| {
-                let is_warm = p
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get("basilica.ai/warm-pool"))
-                    .map(|v| v == "true")
-                    .unwrap_or(false);
-
                 let is_ready = p
                     .status
                     .as_ref()
@@ -1320,7 +1340,7 @@ where
                     .map(|phase| *phase == NodePoolPhase::Ready)
                     .unwrap_or(false);
 
-                is_warm && is_ready
+                p.is_warm_pool() && is_ready
             })
             .count() as u32
     }
@@ -1346,15 +1366,7 @@ where
                 }
 
                 // Skip warm pool nodes (they have their own scale-down logic)
-                let is_warm_pool = pool
-                    .metadata
-                    .labels
-                    .as_ref()
-                    .and_then(|l| l.get("basilica.ai/warm-pool"))
-                    .map(|v| v == "true")
-                    .unwrap_or(false);
-
-                if is_warm_pool {
+                if pool.is_warm_pool() {
                     return None;
                 }
 
@@ -1365,29 +1377,14 @@ where
                     return None;
                 }
 
-                // Check if node has any GPU pods
+                // Check if node has any active GPU pods
                 let node_name = status.node_name.as_ref()?;
-                let has_gpu_pods = pods_by_node
+                let has_active_gpu_pods = pods_by_node
                     .get(node_name)
-                    .map(|pods| {
-                        pods.iter().any(|pod| {
-                            pod.spec
-                                .as_ref()
-                                .map(|spec| {
-                                    spec.containers.iter().any(|c| {
-                                        c.resources
-                                            .as_ref()
-                                            .and_then(|r| r.requests.as_ref())
-                                            .and_then(|req| req.get("nvidia.com/gpu"))
-                                            .is_some()
-                                    })
-                                })
-                                .unwrap_or(false)
-                        })
-                    })
+                    .map(|pods| pods.iter().any(Self::is_active_gpu_pod))
                     .unwrap_or(false);
 
-                if has_gpu_pods {
+                if has_active_gpu_pods {
                     return None;
                 }
 
@@ -1396,34 +1393,73 @@ where
             .collect()
     }
 
+    /// Check if a pod is an active GPU workload that should prevent node scale-down.
+    /// A pod is considered active if:
+    /// 1. It's in Pending or Running phase (not Succeeded/Failed), AND
+    /// 2. It requests GPU resources in containers or init_containers
+    fn is_active_gpu_pod(pod: &Pod) -> bool {
+        // Check pod phase - only Pending/Running pods are active
+        let phase = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .unwrap_or("Unknown");
+
+        // Pods in terminal states (Succeeded, Failed) are not active
+        if phase == "Succeeded" || phase == "Failed" {
+            return false;
+        }
+
+        // Check if pod requests GPU in any container or init container
+        let spec = match pod.spec.as_ref() {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let has_gpu_in_containers = spec.containers.iter().any(|c| {
+            c.resources
+                .as_ref()
+                .and_then(|r| r.requests.as_ref())
+                .and_then(|req| req.get("nvidia.com/gpu"))
+                .is_some()
+        });
+
+        if has_gpu_in_containers {
+            return true;
+        }
+
+        // Also check init containers
+        let has_gpu_in_init = spec
+            .init_containers
+            .as_ref()
+            .map(|init_containers| {
+                init_containers.iter().any(|c| {
+                    c.resources
+                        .as_ref()
+                        .and_then(|r| r.requests.as_ref())
+                        .and_then(|req| req.get("nvidia.com/gpu"))
+                        .is_some()
+                })
+            })
+            .unwrap_or(false);
+
+        has_gpu_in_init
+    }
+
     /// Count pending warm pool nodes (Provisioning, Configuring, etc.).
     /// These are nodes that have been created but are not yet Ready.
     fn count_pending_warm_pool_nodes(node_pools: &[NodePool]) -> u32 {
         node_pools
             .iter()
             .filter(|p| {
-                let is_warm = p
-                    .metadata
-                    .labels
+                let is_provisioning = p
+                    .status
                     .as_ref()
-                    .and_then(|l| l.get("basilica.ai/warm-pool"))
-                    .map(|v| v == "true")
+                    .and_then(|s| s.phase.as_ref())
+                    .map(|phase| phase.is_provisioning())
                     .unwrap_or(false);
 
-                let phase = p.status.as_ref().and_then(|s| s.phase.as_ref());
-
-                let is_pending = matches!(
-                    phase,
-                    Some(NodePoolPhase::Pending)
-                        | Some(NodePoolPhase::Provisioning)
-                        | Some(NodePoolPhase::Configuring)
-                        | Some(NodePoolPhase::InstallingWireGuard)
-                        | Some(NodePoolPhase::ValidatingNetwork)
-                        | Some(NodePoolPhase::JoiningCluster)
-                        | Some(NodePoolPhase::WaitingForNode)
-                );
-
-                is_warm && is_pending
+                p.is_warm_pool() && is_provisioning
             })
             .count() as u32
     }
@@ -1480,7 +1516,7 @@ where
             "autoscaler".to_string(),
         );
         if is_warm_pool {
-            labels.insert("basilica.ai/warm-pool".to_string(), "true".to_string());
+            labels.insert(WARM_POOL_LABEL.to_string(), "true".to_string());
         }
 
         // Build SecureCloudConfig from template with the specific offering_id
@@ -1590,11 +1626,129 @@ fn add_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k8s_openapi::api::core::v1::{Container, PodSpec, PodStatus, ResourceRequirements};
+    use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+    use kube::api::ObjectMeta;
+    use std::collections::BTreeMap;
 
     #[test]
     fn scaling_decision_equality() {
         assert_eq!(ScalingDecision::NoAction, ScalingDecision::NoAction);
         assert_eq!(ScalingDecision::ScaleUp(1), ScalingDecision::ScaleUp(1));
         assert_ne!(ScalingDecision::ScaleUp(1), ScalingDecision::ScaleDown(1));
+    }
+
+    fn make_pod(phase: &str, has_gpu: bool) -> Pod {
+        let mut requests = BTreeMap::new();
+        if has_gpu {
+            requests.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+        }
+
+        Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some(phase.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn make_pod_with_init_gpu(phase: &str) -> Pod {
+        let mut requests = BTreeMap::new();
+        requests.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+
+        Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    ..Default::default()
+                }],
+                init_containers: Some(vec![Container {
+                    name: "init".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some(phase.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn is_active_gpu_pod_running_with_gpu() {
+        let pod = make_pod("Running", true);
+        assert!(ScalingPolicyController::<
+            crate::controllers::k8s_client::KubeClient,
+            crate::api::SecureCloudClient,
+            crate::offering_matcher::OfferingMatcher,
+        >::is_active_gpu_pod(&pod));
+    }
+
+    #[test]
+    fn is_active_gpu_pod_pending_with_gpu() {
+        let pod = make_pod("Pending", true);
+        assert!(ScalingPolicyController::<
+            crate::controllers::k8s_client::KubeClient,
+            crate::api::SecureCloudClient,
+            crate::offering_matcher::OfferingMatcher,
+        >::is_active_gpu_pod(&pod));
+    }
+
+    #[test]
+    fn is_active_gpu_pod_succeeded_with_gpu_is_inactive() {
+        let pod = make_pod("Succeeded", true);
+        assert!(!ScalingPolicyController::<
+            crate::controllers::k8s_client::KubeClient,
+            crate::api::SecureCloudClient,
+            crate::offering_matcher::OfferingMatcher,
+        >::is_active_gpu_pod(&pod));
+    }
+
+    #[test]
+    fn is_active_gpu_pod_failed_with_gpu_is_inactive() {
+        let pod = make_pod("Failed", true);
+        assert!(!ScalingPolicyController::<
+            crate::controllers::k8s_client::KubeClient,
+            crate::api::SecureCloudClient,
+            crate::offering_matcher::OfferingMatcher,
+        >::is_active_gpu_pod(&pod));
+    }
+
+    #[test]
+    fn is_active_gpu_pod_running_no_gpu_is_inactive() {
+        let pod = make_pod("Running", false);
+        assert!(!ScalingPolicyController::<
+            crate::controllers::k8s_client::KubeClient,
+            crate::api::SecureCloudClient,
+            crate::offering_matcher::OfferingMatcher,
+        >::is_active_gpu_pod(&pod));
+    }
+
+    #[test]
+    fn is_active_gpu_pod_init_container_with_gpu() {
+        let pod = make_pod_with_init_gpu("Running");
+        assert!(ScalingPolicyController::<
+            crate::controllers::k8s_client::KubeClient,
+            crate::api::SecureCloudClient,
+            crate::offering_matcher::OfferingMatcher,
+        >::is_active_gpu_pod(&pod));
     }
 }
