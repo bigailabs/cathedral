@@ -13,18 +13,42 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.mode
-      name: Mode
-      type: string
     - jsonPath: .status.phase
       name: Phase
       type: string
     - jsonPath: .status.nodeName
       name: Node
       type: string
+    - jsonPath: .status.externalIp
+      name: External-IP
+      type: string
+    - jsonPath: .status.gpuModel
+      name: GPU
+      type: string
+    - jsonPath: .status.gpuCount
+      name: GPUs
+      type: integer
+    - jsonPath: .status.gpuMemoryGb
+      name: VRAM
+      type: integer
+    - jsonPath: .metadata.labels.basilica\.ai/warm-pool
+      name: Warm
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .spec.mode
+      name: Mode
+      priority: 1
+      type: string
+    - jsonPath: .status.provider
+      name: Provider
+      priority: 1
+      type: string
+    - jsonPath: .status.cudaVersion
+      name: CUDA
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:

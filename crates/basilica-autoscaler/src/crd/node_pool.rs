@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 /// Finalizer for NodePool cleanup
 pub const FINALIZER: &str = "autoscaler.basilica.ai/node-cleanup";
 
+/// Label key for warm pool nodes
+pub const WARM_POOL_LABEL: &str = "basilica.ai/warm-pool";
+
 /// NodePool represents a single GPU node in the cluster
 #[derive(CustomResource, Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -15,10 +18,17 @@ pub const FINALIZER: &str = "autoscaler.basilica.ai/node-cleanup";
     namespaced
 )]
 #[kube(status = "NodePoolStatus")]
-#[kube(printcolumn = r#"{"name":"Mode", "type":"string", "jsonPath":".spec.mode"}"#)]
 #[kube(printcolumn = r#"{"name":"Phase", "type":"string", "jsonPath":".status.phase"}"#)]
 #[kube(printcolumn = r#"{"name":"Node", "type":"string", "jsonPath":".status.nodeName"}"#)]
+#[kube(printcolumn = r#"{"name":"External-IP", "type":"string", "jsonPath":".status.externalIp"}"#)]
+#[kube(printcolumn = r#"{"name":"GPU", "type":"string", "jsonPath":".status.gpuModel"}"#)]
+#[kube(printcolumn = r#"{"name":"GPUs", "type":"integer", "jsonPath":".status.gpuCount"}"#)]
+#[kube(printcolumn = r#"{"name":"VRAM", "type":"integer", "jsonPath":".status.gpuMemoryGb"}"#)]
+#[kube(printcolumn = r#"{"name":"Warm", "type":"string", "jsonPath":".metadata.labels.basilica\\.ai/warm-pool"}"#)]
 #[kube(printcolumn = r#"{"name":"Age", "type":"date", "jsonPath":".metadata.creationTimestamp"}"#)]
+#[kube(printcolumn = r#"{"name":"Mode", "type":"string", "jsonPath":".spec.mode", "priority":1}"#)]
+#[kube(printcolumn = r#"{"name":"Provider", "type":"string", "jsonPath":".status.provider", "priority":1}"#)]
+#[kube(printcolumn = r#"{"name":"CUDA", "type":"string", "jsonPath":".status.cudaVersion", "priority":1}"#)]
 #[serde(rename_all = "camelCase")]
 pub struct NodePoolSpec {
     /// Provisioning mode: Manual or Dynamic
@@ -62,6 +72,18 @@ pub struct NodePoolSpec {
     /// If true and node already exists, adopt it instead of failing
     #[serde(default)]
     pub adopt_existing: bool,
+}
+
+impl NodePool {
+    /// Returns true if this NodePool is marked as part of the warm pool.
+    pub fn is_warm_pool(&self) -> bool {
+        self.metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(WARM_POOL_LABEL))
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    }
 }
 
 /// Provisioning mode for NodePool
@@ -315,6 +337,23 @@ pub enum NodePoolPhase {
     Terminating,
     Failed,
     Deleted,
+}
+
+impl NodePoolPhase {
+    /// Returns true if this phase represents an in-progress provisioning state.
+    /// Used to count NodePools that are being set up and prevent duplicate scale-ups.
+    pub fn is_provisioning(&self) -> bool {
+        matches!(
+            self,
+            Self::Pending
+                | Self::Provisioning
+                | Self::Configuring
+                | Self::InstallingWireGuard
+                | Self::ValidatingNetwork
+                | Self::JoiningCluster
+                | Self::WaitingForNode
+        )
+    }
 }
 
 impl std::fmt::Display for NodePoolPhase {
