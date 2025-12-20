@@ -134,7 +134,7 @@ impl CsvDataSource {
     /// Expected columns (0-indexed):
     /// 0: vip_machine_id, 1: assigned_user, 2: active, 3: ssh_host, 4: ssh_port,
     /// 5: ssh_user, 6: gpu_type, 7: gpu_count, 8: region, 9: hourly_rate,
-    /// 10: vcpu_count (optional), 11: system_memory_gb (optional), 12: notes (optional)
+    /// 10: vcpu_count, 11: system_memory_gb, 12: notes (optional)
     fn parse_record(
         row_num: usize,
         record: &csv::StringRecord,
