@@ -123,6 +123,50 @@ impl BillingServiceImpl {
         Self::format_decimal(b.as_decimal())
     }
 
+    fn domain_summary_to_proto(
+        s: crate::storage::MinerRevenueSummary,
+    ) -> basilica_protocol::billing::MinerRevenueSummary {
+        basilica_protocol::billing::MinerRevenueSummary {
+            id: s.id.to_string(),
+            node_id: s.node_id,
+            validator_id: s.validator_id.unwrap_or_default(),
+            miner_uid: s.miner_uid.unwrap_or(0) as u32,
+            miner_hotkey: s.miner_hotkey,
+            period_start: Some(prost_types::Timestamp {
+                seconds: s.period_start.timestamp(),
+                nanos: s.period_start.timestamp_subsec_nanos() as i32,
+            }),
+            period_end: Some(prost_types::Timestamp {
+                seconds: s.period_end.timestamp(),
+                nanos: s.period_end.timestamp_subsec_nanos() as i32,
+            }),
+            total_rentals: s.total_rentals as u32,
+            completed_rentals: s.completed_rentals as u32,
+            failed_rentals: s.failed_rentals as u32,
+            total_revenue: Self::format_decimal(s.total_revenue),
+            total_hours: Self::format_decimal(s.total_hours),
+            avg_hourly_rate: s
+                .avg_hourly_rate
+                .map(Self::format_decimal)
+                .unwrap_or_default(),
+            avg_rental_duration_hours: s
+                .avg_rental_duration_hours
+                .map(Self::format_decimal)
+                .unwrap_or_default(),
+            computed_at: Some(prost_types::Timestamp {
+                seconds: s.computed_at.timestamp(),
+                nanos: s.computed_at.timestamp_subsec_nanos() as i32,
+            }),
+            computation_version: s.computation_version as u32,
+            created_at: Some(prost_types::Timestamp {
+                seconds: s.created_at.timestamp(),
+                nanos: s.created_at.timestamp_subsec_nanos() as i32,
+            }),
+            paid: s.paid,
+            tx_hash: s.tx_hash.unwrap_or_default(),
+        }
+    }
+
     fn rental_status_to_domain(status: RentalStatus) -> RentalState {
         match status {
             RentalStatus::Pending => RentalState::Pending,
@@ -145,6 +189,28 @@ impl BillingServiceImpl {
             RentalState::Failed => RentalStatus::Failed,
             RentalState::FailedInsufficientCredits => RentalStatus::FailedInsufficientCredits,
         }
+    }
+
+    /// Parse a date string in YYYY-MM-DD format into a UTC DateTime.
+    /// If `start_of_day` is true, returns 00:00:00.000000 UTC.
+    /// If `start_of_day` is false, returns 23:59:59.999999 UTC.
+    fn parse_period_date(
+        date_str: &str,
+        field_name: &str,
+        start_of_day: bool,
+    ) -> Result<chrono::DateTime<chrono::Utc>, Status> {
+        let date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|_| {
+            Status::invalid_argument(format!("{} must be in YYYY-MM-DD format", field_name))
+        })?;
+
+        let dt = if start_of_day {
+            date.and_hms_opt(0, 0, 0).expect("valid time")
+        } else {
+            date.and_hms_micro_opt(23, 59, 59, 999_999)
+                .expect("valid time")
+        };
+
+        Ok(dt.and_utc())
     }
 
     /// Convert a unified Rental to ActiveRental proto message
@@ -1169,25 +1235,19 @@ impl BillingService for BillingServiceImpl {
         }
 
         if !req.period_start.is_empty() {
-            let period_start_date =
-                chrono::NaiveDate::parse_from_str(&req.period_start, "%Y-%m-%d").map_err(|_| {
-                    Status::invalid_argument("period_start must be in YYYY-MM-DD format")
-                })?;
-            let dt = period_start_date
-                .and_hms_opt(0, 0, 0)
-                .expect("valid time")
-                .and_utc();
-            filter.period_start = Some(dt);
+            filter.period_start = Some(Self::parse_period_date(
+                &req.period_start,
+                "period_start",
+                true,
+            )?);
         }
 
         if !req.period_end.is_empty() {
-            let period_end_date = chrono::NaiveDate::parse_from_str(&req.period_end, "%Y-%m-%d")
-                .map_err(|_| Status::invalid_argument("period_end must be in YYYY-MM-DD format"))?;
-            let dt = period_end_date
-                .and_hms_micro_opt(23, 59, 59, 999_999)
-                .expect("valid time")
-                .and_utc();
-            filter.period_end = Some(dt);
+            filter.period_end = Some(Self::parse_period_date(
+                &req.period_end,
+                "period_end",
+                false,
+            )?);
         }
 
         if let Some(computed_at) = req.computed_at {
@@ -1227,45 +1287,7 @@ impl BillingService for BillingServiceImpl {
         // Convert to protocol format
         let proto_summaries: Vec<basilica_protocol::billing::MinerRevenueSummary> = summaries
             .into_iter()
-            .map(|s| basilica_protocol::billing::MinerRevenueSummary {
-                id: s.id.to_string(),
-                node_id: s.node_id,
-                validator_id: s.validator_id.unwrap_or_default(),
-                miner_uid: s.miner_uid.unwrap_or(0) as u32,
-                miner_hotkey: s.miner_hotkey,
-                period_start: Some(prost_types::Timestamp {
-                    seconds: s.period_start.timestamp(),
-                    nanos: s.period_start.timestamp_subsec_nanos() as i32,
-                }),
-                period_end: Some(prost_types::Timestamp {
-                    seconds: s.period_end.timestamp(),
-                    nanos: s.period_end.timestamp_subsec_nanos() as i32,
-                }),
-                total_rentals: s.total_rentals as u32,
-                completed_rentals: s.completed_rentals as u32,
-                failed_rentals: s.failed_rentals as u32,
-                total_revenue: Self::format_decimal(s.total_revenue),
-                total_hours: Self::format_decimal(s.total_hours),
-                avg_hourly_rate: s
-                    .avg_hourly_rate
-                    .map(Self::format_decimal)
-                    .unwrap_or_default(),
-                avg_rental_duration_hours: s
-                    .avg_rental_duration_hours
-                    .map(Self::format_decimal)
-                    .unwrap_or_default(),
-                computed_at: Some(prost_types::Timestamp {
-                    seconds: s.computed_at.timestamp(),
-                    nanos: s.computed_at.timestamp_subsec_nanos() as i32,
-                }),
-                computation_version: s.computation_version as u32,
-                created_at: Some(prost_types::Timestamp {
-                    seconds: s.created_at.timestamp(),
-                    nanos: s.created_at.timestamp_subsec_nanos() as i32,
-                }),
-                paid: s.paid,
-                tx_hash: s.tx_hash.unwrap_or_default(),
-            })
+            .map(Self::domain_summary_to_proto)
             .collect();
 
         info!(
@@ -1293,27 +1315,28 @@ impl BillingService for BillingServiceImpl {
 
         // Parse date strings (YYYY-MM-DD format)
         if !req.period_start.is_empty() {
-            let period_start_date =
-                chrono::NaiveDate::parse_from_str(&req.period_start, "%Y-%m-%d").map_err(|_| {
-                    Status::invalid_argument("period_start must be in YYYY-MM-DD format")
-                })?;
-            filter.period_start = Some(
-                period_start_date
-                    .and_hms_opt(0, 0, 0)
-                    .expect("valid time")
-                    .and_utc(),
-            );
+            filter.period_start = Some(Self::parse_period_date(
+                &req.period_start,
+                "period_start",
+                true,
+            )?);
         }
 
         if !req.period_end.is_empty() {
-            let period_end_date = chrono::NaiveDate::parse_from_str(&req.period_end, "%Y-%m-%d")
-                .map_err(|_| Status::invalid_argument("period_end must be in YYYY-MM-DD format"))?;
-            filter.period_end = Some(
-                period_end_date
-                    .and_hms_micro_opt(23, 59, 59, 999_999)
-                    .expect("valid time")
-                    .and_utc(),
-            );
+            filter.period_end = Some(Self::parse_period_date(
+                &req.period_end,
+                "period_end",
+                false,
+            )?);
+        }
+
+        // Validate period_start is not after period_end when both are provided
+        if let (Some(start), Some(end)) = (filter.period_start, filter.period_end) {
+            if start > end {
+                return Err(Status::invalid_argument(
+                    "period_start must be before or equal to period_end",
+                ));
+            }
         }
 
         // Apply pagination
@@ -1345,45 +1368,7 @@ impl BillingService for BillingServiceImpl {
         // Convert to protocol format
         let proto_summaries: Vec<basilica_protocol::billing::MinerRevenueSummary> = summaries
             .into_iter()
-            .map(|s| basilica_protocol::billing::MinerRevenueSummary {
-                id: s.id.to_string(),
-                node_id: s.node_id,
-                validator_id: s.validator_id.unwrap_or_default(),
-                miner_uid: s.miner_uid.unwrap_or(0) as u32,
-                miner_hotkey: s.miner_hotkey,
-                period_start: Some(prost_types::Timestamp {
-                    seconds: s.period_start.timestamp(),
-                    nanos: s.period_start.timestamp_subsec_nanos() as i32,
-                }),
-                period_end: Some(prost_types::Timestamp {
-                    seconds: s.period_end.timestamp(),
-                    nanos: s.period_end.timestamp_subsec_nanos() as i32,
-                }),
-                total_rentals: s.total_rentals as u32,
-                completed_rentals: s.completed_rentals as u32,
-                failed_rentals: s.failed_rentals as u32,
-                total_revenue: Self::format_decimal(s.total_revenue),
-                total_hours: Self::format_decimal(s.total_hours),
-                avg_hourly_rate: s
-                    .avg_hourly_rate
-                    .map(Self::format_decimal)
-                    .unwrap_or_default(),
-                avg_rental_duration_hours: s
-                    .avg_rental_duration_hours
-                    .map(Self::format_decimal)
-                    .unwrap_or_default(),
-                computed_at: Some(prost_types::Timestamp {
-                    seconds: s.computed_at.timestamp(),
-                    nanos: s.computed_at.timestamp_subsec_nanos() as i32,
-                }),
-                computation_version: s.computation_version as u32,
-                created_at: Some(prost_types::Timestamp {
-                    seconds: s.created_at.timestamp(),
-                    nanos: s.created_at.timestamp_subsec_nanos() as i32,
-                }),
-                paid: s.paid,
-                tx_hash: s.tx_hash.unwrap_or_default(),
-            })
+            .map(Self::domain_summary_to_proto)
             .collect();
 
         info!(
