@@ -1422,7 +1422,7 @@ where
         // Count pending pods that have at least one matching idle node
         pending_pods
             .iter()
-            .filter_map(|pod| extract_gpu_requirements(pod))
+            .filter_map(extract_gpu_requirements)
             .filter(|pending| {
                 idle_pools
                     .iter()
