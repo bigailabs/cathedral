@@ -163,11 +163,16 @@ impl VipCache {
                         .get("notes")
                         .and_then(|v| v.as_str())
                         .map(String::from);
+                    let hourly_rate = raw_json
+                        .get("hourly_rate")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Decimal>().ok())
+                        .unwrap_or(Decimal::ZERO);
                     VipDisplayInfo {
                         gpu_type,
                         gpu_count,
                         region: row.location_code.clone().unwrap_or_default(),
-                        hourly_rate: Decimal::ZERO, // Not stored in DB, will be fetched from CSV
+                        hourly_rate,
                         vcpu_count,
                         system_memory_gb,
                         notes,

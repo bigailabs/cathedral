@@ -1,16 +1,18 @@
 use crate::config::VipConfig;
+use crate::models::format_vip_machine_id;
 use crate::vip::{
     cache::VipCache,
     csv::{DataSourceError, VipDataSource},
     rental_ops::{
-        close_vip_rental, get_vip_rental_by_machine_id, insert_vip_rental, prepare_vip_rental,
-        update_vip_rental_metadata, PreparedVipRental, VipRentalError,
+        apply_markup, close_vip_rental, delete_vip_rental, insert_vip_rental, prepare_vip_rental,
+        PreparedVipRental, VipRentalError,
     },
     types::{ValidVipMachine, VipConnectionInfo, VipCsvRow, VipDisplayInfo, VipRentalRecord},
 };
 use basilica_billing::BillingClient;
 use chrono::Utc;
-use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -22,6 +24,8 @@ pub enum PollerError {
     DataSource(#[from] DataSourceError),
     #[error("Rental error: {0}")]
     Rental(#[from] VipRentalError),
+    #[error("Billing error: {0}")]
+    Billing(String),
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 }
@@ -33,9 +37,35 @@ pub struct PollStats {
     pub active_rows: usize,
     pub skipped_inactive: usize,
     pub skipped_invalid: usize,
+    pub skipped_conflict: usize,
     pub created: usize,
     pub updated: usize,
     pub removed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessOutcome {
+    Seen,
+    Ignored,
+}
+
+#[derive(sqlx::FromRow)]
+struct VipSnapshotRow {
+    id: String,
+    user_id: String,
+    ip_address: Option<String>,
+    connection_info: Option<serde_json::Value>,
+    raw_response: Option<serde_json::Value>,
+    instance_type: Option<String>,
+    location_code: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct VipRentalSnapshot {
+    rental_id: String,
+    assigned_user: String,
+    connection: VipConnectionInfo,
+    display: VipDisplayInfo,
 }
 
 /// VIP Poller that syncs rentals from a data source (CSV file, S3, or mock)
@@ -107,7 +137,6 @@ impl<D: VipDataSource> VipPoller<D> {
 
             // Validate required fields
             if let Some(validated) = self.validate_row(&row) {
-                seen_ids.insert(validated.vip_machine_id.clone());
                 valid_machines.push(validated);
                 stats.active_rows += 1;
             } else {
@@ -117,12 +146,20 @@ impl<D: VipDataSource> VipPoller<D> {
 
         // 3. Process valid machines
         for machine in &valid_machines {
-            if let Err(e) = self.process_machine(machine, &mut stats).await {
-                tracing::error!(
-                    vip_machine_id = %machine.vip_machine_id,
-                    error = %e,
-                    "Failed to process VIP machine"
-                );
+            match self.process_machine(machine, &mut stats).await {
+                Ok(ProcessOutcome::Seen) => {
+                    seen_ids.insert(machine.vip_machine_id.clone());
+                }
+                Ok(ProcessOutcome::Ignored) => {}
+                Err(e) => {
+                    tracing::error!(
+                        vip_machine_id = %machine.vip_machine_id,
+                        error = %e,
+                        "Failed to process VIP machine"
+                    );
+                    // Be conservative: treat as seen to avoid stale removal on transient errors
+                    seen_ids.insert(machine.vip_machine_id.clone());
+                }
             }
         }
 
@@ -150,6 +187,7 @@ impl<D: VipDataSource> VipPoller<D> {
             active_rows = stats.active_rows,
             skipped_inactive = stats.skipped_inactive,
             skipped_invalid = stats.skipped_invalid,
+            skipped_conflict = stats.skipped_conflict,
             created = stats.created,
             updated = stats.updated,
             removed = stats.removed,
@@ -175,7 +213,6 @@ impl<D: VipDataSource> VipPoller<D> {
             tracing::warn!(vip_machine_id = %row.vip_machine_id, "Invalid row: missing ssh_host");
             return None;
         }
-
         Some(ValidVipMachine {
             vip_machine_id: row.vip_machine_id.clone(),
             assigned_user: row.assigned_user.clone(),
@@ -196,155 +233,376 @@ impl<D: VipDataSource> VipPoller<D> {
         })
     }
 
+    fn expected_marked_up_rate(&self, machine: &ValidVipMachine) -> Result<Decimal, PollerError> {
+        Ok(apply_markup(
+            machine.display.hourly_rate,
+            self.markup_percent,
+        )?)
+    }
+
+    fn immutable_matches(
+        &self,
+        assigned_user: &str,
+        connection: &VipConnectionInfo,
+        display: &VipDisplayInfo,
+        machine: &ValidVipMachine,
+        expected_marked_up: Decimal,
+    ) -> bool {
+        if assigned_user != machine.assigned_user {
+            return false;
+        }
+        if connection.ssh_host != machine.connection.ssh_host
+            || connection.ssh_port != machine.connection.ssh_port
+            || connection.ssh_user != machine.connection.ssh_user
+        {
+            return false;
+        }
+        if display.gpu_type != machine.display.gpu_type
+            || display.gpu_count != machine.display.gpu_count
+            || display.region != machine.display.region
+            || display.vcpu_count != machine.display.vcpu_count
+            || display.system_memory_gb != machine.display.system_memory_gb
+            || display.notes != machine.display.notes
+        {
+            return false;
+        }
+        if display.hourly_rate != Decimal::ZERO && display.hourly_rate != expected_marked_up {
+            return false;
+        }
+        true
+    }
+
+    fn parse_decimal(value: &serde_json::Value) -> Option<Decimal> {
+        value
+            .as_str()
+            .and_then(|s| s.parse::<Decimal>().ok())
+            .or_else(|| value.as_f64().and_then(Decimal::from_f64))
+            .or_else(|| value.as_i64().and_then(|v| Decimal::from_i64(v)))
+            .or_else(|| value.as_u64().and_then(|v| Decimal::from_u64(v)))
+    }
+
+    fn snapshot_from_row(&self, row: VipSnapshotRow) -> VipRentalSnapshot {
+        let connection = if let Some(conn_json) = &row.connection_info {
+            let ssh_host = conn_json
+                .get("ssh_host")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&row.ip_address.clone().unwrap_or_default())
+                .to_string();
+            let ssh_port = conn_json
+                .get("ssh_port")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(22) as u16;
+            let ssh_user = conn_json
+                .get("ssh_user")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ubuntu")
+                .to_string();
+            VipConnectionInfo {
+                ssh_host,
+                ssh_port,
+                ssh_user,
+            }
+        } else {
+            VipConnectionInfo {
+                ssh_host: row.ip_address.clone().unwrap_or_default(),
+                ssh_port: 22,
+                ssh_user: "ubuntu".to_string(),
+            }
+        };
+
+        let display = if let Some(raw_json) = &row.raw_response {
+            let gpu_type = raw_json
+                .get("gpu_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&row.instance_type.clone().unwrap_or_default())
+                .to_string();
+            let gpu_count = raw_json
+                .get("gpu_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1) as u32;
+            let vcpu_count = raw_json
+                .get("vcpu_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let system_memory_gb = raw_json
+                .get("system_memory_gb")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let notes = raw_json
+                .get("notes")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let hourly_rate = raw_json
+                .get("hourly_rate")
+                .and_then(Self::parse_decimal)
+                .unwrap_or(Decimal::ZERO);
+
+            VipDisplayInfo {
+                gpu_type,
+                gpu_count,
+                region: row.location_code.clone().unwrap_or_default(),
+                hourly_rate,
+                vcpu_count,
+                system_memory_gb,
+                notes,
+            }
+        } else {
+            VipDisplayInfo {
+                gpu_type: row.instance_type.clone().unwrap_or_default(),
+                gpu_count: 1,
+                region: row.location_code.clone().unwrap_or_default(),
+                hourly_rate: Decimal::ZERO,
+                vcpu_count: 0,
+                system_memory_gb: 0,
+                notes: None,
+            }
+        };
+
+        VipRentalSnapshot {
+            rental_id: row.id,
+            assigned_user: row.user_id,
+            connection,
+            display,
+        }
+    }
+
+    async fn fetch_active_snapshot(
+        &self,
+        vip_machine_id: &str,
+    ) -> Result<Option<VipRentalSnapshot>, PollerError> {
+        let prefixed_machine_id = format_vip_machine_id(vip_machine_id);
+        let row: Option<VipSnapshotRow> = sqlx::query_as(
+            r#"
+            SELECT id, user_id, ip_address, connection_info, raw_response, instance_type, location_code
+            FROM secure_cloud_rentals
+            WHERE provider_instance_id = $1 AND is_vip = TRUE AND status != 'stopped'
+            LIMIT 1
+            "#,
+        )
+        .bind(&prefixed_machine_id)
+        .fetch_optional(&self.db)
+        .await?;
+
+        Ok(row.map(|r| self.snapshot_from_row(r)))
+    }
+
+    async fn fetch_terminated_snapshot(
+        &self,
+        vip_machine_id: &str,
+    ) -> Result<Option<VipRentalSnapshot>, PollerError> {
+        let prefixed_machine_id = format_vip_machine_id(vip_machine_id);
+        let row: Option<VipSnapshotRow> = sqlx::query_as(
+            r#"
+            SELECT id, user_id, ip_address, connection_info, raw_response, instance_type, location_code
+            FROM terminated_secure_cloud_rentals
+            WHERE provider_instance_id = $1
+            ORDER BY stopped_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(&prefixed_machine_id)
+        .fetch_optional(&self.db)
+        .await?;
+
+        Ok(row.map(|r| self.snapshot_from_row(r)))
+    }
+
     /// Process a single valid VIP machine
     async fn process_machine(
         &self,
         machine: &ValidVipMachine,
         stats: &mut PollStats,
-    ) -> Result<(), PollerError> {
-        // Check if we have it in cache
+    ) -> Result<ProcessOutcome, PollerError> {
+        let expected_marked_up = self.expected_marked_up_rate(machine)?;
+
+        // 1) Check cache first
         if let Some(cached) = self.cache.get(&machine.vip_machine_id).await {
-            // Existing rental - check for changes
-            if cached.assigned_user != machine.assigned_user {
-                // User reassignment not supported - log and skip
-                tracing::warn!(
+            if !self.immutable_matches(
+                &cached.assigned_user,
+                &cached.connection,
+                &cached.display,
+                machine,
+                expected_marked_up,
+            ) {
+                stats.skipped_conflict += 1;
+                tracing::error!(
                     vip_machine_id = %machine.vip_machine_id,
-                    old_user = %cached.assigned_user,
-                    new_user = %machine.assigned_user,
-                    "User reassignment detected - skipping (not supported)"
+                    "Immutable VIP row changed - treating as removal"
                 );
-                return Ok(());
-            }
 
-            // Check if metadata changed
-            let metadata_changed = self.metadata_differs(&cached, machine);
-            if metadata_changed {
-                // Update metadata in DB
-                update_vip_rental_metadata(
-                    &self.db,
-                    &cached.secure_cloud_rental_id,
-                    &machine.vip_machine_id,
-                    &machine.connection,
-                    &machine.display,
-                )
-                .await?;
-
-                // Update cache
-                let updated_record = VipRentalRecord {
-                    vip_machine_id: machine.vip_machine_id.clone(),
-                    assigned_user: machine.assigned_user.clone(),
-                    secure_cloud_rental_id: cached.secure_cloud_rental_id.clone(),
-                    connection: machine.connection.clone(),
-                    display: machine.display.clone(),
-                    last_seen_at: Utc::now(),
-                };
-                self.cache.insert(updated_record).await;
-
-                stats.updated += 1;
-                tracing::info!(
-                    vip_machine_id = %machine.vip_machine_id,
-                    "Updated VIP rental metadata"
-                );
-            }
-        } else {
-            // New machine - check if rental already exists in DB (restart recovery)
-            let existing = get_vip_rental_by_machine_id(&self.db, &machine.vip_machine_id).await?;
-
-            if let Some((rental_id, user_id)) = existing {
-                // Rental exists in DB but not in cache - re-link
-                if user_id != machine.assigned_user {
-                    tracing::warn!(
+                if let Err(e) = self
+                    .finalize_and_close(&cached.secure_cloud_rental_id, &machine.vip_machine_id)
+                    .await
+                {
+                    tracing::error!(
                         vip_machine_id = %machine.vip_machine_id,
-                        db_user = %user_id,
-                        csv_user = %machine.assigned_user,
-                        "User mismatch between DB and CSV - keeping DB user"
+                        error = %e,
+                        "Failed to remove conflicting VIP rental"
                     );
+                    return Ok(ProcessOutcome::Ignored);
                 }
 
-                let record = VipRentalRecord {
-                    vip_machine_id: machine.vip_machine_id.clone(),
-                    assigned_user: user_id,
-                    secure_cloud_rental_id: rental_id,
-                    connection: machine.connection.clone(),
-                    display: machine.display.clone(),
-                    last_seen_at: Utc::now(),
-                };
-                self.cache.insert(record).await;
+                stats.removed += 1;
+                return Ok(ProcessOutcome::Ignored);
+            }
 
-                tracing::info!(
+            // Normalize cached hourly rate to marked-up value
+            if cached.display.hourly_rate != expected_marked_up {
+                let mut updated = cached.clone();
+                updated.display.hourly_rate = expected_marked_up;
+                updated.last_seen_at = Utc::now();
+                self.cache.insert(updated).await;
+            }
+
+            return Ok(ProcessOutcome::Seen);
+        }
+
+        // 2) Check DB for active rental (cache miss / restart recovery)
+        if let Some(active) = self.fetch_active_snapshot(&machine.vip_machine_id).await? {
+            if !self.immutable_matches(
+                &active.assigned_user,
+                &active.connection,
+                &active.display,
+                machine,
+                expected_marked_up,
+            ) {
+                stats.skipped_conflict += 1;
+                tracing::error!(
                     vip_machine_id = %machine.vip_machine_id,
-                    "Re-linked existing VIP rental to cache"
+                    "Immutable VIP row changed for existing rental - treating as removal"
                 );
-            } else {
-                // Create new rental
-                let prepared = prepare_vip_rental(machine, self.markup_percent)?;
 
-                // Register with billing service FIRST (before DB insert)
-                if self.billing_client.is_some() {
-                    if let Err(e) = self.register_with_billing(&prepared).await {
-                        tracing::error!(
-                            vip_machine_id = %machine.vip_machine_id,
-                            error = %e,
-                            "Failed to register VIP rental with billing - skipping"
-                        );
-                        return Ok(()); // Skip this machine, retry next poll
-                    }
+                if let Err(e) = self
+                    .finalize_and_close(&active.rental_id, &machine.vip_machine_id)
+                    .await
+                {
+                    tracing::error!(
+                        vip_machine_id = %machine.vip_machine_id,
+                        error = %e,
+                        "Failed to remove conflicting VIP rental"
+                    );
+                    return Ok(ProcessOutcome::Ignored);
                 }
 
-                // Now insert to DB (billing registration succeeded)
-                insert_vip_rental(&self.db, &prepared).await?;
+                stats.removed += 1;
+                return Ok(ProcessOutcome::Ignored);
+            }
 
-                let record = VipRentalRecord {
-                    vip_machine_id: machine.vip_machine_id.clone(),
-                    assigned_user: machine.assigned_user.clone(),
-                    secure_cloud_rental_id: prepared.rental_id.clone(),
-                    connection: machine.connection.clone(),
-                    display: machine.display.clone(),
-                    last_seen_at: Utc::now(),
-                };
-                self.cache.insert(record).await;
+            let mut display = active.display.clone();
+            if display.hourly_rate == Decimal::ZERO {
+                display.hourly_rate = expected_marked_up;
+            }
 
-                stats.created += 1;
-                tracing::info!(
+            let record = VipRentalRecord {
+                vip_machine_id: machine.vip_machine_id.clone(),
+                assigned_user: active.assigned_user,
+                secure_cloud_rental_id: active.rental_id,
+                connection: active.connection,
+                display,
+                last_seen_at: Utc::now(),
+            };
+            self.cache.insert(record).await;
+
+            tracing::info!(
+                vip_machine_id = %machine.vip_machine_id,
+                "Re-linked existing VIP rental to cache"
+            );
+
+            return Ok(ProcessOutcome::Seen);
+        }
+
+        // 3) If this ID existed before with different immutable data, block reuse
+        if let Some(terminated) = self
+            .fetch_terminated_snapshot(&machine.vip_machine_id)
+            .await?
+        {
+            if !self.immutable_matches(
+                &terminated.assigned_user,
+                &terminated.connection,
+                &terminated.display,
+                machine,
+                expected_marked_up,
+            ) {
+                stats.skipped_conflict += 1;
+                tracing::error!(
                     vip_machine_id = %machine.vip_machine_id,
-                    rental_id = %prepared.rental_id,
-                    user_id = %machine.assigned_user,
-                    "Created new VIP rental"
+                    "VIP row attempts to reuse ID with different immutable data - ignoring"
                 );
+                return Ok(ProcessOutcome::Ignored);
             }
         }
 
-        Ok(())
-    }
+        // 4) Create new rental
+        let prepared = prepare_vip_rental(machine, self.markup_percent)?;
 
-    /// Check if metadata has changed between cached and new machine data
-    fn metadata_differs(&self, cached: &VipRentalRecord, new: &ValidVipMachine) -> bool {
-        cached.connection.ssh_host != new.connection.ssh_host
-            || cached.connection.ssh_port != new.connection.ssh_port
-            || cached.connection.ssh_user != new.connection.ssh_user
-            || cached.display.gpu_type != new.display.gpu_type
-            || cached.display.gpu_count != new.display.gpu_count
-            || cached.display.region != new.display.region
-            || cached.display.vcpu_count != new.display.vcpu_count
-            || cached.display.system_memory_gb != new.display.system_memory_gb
-            || cached.display.notes != new.display.notes
+        // Insert into DB first (local operation) - if this fails, just skip
+        if let Err(e) = insert_vip_rental(&self.db, &prepared).await {
+            tracing::error!(
+                vip_machine_id = %machine.vip_machine_id,
+                error = %e,
+                "Failed to insert VIP rental"
+            );
+            return Ok(ProcessOutcome::Ignored);
+        }
+
+        // Then register with billing - if this fails, delete the DB row to rollback
+        if self.billing_client.is_some() {
+            if let Err(e) = self.register_with_billing(&prepared).await {
+                tracing::error!(
+                    vip_machine_id = %machine.vip_machine_id,
+                    rental_id = %prepared.rental_id,
+                    error = %e,
+                    "Failed to register VIP rental with billing - rolling back DB insert"
+                );
+
+                if let Err(del_err) =
+                    delete_vip_rental(&self.db, &prepared.rental_id, &prepared.vip_machine_id).await
+                {
+                    tracing::error!(
+                        rental_id = %prepared.rental_id,
+                        error = %del_err,
+                        "Failed to delete VIP rental after billing failure"
+                    );
+                }
+
+                return Ok(ProcessOutcome::Ignored);
+            }
+        }
+
+        let mut display = machine.display.clone();
+        display.hourly_rate = prepared.marked_up_hourly_rate;
+
+        let record = VipRentalRecord {
+            vip_machine_id: machine.vip_machine_id.clone(),
+            assigned_user: machine.assigned_user.clone(),
+            secure_cloud_rental_id: prepared.rental_id.clone(),
+            connection: machine.connection.clone(),
+            display,
+            last_seen_at: Utc::now(),
+        };
+        self.cache.insert(record).await;
+
+        stats.created += 1;
+        tracing::info!(
+            vip_machine_id = %machine.vip_machine_id,
+            rental_id = %prepared.rental_id,
+            user_id = %machine.assigned_user,
+            "Created new VIP rental"
+        );
+
+        Ok(ProcessOutcome::Seen)
     }
 
     /// Remove a stale VIP rental (no longer in CSV)
     async fn remove_stale_rental(&self, vip_machine_id: &str) -> Result<(), PollerError> {
         // Get rental info from cache
         if let Some(cached) = self.cache.get(vip_machine_id).await {
-            // Finalize billing first (best-effort, don't block on failure)
-            if self.billing_client.is_some() {
-                self.finalize_rental_billing(&cached.secure_cloud_rental_id)
-                    .await;
+            if let Err(e) = self
+                .finalize_and_close(&cached.secure_cloud_rental_id, vip_machine_id)
+                .await
+            {
+                return Err(e);
             }
-
-            // Close the rental in DB
-            close_vip_rental(&self.db, &cached.secure_cloud_rental_id, vip_machine_id).await?;
-
-            // Remove from cache
-            self.cache.remove(vip_machine_id).await;
 
             tracing::info!(
                 vip_machine_id = %vip_machine_id,
@@ -353,6 +611,17 @@ impl<D: VipDataSource> VipPoller<D> {
             );
         }
 
+        Ok(())
+    }
+
+    async fn finalize_and_close(
+        &self,
+        rental_id: &str,
+        vip_machine_id: &str,
+    ) -> Result<(), PollerError> {
+        self.finalize_rental_billing(rental_id).await?;
+        close_vip_rental(&self.db, rental_id, vip_machine_id).await?;
+        self.cache.remove(vip_machine_id).await;
         Ok(())
     }
 
@@ -384,8 +653,12 @@ impl<D: VipDataSource> VipPoller<D> {
         });
 
         // Calculate per-GPU price from total marked-up rate
-        let base_price_per_gpu = prepared.marked_up_hourly_rate.to_f64().unwrap_or(0.0)
-            / prepared.gpu_count.max(1) as f64;
+        let base_price_per_gpu = prepared.marked_up_hourly_rate.to_f64().ok_or_else(|| {
+            format!(
+                "Failed to convert marked_up_hourly_rate {} to f64 for billing",
+                prepared.marked_up_hourly_rate
+            )
+        })? / prepared.gpu_count.max(1) as f64;
 
         let track_request = TrackRentalRequest {
             rental_id: prepared.rental_id.clone(),
@@ -415,13 +688,13 @@ impl<D: VipDataSource> VipPoller<D> {
         Ok(())
     }
 
-    /// Finalize billing for a VIP rental (best-effort, logs on failure)
-    async fn finalize_rental_billing(&self, rental_id: &str) {
+    /// Finalize billing for a VIP rental (must succeed before DB removal)
+    async fn finalize_rental_billing(&self, rental_id: &str) -> Result<(), PollerError> {
         use basilica_protocol::billing::{FinalizeRentalRequest, RentalStatus};
 
         let billing_client = match self.billing_client.as_ref() {
             Some(client) => client,
-            None => return,
+            None => return Ok(()),
         };
 
         let end_time = prost_types::Timestamp::from(std::time::SystemTime::now());
@@ -440,13 +713,15 @@ impl<D: VipDataSource> VipPoller<D> {
                     total_cost = %response.total_cost,
                     "Finalized VIP rental billing"
                 );
+                Ok(())
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     rental_id = %rental_id,
                     error = %e,
-                    "Failed to finalize VIP rental billing - proceeding with closure"
+                    "Failed to finalize VIP rental billing"
                 );
+                Err(PollerError::Billing(e.to_string()))
             }
         }
     }

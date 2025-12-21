@@ -139,6 +139,35 @@ pub async fn insert_vip_rental(
     Ok(())
 }
 
+/// Delete a VIP rental from the database (used for rollback when billing registration fails).
+/// Unlike close_vip_rental, this does not archive - the rental never actually started.
+pub async fn delete_vip_rental(
+    pool: &PgPool,
+    rental_id: &str,
+    vip_machine_id: &str,
+) -> Result<(), VipRentalError> {
+    let prefixed_machine_id = format_vip_machine_id(vip_machine_id);
+
+    sqlx::query(
+        r#"
+        DELETE FROM secure_cloud_rentals
+        WHERE id = $1 AND provider_instance_id = $2 AND is_vip = TRUE
+        "#,
+    )
+    .bind(rental_id)
+    .bind(&prefixed_machine_id)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        rental_id = %rental_id,
+        vip_machine_id = %vip_machine_id,
+        "Deleted VIP rental (billing registration failed)"
+    );
+
+    Ok(())
+}
+
 /// Close a VIP rental - finalize in database and archive
 /// Note: Billing finalization must be done by the caller (basilica-api has access to BillingClient)
 pub async fn close_vip_rental(
