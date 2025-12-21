@@ -16,8 +16,9 @@ use crate::crd::{
 use crate::error::{AutoscalerError, Result};
 use crate::metrics::AutoscalerMetrics;
 use crate::offering_matcher::{
-    calculate_nodes_needed, filter_pods_by_age, filter_pods_from_failing_deployments,
-    filter_pods_with_stale_affinity, group_pending_pods_by_requirements, has_gpu_node_affinity,
+    calculate_nodes_needed, extract_gpu_requirements, filter_pods_by_age,
+    filter_pods_from_failing_deployments, filter_pods_with_stale_affinity,
+    group_pending_pods_by_requirements, has_gpu_node_affinity, normalize_gpu_model,
     GpuRequirements, OfferingConstraints, OfferingSelector, PendingGpuPod,
 };
 use crate::warm_pool::{
@@ -144,9 +145,15 @@ where
             status.pending_scale_up = provisioning_count;
         }
 
-        // Evaluate scaling decision
-        let decision =
-            self.evaluate_scaling(&policy.spec, &metrics_snapshot, current_nodes, &status);
+        // Evaluate scaling decision with GPU-aware idle node matching
+        let decision = self.evaluate_scaling(
+            &policy.spec,
+            &metrics_snapshot,
+            current_nodes,
+            &status,
+            &pending_gpu_pods,
+            &node_pools,
+        );
 
         match decision {
             ScalingDecision::ScaleUp(count) => {
@@ -703,9 +710,25 @@ where
         metrics: &MetricsSnapshot,
         current_nodes: u32,
         _status: &ScalingPolicyStatus,
+        pending_pods: &[Pod],
+        node_pools: &[NodePool],
     ) -> ScalingDecision {
         // Check scale up: pending GPU pods exceed threshold
         if metrics.pending_gpu_pods >= spec.scale_up.pending_pod_threshold {
+            // GPU-aware idle check: only skip scale-up if idle nodes can actually serve
+            // the pending pods based on GPU model, count, and memory requirements.
+            let serviceable_count = Self::count_serviceable_pending_pods(pending_pods, node_pools);
+
+            if serviceable_count >= metrics.pending_gpu_pods && metrics.idle_nodes > 0 {
+                debug!(
+                    pending = metrics.pending_gpu_pods,
+                    serviceable = serviceable_count,
+                    idle = metrics.idle_nodes,
+                    "Skipping scale-up: idle nodes can serve all pending pods"
+                );
+                return ScalingDecision::NoAction;
+            }
+
             let desired = (current_nodes + spec.scale_up.increment).min(spec.max_nodes);
             if desired > current_nodes {
                 return ScalingDecision::ScaleUp(desired - current_nodes);
@@ -1339,6 +1362,71 @@ where
                     .unwrap_or(false);
 
                 p.is_warm_pool() && is_ready
+            })
+            .count() as u32
+    }
+
+    /// Check if a NodePool's GPU capabilities can serve a pod's requirements.
+    fn node_pool_matches_requirements(pool: &NodePool, req: &GpuRequirements) -> bool {
+        let Some(status) = pool.status.as_ref() else {
+            return false;
+        };
+
+        // Check GPU count
+        let pool_gpu_count = status.gpu_count.unwrap_or(0);
+        if pool_gpu_count < req.gpu_count {
+            return false;
+        }
+
+        // Check GPU memory
+        if let Some(min_mem) = req.min_gpu_memory_gb {
+            if status.gpu_memory_gb.unwrap_or(0) < min_mem {
+                return false;
+            }
+        }
+
+        // If no specific GPU model required, any model is fine
+        if req.gpu_models.is_empty() {
+            return true;
+        }
+
+        // Check GPU model match (exact or prefix match)
+        let Some(pool_model) = status.gpu_model.as_ref() else {
+            return false;
+        };
+        let normalized_pool = normalize_gpu_model(pool_model);
+        req.gpu_models.iter().any(|requested| {
+            normalized_pool == *requested || normalized_pool.starts_with(requested)
+        })
+    }
+
+    /// Count idle nodes that can serve pending pods based on GPU requirements.
+    /// Returns the number of pending pods that CAN be served by available idle nodes.
+    fn count_serviceable_pending_pods(pending_pods: &[Pod], node_pools: &[NodePool]) -> u32 {
+        // Get idle node pools (Ready phase)
+        let idle_pools: Vec<&NodePool> = node_pools
+            .iter()
+            .filter(|p| {
+                p.status
+                    .as_ref()
+                    .and_then(|s| s.phase.as_ref())
+                    .map(|phase| *phase == NodePoolPhase::Ready)
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if idle_pools.is_empty() {
+            return 0;
+        }
+
+        // Count pending pods that have at least one matching idle node
+        pending_pods
+            .iter()
+            .filter_map(|pod| extract_gpu_requirements(pod))
+            .filter(|pending| {
+                idle_pools
+                    .iter()
+                    .any(|pool| Self::node_pool_matches_requirements(pool, &pending.requirements))
             })
             .count() as u32
     }
