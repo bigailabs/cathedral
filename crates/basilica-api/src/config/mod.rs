@@ -132,6 +132,10 @@ pub struct AggregatorConfig {
 
     /// GPU provider configurations
     pub providers: AggregatorProvidersConfig,
+
+    /// VIP configuration (if present, VIP is enabled)
+    #[serde(default)]
+    pub vip: Option<basilica_aggregator::config::VipConfig>,
 }
 
 fn default_aggregator_ttl() -> u64 {
@@ -148,6 +152,7 @@ impl Default for AggregatorConfig {
             ttl_seconds: default_aggregator_ttl(),
             health_check_interval_secs: default_secure_cloud_health_check_interval(),
             providers: AggregatorProvidersConfig::default(),
+            vip: None,
         }
     }
 }
@@ -351,6 +356,7 @@ impl Config {
             database: basilica_aggregator::config::DatabaseConfig {
                 path: self.database.url.clone(), // Uses PostgreSQL URL from API config
             },
+            vip: self.aggregator.vip.clone(),
         }
     }
 }

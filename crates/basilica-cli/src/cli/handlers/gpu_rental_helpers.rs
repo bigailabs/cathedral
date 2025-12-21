@@ -124,6 +124,7 @@ struct UnifiedRentalItem {
 /// * `target` - Optional rental ID provided by user
 /// * `compute_filter` - Optional compute category to filter rentals
 /// * `api_client` - Authenticated API client
+/// * `exclude_vip` - If true, VIP rentals will be excluded from selection (for commands like `down`)
 ///
 /// # Returns
 /// Returns (rental_id, compute_category) tuple
@@ -131,6 +132,7 @@ pub async fn resolve_target_rental_unified(
     target: Option<String>,
     compute_filter: Option<ComputeCategory>,
     api_client: &BasilicaClient,
+    exclude_vip: bool,
 ) -> Result<(String, ComputeCategory)> {
     // If target provided, determine type based on filter or default
     if let Some(t) = target {
@@ -212,6 +214,11 @@ pub async fn resolve_target_rental_unified(
         for rental in secure.rentals.iter() {
             // Skip stopped rentals
             if rental.stopped_at.is_some() {
+                continue;
+            }
+
+            // Skip VIP rentals if exclude_vip is true (e.g., for `down` command)
+            if exclude_vip && rental.is_vip {
                 continue;
             }
 
@@ -676,8 +683,9 @@ pub async fn resolve_rental_with_ssh(
         ))
     } else {
         // No rental ID - use interactive selector
+        // exclude_vip=false: VIP rentals can be accessed via SSH
         let (rental_id, compute_type) =
-            resolve_target_rental_unified(None, None, api_client).await?;
+            resolve_target_rental_unified(None, None, api_client, false).await?;
 
         let (ssh_command, ssh_public_key) = match compute_type {
             ComputeCategory::CommunityCloud => {

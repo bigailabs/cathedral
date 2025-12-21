@@ -170,8 +170,8 @@ impl Database {
             INSERT INTO secure_cloud_rentals
             (id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
              status, hostname, ssh_public_key, ip_address, connection_info, raw_response,
-             error_message, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+             error_message, created_at, updated_at, is_vip)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             "#,
         )
         .bind(&deployment.id)
@@ -190,6 +190,7 @@ impl Database {
         .bind(&deployment.error_message)
         .bind(deployment.created_at)
         .bind(deployment.updated_at)
+        .bind(deployment.is_vip)
         .execute(&self.pool)
         .await?;
 
@@ -286,6 +287,7 @@ impl Database {
             error_message: row.get("error_message"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
+            is_vip: row.get("is_vip"),
         })
     }
 
@@ -295,7 +297,7 @@ impl Database {
             r#"
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_public_key, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at
+                   error_message, created_at, updated_at, is_vip
             FROM secure_cloud_rentals
             WHERE id = $1
             "#,
@@ -317,7 +319,7 @@ impl Database {
             r#"
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_public_key, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at
+                   error_message, created_at, updated_at, is_vip
             FROM secure_cloud_rentals
             WHERE id = $1 AND user_id = $2
             "#,
@@ -336,7 +338,7 @@ impl Database {
             r#"
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_public_key, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at
+                   error_message, created_at, updated_at, is_vip
             FROM secure_cloud_rentals
             WHERE user_id = $1
             ORDER BY created_at DESC
@@ -364,7 +366,7 @@ impl Database {
             r#"
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_public_key, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at
+                   error_message, created_at, updated_at, is_vip
             FROM secure_cloud_rentals
             WHERE 1=1
             "#,
@@ -410,6 +412,7 @@ impl Database {
     }
 
     /// Get all active deployments (for telemetry monitoring)
+    /// Note: Excludes VIP rentals - those are managed by the VIP poller
     pub async fn get_all_active_deployments(&self) -> Result<Vec<Deployment>> {
         let active_statuses: Vec<&str> = vec![
             DeploymentStatus::Pending.as_str(),
@@ -421,9 +424,9 @@ impl Database {
             r#"
             SELECT id, user_id, provider, provider_instance_id, offering_id, instance_type, location_code,
                    status, hostname, ssh_public_key, ip_address, connection_info, raw_response,
-                   error_message, created_at, updated_at
+                   error_message, created_at, updated_at, is_vip
             FROM secure_cloud_rentals
-            WHERE status = ANY($1)
+            WHERE status = ANY($1) AND (is_vip = FALSE OR is_vip IS NULL)
             ORDER BY created_at DESC
             "#,
         )

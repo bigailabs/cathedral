@@ -8,7 +8,10 @@ use crate::{
     error::{ApiError, Result},
 };
 use axum::Router;
-use basilica_aggregator::{AggregatorService, Database as AggregatorDatabase};
+use basilica_aggregator::{
+    vip::{CsvDataSource, MockVipDataSource, VipCache, VipCsvRow, VipPoller, VipPollerTask},
+    AggregatorService, Database as AggregatorDatabase,
+};
 use basilica_billing::BillingClient;
 use basilica_payments::client::PaymentsClient;
 use basilica_protocol::billing::{GpuUsage, ResourceUsage, TelemetryData};
@@ -989,6 +992,139 @@ impl Server {
             refresh_interval.as_secs()
         );
 
+        // Start VIP poller task if configured
+        tracing::info!(
+            vip_configured = config.aggregator.vip.is_some(),
+            vip_mock_user_id = ?config.aggregator.vip.as_ref().and_then(|v| v.mock_user_id.clone()),
+            vip_is_configured = config.aggregator.vip.as_ref().is_some_and(|v| v.is_configured()),
+            vip_is_mock_mode = config.aggregator.vip.as_ref().is_some_and(|v| v.is_mock_mode()),
+            "VIP configuration check"
+        );
+        if let Some(vip_config) = config.aggregator.vip.as_ref().filter(|v| v.is_configured()) {
+            let vip_config = vip_config.clone();
+            let vip_db = state.db.clone();
+
+            if vip_config.is_mock_mode() {
+                // Mock mode - use fake VIP data
+                let mock_user_id = vip_config.mock_user_id.clone().unwrap();
+                tracing::info!(user_id = %mock_user_id, "Starting VIP poller in MOCK mode");
+
+                let mock_data = create_mock_vip_data(&mock_user_id);
+                let mock_source = MockVipDataSource::new(mock_data);
+
+                let vip_cache = Arc::new(VipCache::new());
+                if let Err(e) = vip_cache.rebuild_from_db(&vip_db).await {
+                    tracing::error!(error = %e, "Failed to rebuild VIP cache from database");
+                }
+
+                let poller = Arc::new(VipPoller::new(
+                    vip_config.clone(),
+                    mock_source,
+                    vip_cache,
+                    vip_db,
+                    config.pricing.secure_cloud_markup_percent,
+                    state.billing_client.clone(),
+                ));
+
+                tracing::info!("Starting initial VIP poll (mock mode)...");
+                match poller.poll_once().await {
+                    Ok(stats) => {
+                        tracing::info!(
+                            created = stats.created,
+                            updated = stats.updated,
+                            removed = stats.removed,
+                            "Initial VIP poll completed (mock mode)"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Initial VIP poll failed (mock mode)");
+                    }
+                }
+
+                let task = VipPollerTask::new(poller, vip_config.poll_interval_secs);
+                task.start();
+
+                tracing::info!(
+                    interval_secs = vip_config.poll_interval_secs,
+                    "VIP poller task started (mock mode)"
+                );
+            } else {
+                // Real mode - use CSV data source (S3 or local file)
+                let data_source_result = if vip_config.has_s3_source() {
+                    let bucket = vip_config.s3_bucket.as_ref().unwrap();
+                    let key = vip_config.s3_key.as_ref().unwrap();
+                    let region = vip_config.s3_region.clone();
+                    tracing::info!(bucket = %bucket, key = %key, region = ?region, "VIP: Using S3 CSV source");
+                    CsvDataSource::from_s3(bucket.clone(), key.clone(), region).await
+                } else if vip_config.has_local_csv() {
+                    let file_path = vip_config.csv_file_path.as_ref().unwrap();
+                    tracing::info!(file_path = %file_path, "VIP: Using local CSV file");
+                    Ok(CsvDataSource::from_local(file_path.clone()))
+                } else {
+                    tracing::warn!("VIP: No CSV source configured - VIP polling disabled");
+                    Err(basilica_aggregator::vip::DataSourceError::FileRead(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "No CSV source configured",
+                        ),
+                    ))
+                };
+
+                match data_source_result {
+                    Ok(data_source) => {
+                        let vip_cache = Arc::new(VipCache::new());
+
+                        // Rebuild cache from DB on startup
+                        if let Err(e) = vip_cache.rebuild_from_db(&vip_db).await {
+                            tracing::error!(error = %e, "Failed to rebuild VIP cache from database");
+                        }
+
+                        let poller = Arc::new(VipPoller::new(
+                            vip_config.clone(),
+                            data_source,
+                            vip_cache,
+                            vip_db,
+                            config.pricing.secure_cloud_markup_percent,
+                            state.billing_client.clone(),
+                        ));
+
+                        // Do initial poll immediately
+                        tracing::info!("Starting initial VIP poll...");
+                        match poller.poll_once().await {
+                            Ok(stats) => {
+                                tracing::info!(
+                                    created = stats.created,
+                                    updated = stats.updated,
+                                    removed = stats.removed,
+                                    "Initial VIP poll completed"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Initial VIP poll failed");
+                            }
+                        }
+
+                        // Start periodic polling
+                        let task = VipPollerTask::new(poller, vip_config.poll_interval_secs);
+                        task.start();
+
+                        tracing::info!(
+                            interval_secs = vip_config.poll_interval_secs,
+                            "VIP poller task started"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Failed to initialize CSV data source for VIP - VIP polling disabled"
+                        );
+                    }
+                }
+            }
+        } else {
+            tracing::debug!("VIP poller not configured, skipping");
+        }
+
         // Start Secure Cloud health check task
         let health_check_aggregator_service = state.aggregator_service.clone();
         let health_check_db = state.db.clone();
@@ -1000,10 +1136,13 @@ impl Server {
             loop {
                 interval.tick().await;
 
-                // Query all active secure cloud rentals from the database
-                match sqlx::query_as::<_, (String,)>("SELECT id FROM secure_cloud_rentals")
-                    .fetch_all(&health_check_db)
-                    .await
+                // Query all active secure cloud rentals from the database (excluding VIP rentals
+                // which don't need health checks - they're manually managed and assumed always up)
+                match sqlx::query_as::<_, (String,)>(
+                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE",
+                )
+                .fetch_all(&health_check_db)
+                .await
                 {
                     Ok(rental_records) => {
                         // Process rentals sequentially to avoid overwhelming provider APIs
@@ -1220,4 +1359,42 @@ async fn shutdown_signal() {
             warn!("Received terminate signal, shutting down");
         },
     }
+}
+
+/// Create mock VIP data for testing
+fn create_mock_vip_data(user_id: &str) -> Vec<VipCsvRow> {
+    use rust_decimal::Decimal;
+
+    vec![
+        VipCsvRow {
+            vip_machine_id: "mock-vip-h100-01".to_string(),
+            assigned_user: user_id.to_string(),
+            active: true,
+            ssh_host: "mock-h100-01.basilica.dev".to_string(),
+            ssh_port: 22,
+            ssh_user: "ubuntu".to_string(),
+            gpu_type: "H100".to_string(),
+            gpu_count: 8,
+            region: "us-west-2".to_string(),
+            hourly_rate: Decimal::new(2500, 2), // $25.00/hr
+            vcpu_count: 128,
+            system_memory_gb: 500,
+            notes: Some("Mock H100 cluster for testing".to_string()),
+        },
+        VipCsvRow {
+            vip_machine_id: "mock-vip-a100-01".to_string(),
+            assigned_user: user_id.to_string(),
+            active: true,
+            ssh_host: "mock-a100-01.basilica.dev".to_string(),
+            ssh_port: 22,
+            ssh_user: "ubuntu".to_string(),
+            gpu_type: "A100-80GB".to_string(),
+            gpu_count: 4,
+            region: "us-east-1".to_string(),
+            hourly_rate: Decimal::new(1200, 2), // $12.00/hr
+            vcpu_count: 64,
+            system_memory_gb: 256,
+            notes: Some("Mock A100 for testing".to_string()),
+        },
+    ]
 }

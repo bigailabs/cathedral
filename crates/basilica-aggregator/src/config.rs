@@ -8,6 +8,8 @@ pub struct Config {
     pub cache: CacheConfig,
     pub providers: ProvidersConfig,
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub vip: Option<VipConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -102,6 +104,82 @@ fn default_db_path() -> String {
     "aggregator.db".to_string()
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VipConfig {
+    /// Local CSV file path (for dev/testing)
+    #[serde(default)]
+    pub csv_file_path: Option<String>,
+    /// S3 bucket name (for production)
+    #[serde(default)]
+    pub s3_bucket: Option<String>,
+    /// S3 object key (for production)
+    #[serde(default)]
+    pub s3_key: Option<String>,
+    /// S3 region (for production, e.g., "us-east-2")
+    #[serde(default)]
+    pub s3_region: Option<String>,
+    /// Polling interval in seconds (default: 60)
+    #[serde(default = "default_vip_poll_interval")]
+    pub poll_interval_secs: u64,
+    /// Mock mode: If set, use mock data with this user ID instead of CSV
+    #[serde(default)]
+    pub mock_user_id: Option<String>,
+}
+
+impl Default for VipConfig {
+    fn default() -> Self {
+        Self {
+            csv_file_path: None,
+            s3_bucket: None,
+            s3_key: None,
+            s3_region: None,
+            poll_interval_secs: default_vip_poll_interval(),
+            mock_user_id: None,
+        }
+    }
+}
+
+fn default_vip_poll_interval() -> u64 {
+    60
+}
+
+impl VipConfig {
+    /// Check if VIP is properly configured (mock, local CSV, or S3)
+    pub fn is_configured(&self) -> bool {
+        self.is_mock_mode() || self.has_csv_source()
+    }
+
+    /// Check if a CSV source is configured (local file or S3)
+    pub fn has_csv_source(&self) -> bool {
+        self.has_s3_source() || self.has_local_csv()
+    }
+
+    /// Check if S3 source is configured
+    pub fn has_s3_source(&self) -> bool {
+        self.s3_bucket
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+            && self.s3_key.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+    }
+
+    /// Check if local CSV file is configured
+    pub fn has_local_csv(&self) -> bool {
+        self.csv_file_path
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Check if mock mode is enabled
+    pub fn is_mock_mode(&self) -> bool {
+        self.mock_user_id
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 impl Config {
     /// Load configuration from file and environment variables
     pub fn load(config_path: Option<PathBuf>) -> Result<Self> {
@@ -164,6 +242,7 @@ impl Config {
             database: DatabaseConfig {
                 path: default_db_path(),
             },
+            vip: None,
         }
     }
 }
@@ -189,6 +268,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: None,
         };
 
         assert!(config.validate().is_err());
@@ -211,6 +291,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: None,
         };
 
         assert!(config.validate().is_err());
@@ -237,6 +318,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: None,
         };
 
         assert!(config.validate().is_ok());
@@ -263,6 +345,7 @@ mod tests {
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
+            vip: None,
         };
 
         assert!(config.validate().is_ok());
