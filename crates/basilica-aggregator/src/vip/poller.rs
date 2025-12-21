@@ -5,7 +5,7 @@ use crate::vip::{
     csv::{DataSourceError, VipDataSource},
     rental_ops::{
         apply_markup, close_vip_rental, delete_vip_rental, insert_vip_rental, prepare_vip_rental,
-        PreparedVipRental, VipRentalError,
+        update_vip_rental_metadata, PreparedVipRental, VipRentalError,
     },
     types::{ValidVipMachine, VipConnectionInfo, VipCsvRow, VipDisplayInfo, VipRentalRecord},
 };
@@ -240,17 +240,19 @@ impl<D: VipDataSource> VipPoller<D> {
         )?)
     }
 
-    fn immutable_matches(
+    /// Check if the user assignment matches (user changes require finalize+close)
+    fn user_matches(&self, assigned_user: &str, machine: &ValidVipMachine) -> bool {
+        assigned_user == machine.assigned_user
+    }
+
+    /// Check if metadata fields match (metadata changes can be updated in-place)
+    fn metadata_matches(
         &self,
-        assigned_user: &str,
         connection: &VipConnectionInfo,
         display: &VipDisplayInfo,
         machine: &ValidVipMachine,
         expected_marked_up: Decimal,
     ) -> bool {
-        if assigned_user != machine.assigned_user {
-            return false;
-        }
         if connection.ssh_host != machine.connection.ssh_host
             || connection.ssh_port != machine.connection.ssh_port
             || connection.ssh_user != machine.connection.ssh_user
@@ -277,8 +279,8 @@ impl<D: VipDataSource> VipPoller<D> {
             .as_str()
             .and_then(|s| s.parse::<Decimal>().ok())
             .or_else(|| value.as_f64().and_then(Decimal::from_f64))
-            .or_else(|| value.as_i64().and_then(|v| Decimal::from_i64(v)))
-            .or_else(|| value.as_u64().and_then(|v| Decimal::from_u64(v)))
+            .or_else(|| value.as_i64().and_then(Decimal::from_i64))
+            .or_else(|| value.as_u64().and_then(Decimal::from_u64))
     }
 
     fn snapshot_from_row(&self, row: VipSnapshotRow) -> VipRentalSnapshot {
@@ -417,17 +419,14 @@ impl<D: VipDataSource> VipPoller<D> {
 
         // 1) Check cache first
         if let Some(cached) = self.cache.get(&machine.vip_machine_id).await {
-            if !self.immutable_matches(
-                &cached.assigned_user,
-                &cached.connection,
-                &cached.display,
-                machine,
-                expected_marked_up,
-            ) {
+            // User change requires finalize+close (reassignment to different user)
+            if !self.user_matches(&cached.assigned_user, machine) {
                 stats.skipped_conflict += 1;
                 tracing::error!(
                     vip_machine_id = %machine.vip_machine_id,
-                    "Immutable VIP row changed - treating as removal"
+                    old_user = %cached.assigned_user,
+                    new_user = %machine.assigned_user,
+                    "User assignment changed - treating as removal"
                 );
 
                 if let Err(e) = self
@@ -446,6 +445,53 @@ impl<D: VipDataSource> VipPoller<D> {
                 return Ok(ProcessOutcome::Ignored);
             }
 
+            // Metadata change - update in-place without terminating the rental
+            if !self.metadata_matches(
+                &cached.connection,
+                &cached.display,
+                machine,
+                expected_marked_up,
+            ) {
+                // Update database
+                if let Err(e) = update_vip_rental_metadata(
+                    &self.db,
+                    &cached.secure_cloud_rental_id,
+                    &machine.vip_machine_id,
+                    &machine.connection,
+                    &machine.display,
+                )
+                .await
+                {
+                    tracing::error!(
+                        vip_machine_id = %machine.vip_machine_id,
+                        error = %e,
+                        "Failed to update VIP rental metadata"
+                    );
+                    return Ok(ProcessOutcome::Ignored);
+                }
+
+                // Update cache with new values
+                let updated = VipRentalRecord {
+                    vip_machine_id: cached.vip_machine_id.clone(),
+                    assigned_user: cached.assigned_user.clone(),
+                    secure_cloud_rental_id: cached.secure_cloud_rental_id.clone(),
+                    connection: machine.connection.clone(),
+                    display: VipDisplayInfo {
+                        hourly_rate: expected_marked_up,
+                        ..machine.display.clone()
+                    },
+                    last_seen_at: Utc::now(),
+                };
+                self.cache.insert(updated).await;
+
+                stats.updated += 1;
+                tracing::info!(
+                    vip_machine_id = %machine.vip_machine_id,
+                    "Updated VIP rental metadata"
+                );
+                return Ok(ProcessOutcome::Seen);
+            }
+
             // Normalize cached hourly rate to marked-up value
             if cached.display.hourly_rate != expected_marked_up {
                 let mut updated = cached.clone();
@@ -459,17 +505,14 @@ impl<D: VipDataSource> VipPoller<D> {
 
         // 2) Check DB for active rental (cache miss / restart recovery)
         if let Some(active) = self.fetch_active_snapshot(&machine.vip_machine_id).await? {
-            if !self.immutable_matches(
-                &active.assigned_user,
-                &active.connection,
-                &active.display,
-                machine,
-                expected_marked_up,
-            ) {
+            // User change requires finalize+close (reassignment to different user)
+            if !self.user_matches(&active.assigned_user, machine) {
                 stats.skipped_conflict += 1;
                 tracing::error!(
                     vip_machine_id = %machine.vip_machine_id,
-                    "Immutable VIP row changed for existing rental - treating as removal"
+                    old_user = %active.assigned_user,
+                    new_user = %machine.assigned_user,
+                    "User assignment changed for existing rental - treating as removal"
                 );
 
                 if let Err(e) = self
@@ -488,16 +531,60 @@ impl<D: VipDataSource> VipPoller<D> {
                 return Ok(ProcessOutcome::Ignored);
             }
 
-            let mut display = active.display.clone();
-            if display.hourly_rate == Decimal::ZERO {
-                display.hourly_rate = expected_marked_up;
+            // Metadata change - update in-place without terminating the rental
+            let needs_metadata_update = !self.metadata_matches(
+                &active.connection,
+                &active.display,
+                machine,
+                expected_marked_up,
+            );
+
+            if needs_metadata_update {
+                if let Err(e) = update_vip_rental_metadata(
+                    &self.db,
+                    &active.rental_id,
+                    &machine.vip_machine_id,
+                    &machine.connection,
+                    &machine.display,
+                )
+                .await
+                {
+                    tracing::error!(
+                        vip_machine_id = %machine.vip_machine_id,
+                        error = %e,
+                        "Failed to update VIP rental metadata"
+                    );
+                    return Ok(ProcessOutcome::Ignored);
+                }
+                stats.updated += 1;
+                tracing::info!(
+                    vip_machine_id = %machine.vip_machine_id,
+                    "Updated VIP rental metadata during cache recovery"
+                );
             }
+
+            // Use updated values for cache if metadata was updated
+            let (connection, display) = if needs_metadata_update {
+                (
+                    machine.connection.clone(),
+                    VipDisplayInfo {
+                        hourly_rate: expected_marked_up,
+                        ..machine.display.clone()
+                    },
+                )
+            } else {
+                let mut display = active.display.clone();
+                if display.hourly_rate == Decimal::ZERO {
+                    display.hourly_rate = expected_marked_up;
+                }
+                (active.connection, display)
+            };
 
             let record = VipRentalRecord {
                 vip_machine_id: machine.vip_machine_id.clone(),
                 assigned_user: active.assigned_user,
                 secure_cloud_rental_id: active.rental_id,
-                connection: active.connection,
+                connection,
                 display,
                 last_seen_at: Utc::now(),
             };
@@ -511,22 +598,19 @@ impl<D: VipDataSource> VipPoller<D> {
             return Ok(ProcessOutcome::Seen);
         }
 
-        // 3) If this ID existed before with different immutable data, block reuse
+        // 3) If this ID existed before with a different user, block reuse
+        // (Metadata differences are allowed - only user reassignment blocks reuse)
         if let Some(terminated) = self
             .fetch_terminated_snapshot(&machine.vip_machine_id)
             .await?
         {
-            if !self.immutable_matches(
-                &terminated.assigned_user,
-                &terminated.connection,
-                &terminated.display,
-                machine,
-                expected_marked_up,
-            ) {
+            if !self.user_matches(&terminated.assigned_user, machine) {
                 stats.skipped_conflict += 1;
                 tracing::error!(
                     vip_machine_id = %machine.vip_machine_id,
-                    "VIP row attempts to reuse ID with different immutable data - ignoring"
+                    old_user = %terminated.assigned_user,
+                    new_user = %machine.assigned_user,
+                    "VIP row attempts to reuse ID with different user - ignoring"
                 );
                 return Ok(ProcessOutcome::Ignored);
             }
@@ -597,12 +681,8 @@ impl<D: VipDataSource> VipPoller<D> {
     async fn remove_stale_rental(&self, vip_machine_id: &str) -> Result<(), PollerError> {
         // Get rental info from cache
         if let Some(cached) = self.cache.get(vip_machine_id).await {
-            if let Err(e) = self
-                .finalize_and_close(&cached.secure_cloud_rental_id, vip_machine_id)
-                .await
-            {
-                return Err(e);
-            }
+            self.finalize_and_close(&cached.secure_cloud_rental_id, vip_machine_id)
+                .await?;
 
             tracing::info!(
                 vip_machine_id = %vip_machine_id,
