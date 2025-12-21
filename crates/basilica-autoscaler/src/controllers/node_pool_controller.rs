@@ -207,25 +207,58 @@ where
     }
 
     async fn handle_deletion(&self, ns: &str, pool: &NodePool) -> Result<()> {
+        use crate::config::PhaseTimeouts;
+
         let name = pool.name_any();
         info!(namespace = %ns, pool = %name, "Handling deletion");
 
-        let status = pool.status.clone().unwrap_or_default();
+        let mut status = pool.status.clone().unwrap_or_default();
 
-        // Clean up resources based on current state
+        // Track deletion start time for timeout handling
+        let force_cleanup = if status.deletion_started_at.is_none() {
+            status.deletion_started_at = Some(Utc::now());
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+            false
+        } else {
+            let started = status.deletion_started_at.unwrap();
+            let elapsed = Utc::now().signed_duration_since(started);
+            elapsed.num_seconds() > PhaseTimeouts::DELETION_FORCE_TIMEOUT as i64
+        };
+
+        // Clean up K8s node (non-critical - continue even if fails)
         if let Some(node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(node_name).await {
                 warn!(node = %node_name, error = %e, "Failed to delete K8s node");
             }
         }
 
+        // Stop rental - normally CRITICAL, but force after timeout
         if let Some(rental_id) = &status.rental_id {
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(rental = %rental_id, error = %e, "Failed to stop rental");
+            match self.api.stop_rental(rental_id).await {
+                Ok(()) => {
+                    self.metrics.record_rental_stopped(&name);
+                }
+                Err(e) => {
+                    if force_cleanup {
+                        error!(
+                            pool = %name,
+                            rental = %rental_id,
+                            error = %e,
+                            "ALERT: Forcing deletion after timeout - rental may be orphaned"
+                        );
+                        self.metrics.record_forced_deletion(&name);
+                    } else {
+                        error!(rental = %rental_id, error = %e, "Failed to stop rental, will retry");
+                        return Err(e);
+                    }
+                }
             }
         }
 
         // Deregister node (prefer status.node_id for dynamic mode, fall back to spec)
+        // Non-critical - log warning but continue
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -233,7 +266,7 @@ where
             }
         }
 
-        // Remove finalizer
+        // Remove finalizer only after critical cleanup (stop_rental) succeeded or timeout forced
         self.k8s.remove_node_pool_finalizer(ns, &name).await?;
         self.metrics.record_node_pool_deleted(&name);
         info!(namespace = %ns, pool = %name, "Deletion complete");
@@ -989,27 +1022,58 @@ where
         &self,
         ns: &str,
         pool: &NodePool,
-        status: NodePoolStatus,
+        mut status: NodePoolStatus,
     ) -> Result<()> {
+        use crate::config::PhaseTimeouts;
+
         let name = pool.name_any();
         info!(pool = %name, "Terminating node");
 
-        // Delete K8s node
+        // Track deletion start time for timeout handling
+        let force_cleanup = if status.deletion_started_at.is_none() {
+            status.deletion_started_at = Some(Utc::now());
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+            false
+        } else {
+            let started = status.deletion_started_at.unwrap();
+            let elapsed = Utc::now().signed_duration_since(started);
+            elapsed.num_seconds() > PhaseTimeouts::DELETION_FORCE_TIMEOUT as i64
+        };
+
+        // Delete K8s node (non-critical - continue even if fails)
         if let Some(k8s_node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(k8s_node_name).await {
                 warn!(node = %k8s_node_name, error = %e, "Failed to delete K8s node");
             }
         }
 
-        // Stop rental
+        // Stop rental - normally CRITICAL, but force after timeout
         if let Some(rental_id) = &status.rental_id {
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(rental = %rental_id, error = %e, "Failed to stop rental");
+            match self.api.stop_rental(rental_id).await {
+                Ok(()) => {
+                    self.metrics.record_rental_stopped(&name);
+                }
+                Err(e) => {
+                    if force_cleanup {
+                        error!(
+                            pool = %name,
+                            rental = %rental_id,
+                            error = %e,
+                            "ALERT: Forcing termination after timeout - rental may be orphaned"
+                        );
+                        self.metrics.record_forced_deletion(&name);
+                    } else {
+                        error!(rental = %rental_id, error = %e, "Failed to stop rental, will retry");
+                        return Err(e);
+                    }
+                }
             }
-            self.metrics.record_rental_stopped(&name);
         }
 
         // Deregister node (prefer status.node_id for dynamic mode, fall back to spec)
+        // Non-critical - log warning but continue
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -1045,16 +1109,18 @@ where
 
         info!(pool = %name, "Failed NodePool exceeded GC timeout, cleaning up resources");
 
-        // Stop rental if exists
+        // Stop rental - CRITICAL: must succeed to prevent orphaned VMs
+        // If this fails, stay in Failed phase and retry on next GC cycle
         if let Some(rental_id) = &status.rental_id {
             info!(pool = %name, rental_id = %rental_id, "Stopping rental for failed NodePool");
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental during GC");
-            }
+            self.api.stop_rental(rental_id).await.map_err(|e| {
+                error!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental during GC, will retry");
+                e
+            })?;
             self.metrics.record_rental_stopped(&name);
         }
 
-        // Deregister node if registered
+        // Deregister node if registered (non-critical)
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -1062,7 +1128,7 @@ where
             }
         }
 
-        // Delete K8s node if it was created
+        // Delete K8s node if it was created (non-critical)
         if let Some(node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(node_name).await {
                 warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node during GC");
@@ -1088,14 +1154,16 @@ where
         // Ensure resources are cleaned up and delete the CR.
         info!(pool = %name, "Cleaning up stuck Deleted NodePool");
 
-        // Stop rental if it somehow still exists
+        // Stop rental - CRITICAL: must succeed to prevent orphaned VMs
         if let Some(rental_id) = &status.rental_id {
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental for Deleted NodePool");
-            }
+            self.api.stop_rental(rental_id).await.map_err(|e| {
+                error!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental for Deleted NodePool, will retry");
+                e
+            })?;
+            self.metrics.record_rental_stopped(&name);
         }
 
-        // Deregister node if registered
+        // Deregister node if registered (non-critical)
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -1103,7 +1171,7 @@ where
             }
         }
 
-        // Delete K8s node if it exists
+        // Delete K8s node if it exists (non-critical)
         if let Some(node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(node_name).await {
                 warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node for Deleted NodePool");

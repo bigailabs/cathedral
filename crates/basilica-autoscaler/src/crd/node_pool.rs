@@ -514,6 +514,12 @@ pub struct NodePoolStatus {
     /// Used to track label application state and avoid race conditions.
     #[serde(default)]
     pub labels_applied: bool,
+
+    /// When deletion was first attempted (for timeout tracking).
+    /// Set when NodePool enters Terminating phase or deletion is requested.
+    /// Used to force cleanup after timeout to prevent stuck deletions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletion_started_at: Option<DateTime<Utc>>,
 }
 
 /// NodePool condition

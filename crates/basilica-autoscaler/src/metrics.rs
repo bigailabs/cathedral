@@ -31,6 +31,7 @@ pub struct AutoscalerMetrics {
     rentals_active: IntGauge,
     rentals_started_total: IntCounterVec,
     rentals_stopped_total: IntCounter,
+    forced_deletions_total: IntCounter,
 
     // SSH/provisioning metrics
     ssh_connections_total: IntCounter,
@@ -163,6 +164,12 @@ impl AutoscalerMetrics {
         let rentals_stopped_total = IntCounter::new(
             "autoscaler_rentals_stopped_total",
             "Total number of rentals stopped",
+        )
+        .unwrap();
+
+        let forced_deletions_total = IntCounter::new(
+            "autoscaler_forced_deletions_total",
+            "Total number of forced deletions due to cleanup timeout (potential orphaned VMs)",
         )
         .unwrap();
 
@@ -352,6 +359,9 @@ impl AutoscalerMetrics {
             .register(Box::new(rentals_stopped_total.clone()))
             .unwrap();
         registry
+            .register(Box::new(forced_deletions_total.clone()))
+            .unwrap();
+        registry
             .register(Box::new(ssh_connections_total.clone()))
             .unwrap();
         registry
@@ -421,6 +431,7 @@ impl AutoscalerMetrics {
             rentals_active,
             rentals_started_total,
             rentals_stopped_total,
+            forced_deletions_total,
             ssh_connections_total,
             ssh_errors_total,
             provisioning_duration_seconds,
@@ -488,6 +499,10 @@ impl AutoscalerMetrics {
     pub fn record_rental_stopped(&self, _pool: &str) {
         self.rentals_stopped_total.inc();
         self.rentals_active.dec();
+    }
+
+    pub fn record_forced_deletion(&self, _pool: &str) {
+        self.forced_deletions_total.inc();
     }
 
     pub fn record_node_pool_deleted(&self, _pool: &str) {

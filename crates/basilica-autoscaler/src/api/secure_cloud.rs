@@ -646,8 +646,18 @@ impl SecureCloudApi for SecureCloudClient {
                 .send()
                 .await?;
 
-            if !response.status().is_success() {
-                let status = response.status();
+            let status = response.status();
+
+            // Treat 404/410 as success - rental is already deleted (idempotent cleanup)
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+                info!(
+                    "Rental {} already deleted ({}), treating as success",
+                    rental_id, status
+                );
+                return Ok(());
+            }
+
+            if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
                 return Err(AutoscalerError::RentalStop(format!(
                     "Failed to stop rental: {} - {}",
