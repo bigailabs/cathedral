@@ -207,25 +207,58 @@ where
     }
 
     async fn handle_deletion(&self, ns: &str, pool: &NodePool) -> Result<()> {
+        use crate::config::PhaseTimeouts;
+
         let name = pool.name_any();
         info!(namespace = %ns, pool = %name, "Handling deletion");
 
-        let status = pool.status.clone().unwrap_or_default();
+        let mut status = pool.status.clone().unwrap_or_default();
 
-        // Clean up resources based on current state
+        // Track deletion start time for timeout handling
+        let force_cleanup = if status.deletion_started_at.is_none() {
+            status.deletion_started_at = Some(Utc::now());
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+            false
+        } else {
+            let started = status.deletion_started_at.unwrap();
+            let elapsed = Utc::now().signed_duration_since(started);
+            elapsed.num_seconds() > PhaseTimeouts::DELETION_FORCE_TIMEOUT as i64
+        };
+
+        // Clean up K8s node (non-critical - continue even if fails)
         if let Some(node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(node_name).await {
                 warn!(node = %node_name, error = %e, "Failed to delete K8s node");
             }
         }
 
+        // Stop rental - normally CRITICAL, but force after timeout
         if let Some(rental_id) = &status.rental_id {
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(rental = %rental_id, error = %e, "Failed to stop rental");
+            match self.api.stop_rental(rental_id).await {
+                Ok(()) => {
+                    self.metrics.record_rental_stopped(&name);
+                }
+                Err(e) => {
+                    if force_cleanup {
+                        error!(
+                            pool = %name,
+                            rental = %rental_id,
+                            error = %e,
+                            "ALERT: Forcing deletion after timeout - rental may be orphaned"
+                        );
+                        self.metrics.record_forced_deletion(&name);
+                    } else {
+                        error!(rental = %rental_id, error = %e, "Failed to stop rental, will retry");
+                        return Err(e);
+                    }
+                }
             }
         }
 
         // Deregister node (prefer status.node_id for dynamic mode, fall back to spec)
+        // Non-critical - log warning but continue
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -233,7 +266,7 @@ where
             }
         }
 
-        // Remove finalizer
+        // Remove finalizer only after critical cleanup (stop_rental) succeeded or timeout forced
         self.k8s.remove_node_pool_finalizer(ns, &name).await?;
         self.metrics.record_node_pool_deleted(&name);
         info!(namespace = %ns, pool = %name, "Deletion complete");
@@ -422,10 +455,8 @@ where
                         ip
                     }
                     Some(_) => {
-                        debug!(pool = %name, "IP not yet available, will retry");
-                        return Err(AutoscalerError::SecureCloudApi(
-                            "IP address not yet available, waiting for VM to be ready".to_string(),
-                        ));
+                        debug!(pool = %name, "IP not yet available, will retry on next reconcile");
+                        return Ok(());
                     }
                     None => {
                         return Err(AutoscalerError::SecureCloudApi(format!(
@@ -461,15 +492,15 @@ where
                 .update_node_pool_status(ns, &name, status.clone())
                 .await?;
 
-            // If IP is not yet available, return error to retry in Provisioning phase
-            // Cloud providers (Hyperstack) assign floating IPs asynchronously
+            // If IP is not yet available, return Ok to allow cache to update before retry.
+            // CRITICAL: Do NOT return Err here - error backoff retries within milliseconds,
+            // before the K8s cache updates with rental_id, causing duplicate rentals.
+            // Returning Ok uses success_interval (~10s) which gives cache time to sync.
             match rental.ip_address {
                 Some(ip) => ip,
                 None => {
-                    info!(pool = %name, "Rental created but IP not yet available, will retry");
-                    return Err(AutoscalerError::SecureCloudApi(
-                        "IP address not yet available, waiting for VM to be ready".to_string(),
-                    ));
+                    info!(pool = %name, "Rental created but IP not yet available, will retry on next reconcile");
+                    return Ok(());
                 }
             }
         };
@@ -729,7 +760,7 @@ where
         let k3s_token = self.get_k3s_token(ns, pool).await?;
 
         // Install K3s agent
-        let k8s_node_name = self
+        let join_result = self
             .provisioner
             .install_k3s_agent(
                 &host,
@@ -741,7 +772,9 @@ where
             )
             .await?;
 
-        status.node_name = Some(k8s_node_name);
+        status.node_name = Some(join_result.node_name);
+        status.cuda_version = join_result.cuda_version;
+        status.driver_version = join_result.driver_version;
         status.joined_at = Some(Utc::now());
 
         self.transition_phase(ns, &name, status, NodePoolPhase::WaitingForNode)
@@ -989,27 +1022,58 @@ where
         &self,
         ns: &str,
         pool: &NodePool,
-        status: NodePoolStatus,
+        mut status: NodePoolStatus,
     ) -> Result<()> {
+        use crate::config::PhaseTimeouts;
+
         let name = pool.name_any();
         info!(pool = %name, "Terminating node");
 
-        // Delete K8s node
+        // Track deletion start time for timeout handling
+        let force_cleanup = if status.deletion_started_at.is_none() {
+            status.deletion_started_at = Some(Utc::now());
+            self.k8s
+                .update_node_pool_status(ns, &name, status.clone())
+                .await?;
+            false
+        } else {
+            let started = status.deletion_started_at.unwrap();
+            let elapsed = Utc::now().signed_duration_since(started);
+            elapsed.num_seconds() > PhaseTimeouts::DELETION_FORCE_TIMEOUT as i64
+        };
+
+        // Delete K8s node (non-critical - continue even if fails)
         if let Some(k8s_node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(k8s_node_name).await {
                 warn!(node = %k8s_node_name, error = %e, "Failed to delete K8s node");
             }
         }
 
-        // Stop rental
+        // Stop rental - normally CRITICAL, but force after timeout
         if let Some(rental_id) = &status.rental_id {
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(rental = %rental_id, error = %e, "Failed to stop rental");
+            match self.api.stop_rental(rental_id).await {
+                Ok(()) => {
+                    self.metrics.record_rental_stopped(&name);
+                }
+                Err(e) => {
+                    if force_cleanup {
+                        error!(
+                            pool = %name,
+                            rental = %rental_id,
+                            error = %e,
+                            "ALERT: Forcing termination after timeout - rental may be orphaned"
+                        );
+                        self.metrics.record_forced_deletion(&name);
+                    } else {
+                        error!(rental = %rental_id, error = %e, "Failed to stop rental, will retry");
+                        return Err(e);
+                    }
+                }
             }
-            self.metrics.record_rental_stopped(&name);
         }
 
         // Deregister node (prefer status.node_id for dynamic mode, fall back to spec)
+        // Non-critical - log warning but continue
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -1045,16 +1109,18 @@ where
 
         info!(pool = %name, "Failed NodePool exceeded GC timeout, cleaning up resources");
 
-        // Stop rental if exists
+        // Stop rental - CRITICAL: must succeed to prevent orphaned VMs
+        // If this fails, stay in Failed phase and retry on next GC cycle
         if let Some(rental_id) = &status.rental_id {
             info!(pool = %name, rental_id = %rental_id, "Stopping rental for failed NodePool");
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental during GC");
-            }
+            self.api.stop_rental(rental_id).await.map_err(|e| {
+                error!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental during GC, will retry");
+                e
+            })?;
             self.metrics.record_rental_stopped(&name);
         }
 
-        // Deregister node if registered
+        // Deregister node if registered (non-critical)
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -1062,7 +1128,7 @@ where
             }
         }
 
-        // Delete K8s node if it was created
+        // Delete K8s node if it was created (non-critical)
         if let Some(node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(node_name).await {
                 warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node during GC");
@@ -1088,14 +1154,16 @@ where
         // Ensure resources are cleaned up and delete the CR.
         info!(pool = %name, "Cleaning up stuck Deleted NodePool");
 
-        // Stop rental if it somehow still exists
+        // Stop rental - CRITICAL: must succeed to prevent orphaned VMs
         if let Some(rental_id) = &status.rental_id {
-            if let Err(e) = self.api.stop_rental(rental_id).await {
-                warn!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental for Deleted NodePool");
-            }
+            self.api.stop_rental(rental_id).await.map_err(|e| {
+                error!(pool = %name, rental_id = %rental_id, error = %e, "Failed to stop rental for Deleted NodePool, will retry");
+                e
+            })?;
+            self.metrics.record_rental_stopped(&name);
         }
 
-        // Deregister node if registered
+        // Deregister node if registered (non-critical)
         let resolved_node_id = status.node_id.as_ref().or(pool.spec.node_id.as_ref());
         if let Some(node_id) = resolved_node_id {
             if let Err(e) = self.api.deregister_node(node_id).await {
@@ -1103,7 +1171,7 @@ where
             }
         }
 
-        // Delete K8s node if it exists
+        // Delete K8s node if it exists (non-critical)
         if let Some(node_name) = &status.node_name {
             if let Err(e) = self.k8s.delete_node(node_name).await {
                 warn!(pool = %name, node = %node_name, error = %e, "Failed to delete K8s node for Deleted NodePool");
@@ -1200,11 +1268,26 @@ where
         mut status: NodePoolStatus,
         new_phase: NodePoolPhase,
     ) -> Result<()> {
-        info!(pool = %name, from = ?status.phase, to = ?new_phase, "Phase transition");
+        let now = Utc::now();
+        let old_phase = status.phase.clone();
+
+        // Calculate duration in previous phase if we have phase_entered_at
+        let duration_ms = status
+            .phase_entered_at
+            .map(|entered| now.signed_duration_since(entered).num_milliseconds())
+            .unwrap_or(0);
+
+        info!(
+            pool = %name,
+            phase_from = ?old_phase,
+            phase_to = ?new_phase,
+            duration_ms = duration_ms,
+            "NodePool phase transition"
+        );
         self.metrics.record_phase_transition(name, &new_phase);
 
         status.phase = Some(new_phase);
-        status.phase_entered_at = Some(Utc::now());
+        status.phase_entered_at = Some(now);
         status.last_error = None;
 
         self.k8s.update_node_pool_status(ns, name, status).await
@@ -1217,12 +1300,27 @@ where
         mut status: NodePoolStatus,
         message: &str,
     ) -> Result<()> {
-        error!(pool = %name, message = %message, "Transitioning to Failed");
+        let now = Utc::now();
+        let old_phase = status.phase.clone();
+
+        let duration_ms = status
+            .phase_entered_at
+            .map(|entered| now.signed_duration_since(entered).num_milliseconds())
+            .unwrap_or(0);
+
+        error!(
+            pool = %name,
+            phase_from = ?old_phase,
+            phase_to = ?NodePoolPhase::Failed,
+            duration_ms = duration_ms,
+            error = %message,
+            "NodePool phase transition to Failed"
+        );
         self.metrics
             .record_phase_transition(name, &NodePoolPhase::Failed);
 
         status.phase = Some(NodePoolPhase::Failed);
-        status.phase_entered_at = Some(Utc::now());
+        status.phase_entered_at = Some(now);
         status.last_error = Some(message.to_string());
 
         add_condition(&mut status, "Failed", "True", "PhaseFailed", message);

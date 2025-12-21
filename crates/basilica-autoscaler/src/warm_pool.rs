@@ -82,15 +82,7 @@ pub fn calculate_vram_metrics(
         }
 
         // Check if this pool is a warm pool node
-        let is_warm_pool = pool
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get("basilica.ai/warm-pool"))
-            .map(|v| v == "true")
-            .unwrap_or(false);
-
-        if !is_warm_pool {
+        if !pool.is_warm_pool() {
             continue;
         }
 

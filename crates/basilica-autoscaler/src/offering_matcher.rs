@@ -585,7 +585,10 @@ pub fn extract_gpu_requirements(pod: &Pod) -> Option<PendingGpuPod> {
         .and_then(|a| a.get(pod_annotations::GPU_REQUIREMENTS))
         .and_then(|json| serde_json::from_str(json).ok());
 
-    // Extract GPU models: prefer annotation, fallback to label
+    // Extract GPU models with priority:
+    // 1. Annotation (JSON format) - highest priority, explicit user intent
+    // 2. Label (comma-separated) - explicit user intent
+    // 3. NodeAffinity (basilica.ai/gpu-model) - scheduling constraint
     let gpu_models: BTreeSet<String> = annotation_spec
         .as_ref()
         .filter(|spec| !spec.model.is_empty())
@@ -603,6 +606,18 @@ pub fn extract_gpu_requirements(pod: &Pod) -> Option<PendingGpuPod> {
                         .filter(|m| !m.is_empty())
                         .collect()
                 })
+                .filter(|set: &BTreeSet<String>| !set.is_empty())
+        })
+        .or_else(|| {
+            // Fallback to nodeAffinity - extract GPU model from scheduling constraints
+            // This ensures we provision nodes matching what the pod's nodeAffinity requires
+            let from_affinity = extract_raw_gpu_models_from_affinity(pod);
+            (!from_affinity.is_empty()).then(|| {
+                from_affinity
+                    .into_iter()
+                    .map(|m| normalize_gpu_model(&m))
+                    .collect()
+            })
         })
         .unwrap_or_default();
 
@@ -1505,5 +1520,159 @@ mod tests {
 
         let filtered = filter_pods_from_failing_deployments(pending, &all_pods);
         assert_eq!(filtered.len(), 1); // Different owner, so pending is kept
+    }
+
+    fn test_pod_with_gpu_request_and_affinity(
+        name: &str,
+        gpu_count: u32,
+        gpu_models: &[&str],
+    ) -> Pod {
+        use k8s_openapi::api::core::v1::{
+            Affinity, Container, NodeAffinity, NodeSelector, NodeSelectorRequirement,
+            NodeSelectorTerm, PodSpec, ResourceRequirements,
+        };
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use std::collections::BTreeMap;
+
+        let mut requests = BTreeMap::new();
+        requests.insert(
+            "nvidia.com/gpu".to_string(),
+            Quantity(gpu_count.to_string()),
+        );
+
+        let match_expressions = vec![NodeSelectorRequirement {
+            key: "basilica.ai/gpu-model".to_string(),
+            operator: "In".to_string(),
+            values: Some(gpu_models.iter().map(|s| s.to_string()).collect()),
+        }];
+
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                affinity: Some(Affinity {
+                    node_affinity: Some(NodeAffinity {
+                        required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                            node_selector_terms: vec![NodeSelectorTerm {
+                                match_expressions: Some(match_expressions),
+                                ..Default::default()
+                            }],
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_extract_gpu_requirements_from_node_affinity() {
+        // Pod has GPU request and nodeAffinity for H100, but no annotation/label
+        let pod = test_pod_with_gpu_request_and_affinity("pod1", 1, &["H100"]);
+
+        let result = extract_gpu_requirements(&pod);
+        assert!(result.is_some());
+
+        let pending_pod = result.unwrap();
+        assert_eq!(pending_pod.requirements.gpu_count, 1);
+        assert_eq!(pending_pod.requirements.gpu_models.len(), 1);
+        assert!(pending_pod.requirements.gpu_models.contains("H100"));
+    }
+
+    #[test]
+    fn test_extract_gpu_requirements_from_node_affinity_multiple_models() {
+        // Pod requires either H100 or A100
+        let pod = test_pod_with_gpu_request_and_affinity("pod1", 2, &["H100", "A100-80GB"]);
+
+        let result = extract_gpu_requirements(&pod);
+        assert!(result.is_some());
+
+        let pending_pod = result.unwrap();
+        assert_eq!(pending_pod.requirements.gpu_count, 2);
+        assert_eq!(pending_pod.requirements.gpu_models.len(), 2);
+        assert!(pending_pod.requirements.gpu_models.contains("H100"));
+        assert!(pending_pod.requirements.gpu_models.contains("A10080GB")); // Normalized
+    }
+
+    #[test]
+    fn test_extract_gpu_requirements_prefers_annotation_over_affinity() {
+        use k8s_openapi::api::core::v1::{
+            Affinity, Container, NodeAffinity, NodeSelector, NodeSelectorRequirement,
+            NodeSelectorTerm, PodSpec, ResourceRequirements,
+        };
+        use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+        use std::collections::BTreeMap;
+
+        let mut requests = BTreeMap::new();
+        requests.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            pod_annotations::GPU_REQUIREMENTS.to_string(),
+            r#"{"model":["RTX4090"]}"#.to_string(),
+        );
+
+        let match_expressions = vec![NodeSelectorRequirement {
+            key: "basilica.ai/gpu-model".to_string(),
+            operator: "In".to_string(),
+            values: Some(vec!["H100".to_string()]), // Different from annotation
+        }];
+
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some("pod1".to_string()),
+                namespace: Some("default".to_string()),
+                annotations: Some(annotations),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                affinity: Some(Affinity {
+                    node_affinity: Some(NodeAffinity {
+                        required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                            node_selector_terms: vec![NodeSelectorTerm {
+                                match_expressions: Some(match_expressions),
+                                ..Default::default()
+                            }],
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = extract_gpu_requirements(&pod);
+        assert!(result.is_some());
+
+        let pending_pod = result.unwrap();
+        // Annotation takes priority over nodeAffinity
+        assert_eq!(pending_pod.requirements.gpu_models.len(), 1);
+        assert!(pending_pod.requirements.gpu_models.contains("RTX4090"));
     }
 }

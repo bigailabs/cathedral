@@ -226,6 +226,10 @@ impl PhaseTimeouts {
     pub const TERMINATING: u64 = 120; // 2 min
     /// Auto-cleanup timeout for Failed NodePools (stops rental, deletes CR)
     pub const FAILED_GC_TIMEOUT: u64 = 600; // 10 min
+    /// Force deletion timeout: if deletion is stuck for this long, force cleanup
+    /// and proceed with finalizer removal to prevent indefinite blocking.
+    /// Set to 1 hour to allow sufficient time for transient API issues to resolve.
+    pub const DELETION_FORCE_TIMEOUT: u64 = 3600; // 1 hour
 }
 
 fn parse_duration_env(key: &str, default_secs: u64) -> Duration {

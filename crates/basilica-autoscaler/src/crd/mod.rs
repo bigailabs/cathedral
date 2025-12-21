@@ -5,7 +5,7 @@ pub use node_pool::{
     HealthCheckConfig, K3sConfig, LifecycleConfig, NodeManagedBy, NodePasswordRef, NodePool,
     NodePoolCondition, NodePoolMode, NodePoolPhase, NodePoolSpec, NodePoolStatus, SecretRef,
     SecureCloudConfig, SshAuthType, SshConfig, WireGuardConfig, WireGuardPeerStatus,
-    WireGuardStatus, FINALIZER,
+    WireGuardStatus, FINALIZER, WARM_POOL_LABEL,
 };
 pub use scaling_policy::{
     ImagePrepullConfig, MetricsConfig, MetricsSnapshot, NodeTemplate, PrepullImage,
