@@ -74,9 +74,11 @@ module "k3s_nlb" {
 module "deployments_alb" {
   source = "./modules/deployments-alb"
 
-  name_prefix = local.name_prefix
-  vpc_id      = module.networking.vpc_id
-  subnet_ids  = module.networking.public_subnet_ids
+  name_prefix     = local.name_prefix
+  vpc_id          = module.networking.vpc_id
+  subnet_ids      = module.networking.public_subnet_ids
+  enable_https    = var.deployments_alb_enable_https
+  certificate_arn = var.deployments_alb_certificate_arn
 
   tags = local.common_tags
 

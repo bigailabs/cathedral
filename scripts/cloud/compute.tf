@@ -383,7 +383,7 @@ module "basilica_api_service" {
 
     # Cloudflare Integration
     BASILICA_API_DNS__ENABLED      = "true"
-    BASILICA_API_DNS__PROXY        = "true"
+    BASILICA_API_DNS__PROXY        = "false"
     BASILICA_API_DNS__API_TOKEN    = var.cloudflare_api_token
     BASILICA_API_DNS__ZONE_ID      = var.cloudflare_zone_id
     BASILICA_API_DNS__DOMAIN       = var.cloudflare_domain
@@ -391,7 +391,7 @@ module "basilica_api_service" {
     CLOUDFLARE_API_TOKEN           = var.cloudflare_api_token
     CLOUDFLARE_ZONE_ID             = var.cloudflare_zone_id
     CLOUDFLARE_DOMAIN              = var.cloudflare_domain
-    CLOUDFLARE_PROXY               = "true"
+    CLOUDFLARE_PROXY               = "false"
     ALB_DNS_NAME                   = var.deployments_alb_dns_name
 
     # K3S_SERVER_URL for interacting with the cluster

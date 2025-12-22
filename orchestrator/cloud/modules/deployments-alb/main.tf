@@ -9,6 +9,7 @@ resource "aws_lb" "deployments" {
   enable_deletion_protection       = false
   enable_http2                     = true
   enable_cross_zone_load_balancing = true
+  idle_timeout                     = 4000 # Max for ALB (seconds)
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-deploy-alb"
@@ -57,9 +58,26 @@ resource "aws_lb_listener" "http" {
   })
 }
 
-# HTTPS listener removed - not needed with Cloudflare Flexible mode
-# Cloudflare connects to ALB via HTTP (port 80) only
-# If direct HTTPS access to ALB is needed, add an HTTPS listener with a certificate
+# HTTPS listener - TLS termination at ALB
+# Required when not using Cloudflare proxy (direct ALB access)
+resource "aws_lb_listener" "https" {
+  count = var.enable_https ? 1 : 0
+
+  load_balancer_arn = aws_lb.deployments.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.certificate_arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.envoy.arn
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-https-listener"
+  })
+}
 
 # Security group for ALB
 resource "aws_security_group" "alb" {
