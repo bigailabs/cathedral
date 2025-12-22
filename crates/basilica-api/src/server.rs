@@ -973,7 +973,7 @@ impl Server {
                 match refresh_aggregator_service.refresh_all_providers().await {
                     Ok(count) => {
                         if count > 0 {
-                            tracing::debug!("GPU offerings refresh: fetched {} offerings", count);
+                            tracing::trace!("GPU offerings refresh: fetched {} offerings", count);
                         } else {
                             tracing::trace!(
                                 "GPU offerings refresh: no new offerings (cooldown or no providers enabled)"
