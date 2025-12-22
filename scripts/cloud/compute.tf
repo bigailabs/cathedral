@@ -176,6 +176,7 @@ module "billing_service" {
 
     # Logging
     RUST_LOG = "basilica_billing=info,basilica_protocol=info"
+    NO_COLOR = "1"
   }
 
   # No secrets needed - using environment variables
@@ -271,6 +272,7 @@ module "payments_service" {
 
     # Logging
     RUST_LOG = "basilica_payments=info,bittensor=info,basilica_protocol=info"
+    NO_COLOR = "1"
   }
 
   # Secrets from AWS Secrets Manager
@@ -409,6 +411,7 @@ module "basilica_api_service" {
 
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
+    NO_COLOR = "1"
   }
 
   # Secrets from AWS Secrets Manager
