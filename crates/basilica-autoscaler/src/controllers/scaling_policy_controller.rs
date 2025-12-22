@@ -146,15 +146,12 @@ where
         }
 
         // Evaluate scaling decision with GPU-aware idle node matching
-        let decision = self.evaluate_scaling(
-            &policy.spec,
-            &metrics_snapshot,
-            current_nodes,
-            &status,
-            &pending_gpu_pods,
-            &node_pools,
-            &gpu_nodes,
-        );
+        let ctx = ScalingContext {
+            pending_pods: &pending_gpu_pods,
+            node_pools: &node_pools,
+            k8s_nodes: &gpu_nodes,
+        };
+        let decision = self.evaluate_scaling(&policy.spec, &metrics_snapshot, current_nodes, &ctx);
 
         match decision {
             ScalingDecision::ScaleUp(count) => {
@@ -717,18 +714,18 @@ where
         spec: &ScalingPolicySpec,
         metrics: &MetricsSnapshot,
         current_nodes: u32,
-        _status: &ScalingPolicyStatus,
-        pending_pods: &[Pod],
-        node_pools: &[NodePool],
-        k8s_nodes: &[k8s_openapi::api::core::v1::Node],
+        ctx: &ScalingContext<'_>,
     ) -> ScalingDecision {
         // Check scale up: pending GPU pods exceed threshold
         if metrics.pending_gpu_pods >= spec.scale_up.pending_pod_threshold {
             // GPU-aware idle check: only skip scale-up if idle nodes can actually serve
             // the pending pods based on GPU model, count, and memory requirements.
             // Also checks that nodes are schedulable (no disk pressure, etc.)
-            let serviceable_count =
-                Self::count_serviceable_pending_pods(pending_pods, node_pools, k8s_nodes);
+            let serviceable_count = Self::count_serviceable_pending_pods(
+                ctx.pending_pods,
+                ctx.node_pools,
+                ctx.k8s_nodes,
+            );
 
             if serviceable_count >= metrics.pending_gpu_pods && metrics.idle_nodes > 0 {
                 debug!(
@@ -1712,6 +1709,14 @@ enum ScalingDecision {
     ScaleUp(u32),
     ScaleDown(u32),
     NoAction,
+}
+
+/// Context for scaling evaluation containing node and pod information.
+/// Groups related parameters to reduce function argument count.
+struct ScalingContext<'a> {
+    pending_pods: &'a [Pod],
+    node_pools: &'a [NodePool],
+    k8s_nodes: &'a [k8s_openapi::api::core::v1::Node],
 }
 
 /// Result of offering lookup with fallback handling
