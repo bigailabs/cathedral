@@ -108,8 +108,8 @@ where
 
         let mut status = policy.status.clone().unwrap_or_default();
 
-        // Collect metrics and pending pods
-        let (metrics_snapshot, pending_gpu_pods) = self.collect_metrics(ns).await?;
+        // Collect metrics, pending pods, and K8s nodes for schedulability checks
+        let (metrics_snapshot, pending_gpu_pods, gpu_nodes) = self.collect_metrics(ns).await?;
         status.metrics = Some(metrics_snapshot.clone());
         status.last_evaluation_time = Some(Utc::now());
 
@@ -153,6 +153,7 @@ where
             &status,
             &pending_gpu_pods,
             &node_pools,
+            &gpu_nodes,
         );
 
         match decision {
@@ -585,7 +586,14 @@ where
         Ok(())
     }
 
-    async fn collect_metrics(&self, ns: &str) -> Result<(MetricsSnapshot, Vec<Pod>)> {
+    async fn collect_metrics(
+        &self,
+        ns: &str,
+    ) -> Result<(
+        MetricsSnapshot,
+        Vec<Pod>,
+        Vec<k8s_openapi::api::core::v1::Node>,
+    )> {
         let pending_pods = self.k8s.list_pending_pods().await?;
         let pending_gpu_pods: Vec<Pod> = pending_pods.into_iter().filter(requests_gpu).collect();
 
@@ -654,7 +662,7 @@ where
             idle_nodes,
         };
 
-        Ok((metrics, filtered_gpu_pods))
+        Ok((metrics, filtered_gpu_pods, nodes))
     }
 
     /// Apply filters to pending GPU pods to exclude:
@@ -712,12 +720,15 @@ where
         _status: &ScalingPolicyStatus,
         pending_pods: &[Pod],
         node_pools: &[NodePool],
+        k8s_nodes: &[k8s_openapi::api::core::v1::Node],
     ) -> ScalingDecision {
         // Check scale up: pending GPU pods exceed threshold
         if metrics.pending_gpu_pods >= spec.scale_up.pending_pod_threshold {
             // GPU-aware idle check: only skip scale-up if idle nodes can actually serve
             // the pending pods based on GPU model, count, and memory requirements.
-            let serviceable_count = Self::count_serviceable_pending_pods(pending_pods, node_pools);
+            // Also checks that nodes are schedulable (no disk pressure, etc.)
+            let serviceable_count =
+                Self::count_serviceable_pending_pods(pending_pods, node_pools, k8s_nodes);
 
             if serviceable_count >= metrics.pending_gpu_pods && metrics.idle_nodes > 0 {
                 debug!(
@@ -1400,18 +1411,74 @@ where
         })
     }
 
+    /// Check if a K8s node is schedulable (no blocking conditions or taints).
+    fn is_node_schedulable(node: &k8s_openapi::api::core::v1::Node) -> bool {
+        // Check for unschedulable flag
+        if node
+            .spec
+            .as_ref()
+            .and_then(|s| s.unschedulable)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        // Check for blocking conditions (DiskPressure, MemoryPressure, PIDPressure)
+        if let Some(conditions) = node.status.as_ref().and_then(|s| s.conditions.as_ref()) {
+            for cond in conditions {
+                // These conditions block scheduling when True
+                if (cond.type_ == "DiskPressure"
+                    || cond.type_ == "MemoryPressure"
+                    || cond.type_ == "PIDPressure")
+                    && cond.status == "True"
+                {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
     /// Count idle nodes that can serve pending pods based on GPU requirements.
     /// Returns the number of pending pods that CAN be served by available idle nodes.
-    fn count_serviceable_pending_pods(pending_pods: &[Pod], node_pools: &[NodePool]) -> u32 {
-        // Get idle node pools (Ready phase)
+    /// Also verifies that the underlying K8s nodes are schedulable.
+    fn count_serviceable_pending_pods(
+        pending_pods: &[Pod],
+        node_pools: &[NodePool],
+        k8s_nodes: &[k8s_openapi::api::core::v1::Node],
+    ) -> u32 {
+        // Build a map of node_name -> K8s node for quick lookup
+        let node_map: std::collections::HashMap<&str, &k8s_openapi::api::core::v1::Node> =
+            k8s_nodes
+                .iter()
+                .filter_map(|n| n.metadata.name.as_deref().map(|name| (name, n)))
+                .collect();
+
+        // Get idle node pools (Ready phase) with schedulable underlying nodes
         let idle_pools: Vec<&NodePool> = node_pools
             .iter()
             .filter(|p| {
-                p.status
-                    .as_ref()
-                    .and_then(|s| s.phase.as_ref())
-                    .map(|phase| *phase == NodePoolPhase::Ready)
-                    .unwrap_or(false)
+                let status = match p.status.as_ref() {
+                    Some(s) => s,
+                    None => return false,
+                };
+
+                // Check NodePool phase is Ready
+                if status.phase.as_ref() != Some(&NodePoolPhase::Ready) {
+                    return false;
+                }
+
+                // Check underlying K8s node is schedulable
+                let node_name = match status.node_name.as_deref() {
+                    Some(name) => name,
+                    None => return false,
+                };
+
+                match node_map.get(node_name) {
+                    Some(node) => Self::is_node_schedulable(node),
+                    None => false, // Node not found in K8s - not schedulable
+                }
             })
             .collect();
 
