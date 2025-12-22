@@ -194,3 +194,31 @@ variable "k3s_vpc_cidr" {
   description = "CIDR block of the K3s VPC (e.g., 10.101.0.0/16). Required for routing traffic via VPC peering."
   default     = ""
 }
+
+# =============================================================================
+# VIP (Managed Machines) Configuration
+# =============================================================================
+
+variable "vip_s3_bucket" {
+  type        = string
+  description = "S3 bucket name containing VIP machines CSV file"
+  default     = ""
+}
+
+variable "vip_s3_key" {
+  type        = string
+  description = "S3 object key for VIP machines CSV file (e.g., 'vip/machines.csv')"
+  default     = ""
+}
+
+variable "vip_s3_region" {
+  type        = string
+  description = "AWS region for VIP S3 bucket (defaults to aws_region if not specified)"
+  default     = ""
+}
+
+variable "vip_poll_interval_secs" {
+  type        = number
+  description = "Polling interval in seconds for VIP machine sync (default: 60)"
+  default     = 60
+}
