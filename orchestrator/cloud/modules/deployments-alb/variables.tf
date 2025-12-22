@@ -18,3 +18,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "certificate_arn" {
+  description = "ACM certificate ARN for HTTPS listener"
+  type        = string
+  default     = ""
+}
+
+variable "enable_https" {
+  description = "Enable HTTPS listener with TLS termination at ALB"
+  type        = bool
+  default     = false
+}

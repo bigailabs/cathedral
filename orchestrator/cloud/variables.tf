@@ -109,3 +109,15 @@ variable "deployment_public_ip" {
   description = "Public IP/DNS for user deployments (defaults to primary K3s server IP, update after Envoy LB is provisioned)"
   default     = ""
 }
+
+variable "deployments_alb_enable_https" {
+  type        = bool
+  description = "Enable HTTPS listener on deployments ALB with TLS termination"
+  default     = false
+}
+
+variable "deployments_alb_certificate_arn" {
+  type        = string
+  description = "ACM certificate ARN for HTTPS listener on deployments ALB"
+  default     = ""
+}
