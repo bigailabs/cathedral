@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument, trace, warn};
 
 /// JSON Web Key Set structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,15 +69,15 @@ pub struct Claims {
 ///
 /// This function retrieves the public keys used to verify JWT signatures
 /// from the Auth0 JWKS endpoint, with automatic caching using the default TTL.
-#[instrument(level = "debug")]
+#[instrument(level = "trace")]
 pub async fn fetch_jwks(auth0_domain: &str) -> Result<JwkSet> {
     let jwks_url = format!("https://{}/.well-known/jwks.json", auth0_domain);
 
-    debug!("Fetching JWKS from: {}", jwks_url);
+    trace!("Fetching JWKS from: {}", jwks_url);
 
     // Check cache first
     if let Some(cached_jwks) = JWKS_CACHE.get(&jwks_url).await {
-        debug!("Using cached JWKS for: {}", jwks_url);
+        trace!("Using cached JWKS for: {}", jwks_url);
         return Ok((*cached_jwks).clone());
     }
 
@@ -119,7 +119,7 @@ pub async fn fetch_jwks(auth0_domain: &str) -> Result<JwkSet> {
         return Err(anyhow!("JWKS contains no keys"));
     }
 
-    debug!("Successfully fetched JWKS with {} keys", jwks.keys.len());
+    trace!("Successfully fetched JWKS with {} keys", jwks.keys.len());
 
     // Cache the result using the default TTL configured in the cache
     let cached_jwks = Arc::new(jwks.clone());
@@ -131,13 +131,13 @@ pub async fn fetch_jwks(auth0_domain: &str) -> Result<JwkSet> {
 /// Validates a JWT token using the provided JWKS with additional options
 ///
 /// This function decodes and validates a JWT token with configurable validation options.
-#[instrument(level = "debug", skip(token, jwks))]
+#[instrument(level = "trace", skip(token, jwks))]
 pub fn validate_jwt_with_options(
     token: &str,
     jwks: &JwkSet,
     clock_skew: Option<Duration>,
 ) -> Result<Claims> {
-    debug!("Validating JWT token with options");
+    trace!("Validating JWT token with options");
 
     // Step 1: Decode header without verification to get key ID
     let header = decode_header(token).map_err(|e| anyhow!("Failed to decode JWT header: {}", e))?;
@@ -146,7 +146,7 @@ pub fn validate_jwt_with_options(
         .kid
         .ok_or_else(|| anyhow!("JWT header missing key ID (kid)"))?;
 
-    debug!("JWT key ID: {}", key_id);
+    trace!("JWT key ID: {}", key_id);
 
     // Step 2: Find matching JWK by key ID
     let jwk = jwks
@@ -186,16 +186,17 @@ pub fn validate_jwt_with_options(
         validation.leeway = skew.as_secs();
     }
 
-    debug!(
+    trace!(
         "JWT validation configured: aud={}, leeway={}",
-        validation.validate_aud, validation.leeway
+        validation.validate_aud,
+        validation.leeway
     );
 
     // Step 5: Decode and validate the token
     let token_data = decode::<Claims>(token, &decoding_key, &validation)
         .map_err(|e| anyhow!("JWT validation failed: {}", e))?;
 
-    debug!(
+    trace!(
         "JWT validation successful for subject: {}",
         token_data.claims.sub
     );
@@ -208,14 +209,14 @@ pub fn validate_jwt_with_options(
 ///
 /// Auth0 tokens can have single audience (string) or multiple audiences (array).
 /// This function handles both cases.
-#[instrument(level = "debug")]
+#[instrument(level = "trace")]
 pub fn verify_audience(claims: &Claims, expected: &str) -> Result<()> {
-    debug!("Verifying audience: expected={}", expected);
+    trace!("Verifying audience: expected={}", expected);
 
     match &claims.aud {
         serde_json::Value::String(aud) => {
             if aud == expected {
-                debug!("Audience verification successful (string)");
+                trace!("Audience verification successful (string)");
                 Ok(())
             } else {
                 warn!("Audience mismatch: expected={}, got={}", expected, aud);
@@ -237,7 +238,7 @@ pub fn verify_audience(claims: &Claims, expected: &str) -> Result<()> {
             });
 
             if found {
-                debug!("Audience verification successful (array)");
+                trace!("Audience verification successful (array)");
                 Ok(())
             } else {
                 warn!(
@@ -260,12 +261,12 @@ pub fn verify_audience(claims: &Claims, expected: &str) -> Result<()> {
 /// Verifies that the token issuer matches the expected issuer
 ///
 /// This ensures the token was issued by the expected Auth0 tenant.
-#[instrument(level = "debug")]
+#[instrument(level = "trace")]
 pub fn verify_issuer(claims: &Claims, expected: &str) -> Result<()> {
-    debug!("Verifying issuer: expected={}", expected);
+    trace!("Verifying issuer: expected={}", expected);
 
     if claims.iss == expected {
-        debug!("Issuer verification successful");
+        trace!("Issuer verification successful");
         Ok(())
     } else {
         warn!("Issuer mismatch: expected={}, got={}", expected, claims.iss);

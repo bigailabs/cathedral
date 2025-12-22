@@ -11,7 +11,7 @@ use axum::{
 };
 use basilica_common::{auth0_audience, auth0_domain, auth0_issuer};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
 use crate::{
     api::auth::{
@@ -148,7 +148,7 @@ pub async fn auth_middleware(
         }
     } else {
         // JWT authentication (existing Auth0 logic)
-        debug!("Attempting JWT authentication");
+        trace!("Attempting JWT authentication");
 
         // Fetch the JWKS from Auth0
         let jwks = fetch_jwks(auth0_domain()).await.map_err(|e| {
@@ -208,9 +208,10 @@ pub async fn auth_middleware(
                 .into_response());
         }
 
-        debug!(
+        trace!(
             "JWT authentication successful for user: {}. Scopes: {:?}",
-            claims.sub, claims.scope
+            claims.sub,
+            claims.scope
         );
 
         // Record successful JWT auth

@@ -149,8 +149,8 @@ pub async fn list_secure_cloud_rentals(
     Extension(auth): Extension<AuthContext>,
 ) -> Result<impl IntoResponse, ApiError> {
     // 1. Query secure_cloud_rentals table for this user to get rental IDs
-    let rental_ids: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, status FROM secure_cloud_rentals WHERE user_id = $1")
+    let rental_ids: Vec<(String, String, bool)> =
+        sqlx::query_as("SELECT id, status, is_vip FROM secure_cloud_rentals WHERE user_id = $1")
             .bind(&auth.user_id)
             .fetch_all(&state.db)
             .await
@@ -162,7 +162,11 @@ pub async fn list_secure_cloud_rentals(
             })?;
 
     // 2. Refresh active rentals from provider to get latest IP/status
-    for (rental_id, status) in &rental_ids {
+    for (rental_id, status, is_vip) in &rental_ids {
+        // Skip VIP rentals - they get status from CSV/database directly
+        if *is_vip {
+            continue;
+        }
         if status == "running" || status == "provisioning" || status == "pending" {
             if let Err(e) = state.aggregator_service.get_deployment(rental_id).await {
                 tracing::debug!(
