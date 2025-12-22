@@ -407,6 +407,13 @@ module "basilica_api_service" {
     BASILICA_API_WIREGUARD__ENABLED = tostring(var.wireguard_enabled)
     BASILICA_API_WIREGUARD__SERVERS = jsonencode(var.wireguard_servers)
 
+    # VIP (Managed Machines) Configuration
+    # Set s3_bucket and s3_key to sync VIP machines from S3
+    BASILICA_API_AGGREGATOR__VIP__S3_BUCKET          = var.vip_s3_bucket
+    BASILICA_API_AGGREGATOR__VIP__S3_KEY             = var.vip_s3_key
+    BASILICA_API_AGGREGATOR__VIP__S3_REGION          = var.vip_s3_region != "" ? var.vip_s3_region : var.aws_region
+    BASILICA_API_AGGREGATOR__VIP__POLL_INTERVAL_SECS = tostring(var.vip_poll_interval_secs)
+
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
   }
@@ -430,6 +437,35 @@ module "basilica_api_service" {
   tags = local.common_tags
 
   depends_on = [module.rds, module.basilica_api_alb]
+}
+
+# =============================================================================
+# VIP S3 ACCESS POLICY
+# =============================================================================
+# Grant the API service permission to read VIP machine data from S3
+# This is only created when VIP is enabled and S3 bucket is configured
+
+resource "aws_iam_role_policy" "api_vip_s3_access" {
+  count = var.vip_s3_bucket != "" ? 1 : 0
+  name  = "${local.name_prefix}-api-vip-s3-access"
+  role  = module.basilica_api_service.task_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.vip_s3_bucket}",
+          "arn:aws:s3:::${var.vip_s3_bucket}/${var.vip_s3_key}"
+        ]
+      }
+    ]
+  })
 }
 
 # =============================================================================
