@@ -3,22 +3,30 @@
 use crate::api::routes::secure_cloud::stop_secure_cloud_rental_internal;
 use crate::server::AppState;
 use axum::{
-    extract::{Path, State},
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
+use serde::Deserialize;
 use basilica_aggregator::models::DeploymentStatus;
 use basilica_aggregator::providers::hyperstack::HyperstackCallback;
 use serde_json::json;
 
+/// Query parameters for webhook authentication
+#[derive(Deserialize)]
+pub struct WebhookQuery {
+    token: String,
+}
+
 /// Handle Hyperstack webhook callback
-/// POST /webhooks/hyperstack/{token}
+/// POST /webhooks/hyperstack?token=...
 pub async fn hyperstack_callback(
     State(state): State<AppState>,
-    Path(token): Path<String>,
+    Query(query): Query<WebhookQuery>,
     Json(payload): Json<HyperstackCallback>,
 ) -> impl IntoResponse {
+    let token = query.token;
     // Log full payload for debugging
     tracing::info!(
         payload = ?payload,

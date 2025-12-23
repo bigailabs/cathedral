@@ -21,9 +21,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/health/k3s", get(routes::health::k3s_health_check))
         // Metrics endpoint - no authentication required for Prometheus scraping
         .route("/metrics", get(routes::metrics::metrics_handler))
-        // Webhook endpoints - token in path provides authentication
+        // Webhook endpoints - token in query param provides authentication
         .route(
-            "/webhooks/hyperstack/:token",
+            "/webhooks/hyperstack",
             post(routes::webhooks::hyperstack_callback),
         );
 
