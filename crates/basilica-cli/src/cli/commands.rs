@@ -365,10 +365,6 @@ pub struct UpOptions {
     #[arg(long)]
     pub country: Option<String>,
 
-    /// Disable SSH access (faster startup)
-    #[arg(long)]
-    pub no_ssh: bool,
-
     /// Create rental in detached mode (don't auto-connect via SSH)
     #[arg(short = 'd', long)]
     pub detach: bool,

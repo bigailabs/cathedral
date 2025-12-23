@@ -95,7 +95,7 @@ def print_ssh_instructions(
     """
     if not credentials:
         print(f"No SSH access available for rental {rental_id}")
-        print("(SSH was disabled with no_ssh=True or not yet provisioned)")
+        print("(SSH not yet provisioned)")
         return
     
     try:

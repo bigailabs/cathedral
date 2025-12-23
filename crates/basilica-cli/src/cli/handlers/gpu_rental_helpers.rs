@@ -717,11 +717,10 @@ async fn fetch_community_ssh_info(
         CliError::Internal(
             eyre!("SSH credentials not available")
                 .wrap_err(format!(
-                    "The rental '{}' was created without SSH access",
+                    "The rental '{}' does not have SSH access",
                     rental_id
                 ))
-                .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
-                .note("Create a new rental without --no-ssh to enable SSH access"),
+                .suggestion("Create a new rental to enable SSH access"),
         )
     })?;
 

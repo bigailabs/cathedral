@@ -469,11 +469,6 @@ async fn handle_secure_cloud_rental_with_offering(
         response.rental_id
     ));
 
-    // Handle SSH based on options
-    if options.no_ssh {
-        return Ok(());
-    }
-
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
             // Look up the private key for display
@@ -627,7 +622,6 @@ async fn handle_community_cloud_rental_with_selection(
         },
         command,
         volumes: vec![],
-        no_ssh: options.no_ssh,
     };
 
     spinner.set_message("Creating rental...");
@@ -646,11 +640,6 @@ async fn handle_community_cloud_rental_with_selection(
         "Successfully started community cloud rental {}",
         response.rental_id
     ));
-
-    // Handle SSH based on options
-    if options.no_ssh {
-        return Ok(());
-    }
 
     let ssh_creds = match response.ssh_credentials {
         Some(ref creds) => creds,
@@ -1757,7 +1746,7 @@ pub async fn handle_exec(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -1819,7 +1808,7 @@ pub async fn handle_ssh(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -1903,7 +1892,7 @@ pub async fn handle_cp(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
