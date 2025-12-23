@@ -1,0 +1,177 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: falco
+  labels:
+    app: falco
+    app.kubernetes.io/name: falco
+    app.kubernetes.io/part-of: basilica-security
+spec:
+  selector:
+    matchLabels:
+      app: falco
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: falco
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8765"
+    spec:
+      serviceAccountName: falco
+      hostNetwork: true
+      hostPID: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+
+      nodeSelector:
+        basilica.ai/node-type: gpu
+
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+        - effect: NoExecute
+          operator: Exists
+        - key: nvidia.com/gpu
+          operator: Exists
+        - key: basilica.ai/workloads-only
+          operator: Exists
+
+      containers:
+        - name: falco
+          image: falcosecurity/falco:0.39.2
+          imagePullPolicy: IfNotPresent
+
+          securityContext:
+            privileged: true
+
+          command:
+            - /usr/bin/falco
+
+          args:
+            - -c
+            - /etc/falco/falco.yaml
+
+          env:
+            - name: HOST_ROOT
+              value: /host
+            - name: FALCO_BPF_PROBE
+              value: ""
+            - name: SKIP_DRIVER_LOADER
+              value: "true"
+            - name: FALCO_K8S_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8765
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 12
+
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8765
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8765
+            periodSeconds: 15
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: containerd-socket
+              mountPath: /run/k3s/containerd/containerd.sock
+            - name: dev-fs
+              mountPath: /host/dev
+              readOnly: true
+            - name: sys-fs
+              mountPath: /sys
+              readOnly: true
+            - name: proc-fs
+              mountPath: /host/proc
+              readOnly: true
+            - name: falco-config
+              mountPath: /etc/falco/falco.yaml
+              subPath: falco.yaml
+            - name: falco-rules-gpu
+              mountPath: /etc/falco/rules.d/basilica_gpu_rules.yaml
+              subPath: basilica_gpu_rules.yaml
+            - name: run-falco
+              mountPath: /var/run/falco
+            - name: etc-fs
+              mountPath: /host/etc
+              readOnly: true
+
+      volumes:
+        - name: containerd-socket
+          hostPath:
+            path: /run/k3s/containerd/containerd.sock
+            type: Socket
+        - name: dev-fs
+          hostPath:
+            path: /dev
+        - name: sys-fs
+          hostPath:
+            path: /sys
+        - name: proc-fs
+          hostPath:
+            path: /proc
+        - name: falco-config
+          configMap:
+            name: falco-config
+        - name: falco-rules-gpu
+          configMap:
+            name: falco-rules-gpu
+        - name: run-falco
+          emptyDir: {}
+        - name: etc-fs
+          hostPath:
+            path: /etc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: falco
+  namespace: falco
+  labels:
+    app: falco
+spec:
+  selector:
+    app: falco
+  ports:
+    - name: metrics
+      port: 8765
+      targetPort: 8765
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: falco
+  namespace: falco
+spec:
+  maxUnavailable: 3
+  selector:
+    matchLabels:
+      app: falco
