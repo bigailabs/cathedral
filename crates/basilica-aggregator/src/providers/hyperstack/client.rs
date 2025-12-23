@@ -20,10 +20,12 @@ pub struct HyperstackProvider {
     client: Client,
     api_key: String,
     base_url: String,
+    /// Pre-built callback URL with token for webhook notifications
+    callback_url: Option<String>,
 }
 
 impl HyperstackProvider {
-    pub fn new(api_key: String) -> Result<Self> {
+    pub fn new(api_key: String, callback_url: Option<String>) -> Result<Self> {
         let client = HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS)
             .build("hyperstack")?;
 
@@ -31,6 +33,7 @@ impl HyperstackProvider {
             client,
             api_key,
             base_url: crate::providers::HYPERSTACK_API_BASE_URL.to_string(),
+            callback_url,
         })
     }
 
@@ -583,6 +586,7 @@ impl Provider for HyperstackProvider {
                 port_range_max: 22,
                 remote_ip_prefix: "0.0.0.0/0".to_string(),
             }]),
+            callback_url: self.callback_url.clone(),
         };
 
         tracing::debug!(

@@ -178,6 +178,8 @@ pub struct DeployVmRequest {
     pub create_bootable_volume: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_rules: Option<Vec<SecurityRuleRequest>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 }
 
 /// Virtual machine details from Hyperstack API
@@ -301,4 +303,38 @@ pub struct GetVmResponse {
     pub status: bool,
     pub message: String,
     pub instance: DeployVmInstance,
+}
+
+// ============================================================================
+// Webhook Callback Types
+// ============================================================================
+
+/// Hyperstack callback payload
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyperstackCallback {
+    pub resource: HyperstackCallbackResource,
+    pub operation: HyperstackCallbackOperation,
+    #[serde(default)]
+    pub user_payload: Option<serde_json::Value>,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+}
+
+/// Resource information in callback
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyperstackCallbackResource {
+    /// VM ID (provider_instance_id)
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub resource_type: String,
+}
+
+/// Operation information in callback
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyperstackCallbackOperation {
+    /// Operation name e.g., "createVM", "deleteVM"
+    pub name: String,
+    /// Status: "SUCCESS" or "FAILED"
+    pub status: String,
 }

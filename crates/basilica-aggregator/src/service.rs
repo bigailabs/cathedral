@@ -61,23 +61,14 @@ impl AggregatorService {
             }
         }
 
-        // Initialize Hyperstack provider (optional)
-        if config.providers.hyperstack.is_enabled() {
-            if let Some(auth) = config.providers.hyperstack.get_auth() {
-                let api_key = match auth {
-                    AuthConfig::ApiKey { api_key } => api_key,
-                    AuthConfig::OAuth { .. } => {
-                        return Err(AggregatorError::Config(
-                            "Hyperstack requires ApiKey authentication".into(),
-                        ))
-                    }
-                };
+        // Initialize Hyperstack provider (optional - requires HyperstackConfig with webhook fields)
+        if let Some(ref hyperstack_config) = config.providers.hyperstack {
+            let callback_url = hyperstack_config.callback_url();
+            let provider =
+                HyperstackProvider::new(hyperstack_config.api_key.clone(), Some(callback_url))?;
 
-                let provider = HyperstackProvider::new(api_key)?;
-
-                providers.push(ProviderClient::Hyperstack(provider));
-                tracing::info!("Hyperstack provider initialized");
-            }
+            providers.push(ProviderClient::Hyperstack(provider));
+            tracing::info!("Hyperstack provider initialized with webhook callbacks");
         }
 
         if providers.is_empty() {

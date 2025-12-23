@@ -78,6 +78,9 @@ pub struct AppState {
     /// GPU Aggregator service (Secure Cloud)
     pub aggregator_service: Arc<AggregatorService>,
 
+    /// GPU Aggregator configuration (for webhook validation)
+    pub aggregator_config: basilica_aggregator::config::Config,
+
     /// Pricing configuration (marketplace markups)
     pub pricing_config: crate::config::PricingConfig,
 
@@ -764,7 +767,7 @@ impl Server {
 
         let aggregator_config = config.to_aggregator_config();
         let aggregator_service = Arc::new(
-            AggregatorService::new(aggregator_db, aggregator_config).map_err(|e| {
+            AggregatorService::new(aggregator_db, aggregator_config.clone()).map_err(|e| {
                 ApiError::Internal {
                     message: format!("Failed to initialize aggregator service: {}", e),
                 }
@@ -867,6 +870,7 @@ impl Server {
             dns_provider,
             metrics,
             aggregator_service,
+            aggregator_config,
             pricing_config: config.pricing.clone(),
             ssh_client,
         };

@@ -43,11 +43,33 @@ pub struct ProvidersConfig {
     #[serde(default)]
     pub datacrunch: ProviderConfig,
     #[serde(default)]
-    pub hyperstack: ProviderConfig,
+    pub hyperstack: Option<HyperstackConfig>,
     #[serde(default)]
     pub lambda: ProviderConfig,
     #[serde(default)]
     pub hydrahost: ProviderConfig,
+}
+
+/// Hyperstack-specific configuration with required webhook fields
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HyperstackConfig {
+    /// Hyperstack API key
+    pub api_key: String,
+    /// Webhook secret token for authenticating callbacks
+    pub webhook_secret: String,
+    /// Base URL for webhooks, e.g., "https://api.basilica.ai"
+    pub callback_base_url: String,
+}
+
+impl HyperstackConfig {
+    /// Build callback URL with token
+    pub fn callback_url(&self) -> String {
+        format!(
+            "{}/webhooks/hyperstack/{}",
+            self.callback_base_url.trim_end_matches('/'),
+            self.webhook_secret
+        )
+    }
 }
 
 /// Authentication configuration enum for different provider types
@@ -210,7 +232,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         // Check at least one provider is enabled (has auth configured)
         let any_enabled = self.providers.datacrunch.is_enabled()
-            || self.providers.hyperstack.is_enabled()
+            || self.providers.hyperstack.is_some()
             || self.providers.lambda.is_enabled()
             || self.providers.hydrahost.is_enabled();
 
@@ -235,7 +257,7 @@ impl Config {
             },
             providers: ProvidersConfig {
                 datacrunch: ProviderConfig::default(),
-                hyperstack: ProviderConfig::default(),
+                hyperstack: None,
                 lambda: ProviderConfig::default(),
                 hydrahost: ProviderConfig::default(),
             },
@@ -261,7 +283,7 @@ mod tests {
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
                 datacrunch: ProviderConfig::default(),
-                hyperstack: ProviderConfig::default(),
+                hyperstack: None,
                 lambda: ProviderConfig::default(),
                 hydrahost: ProviderConfig::default(),
             },
@@ -284,7 +306,7 @@ mod tests {
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
                 datacrunch: ProviderConfig::default(),
-                hyperstack: ProviderConfig::default(),
+                hyperstack: None,
                 lambda: ProviderConfig::default(),
                 hydrahost: ProviderConfig::default(),
             },
@@ -311,7 +333,7 @@ mod tests {
                     client_secret: Some("test-client-secret".to_string()),
                     api_key: None,
                 },
-                hyperstack: ProviderConfig::default(),
+                hyperstack: None,
                 lambda: ProviderConfig::default(),
                 hydrahost: ProviderConfig::default(),
             },
@@ -334,7 +356,7 @@ mod tests {
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
                 datacrunch: ProviderConfig::default(),
-                hyperstack: ProviderConfig::default(),
+                hyperstack: None,
                 lambda: ProviderConfig {
                     client_id: None,
                     client_secret: None,
@@ -349,6 +371,47 @@ mod tests {
         };
 
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_config_validation_valid_hyperstack() {
+        let config = Config {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+            },
+            cache: CacheConfig { ttl_seconds: 45 },
+            providers: ProvidersConfig {
+                datacrunch: ProviderConfig::default(),
+                hyperstack: Some(HyperstackConfig {
+                    api_key: "test-api-key".to_string(),
+                    webhook_secret: "test-webhook-secret".to_string(),
+                    callback_base_url: "https://api.example.com".to_string(),
+                }),
+                lambda: ProviderConfig::default(),
+                hydrahost: ProviderConfig::default(),
+            },
+            database: DatabaseConfig {
+                path: "test.db".to_string(),
+            },
+            vip: None,
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_hyperstack_config_callback_url() {
+        let config = HyperstackConfig {
+            api_key: "test-key".to_string(),
+            webhook_secret: "secret123".to_string(),
+            callback_base_url: "https://api.example.com/".to_string(),
+        };
+
+        assert_eq!(
+            config.callback_url(),
+            "https://api.example.com/webhooks/hyperstack/secret123"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 mod client;
 mod normalize;
-mod types;
+pub mod types;
 
 pub use client::HyperstackProvider;
-pub use types::{DeployVmRequest, Keypair, VirtualMachine};
+pub use types::{DeployVmRequest, HyperstackCallback, Keypair, VirtualMachine};
