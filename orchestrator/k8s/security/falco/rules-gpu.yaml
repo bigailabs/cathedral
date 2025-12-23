@@ -1,0 +1,301 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-rules-gpu
+  namespace: falco
+data:
+  basilica_gpu_rules.yaml: |
+    # Basilica GPU Rental Security Rules
+    # Lists for GPU workload security
+    - list: crypto_miners
+      items: [xmrig, ethminer, cgminer, bfgminer, t-rex, nbminer, phoenixminer, gminer, lolminer, nanominer, teamredminer]
+
+    - list: shell_binaries
+      items: [ash, bash, csh, ksh, sh, tcsh, zsh, dash]
+
+    - list: nvidia_allowed_processes
+      items: [nvidia-smi, nvidia-cuda-mps-server, nvidia-cuda-mps-control, nvidia-persistenced, nvidia-debugdump]
+
+    - list: nvidia_read_allowed_processes
+      items: [nvidia-smi, python, python3, jupyter, nvcc, pytorch, tensorflow, jax, triton]
+
+    - list: container_escape_tools
+      items: [docker, runc, kubectl, ctr, crictl, nsenter, unshare]
+
+    - list: data_exfil_tools
+      items: [curl, wget, nc, netcat, ncat, socat, rsync, scp, sftp, ftp, rclone]
+
+    - list: cloud_storage_patterns
+      items: [s3.amazonaws.com, storage.googleapis.com, blob.core.windows.net, r2.cloudflarestorage.com]
+
+    # Legitimate ML workflow tools (false positive reduction)
+    - list: ml_workflow_tools
+      items: [dvc, wandb, mlflow, tensorboard, huggingface-cli, git-lfs, aws, gsutil, az]
+
+    - list: ml_parent_processes
+      items: [python, python3, jupyter, jupyter-notebook, jupyter-lab, jupyterhub, ray, celery]
+
+    - list: ml_checkpoint_patterns
+      items: [checkpoint, ckpt, epoch_, step_, best_model, latest]
+
+    # Cryptocurrency mining detection
+    - rule: Crypto Mining Detection in GPU Rental
+      desc: Detect cryptocurrency mining activity in user GPU rentals
+      condition: >
+        spawned_process and
+        container and
+        (proc.name in (crypto_miners) or
+         proc.cmdline contains "stratum+tcp" or
+         proc.cmdline contains "stratum+ssl" or
+         proc.cmdline contains "pool.") and
+        k8s.ns.name startswith "u-"
+      output: >
+        Cryptocurrency mining detected in GPU rental
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        container=%container.name
+        process=%proc.name
+        command=%proc.cmdline
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: ERROR
+      tags: [basilica, gpu, crypto_mining, policy_violation]
+
+    # Container escape detection
+    - rule: Container Escape Attempt in User Namespace
+      desc: Detect container escape attempts via namespace manipulation
+      condition: >
+        spawned_process and
+        container and
+        (proc.name in (container_escape_tools) or
+         proc.cmdline contains "nsenter" or
+         proc.cmdline contains "unshare") and
+        k8s.ns.name startswith "u-"
+      output: >
+        Container escape attempt detected
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        container=%container.name
+        process=%proc.name
+        command=%proc.cmdline
+        parent=%proc.pname
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: CRITICAL
+      tags: [basilica, container_escape, security]
+
+    # GPU driver tampering
+    - rule: GPU Driver Tampering Attempt
+      desc: Detect unauthorized writes to NVIDIA driver paths
+      condition: >
+        open_write and
+        container and
+        (fd.name glob /sys/class/nvidia-* or
+         fd.name glob /sys/devices/*/nvidia* or
+         fd.name glob /dev/nvidia*) and
+        k8s.ns.name startswith "u-" and
+        not proc.name in (nvidia_allowed_processes)
+      output: >
+        GPU driver tampering attempt detected
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        file=%fd.name
+        process=%proc.name
+        command=%proc.cmdline)
+      priority: CRITICAL
+      tags: [basilica, gpu, tampering]
+
+    # GPU memory scraping detection (model/data theft)
+    - rule: Unauthorized GPU Memory Read
+      desc: Detect unauthorized GPU memory access for model or data theft
+      condition: >
+        open_read and
+        container and
+        fd.name glob /dev/nvidia* and
+        k8s.ns.name startswith "u-" and
+        not proc.name in (nvidia_read_allowed_processes)
+      output: >
+        Unauthorized GPU memory read detected
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        file=%fd.name
+        process=%proc.name
+        command=%proc.cmdline
+        parent=%proc.pname
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: ERROR
+      tags: [basilica, gpu, memory_theft, data_exfiltration]
+
+    # Privilege escalation
+    - rule: Privilege Escalation in User Rental
+      desc: Detect privilege escalation attempts in user rentals
+      condition: >
+        spawned_process and
+        container and
+        (proc.name in (sudo, su, pkexec, doas) or
+         (proc.cmdline contains "chmod" and proc.args contains "+s") or
+         proc.cmdline contains "setuid") and
+        k8s.ns.name startswith "u-" and
+        not user.name = "root"
+      output: >
+        Privilege escalation attempt in user rental
+        (user=%user.name
+        namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        process=%proc.name
+        command=%proc.cmdline)
+      priority: ERROR
+      tags: [basilica, privilege_escalation]
+
+    # Network scanning
+    - rule: Network Scanning from GPU Rental
+      desc: Detect network scanning activity from user rentals
+      condition: >
+        spawned_process and
+        container and
+        (proc.name in (nmap, masscan, zmap, unicornscan) or
+         proc.cmdline contains "nc -z" or
+         proc.cmdline contains "netcat -z") and
+        k8s.ns.name startswith "u-"
+      output: >
+        Network scanning detected from GPU rental
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        process=%proc.name
+        command=%proc.cmdline)
+      priority: WARNING
+      tags: [basilica, network_scan, policy_violation]
+
+    # Kernel module loading
+    - rule: Kernel Module Load Attempt in User Namespace
+      desc: Detect kernel module loading attempts in user rentals
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (insmod, modprobe, rmmod) and
+        k8s.ns.name startswith "u-"
+      output: >
+        Kernel module load attempt in user rental
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        process=%proc.name
+        command=%proc.cmdline)
+      priority: CRITICAL
+      tags: [basilica, kernel_module, security]
+
+    # Sensitive file access
+    - rule: Sensitive File Access in GPU Rental
+      desc: Detect access to sensitive files in user rentals
+      condition: >
+        open_read and
+        container and
+        (fd.name in (/etc/shadow, /etc/passwd, /root/.ssh/id_rsa, /root/.aws/credentials) or
+         fd.name glob /var/run/secrets/kubernetes.io/*) and
+        k8s.ns.name startswith "u-"
+      output: >
+        Sensitive file access in user rental
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        file=%fd.name
+        process=%proc.name)
+      priority: ERROR
+      tags: [basilica, credential_theft]
+
+    # Shell spawn in user namespace (audit trail)
+    - rule: Shell Spawned in User Rental
+      desc: Detect shell spawning in user rentals for audit trail
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (shell_binaries) and
+        proc.pname != "sshd" and
+        not proc.pname in (ml_parent_processes) and
+        k8s.ns.name startswith "u-"
+      output: >
+        Shell spawned in user rental
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        shell=%proc.name
+        parent=%proc.pname
+        command=%proc.cmdline
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: WARNING
+      tags: [basilica, shell, audit]
+
+    # Data exfiltration via cloud storage upload (excludes ML workflow tools)
+    - rule: Cloud Storage Upload from GPU Rental
+      desc: Detect uploads to cloud storage services from user rentals
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (data_exfil_tools) and
+        not proc.name in (ml_workflow_tools) and
+        not proc.pname in (ml_parent_processes) and
+        (proc.cmdline contains "s3.amazonaws.com" or
+         proc.cmdline contains "storage.googleapis.com" or
+         proc.cmdline contains "blob.core.windows.net" or
+         proc.cmdline contains "r2.cloudflarestorage.com" or
+         proc.cmdline contains "s3://" or
+         proc.cmdline contains "gs://" or
+         proc.cmdline contains "az://") and
+        k8s.ns.name startswith "u-"
+      output: >
+        Suspicious cloud storage upload detected
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        process=%proc.name
+        parent=%proc.pname
+        command=%proc.cmdline
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: WARNING
+      tags: [basilica, data_exfiltration, cloud_storage]
+
+    # Suspicious large file transfer (excludes legitimate ML checkpointing)
+    - rule: Bulk Data Transfer from GPU Rental
+      desc: Detect bulk data transfer tools with large file patterns
+      condition: >
+        spawned_process and
+        container and
+        proc.name in (rsync, scp, rclone) and
+        not proc.name in (ml_workflow_tools) and
+        not proc.pname in (ml_parent_processes) and
+        (proc.cmdline contains "/model" or
+         proc.cmdline contains "/weights" or
+         proc.cmdline contains ".pt" or
+         proc.cmdline contains ".pth" or
+         proc.cmdline contains ".safetensors" or
+         proc.cmdline contains ".gguf") and
+        not (proc.cmdline contains "checkpoint" or
+             proc.cmdline contains "ckpt" or
+             proc.cmdline contains "epoch_") and
+        k8s.ns.name startswith "u-"
+      output: >
+        Suspicious bulk data transfer detected
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        process=%proc.name
+        parent=%proc.pname
+        command=%proc.cmdline
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: WARNING
+      tags: [basilica, data_exfiltration, model_theft]
+
+    # Reverse shell detection
+    - rule: Reverse Shell in GPU Rental
+      desc: Detect reverse shell patterns in user rentals
+      condition: >
+        spawned_process and
+        container and
+        (proc.cmdline contains "bash -i" or
+         proc.cmdline contains "/dev/tcp/" or
+         proc.cmdline contains "mkfifo" or
+         (proc.name in (nc, netcat, ncat) and proc.cmdline contains "-e")) and
+        k8s.ns.name startswith "u-"
+      output: >
+        Reverse shell detected in GPU rental
+        (namespace=%k8s.ns.name
+        pod=%k8s.pod.name
+        process=%proc.name
+        command=%proc.cmdline
+        parent=%proc.pname
+        rental_id=%k8s.pod.label.basilica.ai/rental-id)
+      priority: CRITICAL
+      tags: [basilica, reverse_shell, security]
