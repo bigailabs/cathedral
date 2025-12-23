@@ -1746,7 +1746,7 @@ pub async fn handle_exec(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -1808,7 +1808,7 @@ pub async fn handle_ssh(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -1892,7 +1892,7 @@ pub async fn handle_cp(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
