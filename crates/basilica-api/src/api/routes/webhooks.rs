@@ -19,10 +19,9 @@ pub async fn hyperstack_callback(
     Path(token): Path<String>,
     Json(payload): Json<HyperstackCallback>,
 ) -> impl IntoResponse {
+    // Log full payload for debugging
     tracing::info!(
-        operation = %payload.operation.name,
-        status = %payload.operation.status,
-        resource_id = %payload.resource.id,
+        payload = ?payload,
         "Received Hyperstack webhook callback"
     );
 
@@ -41,12 +40,24 @@ pub async fn hyperstack_callback(
         return (StatusCode::OK, Json(json!({ "status": "unauthorized" })));
     }
 
+    // Get VM ID from payload
+    let vm_id = match payload.vm_id() {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                payload = ?payload,
+                "Webhook received without VM ID"
+            );
+            return (StatusCode::OK, Json(json!({ "status": "no_vm_id" })));
+        }
+    };
+
     // Look up deployment by provider_instance_id
     let deployment = match sqlx::query_as::<_, (String, String)>(
         "SELECT id, status FROM secure_cloud_rentals
          WHERE provider_instance_id = $1 AND provider = 'hyperstack'",
     )
-    .bind(&payload.resource.id)
+    .bind(&vm_id)
     .fetch_optional(&state.db)
     .await
     {
@@ -54,7 +65,7 @@ pub async fn hyperstack_callback(
         Ok(None) => {
             // Unknown VM ID - log and return 200
             tracing::warn!(
-                resource_id = %payload.resource.id,
+                vm_id = %vm_id,
                 "Webhook received for unknown VM ID"
             );
             return (StatusCode::OK, Json(json!({ "status": "unknown_vm" })));
@@ -75,20 +86,28 @@ pub async fn hyperstack_callback(
         rental_id = %rental_id,
         old_status = %current_status,
         new_status = ?new_status,
+        operation_name = ?payload.operation_name(),
+        operation_status = ?payload.operation_status(),
         "Processing webhook status update"
     );
+
+    // Extract floating IP from data if available
+    let ip_address = payload
+        .data
+        .as_ref()
+        .and_then(|d| d.get("floating_ip"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    if ip_address.is_some() {
+        tracing::info!(ip = ?ip_address, "Extracted floating IP from webhook");
+    }
 
     // Handle based on new status
     match new_status {
         DeploymentStatus::Running => {
             // VM is ready - update status and IP if available
-            let ip_address = payload
-                .data
-                .as_ref()
-                .and_then(|d| d.get("floating_ip"))
-                .and_then(|v| v.as_str())
-                .map(String::from);
-
             if let Err(e) = sqlx::query(
                 "UPDATE secure_cloud_rentals SET status = $1, ip_address = COALESCE($2, ip_address), updated_at = NOW() WHERE id = $3",
             )
@@ -150,16 +169,48 @@ pub async fn hyperstack_callback(
 
 /// Map Hyperstack callback operation/status to DeploymentStatus
 fn map_callback_status(callback: &HyperstackCallback) -> DeploymentStatus {
-    match (
-        callback.operation.name.as_str(),
-        callback.operation.status.as_str(),
-    ) {
-        ("createVM", "SUCCESS") => DeploymentStatus::Running,
-        ("createVM", "FAILED") => DeploymentStatus::Error,
-        ("deleteVM", "SUCCESS") => DeploymentStatus::Deleted,
-        ("deleteVM", "FAILED") => DeploymentStatus::Error,
-        (_, "SUCCESS") => DeploymentStatus::Running,
-        (_, "FAILED") => DeploymentStatus::Error,
+    let op_name = callback.operation_name().unwrap_or("").to_lowercase();
+    let op_status = callback.operation_status().unwrap_or("").to_lowercase();
+
+    // Also check data.status if available (more reliable for VM state)
+    let data_status = callback
+        .data
+        .as_ref()
+        .and_then(|d| d.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Priority: check data.status first (reflects actual VM state)
+    if data_status == "active" || data_status == "running" {
+        return DeploymentStatus::Running;
+    }
+    if data_status == "error" || data_status == "failed" {
+        return DeploymentStatus::Error;
+    }
+    if data_status == "deleted" || data_status == "terminated" {
+        return DeploymentStatus::Deleted;
+    }
+    if data_status == "build" || data_status == "building" || data_status == "creating" {
+        return DeploymentStatus::Provisioning;
+    }
+
+    // Fall back to operation-based status
+    match (op_name.as_str(), op_status.as_str()) {
+        // createInstance operations
+        ("createinstance", "success") | ("createvm", "success") => DeploymentStatus::Running,
+        ("createinstance", "failed") | ("createvm", "failed") => DeploymentStatus::Error,
+        ("createinstance", "building") | ("createinstance", "creating") => {
+            DeploymentStatus::Provisioning
+        }
+        // deleteInstance operations
+        ("deleteinstance", "success") | ("deletevm", "success") => DeploymentStatus::Deleted,
+        ("deleteinstance", "failed") | ("deletevm", "failed") => DeploymentStatus::Error,
+        // Generic status handling
+        (_, "success") | (_, "active") | (_, "running") => DeploymentStatus::Running,
+        (_, "failed") | (_, "error") => DeploymentStatus::Error,
+        (_, "deleted") | (_, "terminated") => DeploymentStatus::Deleted,
+        (_, "building") | (_, "creating") | (_, "provisioning") => DeploymentStatus::Provisioning,
         _ => DeploymentStatus::Pending,
     }
 }

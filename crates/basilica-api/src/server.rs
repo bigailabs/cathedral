@@ -1141,9 +1141,10 @@ impl Server {
                 interval.tick().await;
 
                 // Query all active secure cloud rentals from the database (excluding VIP rentals
-                // which don't need health checks - they're manually managed and assumed always up)
+                // which don't need health checks - they're manually managed and assumed always up,
+                // and excluding Hyperstack rentals which use webhook callbacks instead of polling)
                 match sqlx::query_as::<_, (String,)>(
-                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE",
+                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE AND provider != 'hyperstack'",
                 )
                 .fetch_all(&health_check_db)
                 .await
