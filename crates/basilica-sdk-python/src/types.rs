@@ -494,15 +494,13 @@ pub struct StartRentalApiRequest {
     pub command: Vec<String>,
     #[pyo3(get, set)]
     pub volumes: Vec<VolumeMountRequest>,
-    #[pyo3(get, set)]
-    pub no_ssh: bool,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl StartRentalApiRequest {
     #[new]
-    #[pyo3(signature = (node_selection, container_image, environment=None, ports=None, resources=None, command=None, volumes=None, no_ssh=false))]
+    #[pyo3(signature = (node_selection, container_image, environment=None, ports=None, resources=None, command=None, volumes=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         node_selection: NodeSelection,
@@ -512,7 +510,6 @@ impl StartRentalApiRequest {
         resources: Option<ResourceRequirementsRequest>,
         command: Option<Vec<String>>,
         volumes: Option<Vec<VolumeMountRequest>>,
-        no_ssh: bool,
     ) -> Self {
         Self {
             node_selection,
@@ -522,7 +519,6 @@ impl StartRentalApiRequest {
             resources: resources.unwrap_or_default(),
             command: command.unwrap_or_default(),
             volumes: volumes.unwrap_or_default(),
-            no_ssh,
         }
     }
 }
@@ -537,7 +533,6 @@ impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
             resources: req.resources.into(),
             command: req.command,
             volumes: req.volumes.into_iter().map(Into::into).collect(),
-            no_ssh: req.no_ssh,
         }
     }
 }

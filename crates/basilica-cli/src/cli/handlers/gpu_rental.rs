@@ -469,11 +469,6 @@ async fn handle_secure_cloud_rental_with_offering(
         response.rental_id
     ));
 
-    // Handle SSH based on options
-    if options.no_ssh {
-        return Ok(());
-    }
-
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
             // Look up the private key for display
@@ -627,7 +622,6 @@ async fn handle_community_cloud_rental_with_selection(
         },
         command,
         volumes: vec![],
-        no_ssh: options.no_ssh,
     };
 
     spinner.set_message("Creating rental...");
@@ -646,11 +640,6 @@ async fn handle_community_cloud_rental_with_selection(
         "Successfully started community cloud rental {}",
         response.rental_id
     ));
-
-    // Handle SSH based on options
-    if options.no_ssh {
-        return Ok(());
-    }
 
     let ssh_creds = match response.ssh_credentials {
         Some(ref creds) => creds,
