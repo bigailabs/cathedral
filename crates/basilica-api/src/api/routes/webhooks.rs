@@ -8,9 +8,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::Deserialize;
 use basilica_aggregator::models::DeploymentStatus;
 use basilica_aggregator::providers::hyperstack::HyperstackCallback;
+use serde::Deserialize;
 use serde_json::json;
 
 /// Query parameters for webhook authentication
