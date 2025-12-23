@@ -290,6 +290,7 @@ mod tests {
             dns_provider: None,
             metrics: None,
             aggregator_service,
+            aggregator_config: basilica_aggregator::config::Config::default_for_tests(),
             pricing_config: crate::config::PricingConfig::default(),
             ssh_client: Arc::new(crate::ssh::K3sSshClient::disabled()),
         }
