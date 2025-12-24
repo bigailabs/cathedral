@@ -29,6 +29,18 @@ fn region_to_environment(region: &str) -> String {
     format!("default-{}", region)
 }
 
+/// Build structured connection_info from IP address
+/// Returns JSON with ssh_host, ssh_port, ssh_user (matching VIP format)
+fn build_connection_info(ip: &Option<String>) -> Option<serde_json::Value> {
+    ip.as_ref().map(|ip| {
+        serde_json::json!({
+            "ssh_host": ip,
+            "ssh_port": 22,
+            "ssh_user": "ubuntu"
+        })
+    })
+}
+
 pub struct AggregatorService {
     db: Arc<Database>,
     providers: Vec<ProviderClient>,
@@ -510,8 +522,8 @@ impl AggregatorService {
                 .map_provider_status_to_deployment(&provider_deployment.status, provider_enum),
             hostname,
             ssh_public_key: Some(ssh_key.public_key.clone()),
-            ip_address: provider_deployment.ip_address,
-            connection_info: provider_deployment.raw_data.clone(),
+            ip_address: provider_deployment.ip_address.clone(),
+            connection_info: build_connection_info(&provider_deployment.ip_address),
             raw_response: provider_deployment.raw_data,
             error_message: None,
             created_at: now,
@@ -596,15 +608,16 @@ impl AggregatorService {
                             Some(provider_instance_id.clone()),
                             status.clone(),
                             provider_deployment.ip_address.clone(),
-                            provider_deployment.raw_data.clone(),
+                            build_connection_info(&provider_deployment.ip_address),
                             provider_deployment.raw_data.clone(),
                             None,
                         )
                         .await?;
 
                     deployment.status = status;
-                    deployment.ip_address = provider_deployment.ip_address;
-                    deployment.connection_info = provider_deployment.raw_data.clone();
+                    deployment.ip_address = provider_deployment.ip_address.clone();
+                    deployment.connection_info =
+                        build_connection_info(&provider_deployment.ip_address);
                     deployment.raw_response = provider_deployment.raw_data;
                     deployment.updated_at = Utc::now();
                 }

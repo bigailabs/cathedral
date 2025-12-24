@@ -70,7 +70,7 @@ impl HyperstackProvider {
     async fn fetch_pricebook(&self) -> Result<HashMap<String, Decimal>> {
         let url = format!("{}/pricebook", self.base_url);
 
-        tracing::debug!("Fetching pricebook from Hyperstack: {}", url);
+        tracing::trace!("Fetching pricebook from Hyperstack: {}", url);
 
         let response = self
             .client
@@ -113,7 +113,7 @@ impl HyperstackProvider {
             });
             price_map.insert(item.name.clone(), price);
 
-            tracing::debug!(
+            tracing::trace!(
                 "Pricebook entry: {} = ${}/hr{}",
                 item.name,
                 item.value,

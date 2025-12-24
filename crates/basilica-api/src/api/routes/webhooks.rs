@@ -112,15 +112,30 @@ pub async fn hyperstack_callback(
         tracing::info!(ip = ?ip_address, "Extracted floating IP from webhook");
     }
 
+    // Build connection_info if we have an IP
+    let connection_info = ip_address.as_ref().map(|ip| {
+        json!({
+            "ssh_host": ip,
+            "ssh_port": 22,
+            "ssh_user": "ubuntu"
+        })
+    });
+
     // Handle based on new status
     match new_status {
         DeploymentStatus::Running => {
-            // VM is ready - update status and IP if available
+            // VM is ready - update status, IP, and connection_info if available
             if let Err(e) = sqlx::query(
-                "UPDATE secure_cloud_rentals SET status = $1, ip_address = COALESCE($2, ip_address), updated_at = NOW() WHERE id = $3",
+                r#"UPDATE secure_cloud_rentals SET
+                   status = $1,
+                   ip_address = COALESCE($2, ip_address),
+                   connection_info = CASE WHEN $2 IS NOT NULL THEN $3 ELSE connection_info END,
+                   updated_at = NOW()
+                   WHERE id = $4"#,
             )
             .bind("running")
             .bind(&ip_address)
+            .bind(&connection_info)
             .bind(&rental_id)
             .execute(&state.db)
             .await

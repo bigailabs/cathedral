@@ -2063,9 +2063,9 @@ async fn poll_secure_cloud_rental_status(
                                     return Ok(Some(rental.clone()));
                                 }
                             } else {
-                                // No SSH command yet, return success anyway
-                                complete_spinner_and_clear(spinner);
-                                return Ok(Some(rental.clone()));
+                                // No SSH command yet, continue polling
+                                spinner.set_message("Rental running but waiting for SSH info...");
+                                // Continue to next iteration
                             }
                         }
                         "error" => {
@@ -2117,6 +2117,9 @@ async fn poll_secure_cloud_rental_status(
 ///
 /// SSH services may not be immediately available after a rental becomes active.
 /// This function retries the connection for up to `max_wait` duration with exponential backoff.
+///
+/// Uses try_connect_silently() for retries (suppresses stderr, allows passphrases)
+/// then interactive_session() once connected.
 async fn retry_ssh_connection(
     ssh_client: &SshClient,
     ssh_access: &SshAccess,
@@ -2145,31 +2148,37 @@ async fn retry_ssh_connection(
             ));
         }
 
-        // Show spinner only during wait, clear before interactive session
-        let spinner = create_spinner("Waiting for SSH to become available...");
+        // Show spinner during wait periods
+        let spinner = create_spinner(&format!("Waiting for SSH... (attempt {})", attempt));
 
         // Brief delay between attempts (skip on first attempt)
         if attempt > 1 {
-            spinner.set_message(format!("Retrying SSH connection (attempt {})...", attempt));
             tokio::time::sleep(interval).await;
             interval = std::cmp::min(interval * 2, MAX_INTERVAL);
         }
 
+        // Clear spinner before SSH attempt (in case passphrase prompt appears)
         complete_spinner_and_clear(spinner);
 
-        // Try interactive session directly (matches `basilica ssh` behavior)
-        // Uses .status() which doesn't hang on stream close
+        // Try silent connection (suppresses errors, allows passphrase)
         match ssh_client
-            .interactive_session(ssh_access, private_key_path.clone())
+            .try_connect_silently(ssh_access, private_key_path.clone())
             .await
         {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                // Connection succeeded, start interactive session
+                return ssh_client
+                    .interactive_session(ssh_access, private_key_path)
+                    .await
+                    .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
+            }
             Err(e) => {
                 debug!(
-                    "SSH connection attempt {} failed ({}s elapsed): {}",
+                    "SSH attempt {} failed ({}s elapsed): {}. Retrying in {}s...",
                     attempt,
                     start_time.elapsed().as_secs(),
-                    e
+                    e,
+                    interval.as_secs()
                 );
                 // Continue to next iteration for retry
             }
