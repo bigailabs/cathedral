@@ -309,33 +309,19 @@ pub struct GetVmResponse {
 // Webhook Callback Types
 // ============================================================================
 
-/// Hyperstack callback payload - flexible to handle different payload formats
+/// Hyperstack callback payload
 #[derive(Debug, Clone, Deserialize)]
 pub struct HyperstackCallback {
-    /// Resource info - may be present in different forms
-    #[serde(default)]
-    pub resource: Option<HyperstackCallbackResource>,
-    /// Operation info - may be present in different forms
-    #[serde(default)]
-    pub operation: Option<HyperstackCallbackOperation>,
+    /// Resource info from Hyperstack
+    pub resource: HyperstackCallbackResource,
+    /// Operation info from Hyperstack
+    pub operation: HyperstackCallbackOperation,
     /// User-provided payload echoed back
     #[serde(default)]
     pub user_payload: Option<serde_json::Value>,
     /// Additional data from Hyperstack
     #[serde(default)]
     pub data: Option<serde_json::Value>,
-    /// VM ID directly at root level (alternative format)
-    #[serde(default)]
-    pub id: Option<i64>,
-    /// VM name directly at root level
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Status directly at root level
-    #[serde(default)]
-    pub status: Option<String>,
-    /// Event type (e.g., "vm.created", "vm.deleted")
-    #[serde(default)]
-    pub event: Option<String>,
     /// Capture all other fields for debugging
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_json::Value>,
@@ -343,29 +329,18 @@ pub struct HyperstackCallback {
 
 impl HyperstackCallback {
     /// Get the VM ID from any of the possible locations in the payload
-    pub fn vm_id(&self) -> Option<String> {
-        // Try resource.id first
-        if let Some(ref resource) = self.resource {
-            return Some(resource.id.clone());
-        }
-        // Fall back to root-level id
-        self.id.map(|id| id.to_string())
+    pub fn vm_id(&self) -> &str {
+        &self.resource.id
     }
 
     /// Get the operation status
-    pub fn operation_status(&self) -> Option<&str> {
-        if let Some(ref op) = self.operation {
-            return op.status.as_deref();
-        }
-        self.status.as_deref()
+    pub fn operation_status(&self) -> &str {
+        &self.operation.status
     }
 
     /// Get the operation name
-    pub fn operation_name(&self) -> Option<&str> {
-        if let Some(ref op) = self.operation {
-            return op.name.as_deref();
-        }
-        self.event.as_deref()
+    pub fn operation_name(&self) -> &str {
+        &self.operation.name
     }
 }
 
@@ -385,11 +360,9 @@ pub struct HyperstackCallbackResource {
 #[derive(Debug, Clone, Deserialize)]
 pub struct HyperstackCallbackOperation {
     /// Operation name e.g., "createVM", "deleteVM"
-    #[serde(default)]
-    pub name: Option<String>,
+    pub name: String,
     /// Status: "SUCCESS" or "FAILED"
-    #[serde(default)]
-    pub status: Option<String>,
+    pub status: String,
 }
 
 /// Deserialize ID from either string or integer
@@ -403,5 +376,21 @@ where
         serde_json::Value::String(s) => Ok(s),
         serde_json::Value::Number(n) => Ok(n.to_string()),
         _ => Err(D::Error::custom("expected string or number for id")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HyperstackCallback;
+    use serde_json::json;
+
+    #[test]
+    fn vm_id_uses_resource_id() {
+        let callback: HyperstackCallback = serde_json::from_value(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "createInstance", "status": "CREATING" }
+        }))
+        .expect("valid callback");
+        assert_eq!(callback.vm_id(), "507279");
     }
 }

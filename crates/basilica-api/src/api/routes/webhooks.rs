@@ -1,9 +1,8 @@
 //! Webhook handlers for external provider callbacks
 
-use crate::api::routes::secure_cloud::stop_secure_cloud_rental_internal;
 use crate::server::AppState;
 use axum::{
-    extract::{Query, State},
+    extract::{rejection::JsonRejection, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -24,14 +23,20 @@ pub struct WebhookQuery {
 pub async fn hyperstack_callback(
     State(state): State<AppState>,
     Query(query): Query<WebhookQuery>,
-    Json(payload): Json<HyperstackCallback>,
+    payload: Result<Json<HyperstackCallback>, JsonRejection>,
 ) -> impl IntoResponse {
+    let payload = match payload {
+        Ok(Json(payload)) => payload,
+        Err(err) => {
+            tracing::warn!(error = %err, "Invalid Hyperstack webhook payload");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_payload" })),
+            );
+        }
+    };
     let token = query.token;
-    // Log full payload for debugging
-    tracing::info!(
-        payload = ?payload,
-        "Received Hyperstack webhook callback"
-    );
+    tracing::info!("Received Hyperstack webhook callback");
 
     // Validate token against configured webhook secret
     let hyperstack_config = match &state.aggregator_config.providers.hyperstack {
@@ -49,16 +54,7 @@ pub async fn hyperstack_callback(
     }
 
     // Get VM ID from payload
-    let vm_id = match payload.vm_id() {
-        Some(id) => id,
-        None => {
-            tracing::warn!(
-                payload = ?payload,
-                "Webhook received without VM ID"
-            );
-            return (StatusCode::OK, Json(json!({ "status": "no_vm_id" })));
-        }
-    };
+    let vm_id = payload.vm_id();
 
     // Look up deployment by provider_instance_id
     let deployment = match sqlx::query_as::<_, (String, String)>(
@@ -72,10 +68,7 @@ pub async fn hyperstack_callback(
         Ok(Some(row)) => row,
         Ok(None) => {
             // Unknown VM ID - log and return 200
-            tracing::warn!(
-                vm_id = %vm_id,
-                "Webhook received for unknown VM ID"
-            );
+            tracing::trace!(vm_id = %vm_id, "Webhook received for unknown VM ID");
             return (StatusCode::OK, Json(json!({ "status": "unknown_vm" })));
         }
         Err(e) => {
@@ -94,8 +87,8 @@ pub async fn hyperstack_callback(
         rental_id = %rental_id,
         old_status = %current_status,
         new_status = ?new_status,
-        operation_name = ?payload.operation_name(),
-        operation_status = ?payload.operation_status(),
+        operation_name = %payload.operation_name(),
+        operation_status = %payload.operation_status(),
         "Processing webhook status update"
     );
 
@@ -143,37 +136,8 @@ pub async fn hyperstack_callback(
                 tracing::error!("Failed to update rental status: {}", e);
             }
         }
-        DeploymentStatus::Deleted | DeploymentStatus::Error => {
-            // Terminal state - archive and finalize billing
-            let reason = if new_status == DeploymentStatus::Deleted {
-                "vm_deleted_via_webhook"
-            } else {
-                "vm_error_via_webhook"
-            };
-
-            let target_status = if new_status == DeploymentStatus::Deleted {
-                basilica_protocol::billing::RentalStatus::Stopped
-            } else {
-                basilica_protocol::billing::RentalStatus::Failed
-            };
-
-            // Use existing stop logic (skip_provider_delete=true since VM already gone)
-            if let Err(e) = stop_secure_cloud_rental_internal(
-                &state.aggregator_service,
-                state.billing_client.as_deref(),
-                &state.db,
-                &rental_id,
-                reason,
-                target_status,
-                true, // skip_provider_delete since VM state change came from provider
-            )
-            .await
-            {
-                tracing::error!("Failed to finalize rental from webhook: {}", e);
-            }
-        }
         _ => {
-            // Provisioning or other interim status - just update
+            // Any non-running status - just update
             if let Err(e) = sqlx::query(
                 "UPDATE secure_cloud_rentals SET status = $1, updated_at = NOW() WHERE id = $2",
             )
@@ -192,48 +156,118 @@ pub async fn hyperstack_callback(
 
 /// Map Hyperstack callback operation/status to DeploymentStatus
 fn map_callback_status(callback: &HyperstackCallback) -> DeploymentStatus {
-    let op_name = callback.operation_name().unwrap_or("").to_lowercase();
-    let op_status = callback.operation_status().unwrap_or("").to_lowercase();
+    let op_name = callback.operation_name().to_lowercase();
 
-    // Also check data.status if available (more reliable for VM state)
-    let data_status = callback
+    if let Some(status) = callback
         .data
         .as_ref()
         .and_then(|d| d.get("status"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
+        .map(|s| s.to_lowercase())
+    {
+        return map_hyperstack_status(&status, &op_name);
+    }
 
-    // Priority: check data.status first (reflects actual VM state)
-    if data_status == "active" || data_status == "running" {
-        return DeploymentStatus::Running;
+    let op_status = callback.operation_status().to_lowercase();
+    map_hyperstack_status(&op_status, &op_name)
+}
+
+fn map_hyperstack_status(status: &str, op_name: &str) -> DeploymentStatus {
+    let status = status.trim();
+    if status.is_empty() {
+        return DeploymentStatus::Pending;
     }
-    if data_status == "error" || data_status == "failed" {
-        return DeploymentStatus::Error;
+
+    match status {
+        "active" | "running" => return DeploymentStatus::Running,
+        "build" | "building" | "creating" | "provisioning" => {
+            return DeploymentStatus::Provisioning
+        }
+        "deleting" | "deleted" | "terminated" => return DeploymentStatus::Deleted,
+        "error" | "failed" => return DeploymentStatus::Error,
+        "success" => {
+            if op_name.contains("delete") || op_name.contains("deleted") {
+                return DeploymentStatus::Deleted;
+            }
+            if op_name.contains("create") || op_name.contains("created") {
+                return DeploymentStatus::Running;
+            }
+        }
+        _ => {}
     }
-    if data_status == "deleted" || data_status == "terminated" {
+
+    if op_name.contains("delete") || op_name.contains("deleted") {
         return DeploymentStatus::Deleted;
     }
-    if data_status == "build" || data_status == "building" || data_status == "creating" {
+    if op_name.contains("create") || op_name.contains("created") {
         return DeploymentStatus::Provisioning;
     }
 
-    // Fall back to operation-based status
-    match (op_name.as_str(), op_status.as_str()) {
-        // createInstance operations
-        ("createinstance", "success") | ("createvm", "success") => DeploymentStatus::Running,
-        ("createinstance", "failed") | ("createvm", "failed") => DeploymentStatus::Error,
-        ("createinstance", "building") | ("createinstance", "creating") => {
-            DeploymentStatus::Provisioning
+    DeploymentStatus::Pending
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn callback_from(value: serde_json::Value) -> HyperstackCallback {
+        serde_json::from_value(value).expect("valid callback")
+    }
+
+    #[test]
+    fn map_status_from_data_status() {
+        let cases = vec![
+            ("CREATING", DeploymentStatus::Provisioning),
+            ("BUILD", DeploymentStatus::Provisioning),
+            ("ACTIVE", DeploymentStatus::Running),
+            ("DELETED", DeploymentStatus::Deleted),
+            ("ERROR", DeploymentStatus::Error),
+        ];
+
+        for (status, expected) in cases {
+            let callback = callback_from(json!({
+                "resource": { "id": "507279" },
+                "operation": { "name": "createInstance", "status": "CREATING" },
+                "data": { "status": status }
+            }));
+            assert_eq!(map_callback_status(&callback), expected, "status={status}");
         }
-        // deleteInstance operations
-        ("deleteinstance", "success") | ("deletevm", "success") => DeploymentStatus::Deleted,
-        ("deleteinstance", "failed") | ("deletevm", "failed") => DeploymentStatus::Error,
-        // Generic status handling
-        (_, "success") | (_, "active") | (_, "running") => DeploymentStatus::Running,
-        (_, "failed") | (_, "error") => DeploymentStatus::Error,
-        (_, "deleted") | (_, "terminated") => DeploymentStatus::Deleted,
-        (_, "building") | (_, "creating") | (_, "provisioning") => DeploymentStatus::Provisioning,
-        _ => DeploymentStatus::Pending,
+    }
+
+    #[test]
+    fn map_status_from_operation_status() {
+        let callback = callback_from(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "createInstance", "status": "building" }
+        }));
+        assert_eq!(
+            map_callback_status(&callback),
+            DeploymentStatus::Provisioning
+        );
+
+        let callback = callback_from(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "createInstance", "status": "active" }
+        }));
+        assert_eq!(map_callback_status(&callback), DeploymentStatus::Running);
+
+        let callback = callback_from(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "deleteInstances", "status": "DELETING" }
+        }));
+        assert_eq!(map_callback_status(&callback), DeploymentStatus::Deleted);
+
+        let callback = callback_from(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "deleteInstances", "status": "DELETED" }
+        }));
+        assert_eq!(map_callback_status(&callback), DeploymentStatus::Deleted);
+
+        let callback = callback_from(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "deleteInstance", "status": "FAILED" }
+        }));
+        assert_eq!(map_callback_status(&callback), DeploymentStatus::Error);
     }
 }
