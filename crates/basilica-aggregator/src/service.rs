@@ -29,16 +29,39 @@ fn region_to_environment(region: &str) -> String {
     format!("default-{}", region)
 }
 
-/// Build structured connection_info from IP address
-/// Returns JSON with ssh_host, ssh_port, ssh_user (matching VIP format)
-fn build_connection_info(ip: &Option<String>) -> Option<serde_json::Value> {
+/// Build structured connection_info from IP address and SSH parameters.
+/// Returns JSON with ssh_host, ssh_port, ssh_user (matching VIP format).
+fn build_connection_info(
+    ip: &Option<String>,
+    ssh_port: Option<u16>,
+    ssh_user: Option<String>,
+) -> Option<serde_json::Value> {
     ip.as_ref().map(|ip| {
+        let resolved_port = ssh_port.unwrap_or(22);
+        let resolved_user = ssh_user
+            .and_then(|user| {
+                let trimmed = user.trim().to_string();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
+            })
+            .unwrap_or_else(|| "ubuntu".to_string());
+
         serde_json::json!({
             "ssh_host": ip,
-            "ssh_port": 22,
-            "ssh_user": "ubuntu"
+            "ssh_port": resolved_port,
+            "ssh_user": resolved_user
         })
     })
+}
+
+fn ssh_params_for_provider(provider: ProviderEnum) -> (Option<u16>, Option<String>) {
+    match provider {
+        ProviderEnum::Hyperstack => (Some(22), Some("ubuntu".to_string())),
+        _ => (None, None),
+    }
 }
 
 pub struct AggregatorService {
@@ -507,6 +530,9 @@ impl AggregatorService {
         };
 
         let provider_deployment = provider.deploy(deploy_request).await?;
+        let (ssh_port, ssh_user) = ssh_params_for_provider(provider_enum);
+        let connection_info =
+            build_connection_info(&provider_deployment.ip_address, ssh_port, ssh_user);
 
         // Create deployment record in database
         let now = Utc::now();
@@ -523,7 +549,7 @@ impl AggregatorService {
             hostname,
             ssh_public_key: Some(ssh_key.public_key.clone()),
             ip_address: provider_deployment.ip_address.clone(),
-            connection_info: build_connection_info(&provider_deployment.ip_address),
+            connection_info,
             raw_response: provider_deployment.raw_data,
             error_message: None,
             created_at: now,
@@ -601,6 +627,9 @@ impl AggregatorService {
                         &provider_deployment.status,
                         deployment.provider,
                     );
+                    let (ssh_port, ssh_user) = ssh_params_for_provider(deployment.provider);
+                    let connection_info =
+                        build_connection_info(&provider_deployment.ip_address, ssh_port, ssh_user);
 
                     self.db
                         .update_deployment(
@@ -608,7 +637,7 @@ impl AggregatorService {
                             Some(provider_instance_id.clone()),
                             status.clone(),
                             provider_deployment.ip_address.clone(),
-                            build_connection_info(&provider_deployment.ip_address),
+                            connection_info.clone(),
                             provider_deployment.raw_data.clone(),
                             None,
                         )
@@ -616,8 +645,7 @@ impl AggregatorService {
 
                     deployment.status = status;
                     deployment.ip_address = provider_deployment.ip_address.clone();
-                    deployment.connection_info =
-                        build_connection_info(&provider_deployment.ip_address);
+                    deployment.connection_info = connection_info;
                     deployment.raw_response = provider_deployment.raw_data;
                     deployment.updated_at = Utc::now();
                 }
