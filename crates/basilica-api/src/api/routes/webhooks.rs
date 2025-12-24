@@ -61,7 +61,7 @@ pub async fn hyperstack_callback(
         "SELECT id, status FROM secure_cloud_rentals
          WHERE provider_instance_id = $1 AND provider = 'hyperstack'",
     )
-    .bind(&vm_id)
+    .bind(vm_id)
     .fetch_optional(&state.db)
     .await
     {
