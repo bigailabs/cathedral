@@ -102,9 +102,17 @@ deployments_alb_dns_name = "your-deployments-alb-dns-name"
 # =============================================================================
 # GPU AGGREGATOR CONFIGURATION (Secure Cloud)
 # =============================================================================
-# API key for Hyperstack GPU provider
+# Hyperstack GPU provider configuration
 # Get your API key from: https://infrahub-api.nexgencloud.com/
+
+# API key for authentication
 hyperstack_api_key = "your-hyperstack-api-key"
+
+# Webhook secret for callback authentication (must be URL-safe: A-Z a-z 0-9 - _ . ~)
+hyperstack_webhook_secret = "your-url-safe-webhook-secret"
+
+# Base URL for webhooks (where Hyperstack will send callbacks)
+hyperstack_callback_base_url = "https://api.basilica.ai"
 
 # =============================================================================
 # VPC PEERING CONFIGURATION (Required for K3s SSH connectivity)

@@ -178,6 +178,8 @@ pub struct DeployVmRequest {
     pub create_bootable_volume: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_rules: Option<Vec<SecurityRuleRequest>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 }
 
 /// Virtual machine details from Hyperstack API
@@ -301,4 +303,94 @@ pub struct GetVmResponse {
     pub status: bool,
     pub message: String,
     pub instance: DeployVmInstance,
+}
+
+// ============================================================================
+// Webhook Callback Types
+// ============================================================================
+
+/// Hyperstack callback payload
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyperstackCallback {
+    /// Resource info from Hyperstack
+    pub resource: HyperstackCallbackResource,
+    /// Operation info from Hyperstack
+    pub operation: HyperstackCallbackOperation,
+    /// User-provided payload echoed back
+    #[serde(default)]
+    pub user_payload: Option<serde_json::Value>,
+    /// Additional data from Hyperstack
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+    /// Capture all other fields for debugging
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl HyperstackCallback {
+    /// Get the VM ID from any of the possible locations in the payload
+    pub fn vm_id(&self) -> &str {
+        &self.resource.id
+    }
+
+    /// Get the operation status
+    pub fn operation_status(&self) -> &str {
+        &self.operation.status
+    }
+
+    /// Get the operation name
+    pub fn operation_name(&self) -> &str {
+        &self.operation.name
+    }
+}
+
+/// Resource information in callback
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyperstackCallbackResource {
+    /// VM ID (provider_instance_id) - can be string or integer
+    #[serde(deserialize_with = "deserialize_id")]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(rename = "type", default)]
+    pub resource_type: Option<String>,
+}
+
+/// Operation information in callback
+#[derive(Debug, Clone, Deserialize)]
+pub struct HyperstackCallbackOperation {
+    /// Operation name e.g., "createVM", "deleteVM"
+    pub name: String,
+    /// Status: "SUCCESS" or "FAILED"
+    pub status: String,
+}
+
+/// Deserialize ID from either string or integer
+fn deserialize_id<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        _ => Err(D::Error::custom("expected string or number for id")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HyperstackCallback;
+    use serde_json::json;
+
+    #[test]
+    fn vm_id_uses_resource_id() {
+        let callback: HyperstackCallback = serde_json::from_value(json!({
+            "resource": { "id": "507279" },
+            "operation": { "name": "createInstance", "status": "CREATING" }
+        }))
+        .expect("valid callback");
+        assert_eq!(callback.vm_id(), "507279");
+    }
 }

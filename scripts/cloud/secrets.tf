@@ -122,3 +122,24 @@ resource "aws_secretsmanager_secret_version" "hyperstack_api_key" {
     ignore_changes = [secret_string]
   }
 }
+
+# Hyperstack webhook secret for callback authentication
+resource "aws_secretsmanager_secret" "hyperstack_webhook_secret" {
+  name                    = "${local.name_prefix}-hyperstack-webhook-secret"
+  description             = "Webhook secret for Hyperstack callback authentication"
+  recovery_window_in_days = 7
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-hyperstack-webhook-secret"
+  })
+}
+
+resource "aws_secretsmanager_secret_version" "hyperstack_webhook_secret" {
+  count         = var.hyperstack_webhook_secret != "" ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.hyperstack_webhook_secret.id
+  secret_string = var.hyperstack_webhook_secret
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
