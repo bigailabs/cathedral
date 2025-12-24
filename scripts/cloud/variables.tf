@@ -164,6 +164,19 @@ variable "hyperstack_api_key" {
   default     = ""
 }
 
+variable "hyperstack_webhook_secret" {
+  type        = string
+  description = "Webhook secret token for Hyperstack callbacks (must be URL-safe: A-Z a-z 0-9 - _ . ~)"
+  sensitive   = true
+  default     = ""
+}
+
+variable "hyperstack_callback_base_url" {
+  type        = string
+  description = "Base URL for Hyperstack webhooks (e.g., https://api.basilica.ai)"
+  default     = ""
+}
+
 # WireGuard VPN Configuration
 variable "wireguard_enabled" {
   type        = bool
