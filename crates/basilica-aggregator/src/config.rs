@@ -242,6 +242,29 @@ impl Config {
             ));
         }
 
+        if let Some(hyperstack) = &self.providers.hyperstack {
+            if hyperstack.api_key.trim().is_empty() {
+                return Err(AggregatorError::Config(
+                    "Hyperstack api_key must be non-empty".to_string(),
+                ));
+            }
+            if hyperstack.webhook_secret.trim().is_empty() {
+                return Err(AggregatorError::Config(
+                    "Hyperstack webhook_secret must be non-empty".to_string(),
+                ));
+            }
+            if !is_url_safe_token(&hyperstack.webhook_secret) {
+                return Err(AggregatorError::Config(
+                    "Hyperstack webhook_secret must be URL-safe (A-Z a-z 0-9 - _ . ~)".to_string(),
+                ));
+            }
+            if hyperstack.callback_base_url.trim().is_empty() {
+                return Err(AggregatorError::Config(
+                    "Hyperstack callback_base_url must be non-empty".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -267,6 +290,12 @@ impl Config {
             vip: None,
         }
     }
+}
+
+fn is_url_safe_token(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
 }
 
 #[cfg(test)]
@@ -412,6 +441,33 @@ mod tests {
             config.callback_url(),
             "https://api.example.com/webhooks/cloud-provider/hyperstack?token=secret123"
         );
+    }
+
+    #[test]
+    fn test_config_validation_invalid_hyperstack_webhook_secret() {
+        let config = Config {
+            server: ServerConfig {
+                host: "0.0.0.0".to_string(),
+                port: 8080,
+            },
+            cache: CacheConfig { ttl_seconds: 45 },
+            providers: ProvidersConfig {
+                datacrunch: ProviderConfig::default(),
+                hyperstack: Some(HyperstackConfig {
+                    api_key: "test-api-key".to_string(),
+                    webhook_secret: "bad&token".to_string(),
+                    callback_base_url: "https://api.example.com".to_string(),
+                }),
+                lambda: ProviderConfig::default(),
+                hydrahost: ProviderConfig::default(),
+            },
+            database: DatabaseConfig {
+                path: "test.db".to_string(),
+            },
+            vip: None,
+        };
+
+        assert!(config.validate().is_err());
     }
 
     #[test]
