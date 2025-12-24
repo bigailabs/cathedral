@@ -2130,58 +2130,48 @@ async fn retry_ssh_connection(
     let mut interval = INITIAL_INTERVAL;
     let mut attempt = 0;
 
-    // Use a spinner to show progress and avoid cluttering the terminal
-    let spinner = create_spinner("Waiting for SSH to become available...");
-
     loop {
         attempt += 1;
-        spinner.set_message("Waiting for SSH...");
 
-        // First test connectivity without starting an interactive session
-        // This captures stderr so we don't print raw SSH errors
+        // Check timeout before attempting
+        if start_time.elapsed() >= max_wait {
+            return Err(CliError::Internal(
+                eyre!(
+                    "SSH connection failed after {} attempts over {}s",
+                    attempt - 1,
+                    start_time.elapsed().as_secs(),
+                )
+                .suggestion("The SSH service may not be ready yet. Wait a minute and try 'basilica ssh <rental_id>'"),
+            ));
+        }
+
+        // Show spinner only during wait, clear before interactive session
+        let spinner = create_spinner("Waiting for SSH to become available...");
+
+        // Brief delay between attempts (skip on first attempt)
+        if attempt > 1 {
+            spinner.set_message(format!("Retrying SSH connection (attempt {})...", attempt));
+            tokio::time::sleep(interval).await;
+            interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+        }
+
+        complete_spinner_and_clear(spinner);
+
+        // Try interactive session directly (matches `basilica ssh` behavior)
+        // Uses .status() which doesn't hang on stream close
         match ssh_client
-            .test_connection(ssh_access, private_key_path.clone())
+            .interactive_session(ssh_access, private_key_path.clone())
             .await
         {
-            Ok(_) => {
-                // Connection test succeeded, now start the actual interactive session
-                complete_spinner_and_clear(spinner);
-                return ssh_client
-                    .interactive_session(ssh_access, private_key_path)
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
-            }
+            Ok(_) => return Ok(()),
             Err(e) => {
-                // Check if we've exceeded the maximum wait time
-                if start_time.elapsed() >= max_wait {
-                    // Final attempt failed, return error
-                    complete_spinner_error(spinner, "SSH connection failed");
-                    // Log the final error for debugging (raw SSH stderr preserved in logs)
-                    debug!("Final SSH connection attempt failed: {}", e);
-                    return Err(CliError::Internal(
-                        eyre!(
-                            "SSH connection failed after {} attempts over {}s",
-                            attempt,
-                            start_time.elapsed().as_secs(),
-                        )
-                        .suggestion("The SSH service may not be ready yet. Wait a minute and try 'basilica ssh <rental_id>'"),
-                    ));
-                }
-
-                // Log the retry attempt
                 debug!(
-                    "SSH connection attempt {} failed ({}s elapsed): {}. Retrying in {}s...",
+                    "SSH connection attempt {} failed ({}s elapsed): {}",
                     attempt,
                     start_time.elapsed().as_secs(),
-                    e,
-                    interval.as_secs()
+                    e
                 );
-
-                // Wait before next attempt
-                tokio::time::sleep(interval).await;
-
-                // Increase interval up to maximum (exponential backoff)
-                interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+                // Continue to next iteration for retry
             }
         }
     }

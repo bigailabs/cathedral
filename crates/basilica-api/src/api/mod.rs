@@ -23,7 +23,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/metrics", get(routes::metrics::metrics_handler))
         // Webhook endpoints - token in query param provides authentication
         .route(
-            "/webhooks/hyperstack",
+            "/webhooks/cloud-provider/hyperstack",
             post(routes::webhooks::hyperstack_callback),
         );
 

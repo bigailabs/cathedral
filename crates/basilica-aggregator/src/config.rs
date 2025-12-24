@@ -65,7 +65,7 @@ impl HyperstackConfig {
     /// Build callback URL with token as query parameter
     pub fn callback_url(&self) -> String {
         format!(
-            "{}/webhooks/hyperstack?token={}",
+            "{}/webhooks/cloud-provider/hyperstack?token={}",
             self.callback_base_url.trim_end_matches('/'),
             self.webhook_secret
         )
@@ -410,7 +410,7 @@ mod tests {
 
         assert_eq!(
             config.callback_url(),
-            "https://api.example.com/webhooks/hyperstack?token=secret123"
+            "https://api.example.com/webhooks/cloud-provider/hyperstack?token=secret123"
         );
     }
 
