@@ -37,14 +37,23 @@ use rand::seq::SliceRandom;
 use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 use sqlx::Row;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, instrument};
 
 /// Get detailed rental status (with ownership validation)
+#[instrument(
+    err,
+    skip(state, owned_rental),
+    fields(
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        cloud_type = "community"
+    )
+)]
 pub async fn get_rental_status(
     State(state): State<AppState>,
     owned_rental: OwnedRental,
 ) -> Result<Json<RentalStatusWithSshResponse>> {
-    debug!("Getting status for rental: {}", owned_rental.rental_id);
+    debug!(rental_id = %owned_rental.rental_id, "Getting rental status");
 
     let client = &state.validator_client;
     let validator_response = client.get_rental_status(&owned_rental.rental_id).await?;
@@ -68,6 +77,15 @@ pub async fn get_rental_status(
 // ===== New Validator-Compatible Endpoints =====
 
 /// Start a new rental (validator-compatible endpoint)
+#[instrument(
+    err,
+    skip(state, auth_context, request),
+    fields(
+        user_id = %auth_context.user_id,
+        rental_id = tracing::field::Empty,
+        cloud_type = "community"
+    )
+)]
 pub async fn start_rental(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
@@ -91,7 +109,7 @@ pub async fn start_rental(
         match ssh_key_row {
             Some(row) => row.get("public_key"),
             None => {
-                error!("User {} has no SSH key registered", user_id);
+                error!(user_id = %user_id, "No SSH key registered");
                 return Err(crate::error::ApiError::BadRequest {
                     message: "No SSH key registered. Please register an SSH key first using 'basilica ssh-keys add' or by starting a rental through the CLI.".into(),
                 });
@@ -101,7 +119,7 @@ pub async fn start_rental(
 
     // Validate container image using OCI specification
     if let Err(e) = validate_docker_image(&request.container_image) {
-        error!("Invalid container image provided: {}", e);
+        error!(error = %e, "Invalid container image");
         return Err(crate::error::ApiError::BadRequest {
             message: format!("Invalid container image: {}", e),
         });
@@ -115,7 +133,7 @@ pub async fn start_rental(
     // Determine node_id, pricing, and GPU count based on the selection strategy
     let (node_id, node_hourly_rate_cents, gpu_count) = match &request.node_selection {
         NodeSelection::NodeId { node_id } => {
-            info!("Starting rental with specified node: {}", node_id);
+            info!(node_id = %node_id, "Starting rental with specified node");
 
             // Fetch the specific node's pricing from validator
             let query = ListAvailableNodesQuery {
@@ -145,8 +163,10 @@ pub async fn start_rental(
         }
         NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
             info!(
-                "Selecting node based on GPU requirements (exact): {:?}",
-                gpu_requirements
+                gpu_count = gpu_requirements.gpu_count,
+                gpu_type = ?gpu_requirements.gpu_type,
+                min_memory_gb = gpu_requirements.min_memory_gb,
+                "Selecting node based on GPU requirements"
             );
 
             // Query available nodes with filters based on requirements
@@ -175,7 +195,7 @@ pub async fn start_rental(
                 .collect();
 
             if nodes.is_empty() {
-                error!("No nodes with exactly {} GPU(s) available", exact_count);
+                error!(gpu_count = exact_count, "No nodes with exact GPU count available");
                 return Err(crate::error::ApiError::NotFound {
                     message: format!(
                         "No nodes with exactly {} GPU(s) matching requirements",
@@ -191,8 +211,9 @@ pub async fn start_rental(
                 })?;
 
             info!(
-                "Selected node {} with exactly {} GPU(s)",
-                selected_node.node.id, exact_count
+                node_id = %selected_node.node.id,
+                gpu_count = exact_count,
+                "Selected node with exact GPU count"
             );
 
             // Capture node_id, pricing, and GPU count from the selected node
@@ -207,10 +228,7 @@ pub async fn start_rental(
 
     // Validate pricing is available before creating rental (fail fast before side effects)
     if node_hourly_rate_cents.is_none() {
-        error!(
-            "No pricing configured for node {}. Cannot proceed with rental.",
-            node_id
-        );
+        error!(node_id = %node_id, "No pricing configured for node");
         return Err(crate::error::ApiError::BadRequest {
             message: format!(
                 "Node {} does not have pricing configured. Please select a different node or contact support.",
@@ -244,12 +262,17 @@ pub async fn start_rental(
         volumes: request.volumes,
         no_ssh: request.no_ssh,
     };
-    debug!("Starting rental with request: {:?}", validator_request);
+    debug!(
+        node_id = %validator_request.node_id,
+        no_ssh = validator_request.no_ssh,
+        "Starting rental request"
+    );
 
     let validator_response = state
         .validator_client
         .start_rental(validator_request)
         .await?;
+    tracing::Span::current().record("rental_id", &validator_response.rental_id);
 
     // Get rental status to extract actual GPU specs from the assigned node
     let rental_status = state
@@ -281,8 +304,9 @@ pub async fn start_rental(
     .await
     {
         error!(
-            "Failed to store rental ownership for rental {}: {}. Rolling back rental creation.",
-            validator_response.rental_id, e
+            rental_id = %validator_response.rental_id,
+            error = %e,
+            "Failed to store rental ownership; rolling back rental creation"
         );
 
         // Rollback: terminate the rental on the validator since we can't track ownership
@@ -296,13 +320,14 @@ pub async fn start_rental(
             .await
         {
             error!(
-                "CRITICAL: Failed to rollback rental {} after ownership storage failure: {}. Manual cleanup required.",
-                validator_response.rental_id, rollback_err
+                rental_id = %validator_response.rental_id,
+                error = %rollback_err,
+                "CRITICAL: Failed to rollback rental after ownership storage failure"
             );
         } else {
             info!(
-                "Successfully rolled back rental {} after ownership storage failure",
-                validator_response.rental_id
+                rental_id = %validator_response.rental_id,
+                "Rolled back rental after ownership storage failure"
             );
         }
 
@@ -355,8 +380,8 @@ pub async fn start_rental(
         )?;
         let marked_up_price = marked_up_decimal.to_f64().ok_or_else(|| {
             tracing::error!(
-                "Failed to convert marked_up_price {} to f64 for billing",
-                marked_up_decimal
+                marked_up_price = %marked_up_decimal,
+                "Failed to convert marked_up_price for billing"
             );
             crate::error::ApiError::Internal {
                 message: "Failed to calculate billing rate: price conversion error".to_string(),
@@ -390,7 +415,11 @@ pub async fn start_rental(
         };
 
         if let Err(e) = billing_client.track_rental(track_request).await {
-            error!("Failed to register rental with billing service: {}", e);
+            error!(
+                rental_id = %validator_response.rental_id,
+                error = %e,
+                "Failed to register rental with billing service"
+            );
 
             // Rollback: remove ownership record and terminate rental
             if let Err(archive_err) = archive_rental_ownership(
@@ -401,8 +430,9 @@ pub async fn start_rental(
             .await
             {
                 error!(
-                    "Failed to archive ownership for rental {} during rollback: {}",
-                    validator_response.rental_id, archive_err
+                    rental_id = %validator_response.rental_id,
+                    error = %archive_err,
+                    "Failed to archive ownership during billing rollback"
                 );
             }
 
@@ -418,13 +448,14 @@ pub async fn start_rental(
                 .await
             {
                 error!(
-                    "CRITICAL: Failed to rollback rental {} after billing registration failure: {}. Manual cleanup required.",
-                    validator_response.rental_id, rollback_err
+                    rental_id = %validator_response.rental_id,
+                    error = %rollback_err,
+                    "CRITICAL: Failed to rollback rental after billing registration failure"
                 );
             } else {
                 info!(
-                    "Successfully rolled back rental {} after billing registration failure",
-                    validator_response.rental_id
+                    rental_id = %validator_response.rental_id,
+                    "Rolled back rental after billing registration failure"
                 );
             }
 
@@ -438,8 +469,9 @@ pub async fn start_rental(
     }
 
     info!(
-        "User {} started rental {}",
-        user_id, validator_response.rental_id
+        user_id = %user_id,
+        rental_id = %validator_response.rental_id,
+        "Started rental"
     );
 
     Ok(Json(validator_response))
@@ -513,13 +545,23 @@ pub async fn stop_community_rental_internal(
 }
 
 /// Stop a rental (with ownership validation)
+#[instrument(
+    err,
+    skip(state, owned_rental),
+    fields(
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        cloud_type = "community"
+    )
+)]
 pub async fn stop_rental(
     State(state): State<AppState>,
     owned_rental: OwnedRental,
 ) -> Result<Response> {
     info!(
-        "User {} stopping rental {}",
-        owned_rental.user_id, owned_rental.rental_id
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        "Stopping rental"
     );
 
     let _ = stop_community_rental_internal(
@@ -537,13 +579,23 @@ pub async fn stop_rental(
 }
 
 /// Restart a rental's container (with ownership validation)
+#[instrument(
+    err,
+    skip(state, owned_rental),
+    fields(
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        cloud_type = "community"
+    )
+)]
 pub async fn restart_rental(
     State(state): State<AppState>,
     owned_rental: OwnedRental,
 ) -> Result<Json<basilica_validator::rental::RentalRestartResponse>> {
     info!(
-        "User {} restarting rental {}",
-        owned_rental.user_id, owned_rental.rental_id
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        "Restarting rental"
     );
 
     let response = state
@@ -555,8 +607,10 @@ pub async fn restart_rental(
     // Note: Billing continues uninterrupted during restart
     if state.billing_client.is_some() {
         debug!(
-            "Rental {} restarted by user {} (duration: {}ms)",
-            owned_rental.rental_id, owned_rental.user_id, response.operation_duration_ms
+            rental_id = %owned_rental.rental_id,
+            user_id = %owned_rental.user_id,
+            duration_ms = response.operation_duration_ms,
+            "Rental restarted"
         );
     }
 
@@ -564,14 +618,24 @@ pub async fn restart_rental(
 }
 
 /// Stream rental logs (with ownership validation)
+#[instrument(
+    err,
+    skip(state, owned_rental, query),
+    fields(
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        cloud_type = "community"
+    )
+)]
 pub async fn stream_rental_logs(
     State(state): State<AppState>,
     owned_rental: OwnedRental,
     Query(query): Query<LogStreamQuery>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, std::io::Error>>>> {
     info!(
-        "User {} streaming logs for rental {}",
-        owned_rental.user_id, owned_rental.rental_id
+        user_id = %owned_rental.user_id,
+        rental_id = %owned_rental.rental_id,
+        "Streaming rental logs"
     );
 
     let follow = query.follow.unwrap_or(false);
@@ -589,7 +653,7 @@ pub async fn stream_rental_logs(
         .stream_rental_logs(&owned_rental.rental_id, log_query)
         .await
         .map_err(|e| {
-            error!("Failed to get log stream from validator: {}", e);
+            error!(error = %e, "Failed to get log stream from validator");
             crate::error::ApiError::ValidatorCommunication {
                 message: format!("Failed to stream logs: {}", e),
             }
@@ -613,7 +677,7 @@ pub async fn stream_rental_logs(
                     yield Ok(Event::default().data(data.to_string()));
                 }
                 Err(e) => {
-                    error!("Error in log stream: {}", e);
+                    error!(error = %e, "Error in log stream");
                     // Send error as an SSE event
                     let data = serde_json::json!({
                         "timestamp": chrono::Utc::now(),
@@ -632,12 +696,20 @@ pub async fn stream_rental_logs(
 
 /// List rentals with state filter (validator-compatible)
 /// Only returns rentals owned by the authenticated user
+#[instrument(
+    err,
+    skip(state, auth_context, query),
+    fields(
+        user_id = %auth_context.user_id,
+        cloud_type = "community"
+    )
+)]
 pub async fn list_rentals_validator(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
     Query(query): Query<ListRentalsQuery>,
 ) -> Result<Json<ApiListRentalsResponse>> {
-    info!("Listing rentals with state filter: {:?}", query.status);
+    info!(status = ?query.status, "Listing rentals");
 
     // Get user ID from auth context (already extracted via Extension)
     let user_id = &auth_context.user_id;
@@ -697,7 +769,7 @@ pub async fn list_rentals_validator(
                     })
                     .collect(),
                 Err(e) => {
-                    tracing::warn!("Failed to fetch billing costs, will use None: {}", e);
+                    tracing::warn!(error = %e, "Failed to fetch billing costs; using None");
                     std::collections::HashMap::new()
                 }
             }
@@ -764,9 +836,9 @@ pub async fn list_rentals_validator(
     };
 
     info!(
-        "User {} has {} rentals",
-        user_id,
-        user_rentals.rentals.len()
+        user_id = %user_id,
+        rental_count = user_rentals.rentals.len(),
+        "Listed rentals"
     );
 
     Ok(Json(user_rentals))
@@ -791,12 +863,20 @@ fn format_billing_status(status: BillingRentalStatus) -> &'static str {
 }
 
 /// List historical (completed/failed) rentals from billing service
+#[instrument(
+    err,
+    skip(state, auth_context, query),
+    fields(
+        user_id = %auth_context.user_id,
+        cloud_type = "community"
+    )
+)]
 pub async fn list_rental_history(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
     Query(query): Query<HistoricalRentalsQuery>,
 ) -> Result<Json<HistoricalRentalsResponse>> {
-    info!("Listing rental history for user: {}", auth_context.user_id);
+    info!(user_id = %auth_context.user_id, "Listing rental history");
 
     let user_id = &auth_context.user_id;
 
@@ -885,7 +965,11 @@ pub async fn list_rental_history(
 
     let count = historical_rentals.len();
 
-    info!("User {} has {} historical rentals", user_id, count);
+    info!(
+        user_id = %user_id,
+        rental_count = count,
+        "Listed rental history"
+    );
 
     Ok(Json(HistoricalRentalsResponse {
         rentals: historical_rentals,
@@ -895,6 +979,18 @@ pub async fn list_rental_history(
 }
 
 /// List available nodes for rentals
+#[instrument(
+    err,
+    skip(state),
+    fields(
+        available = ?query.available,
+        min_gpu_memory = ?query.min_gpu_memory,
+        gpu_type = ?query.gpu_type,
+        min_gpu_count = ?query.min_gpu_count,
+        location = ?query.location,
+        cloud_type = "community"
+    )
+)]
 pub async fn list_available_nodes(
     State(state): State<AppState>,
     Query(mut query): Query<ListAvailableNodesQuery>,
@@ -912,7 +1008,14 @@ pub async fn list_available_nodes(
         }
     }
 
-    info!("Listing nodes with filters: {:?}", query);
+    info!(
+        available = ?query.available,
+        min_gpu_memory = ?query.min_gpu_memory,
+        gpu_type = ?query.gpu_type,
+        min_gpu_count = ?query.min_gpu_count,
+        location = ?query.location,
+        "Listing nodes"
+    );
 
     let mut response = state
         .validator_client
