@@ -59,6 +59,7 @@ async fn get_ssh_key_for_user(
 
 /// List GPU prices from aggregator service
 /// This is a thin proxy to the aggregator's get_gpu_prices handler
+#[tracing::instrument(skip_all, fields(cloud_type = "secure"))]
 pub async fn list_gpu_prices(
     State(state): State<AppState>,
     Query(query): Query<GpuPriceQuery>,
@@ -107,7 +108,7 @@ pub async fn list_gpu_prices(
                 ) {
                     Ok(marked_up) => offering.hourly_rate_per_gpu = marked_up,
                     Err(e) => {
-                        tracing::error!("Failed to apply markup: {}", e);
+                        tracing::error!(error = %e, "Failed to apply markup");
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({
@@ -131,7 +132,7 @@ pub async fn list_gpu_prices(
             )
         }
         Err(e) => {
-            tracing::error!("Failed to get offerings: {}", e);
+            tracing::error!(error = %e, "Failed to get offerings");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -144,6 +145,14 @@ pub async fn list_gpu_prices(
 }
 
 /// List secure cloud rentals for the authenticated user
+#[tracing::instrument(
+    err,
+    skip_all,
+    fields(
+        user_id = %auth.user_id,
+        cloud_type = "secure"
+    )
+)]
 pub async fn list_secure_cloud_rentals(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -156,7 +165,7 @@ pub async fn list_secure_cloud_rentals(
     .fetch_all(&state.db)
     .await
     .map_err(|e| {
-        tracing::error!("Failed to query rental IDs: {}", e);
+        tracing::error!(error = %e, "Failed to query secure cloud rental IDs");
         ApiError::Internal {
             message: "Failed to fetch rentals".to_string(),
         }
@@ -177,9 +186,9 @@ pub async fn list_secure_cloud_rentals(
         if status == "running" || status == "provisioning" || status == "pending" {
             if let Err(e) = state.aggregator_service.get_deployment(rental_id).await {
                 tracing::debug!(
-                    "Failed to refresh rental {} from provider (may be expected): {}",
-                    rental_id,
-                    e
+                    rental_id = %rental_id,
+                    error = %e,
+                    "Failed to refresh rental from provider"
                 );
             }
         }
@@ -200,7 +209,7 @@ pub async fn list_secure_cloud_rentals(
     .fetch_all(&state.db)
     .await
     .map_err(|e| {
-        tracing::error!("Failed to query secure_cloud_rentals: {}", e);
+        tracing::error!(error = %e, "Failed to query secure cloud rentals");
         ApiError::Internal {
             message: "Failed to fetch rentals".to_string(),
         }
@@ -212,7 +221,7 @@ pub async fn list_secure_cloud_rentals(
         .get_offerings()
         .await
         .unwrap_or_else(|e| {
-            tracing::warn!("Failed to fetch offerings, using empty list: {}", e);
+            tracing::warn!(error = %e, "Failed to fetch offerings; using empty list");
             vec![]
         });
 
@@ -233,7 +242,7 @@ pub async fn list_secure_cloud_rentals(
                     .map(|r| (r.rental_id, r.current_cost))
                     .collect(),
                 Err(e) => {
-                    tracing::warn!("Failed to fetch billing costs, will use None: {}", e);
+                    tracing::warn!(error = %e, "Failed to fetch billing costs; using None");
                     std::collections::HashMap::new()
                 }
             }
@@ -295,7 +304,13 @@ pub async fn list_secure_cloud_rentals(
                         .and_then(|s| s.parse::<f64>().ok())
                         .unwrap_or(0.0);
 
-                    (instance_type.clone(), vip_gpu_count, vip_hourly_rate, vip_vcpu, vip_ram)
+                    (
+                        instance_type.clone(),
+                        vip_gpu_count,
+                        vip_hourly_rate,
+                        vip_vcpu,
+                        vip_ram,
+                    )
                 } else if let Some(offering) = offerings_map.get(offering_id.as_str()) {
                     // Regular rental: use offering data
                     let gpu_count = offering.gpu_count;
@@ -307,38 +322,52 @@ pub async fn list_secure_cloud_rentals(
                     ) {
                         Ok(decimal) => decimal.to_f64().unwrap_or_else(|| {
                             tracing::error!(
-                                "Failed to convert hourly_cost {} to f64 for offering {} rental {} display",
-                                decimal,
-                                offering_id,
-                                rental_id
+                                hourly_cost = %decimal,
+                                offering_id = %offering_id,
+                                rental_id = %rental_id,
+                                "Failed to convert hourly_cost to f64"
                             );
                             0.0
                         }),
                         Err(e) => {
                             tracing::error!(
-                                "Failed to calculate hourly_cost for offering {} rental {}: {}",
-                                offering_id,
-                                rental_id,
-                                e
+                                offering_id = %offering_id,
+                                rental_id = %rental_id,
+                                error = %e,
+                                "Failed to calculate hourly_cost"
                             );
                             0.0
                         }
                     };
 
-                    (offering.gpu_type.to_string(), gpu_count, hourly_cost, None, None)
+                    (
+                        offering.gpu_type.to_string(),
+                        gpu_count,
+                        hourly_cost,
+                        None,
+                        None,
+                    )
                 } else {
                     // Fallback if offering not found (e.g., offering expired)
                     tracing::warn!(
-                        "Offering {} not found for rental {}, using defaults",
-                        offering_id,
-                        rental_id
+                        offering_id = %offering_id,
+                        rental_id = %rental_id,
+                        "Offering not found; using defaults"
                     );
                     ("unknown".to_string(), 0, 0.0, None, None)
                 };
 
                 // Use VIP values if available, otherwise fall back to db values from gpu_offerings JOIN
-                let vcpu_count = if is_vip { vip_vcpu } else { db_vcpu_count.map(|v| v as u32) };
-                let system_memory_gb = if is_vip { vip_ram } else { db_system_memory_gb.map(|v| v as u32) };
+                let vcpu_count = if is_vip {
+                    vip_vcpu
+                } else {
+                    db_vcpu_count.map(|v| v as u32)
+                };
+                let system_memory_gb = if is_vip {
+                    vip_ram
+                } else {
+                    db_system_memory_gb.map(|v| v as u32)
+                };
 
                 // Prefer location_code from rental table, fallback to region from offering
                 let final_location_code = location_code.or(db_region);
@@ -385,6 +414,16 @@ pub async fn list_secure_cloud_rentals(
 }
 
 /// Start a secure cloud rental (direct datacenter provisioning)
+#[tracing::instrument(
+    err,
+    skip_all,
+    fields(
+        user_id = %auth.user_id,
+        offering_id = %request.offering_id,
+        rental_id = tracing::field::Empty,
+        cloud_type = "secure"
+    )
+)]
 pub async fn start_secure_cloud_rental(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -394,7 +433,11 @@ pub async fn start_secure_cloud_rental(
     let _public_key = get_ssh_key_for_user(&state.db, &request.ssh_public_key_id, &auth.user_id)
         .await
         .map_err(|e| {
-            tracing::error!("SSH key lookup failed: {}", e);
+            tracing::error!(
+                error = %e,
+                user_id = %auth.user_id,
+                "SSH key lookup failed"
+            );
             ApiError::BadRequest {
                 message: "Invalid SSH key".to_string(),
             }
@@ -406,7 +449,7 @@ pub async fn start_secure_cloud_rental(
         .get_offerings()
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get offerings: {}", e);
+            tracing::error!(error = %e, "Failed to get offerings");
             ApiError::Internal {
                 message: "Failed to fetch GPU offerings".to_string(),
             }
@@ -446,13 +489,18 @@ pub async fn start_secure_cloud_rental(
         )
         .await
         .map_err(|e| {
-            tracing::error!("Deployment failed: {}", e);
+            tracing::error!(
+                error = %e,
+                offering_id = %request.offering_id,
+                "Deployment failed"
+            );
             ApiError::Internal {
                 message: "Failed to deploy instance".to_string(),
             }
         })?;
 
     let rental_id = deployment.id.clone();
+    tracing::Span::current().record("rental_id", &rental_id);
     let provider_instance_id = deployment.provider_instance_id.clone().unwrap_or_default();
 
     // 4. Register with billing service
@@ -478,8 +526,8 @@ pub async fn start_secure_cloud_rental(
     // Note: offering.hourly_rate_per_gpu is already normalized to per-GPU rate by the aggregator
     let base_price_per_gpu = marked_up_rate.to_f64().ok_or_else(|| {
         tracing::error!(
-            "Failed to convert marked_up_rate {} to f64 for billing",
-            marked_up_rate
+            marked_up_rate = %marked_up_rate,
+            "Failed to convert marked_up_rate for billing"
         );
         ApiError::Internal {
             message: "Failed to calculate billing rate: price conversion error".to_string(),
@@ -503,20 +551,25 @@ pub async fn start_secure_cloud_rental(
 
     if let Some(ref billing_client) = state.billing_client {
         if let Err(e) = billing_client.track_rental(track_request).await {
-            tracing::error!("Failed to register with billing: {}", e);
+            tracing::error!(
+                rental_id = %rental_id,
+                error = %e,
+                "Failed to register rental with billing"
+            );
 
             // Rollback: delete the deployed instance since billing registration failed
             // This prevents orphaned instances running without billing tracking
             if let Err(rollback_err) = state.aggregator_service.delete_deployment(&rental_id).await
             {
                 tracing::error!(
-                    "CRITICAL: Failed to rollback deployment {} after billing failure: {}. Manual cleanup required.",
-                    rental_id, rollback_err
+                    rental_id = %rental_id,
+                    error = %rollback_err,
+                    "CRITICAL: Failed to rollback deployment after billing failure"
                 );
             } else {
                 tracing::info!(
-                    "Successfully rolled back deployment {} after billing registration failure",
-                    rental_id
+                    rental_id = %rental_id,
+                    "Rolled back deployment after billing registration failure"
                 );
             }
 
@@ -572,18 +625,23 @@ pub async fn stop_secure_cloud_rental_internal(
     // since the desired outcome (VM gone) is achieved.
     let was_deleted_externally = match aggregator_service.delete_deployment(rental_id).await {
         Ok(()) => {
-            tracing::info!("Deployment {} deleted successfully", rental_id);
+            tracing::info!(rental_id = %rental_id, "Deployment deleted successfully");
             false
         }
         Err(basilica_aggregator::AggregatorError::NotFound(msg)) => {
             tracing::warn!(
-                "Deployment {} not found at provider (deleted externally): {}. Proceeding with billing finalization.",
-                rental_id, msg
+                rental_id = %rental_id,
+                provider_message = %msg,
+                "Deployment not found at provider; proceeding with billing finalization"
             );
             true
         }
         Err(e) => {
-            tracing::error!("Failed to delete deployment {}: {}", rental_id, e);
+            tracing::error!(
+                rental_id = %rental_id,
+                error = %e,
+                "Failed to delete deployment"
+            );
             return Err(ApiError::Internal {
                 message: "Failed to stop instance".to_string(),
             });
@@ -627,9 +685,9 @@ pub async fn stop_secure_cloud_rental_internal(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to finalize rental {} in billing service: {}",
-                        rental_id,
-                        e
+                        rental_id = %rental_id,
+                        error = %e,
+                        "Failed to finalize rental in billing service"
                     );
                 }
             }
@@ -640,13 +698,26 @@ pub async fn stop_secure_cloud_rental_internal(
     if let Err(e) =
         archive_secure_cloud_rental(db, rental_id, Some(archive_reason), Some(final_status)).await
     {
-        tracing::error!("Failed to archive secure cloud rental {}: {}", rental_id, e);
+        tracing::error!(
+            rental_id = %rental_id,
+            error = %e,
+            "Failed to archive secure cloud rental"
+        );
     }
 
     Ok(total_cost)
 }
 
 /// Stop a secure cloud rental and calculate final cost
+#[tracing::instrument(
+    err,
+    skip_all,
+    fields(
+        user_id = %auth.user_id,
+        rental_id = %rental_id,
+        cloud_type = "secure"
+    )
+)]
 pub async fn stop_secure_cloud_rental(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -703,9 +774,9 @@ pub async fn stop_secure_cloud_rental(
     .await?;
 
     tracing::info!(
-        "Rental {} stopped. Duration: {} hours",
-        rental_id,
-        duration_hours
+        rental_id = %rental_id,
+        duration_hours,
+        "Rental stopped"
     );
 
     Ok((

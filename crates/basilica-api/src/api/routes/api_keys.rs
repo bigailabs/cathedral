@@ -56,7 +56,7 @@ pub struct ListKeyItem {
 ///
 /// This endpoint requires JWT authentication (human users only).
 /// Only one active key per user is allowed.
-#[instrument(skip(state, auth_context, request), fields(user_id = %auth_context.user_id, key_name = %request.name))]
+#[instrument(skip_all, fields(user_id = %auth_context.user_id, key_name = %request.name))]
 pub async fn create_key(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
@@ -64,10 +64,7 @@ pub async fn create_key(
 ) -> Result<Json<CreateKeyResponse>> {
     // Require JWT authentication for key management
     if !auth_context.is_jwt() {
-        warn!(
-            "User {} attempted to create API key with non-JWT auth",
-            auth_context.user_id
-        );
+        warn!("Non-JWT auth for API key creation");
         return Err(ApiError::Authentication {
             message: "API key management requires human authentication (JWT)".to_string(),
         });
@@ -139,7 +136,7 @@ pub async fn create_key(
         },
     })?;
 
-    debug!("Successfully created API key");
+    info!("API key created");
 
     Ok(Json(CreateKeyResponse {
         name: key.name,
@@ -151,17 +148,14 @@ pub async fn create_key(
 /// List all API keys for the authenticated user
 ///
 /// This endpoint requires JWT authentication (human users only).
-#[instrument(skip(state, auth_context), fields(user_id = %auth_context.user_id))]
+#[instrument(skip_all, fields(user_id = %auth_context.user_id))]
 pub async fn list_keys(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
 ) -> Result<Json<Vec<ListKeyItem>>> {
     // Require JWT authentication for key management
     if !auth_context.is_jwt() {
-        warn!(
-            "User {} attempted to list API keys with non-JWT auth",
-            auth_context.user_id
-        );
+        warn!("Non-JWT auth for API key listing");
         return Err(ApiError::Authentication {
             message: "API key management requires human authentication (JWT)".to_string(),
         });
@@ -185,7 +179,7 @@ pub async fn list_keys(
         })
         .collect();
 
-    debug!("Found {} API keys", items.len());
+    debug!(api_key_count = items.len(), "Found API keys");
 
     Ok(Json(items))
 }
@@ -193,7 +187,7 @@ pub async fn list_keys(
 /// Delete an API key by name
 ///
 /// This endpoint requires JWT authentication (human users only).
-#[instrument(skip(state, auth_context), fields(user_id = %auth_context.user_id, key_name = %name))]
+#[instrument(skip_all, fields(user_id = %auth_context.user_id, key_name = %name))]
 pub async fn revoke_key(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
@@ -201,10 +195,7 @@ pub async fn revoke_key(
 ) -> Result<()> {
     // Require JWT authentication for key management
     if !auth_context.is_jwt() {
-        warn!(
-            "User {} attempted to delete API key with non-JWT auth",
-            auth_context.user_id
-        );
+        warn!("Non-JWT auth for API key deletion");
         return Err(ApiError::Authentication {
             message: "API key management requires human authentication (JWT)".to_string(),
         });
@@ -238,7 +229,7 @@ pub async fn revoke_key(
         });
     }
 
-    debug!("Successfully deleted API key");
+    info!("API key deleted");
 
     Ok(())
 }
