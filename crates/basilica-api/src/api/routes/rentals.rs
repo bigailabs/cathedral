@@ -37,7 +37,7 @@ use rand::seq::SliceRandom;
 use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 use sqlx::Row;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 /// Get detailed rental status (with ownership validation)
 #[instrument(
@@ -376,7 +376,7 @@ pub async fn start_rental(
             state.pricing_config.community_markup_percent,
         )?;
         let marked_up_price = marked_up_decimal.to_f64().ok_or_else(|| {
-            tracing::error!(
+            error!(
                 marked_up_price = %marked_up_decimal,
                 "Failed to convert marked_up_price for billing"
             );
@@ -771,7 +771,7 @@ pub async fn list_rentals_validator(
                     })
                     .collect(),
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to fetch billing costs; using None");
+                    warn!(error = %e, "Failed to fetch billing costs; using None");
                     std::collections::HashMap::new()
                 }
             }
@@ -1010,8 +1010,6 @@ pub async fn list_available_nodes(
         }
     }
 
-    info!("Listing nodes");
-
     let mut response = state
         .validator_client
         .list_available_nodes(Some(query))
@@ -1030,6 +1028,8 @@ pub async fn list_available_nodes(
             available_node.node.hourly_rate_cents = Some(marked_up_rate);
         }
     }
+
+    info!(node_count = response.available_nodes.len(), "Listed nodes");
 
     Ok(Json(response))
 }

@@ -139,18 +139,19 @@ pub async fn register_ssh_key(
     .execute(&state.db)
     .await
     .map_err(|e| {
-        if e.to_string().contains("UNIQUE constraint") {
-            ApiError::Conflict {
-                message: "User already has an SSH key registered".to_string(),
+        if let Some(db_err) = e.as_database_error() {
+            if db_err.is_unique_violation() {
+                return ApiError::Conflict {
+                    message: "User already has an SSH key registered".to_string(),
+                };
             }
-        } else {
-            ApiError::Internal {
-                message: format!("Failed to register SSH key: {}", e),
-            }
+        }
+        ApiError::Internal {
+            message: format!("Failed to register SSH key: {}", e),
         }
     })?;
 
-    debug!("SSH key registered");
+    info!("SSH key registered");
 
     let ssh_key = SshKey {
         id: id.clone(),
@@ -271,7 +272,7 @@ pub async fn delete_ssh_key(
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    debug!("SSH key deleted");
+    info!("SSH key deleted");
 
     Ok(StatusCode::NO_CONTENT)
 }

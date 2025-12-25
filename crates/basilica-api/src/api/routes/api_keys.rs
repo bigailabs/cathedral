@@ -136,7 +136,7 @@ pub async fn create_key(
         },
     })?;
 
-    debug!("API key created");
+    info!("API key created");
 
     Ok(Json(CreateKeyResponse {
         name: key.name,
@@ -229,7 +229,7 @@ pub async fn revoke_key(
         });
     }
 
-    debug!("API key deleted");
+    info!("API key deleted");
 
     Ok(())
 }

@@ -59,6 +59,7 @@ async fn get_ssh_key_for_user(
 
 /// List GPU prices from aggregator service
 /// This is a thin proxy to the aggregator's get_gpu_prices handler
+#[tracing::instrument(skip_all, fields(cloud_type = "secure"))]
 pub async fn list_gpu_prices(
     State(state): State<AppState>,
     Query(query): Query<GpuPriceQuery>,
