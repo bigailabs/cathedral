@@ -47,8 +47,10 @@ pub async fn register_gpu_node(
     let user_id = &auth_context.user_id;
 
     info!(
-        "GPU node registration request from user {}: node_id={}, datacenter={}",
-        user_id, req.node_id, req.datacenter_id
+        user_id = %user_id,
+        node_id = %req.node_id,
+        datacenter_id = %req.datacenter_id,
+        "GPU node registration request"
     );
 
     if user_id != &req.datacenter_id {
@@ -70,6 +72,7 @@ pub async fn register_gpu_node(
 
     let (k3s_token, node_password) = if state.ssh_client.is_enabled() {
         info!(
+            user_id = %user_id,
             node_id = %req.node_id,
             datacenter_id = %req.datacenter_id,
             "Creating K3s token via SSH"
@@ -135,6 +138,7 @@ pub async fn register_gpu_node(
     }
 
     info!(
+        user_id = %user_id,
         node_id = %req.node_id,
         datacenter_id = %req.datacenter_id,
         wireguard_enabled = wireguard_config.is_some(),
@@ -271,6 +275,13 @@ pub async fn revoke_gpu_node(
 ) -> Result<()> {
     let user_id = &auth_context.user_id;
 
+    info!(
+        user_id = %user_id,
+        node_id = %req.node_id,
+        datacenter_id = %req.datacenter_id,
+        "GPU node revoke request"
+    );
+
     if user_id != &req.datacenter_id {
         return Err(ApiError::Authorization {
             message: format!(
@@ -287,6 +298,7 @@ pub async fn revoke_gpu_node(
     crate::k8s::revoke_cluster_token(&state.db, user_id, &req.node_id).await?;
 
     info!(
+        user_id = %user_id,
         node_id = %req.node_id,
         datacenter_id = %req.datacenter_id,
         "GPU node token revoked"

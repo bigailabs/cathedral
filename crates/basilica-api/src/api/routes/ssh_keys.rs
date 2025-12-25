@@ -59,7 +59,7 @@ pub struct RegisterSshKeyRequest {
 ///
 /// This endpoint requires JWT authentication.
 /// Only one SSH key per user is allowed (enforced by database UNIQUE constraint on user_id).
-#[instrument(skip(state, auth_context, request), fields(user_id = %auth_context.user_id, key_name = %request.name))]
+#[instrument(skip_all, fields(user_id = %auth_context.user_id, key_name = %request.name))]
 pub async fn register_ssh_key(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
@@ -67,10 +67,7 @@ pub async fn register_ssh_key(
 ) -> Result<(StatusCode, Json<SshKeyResponse>)> {
     // Require JWT authentication for SSH key management
     if !auth_context.is_jwt() {
-        warn!(
-            "User {} attempted to register SSH key with non-JWT auth",
-            auth_context.user_id
-        );
+        warn!("Non-JWT auth for SSH key registration");
         return Err(ApiError::Authentication {
             message: "SSH key management requires human authentication (JWT)".to_string(),
         });
@@ -153,7 +150,7 @@ pub async fn register_ssh_key(
         }
     })?;
 
-    debug!("SSH key registered successfully");
+    debug!("SSH key registered");
 
     let ssh_key = SshKey {
         id: id.clone(),
@@ -170,23 +167,20 @@ pub async fn register_ssh_key(
 /// Get the authenticated user's SSH key
 ///
 /// This endpoint requires JWT authentication.
-#[instrument(skip(state, auth_context), fields(user_id = %auth_context.user_id))]
+#[instrument(skip_all, fields(user_id = %auth_context.user_id))]
 pub async fn get_ssh_key(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
 ) -> Result<Json<Option<SshKeyResponse>>> {
     // Require JWT authentication for SSH key management
     if !auth_context.is_jwt() {
-        warn!(
-            "User {} attempted to get SSH key with non-JWT auth",
-            auth_context.user_id
-        );
+        warn!("Non-JWT auth for SSH key read");
         return Err(ApiError::Authentication {
             message: "SSH key management requires human authentication (JWT)".to_string(),
         });
     }
 
-    debug!("Getting SSH key for user");
+    debug!("Getting SSH key");
 
     let row = sqlx::query(
         r#"
@@ -218,23 +212,20 @@ pub async fn get_ssh_key(
 ///
 /// This endpoint requires JWT authentication.
 /// Also removes all provider-specific SSH key registrations.
-#[instrument(skip(state, auth_context), fields(user_id = %auth_context.user_id))]
+#[instrument(skip_all, fields(user_id = %auth_context.user_id))]
 pub async fn delete_ssh_key(
     State(state): State<AppState>,
     axum::Extension(auth_context): axum::Extension<AuthContext>,
 ) -> Result<StatusCode> {
     // Require JWT authentication for SSH key management
     if !auth_context.is_jwt() {
-        warn!(
-            "User {} attempted to delete SSH key with non-JWT auth",
-            auth_context.user_id
-        );
+        warn!("Non-JWT auth for SSH key deletion");
         return Err(ApiError::Authentication {
             message: "SSH key management requires human authentication (JWT)".to_string(),
         });
     }
 
-    info!("Deleting SSH key for user");
+    info!("Deleting SSH key");
 
     // Check if SSH key exists
     let row = sqlx::query("SELECT id FROM ssh_keys WHERE user_id = $1")
@@ -280,7 +271,7 @@ pub async fn delete_ssh_key(
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    debug!("SSH key deleted successfully");
+    debug!("SSH key deleted");
 
     Ok(StatusCode::NO_CONTENT)
 }

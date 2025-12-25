@@ -42,7 +42,7 @@ use tracing::{debug, error, info, instrument};
 /// Get detailed rental status (with ownership validation)
 #[instrument(
     err,
-    skip(state, owned_rental),
+    skip_all,
     fields(
         user_id = %owned_rental.user_id,
         rental_id = %owned_rental.rental_id,
@@ -79,7 +79,7 @@ pub async fn get_rental_status(
 /// Start a new rental (validator-compatible endpoint)
 #[instrument(
     err,
-    skip(state, auth_context, request),
+    skip_all,
     fields(
         user_id = %auth_context.user_id,
         rental_id = tracing::field::Empty,
@@ -528,8 +528,9 @@ pub async fn stop_community_rental_internal(
                 }
                 Err(e) => {
                     error!(
-                        "Failed to finalize rental in billing service for {}: {}",
-                        rental_id, e
+                        rental_id = %rental_id,
+                        error = %e,
+                        "Failed to finalize rental in billing service"
                     );
                 }
             }
@@ -538,7 +539,11 @@ pub async fn stop_community_rental_internal(
 
     // Archive ownership record to terminated_user_rentals table
     if let Err(e) = archive_rental_ownership(db, rental_id, Some(reason)).await {
-        error!("Failed to archive rental ownership record: {}", e);
+        error!(
+            rental_id = %rental_id,
+            error = %e,
+            "Failed to archive rental ownership record"
+        );
     }
 
     Ok(total_cost)
@@ -547,7 +552,7 @@ pub async fn stop_community_rental_internal(
 /// Stop a rental (with ownership validation)
 #[instrument(
     err,
-    skip(state, owned_rental),
+    skip_all,
     fields(
         user_id = %owned_rental.user_id,
         rental_id = %owned_rental.rental_id,
@@ -581,7 +586,7 @@ pub async fn stop_rental(
 /// Restart a rental's container (with ownership validation)
 #[instrument(
     err,
-    skip(state, owned_rental),
+    skip_all,
     fields(
         user_id = %owned_rental.user_id,
         rental_id = %owned_rental.rental_id,
@@ -620,7 +625,7 @@ pub async fn restart_rental(
 /// Stream rental logs (with ownership validation)
 #[instrument(
     err,
-    skip(state, owned_rental, query),
+    skip_all,
     fields(
         user_id = %owned_rental.user_id,
         rental_id = %owned_rental.rental_id,
@@ -698,7 +703,7 @@ pub async fn stream_rental_logs(
 /// Only returns rentals owned by the authenticated user
 #[instrument(
     err,
-    skip(state, auth_context, query),
+    skip_all,
     fields(
         user_id = %auth_context.user_id,
         cloud_type = "community"
@@ -865,7 +870,7 @@ fn format_billing_status(status: BillingRentalStatus) -> &'static str {
 /// List historical (completed/failed) rentals from billing service
 #[instrument(
     err,
-    skip(state, auth_context, query),
+    skip_all,
     fields(
         user_id = %auth_context.user_id,
         cloud_type = "community"
@@ -981,7 +986,7 @@ pub async fn list_rental_history(
 /// List available nodes for rentals
 #[instrument(
     err,
-    skip(state),
+    skip_all,
     fields(
         available = ?query.available,
         min_gpu_memory = ?query.min_gpu_memory,
@@ -1008,14 +1013,7 @@ pub async fn list_available_nodes(
         }
     }
 
-    info!(
-        available = ?query.available,
-        min_gpu_memory = ?query.min_gpu_memory,
-        gpu_type = ?query.gpu_type,
-        min_gpu_count = ?query.min_gpu_count,
-        location = ?query.location,
-        "Listing nodes"
-    );
+    info!("Listing nodes");
 
     let mut response = state
         .validator_client

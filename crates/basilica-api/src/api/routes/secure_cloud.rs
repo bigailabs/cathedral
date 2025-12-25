@@ -107,7 +107,7 @@ pub async fn list_gpu_prices(
                 ) {
                     Ok(marked_up) => offering.hourly_rate_per_gpu = marked_up,
                     Err(e) => {
-                        tracing::error!("Failed to apply markup: {}", e);
+                        tracing::error!(error = %e, "Failed to apply markup");
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({
@@ -131,7 +131,7 @@ pub async fn list_gpu_prices(
             )
         }
         Err(e) => {
-            tracing::error!("Failed to get offerings: {}", e);
+            tracing::error!(error = %e, "Failed to get offerings");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
@@ -146,7 +146,7 @@ pub async fn list_gpu_prices(
 /// List secure cloud rentals for the authenticated user
 #[tracing::instrument(
     err,
-    skip(state, auth),
+    skip_all,
     fields(
         user_id = %auth.user_id,
         cloud_type = "secure"
@@ -384,7 +384,7 @@ pub async fn list_secure_cloud_rentals(
 /// Start a secure cloud rental (direct datacenter provisioning)
 #[tracing::instrument(
     err,
-    skip(state, auth, request),
+    skip_all,
     fields(
         user_id = %auth.user_id,
         offering_id = %request.offering_id,
@@ -593,18 +593,23 @@ pub async fn stop_secure_cloud_rental_internal(
     // since the desired outcome (VM gone) is achieved.
     let was_deleted_externally = match aggregator_service.delete_deployment(rental_id).await {
         Ok(()) => {
-            tracing::info!("Deployment {} deleted successfully", rental_id);
+            tracing::info!(rental_id = %rental_id, "Deployment deleted successfully");
             false
         }
         Err(basilica_aggregator::AggregatorError::NotFound(msg)) => {
             tracing::warn!(
-                "Deployment {} not found at provider (deleted externally): {}. Proceeding with billing finalization.",
-                rental_id, msg
+                rental_id = %rental_id,
+                provider_message = %msg,
+                "Deployment not found at provider; proceeding with billing finalization"
             );
             true
         }
         Err(e) => {
-            tracing::error!("Failed to delete deployment {}: {}", rental_id, e);
+            tracing::error!(
+                rental_id = %rental_id,
+                error = %e,
+                "Failed to delete deployment"
+            );
             return Err(ApiError::Internal {
                 message: "Failed to stop instance".to_string(),
             });
@@ -648,9 +653,9 @@ pub async fn stop_secure_cloud_rental_internal(
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Failed to finalize rental {} in billing service: {}",
-                        rental_id,
-                        e
+                        rental_id = %rental_id,
+                        error = %e,
+                        "Failed to finalize rental in billing service"
                     );
                 }
             }
@@ -661,7 +666,11 @@ pub async fn stop_secure_cloud_rental_internal(
     if let Err(e) =
         archive_secure_cloud_rental(db, rental_id, Some(archive_reason), Some(final_status)).await
     {
-        tracing::error!("Failed to archive secure cloud rental {}: {}", rental_id, e);
+        tracing::error!(
+            rental_id = %rental_id,
+            error = %e,
+            "Failed to archive secure cloud rental"
+        );
     }
 
     Ok(total_cost)
@@ -670,7 +679,7 @@ pub async fn stop_secure_cloud_rental_internal(
 /// Stop a secure cloud rental and calculate final cost
 #[tracing::instrument(
     err,
-    skip(state, auth),
+    skip_all,
     fields(
         user_id = %auth.user_id,
         rental_id = %rental_id,
