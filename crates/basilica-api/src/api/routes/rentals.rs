@@ -195,7 +195,10 @@ pub async fn start_rental(
                 .collect();
 
             if nodes.is_empty() {
-                error!(gpu_count = exact_count, "No nodes with exact GPU count available");
+                error!(
+                    gpu_count = exact_count,
+                    "No nodes with exact GPU count available"
+                );
                 return Err(crate::error::ApiError::NotFound {
                     message: format!(
                         "No nodes with exactly {} GPU(s) matching requirements",

@@ -160,14 +160,14 @@ pub async fn list_secure_cloud_rentals(
     let rental_ids: Vec<(String, String)> =
         sqlx::query_as("SELECT id, status FROM secure_cloud_rentals WHERE user_id = $1")
             .bind(&auth.user_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to query secure cloud rental IDs");
-            ApiError::Internal {
-                message: "Failed to fetch rentals".to_string(),
-            }
-        })?;
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to query secure cloud rental IDs");
+                ApiError::Internal {
+                    message: "Failed to fetch rentals".to_string(),
+                }
+            })?;
 
     // 2. Refresh active rentals from provider to get latest IP/status
     for (rental_id, status) in &rental_ids {
@@ -292,7 +292,13 @@ pub async fn list_secure_cloud_rentals(
                         .and_then(|s| s.parse::<f64>().ok())
                         .unwrap_or(0.0);
 
-                    (instance_type.clone(), vip_gpu_count, vip_hourly_rate, vip_vcpu, vip_ram)
+                    (
+                        instance_type.clone(),
+                        vip_gpu_count,
+                        vip_hourly_rate,
+                        vip_vcpu,
+                        vip_ram,
+                    )
                 } else if let Some(offering) = offerings_map.get(offering_id.as_str()) {
                     // Regular rental: use offering data
                     let gpu_count = offering.gpu_count;
@@ -322,7 +328,13 @@ pub async fn list_secure_cloud_rentals(
                         }
                     };
 
-                    (offering.gpu_type.to_string(), gpu_count, hourly_cost, None, None)
+                    (
+                        offering.gpu_type.to_string(),
+                        gpu_count,
+                        hourly_cost,
+                        None,
+                        None,
+                    )
                 } else {
                     // Fallback if offering not found (e.g., offering expired)
                     tracing::warn!(
@@ -334,8 +346,16 @@ pub async fn list_secure_cloud_rentals(
                 };
 
                 // Use VIP values if available, otherwise fall back to db values from gpu_offerings JOIN
-                let vcpu_count = if is_vip { vip_vcpu } else { db_vcpu_count.map(|v| v as u32) };
-                let system_memory_gb = if is_vip { vip_ram } else { db_system_memory_gb.map(|v| v as u32) };
+                let vcpu_count = if is_vip {
+                    vip_vcpu
+                } else {
+                    db_vcpu_count.map(|v| v as u32)
+                };
+                let system_memory_gb = if is_vip {
+                    vip_ram
+                } else {
+                    db_system_memory_gb.map(|v| v as u32)
+                };
 
                 // Prefer location_code from rental table, fallback to region from offering
                 let final_location_code = location_code.or(db_region);
