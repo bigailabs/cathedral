@@ -469,11 +469,6 @@ async fn handle_secure_cloud_rental_with_offering(
         response.rental_id
     ));
 
-    // Handle SSH based on options
-    if options.no_ssh {
-        return Ok(());
-    }
-
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
             // Look up the private key for display
@@ -627,7 +622,6 @@ async fn handle_community_cloud_rental_with_selection(
         },
         command,
         volumes: vec![],
-        no_ssh: options.no_ssh,
     };
 
     spinner.set_message("Creating rental...");
@@ -646,11 +640,6 @@ async fn handle_community_cloud_rental_with_selection(
         "Successfully started community cloud rental {}",
         response.rental_id
     ));
-
-    // Handle SSH based on options
-    if options.no_ssh {
-        return Ok(());
-    }
 
     let ssh_creds = match response.ssh_credentials {
         Some(ref creds) => creds,
@@ -1757,7 +1746,7 @@ pub async fn handle_exec(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -1819,7 +1808,7 @@ pub async fn handle_ssh(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -1903,7 +1892,7 @@ pub async fn handle_cp(
         let public_key = ssh_public_key.ok_or_else(|| {
             CliError::Internal(
                 eyre!("No SSH public key available for this rental")
-                    .suggestion("The rental may have been created without SSH, or the required SSH key is not on this machine")
+                    .suggestion("The required SSH key may not be on this machine")
                     .note("SSH access requires the original key used during rental creation"),
             )
         })?;
@@ -2074,9 +2063,9 @@ async fn poll_secure_cloud_rental_status(
                                     return Ok(Some(rental.clone()));
                                 }
                             } else {
-                                // No SSH command yet, return success anyway
-                                complete_spinner_and_clear(spinner);
-                                return Ok(Some(rental.clone()));
+                                // No SSH command yet, continue polling
+                                spinner.set_message("Rental running but waiting for SSH info...");
+                                // Continue to next iteration
                             }
                         }
                         "error" => {
@@ -2128,6 +2117,9 @@ async fn poll_secure_cloud_rental_status(
 ///
 /// SSH services may not be immediately available after a rental becomes active.
 /// This function retries the connection for up to `max_wait` duration with exponential backoff.
+///
+/// Uses try_connect_silently() for retries (suppresses stderr, allows passphrases)
+/// then interactive_session() once connected.
 async fn retry_ssh_connection(
     ssh_client: &SshClient,
     ssh_access: &SshAccess,
@@ -2141,58 +2133,54 @@ async fn retry_ssh_connection(
     let mut interval = INITIAL_INTERVAL;
     let mut attempt = 0;
 
-    // Use a spinner to show progress and avoid cluttering the terminal
-    let spinner = create_spinner("Waiting for SSH to become available...");
-
     loop {
         attempt += 1;
-        spinner.set_message("Waiting for SSH...");
 
-        // First test connectivity without starting an interactive session
-        // This captures stderr so we don't print raw SSH errors
+        // Check timeout before attempting
+        if start_time.elapsed() >= max_wait {
+            return Err(CliError::Internal(
+                eyre!(
+                    "SSH connection failed after {} attempts over {}s",
+                    attempt - 1,
+                    start_time.elapsed().as_secs(),
+                )
+                .suggestion("The SSH service may not be ready yet. Wait a minute and try 'basilica ssh <rental_id>'"),
+            ));
+        }
+
+        // Show spinner during wait periods
+        let spinner = create_spinner(&format!("Waiting for SSH... (attempt {})", attempt));
+
+        // Brief delay between attempts (skip on first attempt)
+        if attempt > 1 {
+            tokio::time::sleep(interval).await;
+            interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+        }
+
+        // Clear spinner before SSH attempt (in case passphrase prompt appears)
+        complete_spinner_and_clear(spinner);
+
+        // Try silent connection (suppresses errors, allows passphrase)
         match ssh_client
-            .test_connection(ssh_access, private_key_path.clone())
+            .try_connect_silently(ssh_access, private_key_path.clone())
             .await
         {
             Ok(_) => {
-                // Connection test succeeded, now start the actual interactive session
-                complete_spinner_and_clear(spinner);
+                // Connection succeeded, start interactive session
                 return ssh_client
                     .interactive_session(ssh_access, private_key_path)
                     .await
                     .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
             }
             Err(e) => {
-                // Check if we've exceeded the maximum wait time
-                if start_time.elapsed() >= max_wait {
-                    // Final attempt failed, return error
-                    complete_spinner_error(spinner, "SSH connection failed");
-                    // Log the final error for debugging (raw SSH stderr preserved in logs)
-                    debug!("Final SSH connection attempt failed: {}", e);
-                    return Err(CliError::Internal(
-                        eyre!(
-                            "SSH connection failed after {} attempts over {}s",
-                            attempt,
-                            start_time.elapsed().as_secs(),
-                        )
-                        .suggestion("The SSH service may not be ready yet. Wait a minute and try 'basilica ssh <rental_id>'"),
-                    ));
-                }
-
-                // Log the retry attempt
                 debug!(
-                    "SSH connection attempt {} failed ({}s elapsed): {}. Retrying in {}s...",
+                    "SSH attempt {} failed ({}s elapsed): {}. Retrying in {}s...",
                     attempt,
                     start_time.elapsed().as_secs(),
                     e,
                     interval.as_secs()
                 );
-
-                // Wait before next attempt
-                tokio::time::sleep(interval).await;
-
-                // Increase interval up to maximum (exponential backoff)
-                interval = std::cmp::min(interval * 2, MAX_INTERVAL);
+                // Continue to next iteration for retry
             }
         }
     }

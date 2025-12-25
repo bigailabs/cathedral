@@ -14,13 +14,18 @@ use axum::{
 
 /// Create all API routes
 pub fn routes(state: AppState) -> Router<AppState> {
-    // Unprotected routes (for health checks, metrics, etc.)
+    // Unprotected routes (for health checks, metrics, webhooks, etc.)
     let public_routes = Router::new()
         // Health endpoint - no authentication required for ALB health checks
         .route("/health", get(routes::health::health_check))
         .route("/health/k3s", get(routes::health::k3s_health_check))
         // Metrics endpoint - no authentication required for Prometheus scraping
-        .route("/metrics", get(routes::metrics::metrics_handler));
+        .route("/metrics", get(routes::metrics::metrics_handler))
+        // Webhook endpoints - token in query param provides authentication
+        .route(
+            "/webhooks/cloud-provider/hyperstack",
+            post(routes::webhooks::hyperstack_callback),
+        );
 
     // Protected routes with unified authentication and scope validation
     let protected_routes = Router::new()

@@ -163,7 +163,7 @@ pub struct AggregatorProvidersConfig {
     #[serde(default)]
     pub datacrunch: basilica_aggregator::config::ProviderConfig,
     #[serde(default)]
-    pub hyperstack: basilica_aggregator::config::ProviderConfig,
+    pub hyperstack: Option<basilica_aggregator::config::HyperstackConfig>,
     #[serde(default)]
     pub lambda: basilica_aggregator::config::ProviderConfig,
     #[serde(default)]

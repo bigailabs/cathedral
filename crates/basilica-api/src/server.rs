@@ -78,6 +78,9 @@ pub struct AppState {
     /// GPU Aggregator service (Secure Cloud)
     pub aggregator_service: Arc<AggregatorService>,
 
+    /// GPU Aggregator configuration (for webhook validation)
+    pub aggregator_config: basilica_aggregator::config::Config,
+
     /// Pricing configuration (marketplace markups)
     pub pricing_config: crate::config::PricingConfig,
 
@@ -764,7 +767,7 @@ impl Server {
 
         let aggregator_config = config.to_aggregator_config();
         let aggregator_service = Arc::new(
-            AggregatorService::new(aggregator_db, aggregator_config).map_err(|e| {
+            AggregatorService::new(aggregator_db, aggregator_config.clone()).map_err(|e| {
                 ApiError::Internal {
                     message: format!("Failed to initialize aggregator service: {}", e),
                 }
@@ -867,6 +870,7 @@ impl Server {
             dns_provider,
             metrics,
             aggregator_service,
+            aggregator_config,
             pricing_config: config.pricing.clone(),
             ssh_client,
         };
@@ -973,7 +977,7 @@ impl Server {
                 match refresh_aggregator_service.refresh_all_providers().await {
                     Ok(count) => {
                         if count > 0 {
-                            tracing::debug!("GPU offerings refresh: fetched {} offerings", count);
+                            tracing::trace!("GPU offerings refresh: fetched {} offerings", count);
                         } else {
                             tracing::trace!(
                                 "GPU offerings refresh: no new offerings (cooldown or no providers enabled)"
@@ -1137,9 +1141,10 @@ impl Server {
                 interval.tick().await;
 
                 // Query all active secure cloud rentals from the database (excluding VIP rentals
-                // which don't need health checks - they're manually managed and assumed always up)
+                // which don't need health checks - they're manually managed and assumed always up,
+                // and excluding Hyperstack rentals which use webhook callbacks instead of polling)
                 match sqlx::query_as::<_, (String,)>(
-                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE",
+                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE AND provider != 'hyperstack'",
                 )
                 .fetch_all(&health_check_db)
                 .await

@@ -844,7 +844,6 @@ class BasilicaClient:
         environment: Optional[Dict[str, str]] = None,
         ports: Optional[List[Dict[str, Any]]] = None,
         command: Optional[List[str]] = None,
-        no_ssh: bool = False,
     ) -> RentalResponse:
         """
         Start a new GPU rental.
@@ -859,7 +858,6 @@ class BasilicaClient:
             environment: Environment variables
             ports: Port mappings
             command: Command to run
-            no_ssh: Disable SSH access
 
         Returns:
             RentalResponse with rental details
@@ -871,19 +869,18 @@ class BasilicaClient:
             gpu_type = DEFAULT_GPU_TYPE
 
         ssh_public_key = None
-        if not no_ssh:
-            if ssh_pubkey_path is not None:
-                ssh_key_path = os.path.expanduser(ssh_pubkey_path)
-            else:
-                ssh_key_path = os.path.expanduser("~/.ssh/basilica_ed25519.pub")
+        if ssh_pubkey_path is not None:
+            ssh_key_path = os.path.expanduser(ssh_pubkey_path)
+        else:
+            ssh_key_path = os.path.expanduser("~/.ssh/basilica_ed25519.pub")
 
-            if os.path.exists(ssh_key_path):
-                with open(ssh_key_path) as f:
-                    ssh_public_key = f.read().strip()
-            elif ssh_pubkey_path is not None:
-                raise FileNotFoundError(
-                    f"SSH public key file not found: {ssh_key_path}"
-                )
+        if os.path.exists(ssh_key_path):
+            with open(ssh_key_path) as f:
+                ssh_public_key = f.read().strip()
+        elif ssh_pubkey_path is not None:
+            raise FileNotFoundError(
+                f"SSH public key file not found: {ssh_key_path}"
+            )
 
         resources = {
             "gpu_count": DEFAULT_GPU_COUNT,
@@ -931,7 +928,6 @@ class BasilicaClient:
             resources=resource_req,
             command=command if command is not None else DEFAULT_COMMAND,
             volumes=[],
-            no_ssh=no_ssh,
         )
 
         return self._client.start_rental(request)

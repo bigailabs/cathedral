@@ -717,11 +717,10 @@ async fn fetch_community_ssh_info(
         CliError::Internal(
             eyre!("SSH credentials not available")
                 .wrap_err(format!(
-                    "The rental '{}' was created without SSH access",
+                    "The rental '{}' does not have SSH access",
                     rental_id
                 ))
-                .note("Rentals created with --no-ssh flag cannot be accessed via SSH")
-                .note("Create a new rental without --no-ssh to enable SSH access"),
+                .suggestion("Create a new rental to enable SSH access"),
         )
     })?;
 
@@ -755,5 +754,22 @@ async fn fetch_secure_ssh_info(
         )
     })?;
 
-    Ok((ssh_command, rental.ssh_public_key.clone()))
+    // For VIP rentals without ssh_public_key, fall back to user's registered SSH key
+    let ssh_public_key = match &rental.ssh_public_key {
+        Some(key) => Some(key.clone()),
+        None if rental.is_vip => {
+            // VIP rentals: fetch user's registered SSH key
+            match api_client.get_user_ssh_key().await {
+                Ok(Some(user_key)) => Some(user_key.public_key),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch user SSH key for VIP rental: {}", e);
+                    None
+                }
+            }
+        }
+        None => None, // Non-VIP rentals: keep None (original behavior)
+    };
+
+    Ok((ssh_command, ssh_public_key))
 }

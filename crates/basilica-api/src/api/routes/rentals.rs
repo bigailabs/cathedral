@@ -94,26 +94,22 @@ pub async fn start_rental(
     // Get user ID from auth context (already extracted via Extension)
     let user_id = &auth_context.user_id;
 
-    // Look up user's registered SSH key from database (only if SSH is enabled)
-    let ssh_public_key: String = if request.no_ssh {
-        String::new() // Empty string for no-SSH rentals
-    } else {
-        let ssh_key_row = sqlx::query("SELECT public_key FROM ssh_keys WHERE user_id = $1")
-            .bind(user_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| crate::error::ApiError::Internal {
-                message: format!("Failed to lookup SSH key: {}", e),
-            })?;
+    // Look up user's registered SSH key from database
+    let ssh_key_row = sqlx::query("SELECT public_key FROM ssh_keys WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| crate::error::ApiError::Internal {
+            message: format!("Failed to lookup SSH key: {}", e),
+        })?;
 
-        match ssh_key_row {
-            Some(row) => row.get("public_key"),
-            None => {
-                error!(user_id = %user_id, "No SSH key registered");
-                return Err(crate::error::ApiError::BadRequest {
-                    message: "No SSH key registered. Please register an SSH key first using 'basilica ssh-keys add' or by starting a rental through the CLI.".into(),
-                });
-            }
+    let ssh_public_key: String = match ssh_key_row {
+        Some(row) => row.get("public_key"),
+        None => {
+            error!(user_id = %user_id, "No SSH key registered");
+            return Err(crate::error::ApiError::BadRequest {
+                message: "No SSH key registered. Please register an SSH key first using 'basilica ssh-keys add' or by starting a rental through the CLI.".into(),
+            });
         }
     };
 
@@ -263,11 +259,9 @@ pub async fn start_rental(
         resources: request.resources,
         command: request.command,
         volumes: request.volumes,
-        no_ssh: request.no_ssh,
     };
     debug!(
         node_id = %validator_request.node_id,
-        no_ssh = validator_request.no_ssh,
         "Starting rental request"
     );
 

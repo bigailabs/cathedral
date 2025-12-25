@@ -176,6 +176,7 @@ module "billing_service" {
 
     # Logging
     RUST_LOG = "basilica_billing=info,basilica_protocol=info"
+    NO_COLOR = "1"
   }
 
   # No secrets needed - using environment variables
@@ -271,6 +272,7 @@ module "payments_service" {
 
     # Logging
     RUST_LOG = "basilica_payments=info,bittensor=info,basilica_protocol=info"
+    NO_COLOR = "1"
   }
 
   # Secrets from AWS Secrets Manager
@@ -381,7 +383,7 @@ module "basilica_api_service" {
 
     # Cloudflare Integration
     BASILICA_API_DNS__ENABLED      = "true"
-    BASILICA_API_DNS__PROXY        = "true"
+    BASILICA_API_DNS__PROXY        = "false"
     BASILICA_API_DNS__API_TOKEN    = var.cloudflare_api_token
     BASILICA_API_DNS__ZONE_ID      = var.cloudflare_zone_id
     BASILICA_API_DNS__DOMAIN       = var.cloudflare_domain
@@ -389,7 +391,7 @@ module "basilica_api_service" {
     CLOUDFLARE_API_TOKEN           = var.cloudflare_api_token
     CLOUDFLARE_ZONE_ID             = var.cloudflare_zone_id
     CLOUDFLARE_DOMAIN              = var.cloudflare_domain
-    CLOUDFLARE_PROXY               = "true"
+    CLOUDFLARE_PROXY               = "false"
     ALB_DNS_NAME                   = var.deployments_alb_dns_name
 
     # K3S_SERVER_URL for interacting with the cluster
@@ -407,8 +409,19 @@ module "basilica_api_service" {
     BASILICA_API_WIREGUARD__ENABLED = tostring(var.wireguard_enabled)
     BASILICA_API_WIREGUARD__SERVERS = jsonencode(var.wireguard_servers)
 
+    # VIP (Managed Machines) Configuration
+    # Set s3_bucket and s3_key to sync VIP machines from S3
+    BASILICA_API_AGGREGATOR__VIP__S3_BUCKET          = var.vip_s3_bucket
+    BASILICA_API_AGGREGATOR__VIP__S3_KEY             = var.vip_s3_key
+    BASILICA_API_AGGREGATOR__VIP__S3_REGION          = var.vip_s3_region != "" ? var.vip_s3_region : var.aws_region
+    BASILICA_API_AGGREGATOR__VIP__POLL_INTERVAL_SECS = tostring(var.vip_poll_interval_secs)
+
+    # Hyperstack callback URL (non-sensitive, passed as env var)
+    BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__CALLBACK_BASE_URL = var.hyperstack_callback_base_url
+
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
+    NO_COLOR = "1"
   }
 
   # Secrets from AWS Secrets Manager
@@ -424,12 +437,45 @@ module "basilica_api_service" {
     {
       name      = "BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__API_KEY"
       valueFrom = aws_secretsmanager_secret.hyperstack_api_key.arn
+    },
+    {
+      name      = "BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__WEBHOOK_SECRET"
+      valueFrom = aws_secretsmanager_secret.hyperstack_webhook_secret.arn
     }
   ]
 
   tags = local.common_tags
 
   depends_on = [module.rds, module.basilica_api_alb]
+}
+
+# =============================================================================
+# VIP S3 ACCESS POLICY
+# =============================================================================
+# Grant the API service permission to read VIP machine data from S3
+# This is only created when VIP is enabled and S3 bucket is configured
+
+resource "aws_iam_role_policy" "api_vip_s3_access" {
+  count = var.vip_s3_bucket != "" ? 1 : 0
+  name  = "${local.name_prefix}-api-vip-s3-access"
+  role  = module.basilica_api_service.task_role_name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::${var.vip_s3_bucket}",
+          "arn:aws:s3:::${var.vip_s3_bucket}/${var.vip_s3_key}"
+        ]
+      }
+    ]
+  })
 }
 
 # =============================================================================

@@ -41,8 +41,6 @@ pub struct StartRentalRequest {
     pub command: Vec<String>,
     #[serde(default)]
     pub volumes: Vec<VolumeMountRequest>,
-    #[serde(default)]
-    pub no_ssh: bool,
 }
 
 fn default_command() -> Vec<String> {
@@ -60,7 +58,6 @@ impl Default for StartRentalRequest {
             resources: ResourceRequirementsRequest::default(),
             command: default_command(),
             volumes: Vec::new(),
-            no_ssh: false,
         }
     }
 }
@@ -257,14 +254,12 @@ pub async fn start_rental(
         .map(Into::into)
         .collect();
 
-    // Only add SSH port mapping if no_ssh is false (SSH is enabled by default)
-    if !request.no_ssh {
-        port_mappings.push(crate::rental::PortMapping {
-            container_port: 22,
-            host_port: 0, // Docker will automatically allocate an available port
-            protocol: "tcp".to_string(),
-        });
-    }
+    // Always add SSH port mapping
+    port_mappings.push(crate::rental::PortMapping {
+        container_port: 22,
+        host_port: 0, // Docker will automatically allocate an available port
+        protocol: "tcp".to_string(),
+    });
 
     // Convert request to internal rental request
     let rental_request = RentalRequest {

@@ -124,21 +124,24 @@ impl SshClient {
     /// Test SSH connectivity without starting an interactive session.
     /// Returns Ok(()) if connection succeeds, Err with the error message if it fails.
     /// This method captures stderr to avoid printing raw SSH error messages.
+    ///
+    /// Uses a timeout wrapper to prevent hanging if the SSH process doesn't exit cleanly.
     pub async fn test_connection(
         &self,
         ssh_access: &SshAccess,
         private_key_path: std::path::PathBuf,
     ) -> Result<()> {
         let details = self.ssh_access_to_connection_details(ssh_access, private_key_path)?;
+        let timeout_secs = details.timeout.as_secs();
 
         debug!(
             "Testing SSH connectivity to {}@{}:{}",
             details.username, details.host, details.port
         );
 
-        // Use SSH in batch mode with a simple exit command to test connectivity
-        let output = std::process::Command::new("ssh")
-            .arg("-i")
+        // Build SSH command for connectivity test
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.arg("-i")
             .arg(details.private_key_path.display().to_string())
             .arg("-p")
             .arg(details.port.to_string())
@@ -151,18 +154,81 @@ impl SshClient {
             .arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
-            .arg(format!("ConnectTimeout={}", details.timeout.as_secs()))
+            .arg(format!("ConnectTimeout={}", timeout_secs))
             .arg(format!("{}@{}", details.username, details.host))
             .arg("exit")
-            .arg("0")
-            .output()
-            .map_err(|e| -> CliError { eyre!("Failed to run SSH command: {}", e).into() })?;
+            .arg("0");
 
-        if output.status.success() {
+        // Run with timeout to prevent hanging on stream close
+        // The extra 5 seconds accounts for SSH connection overhead beyond ConnectTimeout
+        let timeout_duration = Duration::from_secs(timeout_secs + 5);
+        let result = tokio::time::timeout(timeout_duration, async {
+            tokio::task::spawn_blocking(move || cmd.output())
+                .await
+                .map_err(|e| eyre!("Task join error: {}", e))?
+                .map_err(|e| eyre!("Failed to run SSH command: {}", e))
+        })
+        .await;
+
+        match result {
+            Ok(Ok(output)) => {
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    Err(eyre!("SSH connection test failed: {}", stderr.trim()).into())
+                }
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(_) => Err(eyre!("SSH connection test timed out").into()),
+        }
+    }
+
+    /// Try to connect silently - suppresses stderr but allows passphrase prompts.
+    /// Returns Ok(()) if connection succeeds, Err if it fails.
+    /// Unlike test_connection(), this doesn't use BatchMode so passphrases work.
+    pub async fn try_connect_silently(
+        &self,
+        ssh_access: &SshAccess,
+        private_key_path: std::path::PathBuf,
+    ) -> Result<()> {
+        let details = self.ssh_access_to_connection_details(ssh_access, private_key_path)?;
+        let timeout_secs = std::cmp::min(details.timeout.as_secs(), 10); // Quick timeout for retry
+
+        debug!(
+            "Trying silent SSH connection to {}@{}:{}",
+            details.username, details.host, details.port
+        );
+
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.arg("-i")
+            .arg(details.private_key_path.display().to_string())
+            .arg("-p")
+            .arg(details.port.to_string())
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("LogLevel=quiet") // Suppress all SSH messages
+            .arg("-o")
+            .arg(format!("ConnectTimeout={}", timeout_secs))
+            .arg(format!("{}@{}", details.username, details.host))
+            .arg("true"); // Quick command that exits immediately
+
+        // Inherit stdin (for passphrase), inherit stdout, suppress stderr
+        cmd.stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::null());
+
+        let status = cmd
+            .status()
+            .map_err(|e| -> CliError { eyre!("Failed to run SSH: {}", e).into() })?;
+
+        if status.success() {
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(eyre!("SSH connection test failed: {}", stderr.trim()).into())
+            Err(eyre!("SSH connection failed (exit code: {:?})", status.code()).into())
         }
     }
 

@@ -137,7 +137,6 @@ async fn handle_start_rental(
         },
         command,
         volumes: Vec::new(),
-        no_ssh: false,
     };
 
     // Call API to start rental

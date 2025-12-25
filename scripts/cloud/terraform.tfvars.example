@@ -102,9 +102,17 @@ deployments_alb_dns_name = "your-deployments-alb-dns-name"
 # =============================================================================
 # GPU AGGREGATOR CONFIGURATION (Secure Cloud)
 # =============================================================================
-# API key for Hyperstack GPU provider
+# Hyperstack GPU provider configuration
 # Get your API key from: https://infrahub-api.nexgencloud.com/
+
+# API key for authentication
 hyperstack_api_key = "your-hyperstack-api-key"
+
+# Webhook secret for callback authentication (must be URL-safe: A-Z a-z 0-9 - _ . ~)
+hyperstack_webhook_secret = "your-url-safe-webhook-secret"
+
+# Base URL for webhooks (where Hyperstack will send callbacks)
+hyperstack_callback_base_url = "https://api.basilica.ai"
 
 # =============================================================================
 # VPC PEERING CONFIGURATION (Required for K3s SSH connectivity)
@@ -115,3 +123,37 @@ hyperstack_api_key = "your-hyperstack-api-key"
 # k3s_vpc_cidr is the CIDR block of the K3s VPC (e.g., 10.101.0.0/16)
 k3s_vpc_peering_connection_id = ""
 k3s_vpc_cidr                  = ""
+
+# =============================================================================
+# VIP (MANAGED MACHINES) CONFIGURATION
+# =============================================================================
+# VIP allows team-managed GPU machines to be synced from an S3 CSV file
+# and made available to specific users through the rental system.
+
+# S3 bucket containing VIP machines CSV file
+# Example: "my-company-vip-machines"
+vip_s3_bucket = ""
+
+# S3 object key for the CSV file
+# Example: "vip/machines.csv"
+vip_s3_key = ""
+
+# S3 region (optional - defaults to aws_region if not specified)
+# Example: "us-east-2"
+vip_s3_region = ""
+
+# Polling interval in seconds (how often to sync from S3)
+# Default: 60 seconds
+vip_poll_interval_secs = 60
+
+# =============================================================================
+# VIP CSV FILE FORMAT
+# =============================================================================
+# The CSV file in S3 should have the following columns:
+# vip_machine_id, assigned_user, active, ssh_host, ssh_port, ssh_user,
+# gpu_type, gpu_count, region, hourly_rate, vcpu_count, system_memory_gb, notes
+#
+# Example CSV:
+# vip_machine_id,assigned_user,active,ssh_host,ssh_port,ssh_user,gpu_type,gpu_count,region,hourly_rate,vcpu_count,system_memory_gb,notes
+# machine-001,auth0|user123,1,10.0.0.1,22,ubuntu,H100,8,us-east-1,25.00,128,500,Production H100 cluster
+# machine-002,auth0|user456,1,10.0.0.2,22,ubuntu,A100,4,us-west-2,12.00,64,256,

@@ -184,10 +184,6 @@ pub struct StartRentalApiRequest {
     /// Volume mounts
     #[serde(default)]
     pub volumes: Vec<VolumeMountRequest>,
-
-    /// Disable SSH
-    #[serde(default)]
-    pub no_ssh: bool,
 }
 
 /// Extended rental status response that includes SSH credentials from the database
