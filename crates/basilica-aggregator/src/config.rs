@@ -258,6 +258,16 @@ impl Config {
                     "Hyperstack webhook_secret must be URL-safe (A-Z a-z 0-9 - _ . ~)".to_string(),
                 ));
             }
+            if hyperstack
+                .webhook_secret
+                .chars()
+                .any(|c| c.is_ascii_uppercase())
+            {
+                tracing::warn!(
+                    "Hyperstack webhook_secret contains uppercase characters; \
+                     Hyperstack lowercases callback URLs so token comparison will be case-insensitive"
+                );
+            }
             if hyperstack.callback_base_url.trim().is_empty() {
                 return Err(AggregatorError::Config(
                     "Hyperstack callback_base_url must be non-empty".to_string(),
