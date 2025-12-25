@@ -47,7 +47,8 @@ pub async fn hyperstack_callback(
         }
     };
 
-    if token != hyperstack_config.webhook_secret {
+    // Hyperstack lowercases callback URL query params, so compare case-insensitively
+    if token.to_lowercase() != hyperstack_config.webhook_secret.to_lowercase() {
         tracing::warn!("Invalid webhook token received");
         // Return 200 to avoid information leakage
         return (StatusCode::OK, Json(json!({ "status": "unauthorized" })));
