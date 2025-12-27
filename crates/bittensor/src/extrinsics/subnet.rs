@@ -10,6 +10,7 @@ use crate::error::BittensorError;
 use crate::extrinsics::ExtrinsicResponse;
 use subxt::OnlineClient;
 use subxt::PolkadotConfig;
+use tracing::{debug, warn};
 
 /// Subnet identity information
 #[derive(Debug, Clone, Default)]
@@ -90,7 +91,7 @@ impl SubnetIdentity {
 /// Register a new subnet on the network
 ///
 /// This creates a new subnet by paying the registration cost.
-/// The subnet netuid is returned on success.
+/// The subnet netuid is returned on success by parsing the `NetworkAdded` event.
 ///
 /// # Arguments
 ///
@@ -99,7 +100,14 @@ impl SubnetIdentity {
 ///
 /// # Returns
 ///
-/// The newly registered subnet netuid
+/// The newly registered subnet netuid extracted from the NetworkAdded event
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Transaction submission fails
+/// - Transaction is not finalized successfully
+/// - NetworkAdded event is not found in the transaction events
 pub async fn register_network<S>(
     client: &OnlineClient<PolkadotConfig>,
     signer: &S,
@@ -111,31 +119,95 @@ where
         .subtensor_module()
         .register_network(signer.account_id());
 
-    let tx_hash = client
+    debug!("Submitting register_network transaction");
+
+    // Submit and watch the transaction to get events
+    let tx_progress = client
         .tx()
-        .sign_and_submit_default(&call, signer)
+        .sign_and_submit_then_watch_default(&call, signer)
         .await
         .map_err(|e| BittensorError::TxSubmissionError {
-            message: format!("Failed to register network: {}", e),
+            message: format!("Failed to submit register_network: {}", e),
         })?;
 
-    // In a real implementation, we'd parse the events to get the netuid
-    // For now, return 0 as a placeholder
-    Ok(ExtrinsicResponse::success()
-        .with_message("Network registration submitted")
-        .with_extrinsic_hash(&format!("{:?}", tx_hash))
-        .with_data(0u16))
+    let tx_hash = tx_progress.extrinsic_hash();
+    debug!("Transaction submitted with hash: {:?}", tx_hash);
+
+    // Wait for finalization and get events
+    let tx_events = tx_progress
+        .wait_for_finalized_success()
+        .await
+        .map_err(|e| {
+            warn!("Transaction finalization failed: {}", e);
+            BittensorError::TxFinalizationError {
+                reason: format!("register_network transaction failed: {}", e),
+            }
+        })?;
+
+    debug!("Transaction finalized successfully");
+
+    // Find the NetworkAdded event to extract the netuid
+    // NetworkAdded event has format: NetworkAdded(netuid: u16, modality: u16)
+    let network_added_event = tx_events
+        .find_first::<api::subtensor_module::events::NetworkAdded>()
+        .map_err(|e| {
+            warn!("Failed to decode NetworkAdded event: {}", e);
+            BittensorError::ChainError {
+                message: format!("Failed to decode NetworkAdded event: {}", e),
+            }
+        })?;
+
+    match network_added_event {
+        Some(event) => {
+            let netuid = event.0;
+            debug!(
+                "NetworkAdded event found: netuid={}, modality={}",
+                netuid, event.1
+            );
+            Ok(ExtrinsicResponse::success()
+                .with_message("Network registered successfully")
+                .with_extrinsic_hash(&format!("{:?}", tx_hash))
+                .with_data(netuid))
+        }
+        None => {
+            warn!("NetworkAdded event not found in transaction events");
+            // Log all events for debugging
+            for event in tx_events.iter().flatten() {
+                debug!(
+                    "Event found: {}::{}",
+                    event.pallet_name(),
+                    event.variant_name()
+                );
+            }
+            Err(BittensorError::ChainError {
+                message: "NetworkAdded event not found - network may not have been registered"
+                    .to_string(),
+            })
+        }
+    }
 }
 
 /// Register a new subnet with identity information
 ///
 /// This creates a new subnet with associated metadata.
+/// The subnet netuid is returned on success by parsing the `NetworkAdded` event.
 ///
 /// # Arguments
 ///
 /// * `client` - The subxt client
 /// * `signer` - The signer (coldkey)
 /// * `identity` - Subnet identity information
+///
+/// # Returns
+///
+/// The newly registered subnet netuid extracted from the NetworkAdded event
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Transaction submission fails
+/// - Transaction is not finalized successfully
+/// - NetworkAdded event is not found in the transaction events
 pub async fn register_network_with_identity<S>(
     client: &OnlineClient<PolkadotConfig>,
     signer: &S,
@@ -144,6 +216,9 @@ pub async fn register_network_with_identity<S>(
 where
     S: subxt::tx::Signer<PolkadotConfig>,
 {
+    // Save name for logging before consuming identity
+    let subnet_name = identity.name.clone();
+
     // Convert to API type
     let api_identity = api::runtime_types::pallet_subtensor::pallet::SubnetIdentityV3 {
         subnet_name: identity.name.into_bytes(),
@@ -160,18 +235,74 @@ where
         .subtensor_module()
         .register_network_with_identity(signer.account_id(), Some(api_identity));
 
-    let tx_hash = client
+    debug!(
+        "Submitting register_network_with_identity transaction for '{}'",
+        subnet_name
+    );
+
+    // Submit and watch the transaction to get events
+    let tx_progress = client
         .tx()
-        .sign_and_submit_default(&call, signer)
+        .sign_and_submit_then_watch_default(&call, signer)
         .await
         .map_err(|e| BittensorError::TxSubmissionError {
-            message: format!("Failed to register network with identity: {}", e),
+            message: format!("Failed to submit register_network_with_identity: {}", e),
         })?;
 
-    Ok(ExtrinsicResponse::success()
-        .with_message("Network registration with identity submitted")
-        .with_extrinsic_hash(&format!("{:?}", tx_hash))
-        .with_data(0u16))
+    let tx_hash = tx_progress.extrinsic_hash();
+    debug!("Transaction submitted with hash: {:?}", tx_hash);
+
+    // Wait for finalization and get events
+    let tx_events = tx_progress
+        .wait_for_finalized_success()
+        .await
+        .map_err(|e| {
+            warn!("Transaction finalization failed: {}", e);
+            BittensorError::TxFinalizationError {
+                reason: format!("register_network_with_identity transaction failed: {}", e),
+            }
+        })?;
+
+    debug!("Transaction finalized successfully");
+
+    // Find the NetworkAdded event to extract the netuid
+    let network_added_event = tx_events
+        .find_first::<api::subtensor_module::events::NetworkAdded>()
+        .map_err(|e| {
+            warn!("Failed to decode NetworkAdded event: {}", e);
+            BittensorError::ChainError {
+                message: format!("Failed to decode NetworkAdded event: {}", e),
+            }
+        })?;
+
+    match network_added_event {
+        Some(event) => {
+            let netuid = event.0;
+            debug!(
+                "NetworkAdded event found: netuid={}, modality={}",
+                netuid, event.1
+            );
+            Ok(ExtrinsicResponse::success()
+                .with_message("Network registered with identity successfully")
+                .with_extrinsic_hash(&format!("{:?}", tx_hash))
+                .with_data(netuid))
+        }
+        None => {
+            warn!("NetworkAdded event not found in transaction events");
+            // Log all events for debugging
+            for event in tx_events.iter().flatten() {
+                debug!(
+                    "Event found: {}::{}",
+                    event.pallet_name(),
+                    event.variant_name()
+                );
+            }
+            Err(BittensorError::ChainError {
+                message: "NetworkAdded event not found - network may not have been registered"
+                    .to_string(),
+            })
+        }
+    }
 }
 
 /// Set or update subnet identity information
