@@ -32,7 +32,7 @@ libc = { workspace = true }
 # ss58-registry = "1.0"  # TODO: Add when implementing Hotkey validation
 
 # Bittensor integration
-bittensor = { path = "../bittensor" }
+bittensor = { workspace = true }
 chrono = { workspace = true }
 
 # Cryptographic dependencies

@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Internal dependencies
 basilica-common = { path = "../basilica-common" }
-bittensor = { path = "../bittensor" }
+bittensor = { workspace = true }
 basilica-validator = { path = "../basilica-validator", features = ["client"] }
 basilica-sdk = { path = "../basilica-sdk" }
 basilica-billing = { path = "../basilica-billing" }
