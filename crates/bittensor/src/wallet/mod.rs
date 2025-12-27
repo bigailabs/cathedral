@@ -166,18 +166,17 @@ impl Wallet {
     /// let wallet = Wallet::create_random("test_wallet", "test_hotkey");
     /// assert!(!wallet.hotkey().as_str().is_empty());
     /// ```
-    pub fn create_random(wallet_name: &str, hotkey_name: &str) -> Self {
+    pub fn create_random(wallet_name: &str, hotkey_name: &str) -> Result<Self, BittensorError> {
         let (pair, _) = sr25519::Pair::generate();
-        let path =
-            Self::default_wallet_path().unwrap_or_else(|_| PathBuf::from("~/.bittensor/wallets"));
+        let path = Self::default_wallet_path()?;
 
-        Self {
+        Ok(Self {
             name: wallet_name.to_string(),
             hotkey_name: hotkey_name.to_string(),
             path: path.join(wallet_name),
             hotkey_pair: pair,
             coldkey_pair: None,
-        }
+        })
     }
 
     /// Create a wallet from a mnemonic phrase
