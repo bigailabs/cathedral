@@ -577,7 +577,7 @@ impl Server {
         // Initialize Bittensor service to find validator endpoint
         info!("Connecting to Bittensor network to discover validator endpoint");
         let bittensor_config = config.to_bittensor_config();
-        let bittensor_service = bittensor::Service::new(bittensor_config).await?;
+        let bittensor_service = bittensor::Service::new(bittensor_config.into()).await?;
 
         // Query metagraph to find validator by hotkey
         info!(

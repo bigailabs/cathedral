@@ -1,7 +1,7 @@
 //! Connection state management for observability and debugging
 
+use crate::config::BittensorConfig;
 use crate::error::BittensorError;
-use basilica_common::config::BittensorConfig;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

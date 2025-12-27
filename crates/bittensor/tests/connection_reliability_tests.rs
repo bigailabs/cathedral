@@ -1,9 +1,8 @@
 //! Integration tests for connection reliability improvements
 
-use basilica_common::config::BittensorConfig;
 use bittensor::{
-    BittensorError, ConnectionManager, ConnectionPool, ConnectionPoolBuilder, ConnectionState,
-    HealthChecker, RetryConfig,
+    config::BittensorConfig, BittensorError, ConnectionManager, ConnectionPool,
+    ConnectionPoolBuilder, ConnectionState, HealthChecker, RetryConfig,
 };
 use std::sync::Arc;
 use std::time::Duration;

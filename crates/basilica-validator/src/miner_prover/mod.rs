@@ -67,8 +67,11 @@ impl MinerProver {
         }
 
         // Get validator hotkey from bittensor service
-        let validator_hotkey = bittensor::account_id_to_hotkey(bittensor_service.get_account_id())
+        let bittensor_hotkey = bittensor::account_id_to_hotkey(bittensor_service.get_account_id())
             .map_err(|e| anyhow::anyhow!("Failed to convert account ID to hotkey: {}", e))?;
+        // Convert to basilica_common::Hotkey for the verification engine
+        let validator_hotkey = basilica_common::Hotkey::new(bittensor_hotkey.as_str().to_string())
+            .map_err(|e| anyhow::anyhow!("Failed to create Hotkey: {}", e))?;
 
         // Use VerificationEngineBuilder to properly initialize SSH key manager
         let verification_engine_builder =

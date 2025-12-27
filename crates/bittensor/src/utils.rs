@@ -1,35 +1,46 @@
 //! # Bittensor Utilities
 //!
-//! Helper functions for common Bittensor operations.
+//! Helper functions for common Bittensor operations including:
+//! - Weight normalization and payload creation
+//! - Cryptographic signature operations
+//! - Unit conversions (TAO/RAO)
 
 use crate::error::BittensorError;
+use crate::types::Hotkey;
 use crate::AccountId;
-use basilica_common::identity::Hotkey;
 use std::str::FromStr;
 use subxt::ext::sp_core::{sr25519, Pair};
 
-/// Convert a Hotkey to an AccountId
-pub fn hotkey_to_account_id(hotkey: &Hotkey) -> Result<AccountId, BittensorError> {
-    AccountId::from_str(hotkey.as_str()).map_err(|_| BittensorError::InvalidHotkey {
-        hotkey: hotkey.as_str().to_string(),
-    })
-}
-
-/// Convert an AccountId to a Hotkey
-pub fn account_id_to_hotkey(account_id: &AccountId) -> Result<Hotkey, BittensorError> {
-    Hotkey::from_str(&account_id.to_string()).map_err(|_| BittensorError::InvalidHotkey {
-        hotkey: account_id.to_string(),
-    })
-}
-
 // Weight-related types
+
+/// Represents a normalized weight for a neuron
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NormalizedWeight {
+    /// The neuron's UID
     pub uid: u16,
+    /// The normalized weight value (0 to u16::MAX)
     pub weight: u16,
 }
 
 /// Normalize weights to sum to u16::MAX
+///
+/// # Arguments
+///
+/// * `weights` - Vector of (uid, weight) pairs
+///
+/// # Returns
+///
+/// Vector of `NormalizedWeight` where weights sum to approximately u16::MAX
+///
+/// # Example
+///
+/// ```
+/// use bittensor::utils::{normalize_weights, NormalizedWeight};
+///
+/// let weights = vec![(0, 100), (1, 100)];
+/// let normalized = normalize_weights(&weights);
+/// assert_eq!(normalized.len(), 2);
+/// ```
 pub fn normalize_weights(weights: &[(u16, u16)]) -> Vec<NormalizedWeight> {
     if weights.is_empty() {
         return vec![];
@@ -59,7 +70,17 @@ pub fn normalize_weights(weights: &[(u16, u16)]) -> Vec<NormalizedWeight> {
         .collect()
 }
 
-/// Create a set_weights payload
+/// Create a set_weights payload for submission to the chain
+///
+/// # Arguments
+///
+/// * `netuid` - The subnet UID
+/// * `weights` - Vector of normalized weights
+/// * `version_key` - Version key for the weights
+///
+/// # Returns
+///
+/// A payload that can be submitted to the chain
 pub fn set_weights_payload(
     netuid: u16,
     weights: Vec<NormalizedWeight>,
@@ -67,7 +88,6 @@ pub fn set_weights_payload(
 ) -> impl subxt::tx::Payload {
     use crate::api::api;
 
-    // Extract UIDs and weights as separate vectors
     let (dests, values): (Vec<u16>, Vec<u16>) =
         weights.into_iter().map(|w| (w.uid, w.weight)).unzip();
 
@@ -76,26 +96,36 @@ pub fn set_weights_payload(
         .set_weights(netuid, dests, values, version_key)
 }
 
-/// Convert stake from TAO to RAO (1 TAO = 10^9 RAO)
-pub fn tao_to_rao(tao: f64) -> u64 {
-    (tao * 1_000_000_000.0) as u64
-}
-
-/// Convert stake from RAO to TAO (1 TAO = 10^9 RAO)
-pub fn rao_to_tao(rao: u64) -> f64 {
-    rao as f64 / 1_000_000_000.0
-}
-
-/// Verify Bittensor signature
+/// Verify a Bittensor signature
+///
+/// # Arguments
+///
+/// * `hotkey` - The hotkey that supposedly signed the data
+/// * `signature_hex` - Hex-encoded signature
+/// * `data` - The data that was signed
+///
+/// # Returns
+///
+/// * `Ok(())` if the signature is valid
+/// * `Err(BittensorError)` if verification fails
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use bittensor::types::Hotkey;
+/// use bittensor::utils::verify_bittensor_signature;
+///
+/// let hotkey = Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
+/// let result = verify_bittensor_signature(&hotkey, "abcd...", b"message");
+/// ```
 pub fn verify_bittensor_signature(
     hotkey: &Hotkey,
     signature_hex: &str,
     data: &[u8],
 ) -> Result<(), BittensorError> {
-    // Validate inputs
     if signature_hex.is_empty() {
-        return Err(BittensorError::InvalidHotkey {
-            hotkey: "Empty signature".to_string(),
+        return Err(BittensorError::AuthError {
+            message: "Empty signature".to_string(),
         });
     }
 
@@ -105,15 +135,15 @@ pub fn verify_bittensor_signature(
         });
     }
 
-    // Decode signature from hex
     let signature_bytes = hex::decode(signature_hex).map_err(|e| BittensorError::AuthError {
         message: format!("Invalid hex signature format: {e}"),
     })?;
 
-    // Convert to AccountId
-    let account_id = hotkey_to_account_id(hotkey)?;
+    let account_id =
+        AccountId::from_str(hotkey.as_str()).map_err(|_| BittensorError::InvalidHotkey {
+            hotkey: hotkey.as_str().to_string(),
+        })?;
 
-    // Convert signature bytes to the expected type for crabtensor
     if signature_bytes.len() != 64 {
         return Err(BittensorError::AuthError {
             message: format!(
@@ -123,17 +153,13 @@ pub fn verify_bittensor_signature(
         });
     }
 
-    // Convert Vec<u8> to fixed-size array for signature
     let mut signature_array = [0u8; 64];
     signature_array.copy_from_slice(&signature_bytes);
 
-    // Create signature from bytes
     let signature = sr25519::Signature::from_raw(signature_array);
 
-    // Verify the signature
     use subxt::ext::sp_runtime::traits::Verify;
 
-    // Convert our AccountId to the expected type
     let public_key = sr25519::Public::from_raw(account_id.0);
     let is_valid = signature.verify(data, &public_key);
 
@@ -151,39 +177,52 @@ pub type BittensorSignature = sr25519::Signature;
 
 /// Sign a message with a keypair
 ///
-/// This is the direct signing method that takes an sr25519 keypair
-/// and returns a signature that can be verified with `verify_bittensor_signature`.
+/// # Arguments
+///
+/// * `keypair` - The sr25519 keypair to sign with
+/// * `message` - The message bytes to sign
+///
+/// # Returns
+///
+/// The signature
 pub fn sign_with_keypair(keypair: &sr25519::Pair, message: &[u8]) -> BittensorSignature {
     keypair.sign(message)
 }
 
 /// Sign a message and return hex-encoded signature
 ///
-/// This is a convenience method that signs with a keypair and returns
-/// a hex-encoded string suitable for transmission.
+/// # Arguments
+///
+/// * `keypair` - The sr25519 keypair to sign with
+/// * `message` - The message bytes to sign
+///
+/// # Returns
+///
+/// Hex-encoded signature string
 pub fn sign_message_hex(keypair: &sr25519::Pair, message: &[u8]) -> String {
     let signature = sign_with_keypair(keypair, message);
     hex::encode(signature.0)
 }
 
-/// Create a signature using a signer
+/// Create a signature using a subxt signer
 ///
-/// This function signs data with a subxt signer and returns a hex-encoded signature.
-/// Use `Service::sign_data` for signing with the service's hotkey.
+/// # Arguments
+///
+/// * `signer` - The signer to use
+/// * `data` - The data to sign
+///
+/// # Returns
+///
+/// Hex-encoded signature string
 pub fn create_signature<T>(signer: &T, data: &[u8]) -> String
 where
     T: subxt::tx::Signer<subxt::PolkadotConfig>,
 {
-    // Sign the data
     let signature = signer.sign(data);
 
-    // Extract sr25519 signature bytes
     match signature {
         subxt::utils::MultiSignature::Sr25519(sig) => hex::encode(sig),
-        _ => {
-            // This shouldn't happen with our signer type, but handle it gracefully
-            hex::encode(vec![0u8; 64])
-        }
+        _ => hex::encode([0u8; 64]),
     }
 }
 
@@ -191,44 +230,103 @@ where
 mod tests {
     use super::*;
 
-    // Note: normalize_weights tests are removed since we're using crabtensor's implementation directly
-
     #[test]
-    fn test_tao_rao_conversion() {
-        assert_eq!(tao_to_rao(1.0), 1_000_000_000);
-        assert_eq!(rao_to_tao(1_000_000_000), 1.0);
-        assert_eq!(tao_to_rao(0.5), 500_000_000);
-        assert_eq!(rao_to_tao(500_000_000), 0.5);
+    fn test_normalize_weights_empty() {
+        let result = normalize_weights(&[]);
+        assert!(result.is_empty());
     }
 
     #[test]
-    fn test_hotkey_account_id_conversion() {
-        // Test with a valid hotkey format
-        let hotkey_str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
-        let hotkey = Hotkey::new(hotkey_str.to_string()).unwrap();
-
-        // Test conversion to AccountId and back
-        if let Ok(account_id) = hotkey_to_account_id(&hotkey) {
-            let converted_hotkey = account_id_to_hotkey(&account_id).unwrap();
-            assert_eq!(hotkey.as_str(), converted_hotkey.as_str());
-        }
+    fn test_normalize_weights_zero_weights() {
+        let weights = vec![(0, 0), (1, 0)];
+        let result = normalize_weights(&weights);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].weight, 0);
+        assert_eq!(result[1].weight, 0);
     }
 
     #[test]
-    fn test_signature_verification_inputs() {
+    fn test_normalize_weights_equal() {
+        let weights = vec![(0, 100), (1, 100)];
+        let result = normalize_weights(&weights);
+        assert_eq!(result.len(), 2);
+        // Each should be approximately half of u16::MAX
+        assert!(result[0].weight > 30000);
+        assert!(result[1].weight > 30000);
+    }
+
+    #[test]
+    fn test_normalize_weights_unequal() {
+        let weights = vec![(0, 75), (1, 25)];
+        let result = normalize_weights(&weights);
+        assert_eq!(result.len(), 2);
+        // First should be ~3x the second
+        assert!(result[0].weight > result[1].weight * 2);
+    }
+
+    #[test]
+    fn test_signature_verification_empty_signature() {
         let hotkey =
             Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
-
-        // Test empty signature
         let result = verify_bittensor_signature(&hotkey, "", b"data");
         assert!(result.is_err());
+    }
 
-        // Test empty data
-        let result = verify_bittensor_signature(&hotkey, "deadbeef".repeat(16).as_str(), b"");
+    #[test]
+    fn test_signature_verification_empty_data() {
+        let hotkey =
+            Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
+        let result = verify_bittensor_signature(&hotkey, &"ab".repeat(64), b"");
         assert!(result.is_err());
+    }
 
-        // Test invalid hex
-        let result = verify_bittensor_signature(&hotkey, "invalid_hex_!", b"data");
+    #[test]
+    fn test_signature_verification_invalid_hex() {
+        let hotkey =
+            Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
+        let result = verify_bittensor_signature(&hotkey, "not_hex!", b"data");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_signature_verification_wrong_length() {
+        let hotkey =
+            Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
+        let result = verify_bittensor_signature(&hotkey, "abcd", b"data");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("length"));
+    }
+
+    #[test]
+    fn test_sign_and_verify() {
+        use subxt::ext::sp_core::Pair;
+
+        // Generate a keypair
+        let (pair, _) = sr25519::Pair::generate();
+        let message = b"test message";
+
+        // Sign the message
+        let signature = sign_with_keypair(&pair, message);
+
+        // Verify using sp_runtime
+        use subxt::ext::sp_runtime::traits::Verify;
+        let public = pair.public();
+        assert!(signature.verify(message.as_slice(), &public));
+    }
+
+    #[test]
+    fn test_sign_message_hex() {
+        use subxt::ext::sp_core::Pair;
+
+        let (pair, _) = sr25519::Pair::generate();
+        let message = b"test message";
+
+        let hex_sig = sign_message_hex(&pair, message);
+
+        // Hex signature should be 128 characters (64 bytes * 2)
+        assert_eq!(hex_sig.len(), 128);
+
+        // Should be valid hex
+        assert!(hex::decode(&hex_sig).is_ok());
     }
 }

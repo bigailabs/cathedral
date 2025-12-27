@@ -269,8 +269,9 @@ impl MinerClient {
                 format!("MINER_AUTH_RESPONSE:{validator_hotkey}:{response_nonce}:{session_token}");
 
             // Verify miner's signature
+            let bittensor_hotkey: bittensor::Hotkey = (&miner_hotkey).into();
             if let Err(e) = bittensor::utils::verify_bittensor_signature(
-                &miner_hotkey,
+                &bittensor_hotkey,
                 &auth_response.miner_signature,
                 canonical_data.as_bytes(),
             ) {

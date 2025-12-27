@@ -1,15 +1,14 @@
 //! # Bittensor Service
 //!
-//! Central service for all Bittensor chain interactions using crabtensor.
+//! Central service for all Bittensor chain interactions.
 
+use crate::config::BittensorConfig;
 use crate::connect::{CircuitBreaker, HealthChecker, RetryConfig, RetryNode};
 use crate::connect::{ConnectionManager, ConnectionPool, ConnectionPoolBuilder};
 use crate::error::BittensorError;
-use anyhow::Result;
-use basilica_common::config::BittensorConfig;
-// Import our own utilities
 use crate::utils::{set_weights_payload, NormalizedWeight};
 use crate::AccountId;
+use anyhow::Result;
 
 // Wallet utilities - we'll implement these
 use std::path::PathBuf;
@@ -588,7 +587,7 @@ impl Service {
     ///
     /// ```rust,no_run
     /// # use bittensor::Service;
-    /// # use basilica_common::config::BittensorConfig;
+    /// # use bittensor::config::BittensorConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = BittensorConfig::default();
@@ -657,7 +656,7 @@ impl Service {
     ///
     /// ```rust,no_run
     /// # use bittensor::Service;
-    /// # use basilica_common::config::BittensorConfig;
+    /// # use bittensor::config::BittensorConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = BittensorConfig::default();
@@ -699,7 +698,7 @@ impl Service {
     ///
     /// ```rust,no_run
     /// # use bittensor::Service;
-    /// # use basilica_common::config::BittensorConfig;
+    /// # use bittensor::config::BittensorConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = BittensorConfig::default();
@@ -754,7 +753,7 @@ impl Service {
     ///
     /// ```rust,no_run
     /// # use bittensor::Service;
-    /// # use basilica_common::config::BittensorConfig;
+    /// # use bittensor::config::BittensorConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = BittensorConfig::default();
@@ -778,7 +777,7 @@ impl Service {
     ///
     /// ```rust,no_run
     /// # use bittensor::Service;
-    /// # use basilica_common::config::BittensorConfig;
+    /// # use bittensor::config::BittensorConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = BittensorConfig::default();
@@ -809,7 +808,7 @@ impl Service {
     ///
     /// ```rust,no_run
     /// # use bittensor::Service;
-    /// # use basilica_common::config::BittensorConfig;
+    /// # use bittensor::config::BittensorConfig;
     /// # #[tokio::main]
     /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let config = BittensorConfig::default();

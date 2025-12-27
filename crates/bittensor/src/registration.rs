@@ -241,25 +241,69 @@ impl ChainRegistration {
             );
             Ok(self.config.local_spoofed_ip.clone())
         } else {
-            // For production without external_ip, auto-detect public IP
-            info!("No external_ip configured, auto-detecting public IP address...");
-            let detected_ip = basilica_common::network::get_public_ip_with_timeout(5).await;
+            // For production, try to auto-detect public IP
+            info!("No external_ip configured, attempting to auto-detect public IP address...");
 
-            if detected_ip == "<unknown-ip>" {
-                error!("Failed to auto-detect public IP address");
-                return Err(anyhow::anyhow!(
-                    "Could not auto-detect public IP address. Please set external_ip in configuration or check your internet connection"
-                ));
+            match Self::detect_public_ip().await {
+                Some(ip) => {
+                    info!("Auto-detected public IP: {}", ip);
+                    warn!(
+                        "Using auto-detected IP {}. For production, consider setting external_ip in configuration for reliability",
+                        ip
+                    );
+                    Ok(ip)
+                }
+                None => {
+                    error!("Failed to auto-detect public IP address");
+                    Err(anyhow::anyhow!(
+                        "Could not auto-detect public IP address. Please set external_ip in configuration."
+                    ))
+                }
             }
-
-            info!("Auto-detected public IP: {}", detected_ip);
-            warn!(
-                "Using auto-detected IP {}. For production, consider setting external_ip in configuration for reliability",
-                detected_ip
-            );
-
-            Ok(detected_ip)
         }
+    }
+
+    /// Attempt to detect the public IP address
+    ///
+    /// Uses multiple methods to try to determine the public IP:
+    /// 1. Try curl to ipinfo.io
+    /// 2. Try curl to ifconfig.me
+    /// 3. Return None if all methods fail
+    async fn detect_public_ip() -> Option<String> {
+        // Try ipinfo.io first
+        if let Ok(output) = tokio::process::Command::new("curl")
+            .args(["-s", "-m", "5", "https://ipinfo.io/ip"])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if Self::is_valid_ip(&ip) {
+                    return Some(ip);
+                }
+            }
+        }
+
+        // Try ifconfig.me as fallback
+        if let Ok(output) = tokio::process::Command::new("curl")
+            .args(["-s", "-m", "5", "https://ifconfig.me"])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if Self::is_valid_ip(&ip) {
+                    return Some(ip);
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check if a string is a valid IPv4 address
+    fn is_valid_ip(ip: &str) -> bool {
+        ip.parse::<std::net::Ipv4Addr>().is_ok()
     }
 
     /// Get current registration state
