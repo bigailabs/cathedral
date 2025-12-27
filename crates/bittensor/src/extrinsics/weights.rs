@@ -37,13 +37,16 @@ impl WeightsParams {
     /// assert_eq!(params.netuid, 1);
     /// assert_eq!(params.uids.len(), 3);
     /// ```
-    pub fn new(netuid: u16, uids: Vec<u16>, weights: Vec<u16>) -> Self {
-        Self {
+    pub fn new(netuid: u16, uids: Vec<u16>, weights: Vec<u16>) -> Result<Self, &'static str> {
+        if uids.len() != weights.len() {
+            return Err("UIDs and weights must have the same length");
+        }
+        Ok(Self {
             netuid,
             uids,
             weights,
             version_key: 0,
-        }
+        })
     }
 
     /// Set the version key
