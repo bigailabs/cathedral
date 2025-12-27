@@ -18,7 +18,6 @@ COPY crates/basilica-billing ./crates/basilica-billing
 COPY crates/basilica-common ./crates/basilica-common
 COPY crates/basilica-protocol ./crates/basilica-protocol
 COPY crates/basilica-payments ./crates/basilica-payments
-COPY crates/bittensor ./crates/bittensor
 COPY crates/basilica-operator ./crates/basilica-operator
 
 # Remove unrelated workspace members from Cargo.toml to avoid copying full repo
