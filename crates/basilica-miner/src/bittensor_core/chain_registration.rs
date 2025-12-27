@@ -25,7 +25,7 @@ impl ChainRegistration {
 
         // Initialize the bittensor service
         let bittensor_service = Arc::new(
-            bittensor::Service::new(config.common.clone().into())
+            bittensor::Service::new(config.common.clone())
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to initialize bittensor service: {}", e))?,
         );

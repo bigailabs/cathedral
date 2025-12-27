@@ -146,30 +146,14 @@ where
 {
     // Convert to API type
     let api_identity = api::runtime_types::pallet_subtensor::pallet::SubnetIdentityV3 {
-        subnet_name: identity.name.into_bytes().try_into().unwrap_or_default(),
-        github_repo: identity
-            .github_repo
-            .into_bytes()
-            .try_into()
-            .unwrap_or_default(),
-        subnet_contact: identity.contact.into_bytes().try_into().unwrap_or_default(),
-        subnet_url: identity.url.into_bytes().try_into().unwrap_or_default(),
-        discord: identity.discord.into_bytes().try_into().unwrap_or_default(),
-        description: identity
-            .description
-            .into_bytes()
-            .try_into()
-            .unwrap_or_default(),
-        logo_url: identity
-            .logo_url
-            .into_bytes()
-            .try_into()
-            .unwrap_or_default(),
-        additional: identity
-            .additional
-            .into_bytes()
-            .try_into()
-            .unwrap_or_default(),
+        subnet_name: identity.name.into_bytes(),
+        github_repo: identity.github_repo.into_bytes(),
+        subnet_contact: identity.contact.into_bytes(),
+        subnet_url: identity.url.into_bytes(),
+        discord: identity.discord.into_bytes(),
+        description: identity.description.into_bytes(),
+        logo_url: identity.logo_url.into_bytes(),
+        additional: identity.additional.into_bytes(),
     };
 
     let call = api::tx()

@@ -10,9 +10,8 @@ keywords = ["bittensor", "blockchain", "substrate", "cryptocurrency", "decentral
 categories = ["cryptography::cryptocurrencies", "api-bindings"]
 
 [features]
-default = ["wallet", "basilica-compat"]
+default = ["wallet"]
 wallet = []
-basilica-compat = ["basilica-common"]
 generate-metadata = ["subxt-codegen", "subxt-metadata", "subxt-utils-fetchmetadata", "parity-scale-codec"]
 
 [dependencies]
@@ -43,9 +42,6 @@ rand = { workspace = true }
 # Time and utilities
 chrono = { workspace = true }
 home = { workspace = true }
-
-# Optional basilica compatibility
-basilica-common = { path = "../basilica-common", optional = true }
 
 # Metadata generation dependencies (only used by binary)
 subxt-codegen = { workspace = true, optional = true }

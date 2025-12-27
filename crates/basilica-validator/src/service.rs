@@ -77,7 +77,7 @@ impl ValidatorService {
         };
 
         let bittensor_service: Arc<BittensorService> =
-            Arc::new(BittensorService::new(self.config.bittensor.common.clone().into()).await?);
+            Arc::new(BittensorService::new(self.config.bittensor.common.clone()).await?);
 
         // Initialize chain registration and perform startup registration
         let chain_registration =
@@ -326,7 +326,7 @@ impl ValidatorService {
 
     /// Test Bittensor network connectivity
     async fn test_bittensor_connectivity(&self) -> Result<u64> {
-        let service = BittensorService::new(self.config.bittensor.common.clone().into())
+        let service = BittensorService::new(self.config.bittensor.common.clone())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create Bittensor service: {}", e))?;
 

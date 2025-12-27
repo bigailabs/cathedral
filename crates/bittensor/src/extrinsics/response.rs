@@ -199,7 +199,7 @@ impl<T> ExtrinsicResponse<T> {
         if self.is_success() {
             Ok(self.data.unwrap_or_default())
         } else {
-            Err(self.error.unwrap_or_else(|| BittensorError::ChainError {
+            Err(self.error.unwrap_or(BittensorError::ChainError {
                 message: self.message,
             }))
         }

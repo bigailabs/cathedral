@@ -128,3 +128,13 @@ pub use crate::api::api::runtime_types::pallet_subtensor::{
 
 // Type alias for AccountId
 pub type AccountId = subxt::config::polkadot::AccountId32;
+
+/// Re-export sp_core for cryptographic operations
+///
+/// This allows dependents to use bittensor's bundled sp_core without
+/// adding it as a direct dependency.
+pub mod crypto {
+    pub use subxt::ext::sp_core::crypto::{Pair, Ss58AddressFormat, Ss58Codec};
+    pub use subxt::ext::sp_core::sr25519;
+    pub use subxt::ext::sp_core::Pair as PairTrait;
+}

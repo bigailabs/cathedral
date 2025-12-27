@@ -277,27 +277,6 @@ impl BittensorConfig {
     }
 }
 
-/// Conversion from basilica-common's BittensorConfig
-#[cfg(feature = "basilica-compat")]
-impl From<basilica_common::BittensorConfig> for BittensorConfig {
-    fn from(config: basilica_common::BittensorConfig) -> Self {
-        Self {
-            wallet_name: config.wallet_name,
-            hotkey_name: config.hotkey_name,
-            network: config.network,
-            netuid: config.netuid,
-            chain_endpoint: config.chain_endpoint,
-            fallback_endpoints: config.fallback_endpoints,
-            weight_interval_secs: config.weight_interval_secs,
-            read_only: config.read_only,
-            connection_pool_size: config.connection_pool_size,
-            health_check_interval: config.health_check_interval,
-            circuit_breaker_threshold: config.circuit_breaker_threshold,
-            circuit_breaker_recovery: config.circuit_breaker_recovery,
-        }
-    }
-}
-
 /// Serde helper for optional Duration fields
 mod optional_duration_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -399,37 +378,47 @@ mod tests {
 
     #[test]
     fn test_validation_empty_wallet() {
-        let mut config = BittensorConfig::default();
-        config.wallet_name = String::new();
+        let config = BittensorConfig {
+            wallet_name: String::new(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_validation_empty_hotkey() {
-        let mut config = BittensorConfig::default();
-        config.hotkey_name = String::new();
+        let config = BittensorConfig {
+            hotkey_name: String::new(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_validation_zero_netuid() {
-        let mut config = BittensorConfig::default();
-        config.netuid = 0;
+        let config = BittensorConfig {
+            netuid: 0,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_validation_invalid_network() {
-        let mut config = BittensorConfig::default();
-        config.network = "invalid".to_string();
+        let config = BittensorConfig {
+            network: "invalid".to_string(),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
     }
 
     #[test]
     #[should_panic(expected = "Unknown network")]
     fn test_invalid_network_endpoint() {
-        let mut config = BittensorConfig::default();
-        config.network = "invalid".to_string();
+        let config = BittensorConfig {
+            network: "invalid".to_string(),
+            ..Default::default()
+        };
         config.get_chain_endpoint();
     }
 

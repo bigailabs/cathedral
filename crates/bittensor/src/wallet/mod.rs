@@ -28,7 +28,7 @@ pub use signer::WalletSigner;
 use crate::error::BittensorError;
 use crate::types::Hotkey;
 use crate::AccountId;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use subxt::ext::sp_core::{sr25519, Pair};
 
 /// Bittensor wallet for managing keys and signing transactions
@@ -122,7 +122,7 @@ impl Wallet {
     pub fn load_from_path(
         wallet_name: &str,
         hotkey_name: &str,
-        base_path: &PathBuf,
+        base_path: &Path,
     ) -> Result<Self, BittensorError> {
         let hotkey_path = base_path
             .join(wallet_name)

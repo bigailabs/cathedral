@@ -58,7 +58,7 @@ pub async fn get_balance(
         })?;
 
     match account_info {
-        Some(info) => Ok(Balance::from_rao(info.data.free as u64)),
+        Some(info) => Ok(Balance::from_rao(info.data.free)),
         None => Ok(Balance::zero()),
     }
 }

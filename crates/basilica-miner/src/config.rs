@@ -263,7 +263,14 @@ impl ConfigValidation for MinerConfig {
         self.database.validate()?;
 
         // Validate Bittensor configuration - delegate to common validation
-        self.bittensor.common.validate()?;
+        self.bittensor
+            .common
+            .validate()
+            .map_err(|e| ConfigurationError::InvalidValue {
+                key: "bittensor".to_string(),
+                value: "".to_string(),
+                reason: e,
+            })?;
 
         // Validate miner-specific fields
         if self.bittensor.common.netuid == 0 {

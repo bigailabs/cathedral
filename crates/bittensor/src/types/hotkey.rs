@@ -166,23 +166,6 @@ impl AsRef<str> for Hotkey {
     }
 }
 
-/// Conversion from basilica-common's Hotkey
-#[cfg(feature = "basilica-compat")]
-impl From<basilica_common::Hotkey> for Hotkey {
-    fn from(hotkey: basilica_common::Hotkey) -> Self {
-        // basilica_common::Hotkey is already validated, so we can create directly
-        Hotkey(hotkey.into_string())
-    }
-}
-
-/// Conversion from reference to basilica-common's Hotkey
-#[cfg(feature = "basilica-compat")]
-impl From<&basilica_common::Hotkey> for Hotkey {
-    fn from(hotkey: &basilica_common::Hotkey) -> Self {
-        Hotkey(hotkey.as_str().to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

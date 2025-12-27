@@ -268,8 +268,8 @@ impl MinerClient {
             let canonical_data =
                 format!("MINER_AUTH_RESPONSE:{validator_hotkey}:{response_nonce}:{session_token}");
 
-            // Verify miner's signature
-            let bittensor_hotkey: bittensor::Hotkey = (&miner_hotkey).into();
+            // Verify miner's signature (Hotkey is re-exported from bittensor, so just clone)
+            let bittensor_hotkey: bittensor::Hotkey = miner_hotkey.clone();
             if let Err(e) = bittensor::utils::verify_bittensor_signature(
                 &bittensor_hotkey,
                 &auth_response.miner_signature,
