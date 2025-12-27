@@ -10,13 +10,17 @@ members = [
   "crates/basilica-api",
   "crates/basilica-cli",
   "crates/basilica-sdk",
-  "crates/basilica-sdk-python",
   "crates/integration-tests",
   "crates/collateral-contract",
   "crates/basilica-aggregator",
   "crates/basilica-operator",
   "crates/basilica-storage",
   "crates/basilica-autoscaler",
+]
+# Excluded from default build - requires Python dev libraries
+# Build with: maturin build (or cargo build -p basilica-sdk-python --features extension-module)
+exclude = [
+  "crates/basilica-sdk-python",
 ]
 resolver = "2"
 
@@ -162,6 +166,8 @@ oauth2 = "4.4"
 webbrowser = "0.8"
 
 # Python bindings
+# abi3-py310 = stable ABI for Python 3.10+, works with 3.10, 3.11, 3.12, etc.
+# Build the Python SDK with: maturin build (handles Python env detection)
 pyo3 = { version = "0.26", features = ["abi3-py310"] }
 pyo3-stub-gen = { version = "0.13.1" }
 pyo3-stub-gen-derive = { version = "0.13.1" }
