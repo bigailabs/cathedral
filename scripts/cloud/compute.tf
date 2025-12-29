@@ -334,8 +334,6 @@ module "basilica_api_service" {
 
   # Environment variables
   environment_variables = {
-    RUST_LOG = "debug"
-
     # Server Configuration
     BASILICA_API_SERVER__BIND_ADDRESS    = "0.0.0.0:8000"
     BASILICA_API_SERVER__MAX_CONNECTIONS = "10000"
@@ -420,7 +418,7 @@ module "basilica_api_service" {
     BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__CALLBACK_BASE_URL = var.hyperstack_callback_base_url
 
     # Logging
-    RUST_LOG = "basilica_api=debug,basilica_protocol=info,kube=debug"
+    RUST_LOG = "basilica_api=debug,basilica_aggregator=debug,basilica_protocol=info,kube=debug"
     NO_COLOR = "1"
   }
 
