@@ -36,7 +36,21 @@ pub async fn hyperstack_callback(
         }
     };
     let token = query.token;
-    tracing::info!("Received Hyperstack webhook callback");
+    tracing::debug!(
+        vm_id = %payload.vm_id(),
+        operation = %payload.operation_name(),
+        operation_status = %payload.operation_status(),
+        resource_name = ?payload.resource.name,
+        resource_type = ?payload.resource.resource_type,
+        has_data = payload.data.is_some(),
+        has_user_payload = payload.user_payload.is_some(),
+        extra_fields = ?payload.extra.keys().collect::<Vec<_>>(),
+        "Received Hyperstack webhook callback"
+    );
+
+    if let Some(ref data) = payload.data {
+        tracing::trace!(data = %data, "Webhook data payload");
+    }
 
     // Validate token against configured webhook secret
     let hyperstack_config = match &state.aggregator_config.providers.hyperstack {
@@ -49,7 +63,11 @@ pub async fn hyperstack_callback(
 
     // Hyperstack lowercases callback URL query params, so compare case-insensitively
     if token.to_lowercase() != hyperstack_config.webhook_secret.to_lowercase() {
-        tracing::warn!("Invalid webhook token received");
+        tracing::warn!(
+            operation = %payload.operation_name(),
+            vm_id = %payload.vm_id(),
+            "Invalid webhook token received"
+        );
         // Return 200 to avoid information leakage
         return (StatusCode::OK, Json(json!({ "status": "unauthorized" })));
     }
@@ -69,11 +87,21 @@ pub async fn hyperstack_callback(
         Ok(Some(row)) => row,
         Ok(None) => {
             // Unknown VM ID - log and return 200
-            tracing::trace!(vm_id = %vm_id, "Webhook received for unknown VM ID");
+            tracing::debug!(
+                vm_id = %vm_id,
+                operation = %payload.operation_name(),
+                operation_status = %payload.operation_status(),
+                "Webhook received for unknown VM ID - may be from a different environment or already deleted"
+            );
             return (StatusCode::OK, Json(json!({ "status": "unknown_vm" })));
         }
         Err(e) => {
-            tracing::error!("Database error: {}", e);
+            tracing::error!(
+                error = %e,
+                vm_id = %vm_id,
+                operation = %payload.operation_name(),
+                "Database error looking up rental by provider_instance_id"
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "internal" })),
@@ -134,7 +162,12 @@ pub async fn hyperstack_callback(
             .execute(&state.db)
             .await
             {
-                tracing::error!("Failed to update rental status: {}", e);
+                tracing::error!(
+                    error = %e,
+                    rental_id = %rental_id,
+                    new_status = ?new_status,
+                    "Failed to update rental status"
+                );
             }
         }
         _ => {
@@ -147,7 +180,12 @@ pub async fn hyperstack_callback(
             .execute(&state.db)
             .await
             {
-                tracing::error!("Failed to update rental status: {}", e);
+                tracing::error!(
+                    error = %e,
+                    rental_id = %rental_id,
+                    new_status = ?new_status,
+                    "Failed to update rental status"
+                );
             }
         }
     }
