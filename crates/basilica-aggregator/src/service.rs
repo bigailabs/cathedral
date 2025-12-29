@@ -12,6 +12,7 @@ use basilica_common::types::GpuCategory;
 use chrono::{Duration, Utc};
 use serde_json::json;
 use std::sync::Arc;
+use tracing::error;
 use uuid::Uuid;
 
 // ============================================================================
@@ -149,7 +150,7 @@ impl AggregatorService {
                         total_count += offerings.len();
                     }
                     Err(e) => {
-                        tracing::error!("Failed to refresh from {}: {}", provider_id, e);
+                        error!("Failed to refresh from {}: {}", provider_id, e);
                         // Provider status is not persisted - health checks done on-demand
                     }
                 }
@@ -650,10 +651,9 @@ impl AggregatorService {
                     deployment.updated_at = Utc::now();
                 }
                 Err(e) => {
-                    tracing::error!(
+                    error!(
                         "Failed to fetch {} instance status: {}",
-                        deployment.provider,
-                        e
+                        deployment.provider, e
                     );
                     return Err(e);
                 }
@@ -678,6 +678,11 @@ impl AggregatorService {
         if let Some(provider_instance_id) = &deployment.provider_instance_id {
             let provider = self.get_provider(deployment.provider)?;
             provider.delete_deployment(provider_instance_id).await?;
+        } else {
+            error!(
+                "Provider instance ID not found for deployment {}",
+                deployment_id
+            );
         }
 
         // Update deployment status to deleted

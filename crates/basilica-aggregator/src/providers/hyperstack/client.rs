@@ -99,18 +99,39 @@ impl HyperstackProvider {
 
         // Build HashMap mapping GPU model name to hourly price
         let mut price_map = HashMap::new();
-        for item in pricebook {
+        for item in &pricebook {
             // Use the actual price (after discounts) not the original value
             // Parse string value to Decimal
-            let price = item.value.parse::<Decimal>().unwrap_or_else(|e| {
-                tracing::warn!(
-                    "Failed to parse price '{}' for {}: {}",
-                    item.value,
+            // The API returns prices in two formats:
+            // - Standard decimal: "1.350000000", "0.150000000"
+            // - Scientific notation: "0E-9" (representing zero)
+            // Try standard parsing first, then fall back to scientific notation
+            let price = item
+                .value
+                .parse::<Decimal>()
+                .or_else(|_| Decimal::from_scientific(&item.value))
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to parse price '{}' for {}: {}",
+                        item.value,
+                        item.name,
+                        e
+                    );
+                    Decimal::ZERO
+                });
+
+            // Log when we get a zero price (either from parsing "0E-9" or fallback)
+            if price.is_zero() {
+                tracing::trace!(
+                    "Zero price for pricebook item: id={}, name='{}', value='{}', original_value='{}', discount_applied={}",
+                    item.id,
                     item.name,
-                    e
+                    item.value,
+                    item.original_value,
+                    item.discount_applied
                 );
-                Decimal::ZERO
-            });
+            }
+
             price_map.insert(item.name.clone(), price);
 
             tracing::trace!(
