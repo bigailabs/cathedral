@@ -1,0 +1,27 @@
+# PriorityClasses for workload scheduling in Basilica
+# GPU workloads get higher priority to ensure they can preempt CPU workloads on GPU nodes
+# CPU workloads get lower priority but can still schedule on GPU nodes when needed
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: basilica-gpu-workload
+  labels:
+    app.kubernetes.io/name: basilica
+    app.kubernetes.io/component: scheduling
+description: "High priority for GPU workloads - can preempt CPU workloads on GPU nodes"
+value: 1000000
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: basilica-cpu-workload
+  labels:
+    app.kubernetes.io/name: basilica
+    app.kubernetes.io/component: scheduling
+description: "Standard priority for CPU workloads - can be preempted by GPU workloads"
+value: 100000
+preemptionPolicy: PreemptLowerPriority
+globalDefault: false
