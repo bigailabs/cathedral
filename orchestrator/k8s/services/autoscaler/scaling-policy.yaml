@@ -88,6 +88,20 @@ spec:
     # Scale down when idle VRAM exceeds 120% of target
     scaleDownThresholdPercent: 120
 
+  # CPU workload scaling configuration
+  # Provisions GPU boxes for CPU-only workloads when pending
+  # (used until CPU-only providers are available in the API)
+  cpuWorkloadScaling:
+    # Enable CPU-aware scaling
+    enabled: true
+    # Number of pending CPU-only pods to trigger scale-up
+    pendingPodThreshold: 1
+    # Cooldown after scale-up in seconds (prevents runaway scaling)
+    cooldownSeconds: 300
+    # Preferred GPU model for CPU workloads (cheapest option)
+    # Leave empty to auto-select cheapest available
+    # preferredGpuModel: "RTX4090"
+
   # Image pre-pull configuration for warm pool nodes
   # Pre-pulls common images to reduce container startup time
   imagePrepull:
