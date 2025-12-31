@@ -46,6 +46,10 @@ pub struct ScalingPolicySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warm_pool: Option<WarmPoolConfig>,
 
+    /// CPU workload scaling configuration (uses GPU boxes for CPU-only workloads)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_workload_scaling: Option<CpuWorkloadScalingConfig>,
+
     /// Image pre-pull configuration for faster container starts
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_prepull: Option<ImagePrepullConfig>,
@@ -222,6 +226,48 @@ fn default_scale_up_threshold_percent() -> u32 {
 
 fn default_scale_down_threshold_percent() -> u32 {
     120
+}
+
+/// CPU workload scaling configuration.
+/// Enables scaling up GPU boxes for CPU-only workloads when no CPU-only providers are available.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CpuWorkloadScalingConfig {
+    /// Enable CPU-aware scaling (default: false)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Number of pending CPU-only pods to trigger scale-up
+    #[serde(default = "default_cpu_pending_threshold")]
+    pub pending_pod_threshold: u32,
+
+    /// Cooldown after scale-up in seconds (prevents runaway scaling)
+    #[serde(default = "default_cpu_cooldown_seconds")]
+    pub cooldown_seconds: u32,
+
+    /// Preferred GPU model to provision for CPU workloads.
+    /// Falls back to cheapest available offering if not specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_gpu_model: Option<String>,
+}
+
+impl Default for CpuWorkloadScalingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            pending_pod_threshold: default_cpu_pending_threshold(),
+            cooldown_seconds: default_cpu_cooldown_seconds(),
+            preferred_gpu_model: None,
+        }
+    }
+}
+
+fn default_cpu_pending_threshold() -> u32 {
+    1
+}
+
+fn default_cpu_cooldown_seconds() -> u32 {
+    300
 }
 
 /// Image pre-pull configuration for faster container starts on warm pool nodes
@@ -448,6 +494,10 @@ pub struct MetricsSnapshot {
     /// Number of pending GPU pods
     #[serde(default)]
     pub pending_gpu_pods: u32,
+
+    /// Number of pending CPU-only pods (no GPU requests)
+    #[serde(default)]
+    pub pending_cpu_pods: u32,
 
     /// Total GPU nodes in cluster
     #[serde(default)]
