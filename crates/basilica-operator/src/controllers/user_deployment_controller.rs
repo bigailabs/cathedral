@@ -1,6 +1,7 @@
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Affinity, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
+    PreferredSchedulingTerm,
 };
 use k8s_openapi::api::core::v1::{
     Capabilities, Container, HTTPGetAction, HostPathVolumeSource, PodSecurityContext, PodSpec,
@@ -229,26 +230,26 @@ fn build_node_selector() -> BTreeMap<String, String> {
     selector
 }
 
-fn build_tolerations(has_gpu: bool) -> Vec<Toleration> {
-    let mut tolerations = vec![Toleration {
-        key: Some("basilica.ai/workloads-only".into()),
-        operator: Some("Equal".into()),
-        value: Some("true".into()),
-        effect: Some("NoSchedule".into()),
-        ..Default::default()
-    }];
-
-    if has_gpu {
-        tolerations.push(Toleration {
+fn build_tolerations() -> Vec<Toleration> {
+    // All pods tolerate both workloads-only and GPU taints.
+    // This allows CPU-only workloads to schedule on GPU nodes when no CPU nodes are available.
+    // Scheduling preference is controlled via node affinity and priority classes.
+    vec![
+        Toleration {
+            key: Some("basilica.ai/workloads-only".into()),
+            operator: Some("Equal".into()),
+            value: Some("true".into()),
+            effect: Some("NoSchedule".into()),
+            ..Default::default()
+        },
+        Toleration {
             key: Some("nvidia.com/gpu".into()),
             operator: Some("Exists".into()),
             value: None,
             effect: Some("NoSchedule".into()),
             ..Default::default()
-        });
-    }
-
-    tolerations
+        },
+    ]
 }
 
 fn build_topology_spread(
@@ -475,6 +476,33 @@ fn build_node_affinity(gpu: &crate::crd::user_deployment::GpuSpec) -> Option<Aff
     })
 }
 
+/// Build node affinity for CPU-only workloads.
+/// Prefers CPU-only nodes (without nvidia.com/gpu label) but allows fallback to GPU nodes.
+fn build_cpu_node_affinity() -> Affinity {
+    Affinity {
+        node_affinity: Some(NodeAffinity {
+            // No hard requirements - CPU pods can schedule anywhere with workloads-only label
+            // (node selector already enforces basilica.ai/workloads-only=true)
+            required_during_scheduling_ignored_during_execution: None,
+            // Prefer CPU-only nodes (nodes without nvidia.com/gpu label)
+            preferred_during_scheduling_ignored_during_execution: Some(vec![
+                PreferredSchedulingTerm {
+                    weight: 100,
+                    preference: NodeSelectorTerm {
+                        match_expressions: Some(vec![NodeSelectorRequirement {
+                            key: "nvidia.com/gpu".to_string(),
+                            operator: "DoesNotExist".to_string(),
+                            values: None,
+                        }]),
+                        ..Default::default()
+                    },
+                },
+            ]),
+        }),
+        ..Default::default()
+    }
+}
+
 pub fn render_deployment(
     instance_name: &str,
     namespace: &str,
@@ -509,7 +537,12 @@ pub fn render_deployment(
 
     let gpu_config = spec.resources.as_ref().and_then(|r| r.gpus.as_ref());
 
-    let node_affinity = gpu_config.and_then(build_node_affinity);
+    // GPU workloads: use GPU-specific affinity with hard requirements
+    // CPU workloads: prefer CPU nodes but allow GPU fallback
+    let (node_affinity, priority_class_name) = match gpu_config {
+        Some(gpu) => (build_node_affinity(gpu), "basilica-gpu-workload"),
+        None => (Some(build_cpu_node_affinity()), "basilica-cpu-workload"),
+    };
 
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), instance_name.to_string());
@@ -636,8 +669,9 @@ pub fn render_deployment(
             security_context: pod_sc,
             termination_grace_period_seconds: Some(120),
             node_selector: Some(build_node_selector()),
-            tolerations: Some(build_tolerations(gpu_config.is_some())),
+            tolerations: Some(build_tolerations()),
             affinity: node_affinity,
+            priority_class_name: Some(priority_class_name.to_string()),
             topology_spread_constraints: build_topology_spread(
                 instance_name,
                 spec.topology_spread.as_ref(),
@@ -1833,28 +1867,20 @@ mod tests {
     }
 
     #[test]
-    fn test_tolerations_without_gpu() {
-        let tolerations = build_tolerations(false);
-        assert_eq!(tolerations.len(), 1);
-        assert_eq!(
-            tolerations[0].key.as_deref(),
-            Some("basilica.ai/workloads-only")
-        );
-    }
-
-    #[test]
-    fn test_tolerations_with_gpu() {
-        let tolerations = build_tolerations(true);
+    fn test_tolerations_always_include_gpu() {
+        // All pods get both tolerations to allow CPU workloads on GPU nodes
+        let tolerations = build_tolerations();
         assert_eq!(tolerations.len(), 2);
         assert_eq!(
             tolerations[0].key.as_deref(),
             Some("basilica.ai/workloads-only")
         );
-        assert_eq!(tolerations[1].key.as_deref(), Some("nvidia.com/gpu"));
-        assert_eq!(tolerations[1].operator.as_deref(), Some("Exists"));
         assert_eq!(tolerations[0].operator.as_deref(), Some("Equal"));
         assert_eq!(tolerations[0].value.as_deref(), Some("true"));
         assert_eq!(tolerations[0].effect.as_deref(), Some("NoSchedule"));
+        assert_eq!(tolerations[1].key.as_deref(), Some("nvidia.com/gpu"));
+        assert_eq!(tolerations[1].operator.as_deref(), Some("Exists"));
+        assert_eq!(tolerations[1].effect.as_deref(), Some("NoSchedule"));
     }
 
     #[test]
@@ -2958,5 +2984,129 @@ mod tests {
             assert_eq!(phase, DeploymentPhase::Failed);
             assert_eq!(ready, 0);
         }
+    }
+
+    #[test]
+    fn test_cpu_node_affinity_prefers_non_gpu_nodes() {
+        let affinity = build_cpu_node_affinity();
+        assert!(affinity.node_affinity.is_some());
+
+        let node_affinity = affinity.node_affinity.unwrap();
+        // No hard requirements for CPU workloads
+        assert!(node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .is_none());
+
+        // Should have preferred scheduling terms
+        let preferred = node_affinity
+            .preferred_during_scheduling_ignored_during_execution
+            .unwrap();
+        assert_eq!(preferred.len(), 1);
+        assert_eq!(preferred[0].weight, 100);
+
+        let expressions = preferred[0].preference.match_expressions.as_ref().unwrap();
+        assert_eq!(expressions.len(), 1);
+        assert_eq!(expressions[0].key, "nvidia.com/gpu");
+        assert_eq!(expressions[0].operator, "DoesNotExist");
+    }
+
+    #[test]
+    fn test_gpu_workload_gets_gpu_priority_class() {
+        use crate::crd::user_deployment::GpuSpec;
+
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "gpu-app".to_string(),
+            "pytorch:latest".to_string(),
+            1,
+            8080,
+            "/deployments/gpu-app".to_string(),
+        )
+        .with_resources(ResourceRequirements {
+            cpu: "4000m".to_string(),
+            memory: "16Gi".to_string(),
+            gpus: Some(GpuSpec {
+                count: 1,
+                model: vec!["A100".to_string()],
+                min_cuda_version: None,
+                min_gpu_memory_gb: None,
+            }),
+            cpu_request_ratio: 1.0,
+        });
+
+        let deployment = render_deployment("gpu-app", "u-user123", &spec, None).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("basilica-gpu-workload")
+        );
+    }
+
+    #[test]
+    fn test_cpu_workload_gets_cpu_priority_class() {
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "cpu-app".to_string(),
+            "python:3.11".to_string(),
+            1,
+            8080,
+            "/deployments/cpu-app".to_string(),
+        );
+
+        let deployment = render_deployment("cpu-app", "u-user123", &spec, None).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        assert_eq!(
+            pod_spec.priority_class_name.as_deref(),
+            Some("basilica-cpu-workload")
+        );
+    }
+
+    #[test]
+    fn test_cpu_workload_has_preferred_affinity() {
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "cpu-app".to_string(),
+            "python:3.11".to_string(),
+            1,
+            8080,
+            "/deployments/cpu-app".to_string(),
+        );
+
+        let deployment = render_deployment("cpu-app", "u-user123", &spec, None).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+
+        let affinity = pod_spec.affinity.unwrap();
+        let node_affinity = affinity.node_affinity.unwrap();
+
+        // CPU workloads should have preferred (not required) scheduling
+        assert!(node_affinity
+            .required_during_scheduling_ignored_during_execution
+            .is_none());
+        assert!(node_affinity
+            .preferred_during_scheduling_ignored_during_execution
+            .is_some());
+    }
+
+    #[test]
+    fn test_cpu_workload_tolerates_gpu_taint() {
+        let spec = UserDeploymentSpec::new(
+            "user123".to_string(),
+            "cpu-app".to_string(),
+            "python:3.11".to_string(),
+            1,
+            8080,
+            "/deployments/cpu-app".to_string(),
+        );
+
+        let deployment = render_deployment("cpu-app", "u-user123", &spec, None).unwrap();
+        let pod_spec = deployment.spec.unwrap().template.spec.unwrap();
+        let tolerations = pod_spec.tolerations.unwrap();
+
+        // CPU workloads should tolerate GPU taint to allow scheduling on GPU nodes
+        assert!(tolerations
+            .iter()
+            .any(|t| t.key.as_deref() == Some("nvidia.com/gpu")));
     }
 }

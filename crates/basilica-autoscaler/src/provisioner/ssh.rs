@@ -916,7 +916,12 @@ sudo sysctl --system > /dev/null 2>&1 || true
             .collect::<Vec<_>>()
             .join(" ");
 
-        // Include taint registration for unvalidated nodes
+        // Build taints list: always include unvalidated taint, plus any from config
+        let mut taints = vec!["basilica.ai/unvalidated=true:NoSchedule".to_string()];
+        taints.extend(k3s_config.node_taints.iter().cloned());
+        let taints_arg = taints.join(",");
+
+        // Include taint registration for unvalidated nodes and configured taints
         // Add driver/cuda version labels for operator validation
         let install_cmd = format!(
             r#"curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="agent" K3S_URL="{}" K3S_TOKEN="{}" sh -s - \
@@ -926,7 +931,7 @@ sudo sysctl --system > /dev/null 2>&1 || true
                 --node-label=basilica.ai/managed-by=autoscaler \
                 --node-label=basilica.ai/driver-version={} \
                 --node-label=basilica.ai/cuda-version={} \
-                --kubelet-arg=register-with-taints=basilica.ai/unvalidated=true:NoSchedule \
+                --kubelet-arg=register-with-taints={} \
                 {}"#,
             server_url,
             token,
@@ -935,6 +940,7 @@ sudo sysctl --system > /dev/null 2>&1 || true
             node_id,
             driver_version,
             cuda_version,
+            taints_arg,
             node_labels
         );
 
