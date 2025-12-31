@@ -63,6 +63,9 @@ pub struct AutoscalerMetrics {
     warm_pool_target_nodes: IntGaugeVec,
     warm_pool_cost_per_hour: prometheus::GaugeVec,
     warm_pool_scale_decisions_total: IntCounterVec,
+
+    // CPU workload scaling metrics
+    pending_cpu_pods: IntGaugeVec,
 }
 
 impl AutoscalerMetrics {
@@ -325,6 +328,16 @@ impl AutoscalerMetrics {
         )
         .unwrap();
 
+        // CPU workload scaling metrics
+        let pending_cpu_pods = IntGaugeVec::new(
+            Opts::new(
+                "autoscaler_pending_cpu_pods",
+                "Number of pending CPU-only pods (no GPU requests)",
+            ),
+            &["policy"],
+        )
+        .unwrap();
+
         // Register all metrics
         registry
             .register(Box::new(node_pools_total.clone()))
@@ -416,6 +429,9 @@ impl AutoscalerMetrics {
         registry
             .register(Box::new(warm_pool_scale_decisions_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(pending_cpu_pods.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -451,6 +467,7 @@ impl AutoscalerMetrics {
             warm_pool_target_nodes,
             warm_pool_cost_per_hour,
             warm_pool_scale_decisions_total,
+            pending_cpu_pods,
         }
     }
 
@@ -598,6 +615,13 @@ impl AutoscalerMetrics {
         self.warm_pool_scale_decisions_total
             .with_label_values(&[policy, decision])
             .inc();
+    }
+
+    /// Set the number of pending CPU-only pods
+    pub fn set_pending_cpu_pods(&self, policy: &str, count: u32) {
+        self.pending_cpu_pods
+            .with_label_values(&[policy])
+            .set(count as i64);
     }
 
     /// Export metrics in Prometheus text format
