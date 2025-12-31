@@ -113,6 +113,10 @@ where
         status.metrics = Some(metrics_snapshot.clone());
         status.last_evaluation_time = Some(Utc::now());
 
+        // Update Prometheus metrics for pending CPU pods
+        self.metrics
+            .set_pending_cpu_pods(&name, metrics_snapshot.pending_cpu_pods);
+
         // Get current node pools managed by this policy
         let node_pools = self.get_managed_node_pools(ns, &name).await?;
         let current_nodes = node_pools.len() as u32;
@@ -369,6 +373,59 @@ where
                     }
                 }
 
+                // Evaluate CPU workload scaling (uses GPU boxes for CPU-only pods)
+                if let Some(cpu_config) = &policy.spec.cpu_workload_scaling {
+                    if cpu_config.enabled
+                        && metrics_snapshot.pending_cpu_pods >= cpu_config.pending_pod_threshold
+                    {
+                        // Check cooldown period to prevent runaway scaling
+                        let cooldown_elapsed = status
+                            .last_scale_up_time
+                            .map(|t| {
+                                let elapsed = Utc::now().signed_duration_since(t);
+                                elapsed.num_seconds() >= cpu_config.cooldown_seconds as i64
+                            })
+                            .unwrap_or(true);
+
+                        if !cooldown_elapsed {
+                            debug!(
+                                policy = %name,
+                                pending_cpu_pods = metrics_snapshot.pending_cpu_pods,
+                                cooldown_seconds = cpu_config.cooldown_seconds,
+                                "CPU scale-up blocked: cooldown period not elapsed"
+                            );
+                        } else if provisioning_count > 0 {
+                            debug!(
+                                policy = %name,
+                                provisioning = provisioning_count,
+                                pending_cpu_pods = metrics_snapshot.pending_cpu_pods,
+                                "CPU scale-up blocked: waiting for nodes to finish provisioning"
+                            );
+                        } else {
+                            let cpu_scale_result = self
+                                .evaluate_and_apply_cpu_workload_scaling(
+                                    ns,
+                                    &name,
+                                    policy,
+                                    cpu_config,
+                                    &mut status,
+                                )
+                                .await;
+
+                            if let Err(e) = cpu_scale_result {
+                                warn!(policy = %name, error = %e, "CPU workload scaling failed");
+                                add_condition(
+                                    &mut status,
+                                    "CpuWorkloadScaling",
+                                    "False",
+                                    "ScalingFailed",
+                                    &format!("CPU workload scaling failed: {}", e),
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // Evaluate idle-time-based scale-down for non-warm-pool nodes
                 let scaled_down = self
                     .try_idle_scale_down(ns, &name, &policy.spec, &node_pools, &mut status)
@@ -583,6 +640,93 @@ where
         Ok(())
     }
 
+    /// Evaluate and apply CPU workload scaling.
+    /// Provisions GPU boxes for CPU-only pending pods when enabled.
+    async fn evaluate_and_apply_cpu_workload_scaling(
+        &self,
+        ns: &str,
+        policy_name: &str,
+        policy: &ScalingPolicy,
+        config: &crate::crd::CpuWorkloadScalingConfig,
+        status: &mut ScalingPolicyStatus,
+    ) -> Result<()> {
+        // Select an offering for CPU workloads
+        let offering = match self.select_offering_for_cpu_workload(config).await {
+            Some(o) => o,
+            None => {
+                warn!(policy = %policy_name, "No GPU offering available for CPU workloads");
+                add_condition(
+                    status,
+                    "CpuWorkloadScaling",
+                    "False",
+                    "NoOfferingAvailable",
+                    "No GPU offering available for CPU workloads",
+                );
+                return Ok(());
+            }
+        };
+
+        // Use optimistic locking to prevent race conditions
+        let resource_version = policy
+            .metadata
+            .resource_version
+            .as_deref()
+            .unwrap_or_default();
+
+        let acquired = self
+            .k8s
+            .try_increment_pending_scale_up(
+                ns,
+                policy_name,
+                resource_version,
+                status.pending_scale_up,
+                1,
+            )
+            .await?;
+
+        if !acquired {
+            debug!(
+                policy = %policy_name,
+                "CPU workload scale-up conflict, another reconcile is handling it"
+            );
+            return Ok(());
+        }
+
+        info!(
+            policy = %policy_name,
+            offering_id = %offering.id,
+            gpu_type = %offering.gpu_type,
+            "Scaling up for CPU workloads"
+        );
+
+        // Create a node using the selected offering
+        self.scale_up_with_offering(
+            ns,
+            policy_name,
+            policy,
+            1,
+            &offering.id,
+            false, // Not a warm pool node
+        )
+        .await?;
+
+        status.pending_scale_up = status.pending_scale_up.saturating_add(1);
+        status.last_scale_up_time = Some(Utc::now());
+
+        add_condition(
+            status,
+            "CpuWorkloadScaling",
+            "True",
+            "ScalingUp",
+            &format!("Scaling up with {} for CPU workloads", offering.gpu_type),
+        );
+
+        self.metrics
+            .record_scale_event(policy_name, "cpu_workload_scale_up", 1);
+
+        Ok(())
+    }
+
     async fn collect_metrics(
         &self,
         ns: &str,
@@ -592,7 +736,18 @@ where
         Vec<k8s_openapi::api::core::v1::Node>,
     )> {
         let pending_pods = self.k8s.list_pending_pods().await?;
-        let pending_gpu_pods: Vec<Pod> = pending_pods.into_iter().filter(requests_gpu).collect();
+
+        // Partition pending pods into GPU and CPU-only categories
+        let pending_gpu_pods: Vec<Pod> = pending_pods
+            .iter()
+            .filter(|p| requests_gpu(p))
+            .cloned()
+            .collect();
+        let pending_cpu_pods: Vec<Pod> = pending_pods
+            .iter()
+            .filter(|p| requests_cpu_only(p) && is_user_workload_namespace(p))
+            .cloned()
+            .collect();
 
         let nodes = self
             .k8s
@@ -621,6 +776,13 @@ where
         let filtered_gpu_pods =
             self.apply_pending_pod_filters(pending_gpu_pods, &nodes, &all_namespace_pods);
         let pending_gpu_count = filtered_gpu_pods.len() as u32;
+
+        // Apply age filter to CPU pods (reuse existing max_pending_age_seconds config)
+        let filtered_cpu_pods = filter_pods_by_age(
+            pending_cpu_pods,
+            self.pending_pod_filter.max_pending_age_seconds,
+        );
+        let pending_cpu_count = filtered_cpu_pods.len() as u32;
 
         let total_gpu_nodes = nodes.len() as u32;
         let healthy_gpu_nodes = nodes
@@ -653,6 +815,7 @@ where
 
         let metrics = MetricsSnapshot {
             pending_gpu_pods: pending_gpu_count,
+            pending_cpu_pods: pending_cpu_count,
             total_gpu_nodes,
             healthy_gpu_nodes,
             average_gpu_utilization: None, // Requires prometheus/DCGM integration
@@ -802,6 +965,25 @@ where
     ) -> Result<bool> {
         if !self.can_scale_down(status, &spec.scale_down) {
             return Ok(false);
+        }
+
+        // Block scale-down if CPU scaling is enabled and there are pending CPU pods
+        if let Some(cpu_config) = &spec.cpu_workload_scaling {
+            if cpu_config.enabled {
+                let pending_cpu_pods = status
+                    .metrics
+                    .as_ref()
+                    .map(|m| m.pending_cpu_pods)
+                    .unwrap_or(0);
+                if pending_cpu_pods > 0 {
+                    debug!(
+                        policy = %policy_name,
+                        pending_cpu_pods = pending_cpu_pods,
+                        "Scale-down blocked: pending CPU pods"
+                    );
+                    return Ok(false);
+                }
+            }
         }
 
         let pods_by_node = self.collect_pods_by_node(node_pools).await;
@@ -1357,6 +1539,41 @@ where
         }
     }
 
+    /// Select an offering for CPU-only workloads.
+    /// Prefers the specified GPU model if configured, otherwise selects the cheapest available.
+    async fn select_offering_for_cpu_workload(
+        &self,
+        config: &crate::crd::CpuWorkloadScalingConfig,
+    ) -> Option<crate::api::GpuOffering> {
+        let offerings = self.get_available_offerings().await;
+        if offerings.is_empty() {
+            return None;
+        }
+
+        // If preferred GPU model is specified, try to find it
+        if let Some(preferred) = &config.preferred_gpu_model {
+            if let Some(offering) = offerings
+                .iter()
+                .find(|o| o.gpu_type.eq_ignore_ascii_case(preferred))
+            {
+                return Some(offering.clone());
+            }
+            debug!(
+                preferred = %preferred,
+                "Preferred GPU model not available, falling back to cheapest"
+            );
+        }
+
+        // Fall back to cheapest available offering
+        offerings.into_iter().min_by(|a, b| {
+            let a_cost = a.hourly_rate_per_gpu * a.gpu_count as f64;
+            let b_cost = b.hourly_rate_per_gpu * b.gpu_count as f64;
+            a_cost
+                .partial_cmp(&b_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
     /// Count warm pool nodes from node pools (Ready only).
     fn count_warm_pool_nodes(node_pools: &[NodePool]) -> u32 {
         node_pools
@@ -1759,6 +1976,61 @@ fn requests_gpu(pod: &k8s_openapi::api::core::v1::Pod) -> bool {
     false
 }
 
+/// Returns true if the pod requests CPU but no GPU resources.
+/// Used to identify CPU-only workloads that need scaling.
+fn requests_cpu_only(pod: &k8s_openapi::api::core::v1::Pod) -> bool {
+    let spec = match &pod.spec {
+        Some(s) => s,
+        None => return false,
+    };
+
+    let mut has_cpu_request = false;
+    let mut has_gpu_request = false;
+
+    // Check regular containers
+    for container in &spec.containers {
+        if let Some(resources) = &container.resources {
+            if let Some(requests) = &resources.requests {
+                if requests.contains_key("nvidia.com/gpu") {
+                    has_gpu_request = true;
+                }
+                if requests.contains_key("cpu") {
+                    has_cpu_request = true;
+                }
+            }
+        }
+    }
+
+    // Check init containers
+    if let Some(init_containers) = &spec.init_containers {
+        for container in init_containers {
+            if let Some(resources) = &container.resources {
+                if let Some(requests) = &resources.requests {
+                    if requests.contains_key("nvidia.com/gpu") {
+                        has_gpu_request = true;
+                    }
+                    if requests.contains_key("cpu") {
+                        has_cpu_request = true;
+                    }
+                }
+            }
+        }
+    }
+
+    has_cpu_request && !has_gpu_request
+}
+
+/// Returns true if the pod is in a user workload namespace.
+/// User namespaces start with "u-". System namespaces are excluded
+/// to prevent autoscaler system pods from triggering CPU workload scaling.
+fn is_user_workload_namespace(pod: &k8s_openapi::api::core::v1::Pod) -> bool {
+    pod.metadata
+        .namespace
+        .as_ref()
+        .map(|ns| ns.starts_with("u-"))
+        .unwrap_or(false)
+}
+
 fn add_condition(
     status: &mut ScalingPolicyStatus,
     type_: &str,
@@ -1908,5 +2180,185 @@ mod tests {
             crate::api::SecureCloudClient,
             crate::offering_matcher::OfferingMatcher,
         >::is_active_gpu_pod(&pod));
+    }
+
+    fn make_cpu_only_pod() -> Pod {
+        let mut requests = BTreeMap::new();
+        requests.insert("cpu".to_string(), Quantity("2".to_string()));
+        requests.insert("memory".to_string(), Quantity("8Gi".to_string()));
+
+        Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn make_gpu_and_cpu_pod() -> Pod {
+        let mut requests = BTreeMap::new();
+        requests.insert("cpu".to_string(), Quantity("2".to_string()));
+        requests.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+
+        Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn make_no_resource_pod() -> Pod {
+        Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                phase: Some("Pending".to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn requests_cpu_only_with_cpu_request() {
+        let pod = make_cpu_only_pod();
+        assert!(requests_cpu_only(&pod));
+    }
+
+    #[test]
+    fn requests_cpu_only_with_gpu_request_returns_false() {
+        let pod = make_pod("Pending", true);
+        assert!(!requests_cpu_only(&pod));
+    }
+
+    #[test]
+    fn requests_cpu_only_with_both_cpu_and_gpu_returns_false() {
+        let pod = make_gpu_and_cpu_pod();
+        assert!(!requests_cpu_only(&pod));
+    }
+
+    #[test]
+    fn requests_cpu_only_with_no_resources_returns_false() {
+        let pod = make_no_resource_pod();
+        assert!(!requests_cpu_only(&pod));
+    }
+
+    #[test]
+    fn requests_cpu_only_with_init_container_gpu_returns_false() {
+        let mut requests = BTreeMap::new();
+        requests.insert("cpu".to_string(), Quantity("2".to_string()));
+
+        let mut init_requests = BTreeMap::new();
+        init_requests.insert("nvidia.com/gpu".to_string(), Quantity("1".to_string()));
+
+        let pod = Pod {
+            metadata: ObjectMeta::default(),
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                init_containers: Some(vec![Container {
+                    name: "init".to_string(),
+                    resources: Some(ResourceRequirements {
+                        requests: Some(init_requests),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            status: None,
+        };
+        assert!(!requests_cpu_only(&pod));
+    }
+
+    #[test]
+    fn cpu_workload_scaling_config_defaults() {
+        let config = crate::crd::CpuWorkloadScalingConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.pending_pod_threshold, 1);
+        assert!(config.preferred_gpu_model.is_none());
+    }
+
+    #[test]
+    fn metrics_snapshot_includes_cpu_pods() {
+        let metrics = MetricsSnapshot {
+            pending_gpu_pods: 5,
+            pending_cpu_pods: 3,
+            ..Default::default()
+        };
+        assert_eq!(metrics.pending_gpu_pods, 5);
+        assert_eq!(metrics.pending_cpu_pods, 3);
+    }
+
+    #[test]
+    fn is_user_workload_namespace_returns_true_for_user_ns() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                namespace: Some("u-github-12345".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(is_user_workload_namespace(&pod));
+    }
+
+    #[test]
+    fn is_user_workload_namespace_returns_false_for_system_ns() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                namespace: Some("basilica-autoscaler".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!is_user_workload_namespace(&pod));
+    }
+
+    #[test]
+    fn is_user_workload_namespace_returns_false_for_kube_system() {
+        let pod = Pod {
+            metadata: ObjectMeta {
+                namespace: Some("kube-system".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!is_user_workload_namespace(&pod));
     }
 }
