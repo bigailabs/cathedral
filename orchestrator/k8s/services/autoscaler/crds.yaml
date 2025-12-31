@@ -358,6 +358,11 @@ spec:
                 description: CUDA version
                 nullable: true
                 type: string
+              deletionStartedAt:
+                description: When deletion was first attempted (for timeout tracking). Set when NodePool enters Terminating phase or deletion is requested. Used to force cleanup after timeout to prevent stuck deletions.
+                format: date-time
+                nullable: true
+                type: string
               driverVersion:
                 description: Driver version
                 nullable: true
@@ -580,6 +585,31 @@ spec:
           spec:
             description: ScalingPolicy defines the autoscaling behavior for the cluster
             properties:
+              cpuWorkloadScaling:
+                description: CPU workload scaling configuration (uses GPU boxes for CPU-only workloads)
+                nullable: true
+                properties:
+                  cooldownSeconds:
+                    default: 300
+                    description: Cooldown after scale-up in seconds (prevents runaway scaling)
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  enabled:
+                    default: false
+                    description: 'Enable CPU-aware scaling (default: false)'
+                    type: boolean
+                  pendingPodThreshold:
+                    default: 1
+                    description: Number of pending CPU-only pods to trigger scale-up
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  preferredGpuModel:
+                    description: Preferred GPU model to provision for CPU workloads. Falls back to cheapest available offering if not specified.
+                    nullable: true
+                    type: string
+                type: object
               enabled:
                 default: true
                 description: Enable/disable autoscaling
@@ -1018,6 +1048,12 @@ spec:
                   idleNodes:
                     default: 0
                     description: Number of idle nodes
+                    format: uint32
+                    minimum: 0.0
+                    type: integer
+                  pendingCpuPods:
+                    default: 0
+                    description: Number of pending CPU-only pods (no GPU requests)
                     format: uint32
                     minimum: 0.0
                     type: integer
