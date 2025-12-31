@@ -8,7 +8,7 @@ pub use node_pool::{
     WireGuardStatus, FINALIZER, WARM_POOL_LABEL,
 };
 pub use scaling_policy::{
-    ImagePrepullConfig, MetricsConfig, MetricsSnapshot, NodeTemplate, PrepullImage,
-    ScaleDownConfig, ScaleUpConfig, ScalingPolicy, ScalingPolicyCondition, ScalingPolicySpec,
-    ScalingPolicyStatus, SecureCloudTemplate, WarmPoolConfig, WarmPoolStatus,
+    CpuWorkloadScalingConfig, ImagePrepullConfig, MetricsConfig, MetricsSnapshot, NodeTemplate,
+    PrepullImage, ScaleDownConfig, ScaleUpConfig, ScalingPolicy, ScalingPolicyCondition,
+    ScalingPolicySpec, ScalingPolicyStatus, SecureCloudTemplate, WarmPoolConfig, WarmPoolStatus,
 };
