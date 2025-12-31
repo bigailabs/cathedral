@@ -19,8 +19,7 @@ pub struct HydraHostProvider {
 
 impl HydraHostProvider {
     pub fn new(api_key: String) -> Result<Self> {
-        let client =
-            HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS).build("hydrahost")?;
+        let client = HttpClientBuilder::new().build("hydrahost")?;
 
         Ok(Self {
             client,
