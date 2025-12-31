@@ -5,7 +5,7 @@ use crate::models::{
     Deployment, DeploymentStatus, GpuOffering, Provider as ProviderEnum, ProviderHealth,
     ProviderSshKey, SshKey,
 };
-use crate::providers::hyperstack::HyperstackProvider;
+use crate::providers::hyperstack::{HyperstackProvider, RateLimitConfig};
 use crate::providers::{DeployRequest, Provider, ProviderClient};
 use basilica_common::types::GpuCategory;
 use chrono::{Duration, Utc};
@@ -77,11 +77,25 @@ impl AggregatorService {
         // Initialize Hyperstack provider (optional - requires HyperstackConfig with webhook fields)
         if let Some(ref hyperstack_config) = config.providers.hyperstack {
             let callback_url = hyperstack_config.callback_url();
-            let provider =
-                HyperstackProvider::new(hyperstack_config.api_key.clone(), Some(callback_url))?;
+
+            // Build rate limit config from Hyperstack config
+            let rate_limit_config = RateLimitConfig {
+                rps: hyperstack_config.rate_limit_rps,
+                token_timeout: std::time::Duration::from_secs(hyperstack_config.token_timeout_secs),
+                retry_delay: std::time::Duration::from_millis(hyperstack_config.retry_delay_ms),
+            };
+
+            let provider = HyperstackProvider::with_rate_limit_config(
+                hyperstack_config.api_key.clone(),
+                Some(callback_url),
+                rate_limit_config,
+            )?;
 
             providers.push(ProviderClient::Hyperstack(provider));
-            tracing::info!("Hyperstack provider initialized with webhook callbacks");
+            tracing::info!(
+                "Hyperstack provider initialized with webhook callbacks (rate limit: {} rps)",
+                hyperstack_config.rate_limit_rps
+            );
         }
 
         if providers.is_empty() {

@@ -1,6 +1,7 @@
 use super::normalize::{
     normalize_gpu_type, normalize_region, parse_gpu_memory, parse_interconnect,
 };
+use super::rate_limiter::RateLimiter;
 use super::types::{
     CreateKeypairRequest, CreateKeypairResponse, DeployVmRequest, DeployVmResponse,
     FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, SecurityRuleRequest,
@@ -15,6 +16,29 @@ use chrono::Utc;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Configuration for the Hyperstack rate limiter
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Requests per second limit
+    pub rps: u32,
+    /// Timeout for mutations waiting for a token
+    pub token_timeout: Duration,
+    /// Delay between 429 retries
+    pub retry_delay: Duration,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            rps: 5,
+            token_timeout: Duration::from_secs(5),
+            retry_delay: Duration::from_millis(1000),
+        }
+    }
+}
 
 pub struct HyperstackProvider {
     client: Client,
@@ -22,17 +46,60 @@ pub struct HyperstackProvider {
     base_url: String,
     /// Pre-built callback URL with token for webhook notifications
     callback_url: Option<String>,
+    /// Rate limiter for Hyperstack API calls
+    rate_limiter: Arc<RateLimiter>,
+    /// Rate limit configuration
+    rate_limit_config: RateLimitConfig,
 }
 
 impl HyperstackProvider {
     pub fn new(api_key: String, callback_url: Option<String>) -> Result<Self> {
+        Self::with_rate_limit_config(api_key, callback_url, RateLimitConfig::default())
+    }
+
+    pub fn with_rate_limit_config(
+        api_key: String,
+        callback_url: Option<String>,
+        rate_limit_config: RateLimitConfig,
+    ) -> Result<Self> {
         let client = HttpClientBuilder::new().build("hyperstack")?;
+
+        let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config.rps));
 
         Ok(Self {
             client,
             api_key,
             base_url: crate::providers::HYPERSTACK_API_BASE_URL.to_string(),
             callback_url,
+            rate_limiter,
+            rate_limit_config,
+        })
+    }
+
+    /// Acquire a rate limit token for a mutation operation (5s timeout by default).
+    async fn acquire_mutation_token(&self) -> Result<()> {
+        let timeout = Some(self.rate_limit_config.token_timeout);
+        self.rate_limiter.acquire(timeout).await.map_err(|_| {
+            tracing::warn!(
+                "Rate limit timeout: failed to acquire token within {:?}",
+                self.rate_limit_config.token_timeout
+            );
+            AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: "Service temporarily unavailable".to_string(),
+            }
+        })
+    }
+
+    /// Acquire a rate limit token for a read operation (waits indefinitely).
+    async fn acquire_read_token(&self) -> Result<()> {
+        // Reads wait indefinitely for a token
+        self.rate_limiter.acquire(None).await.map_err(|_| {
+            // This should never happen with None timeout, but handle it anyway
+            AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: "Rate limit error".to_string(),
+            }
         })
     }
 
@@ -40,6 +107,9 @@ impl HyperstackProvider {
         let url = format!("{}/core/flavors", self.base_url);
 
         tracing::debug!("Fetching flavors from Hyperstack: {}", url);
+
+        // Acquire rate limit token (read operation - waits indefinitely)
+        self.acquire_read_token().await?;
 
         let response = self
             .client
@@ -70,6 +140,9 @@ impl HyperstackProvider {
         let url = format!("{}/pricebook", self.base_url);
 
         tracing::trace!("Fetching pricebook from Hyperstack: {}", url);
+
+        // Acquire rate limit token (read operation - waits indefinitely)
+        self.acquire_read_token().await?;
 
         let response = self
             .client
@@ -185,50 +258,80 @@ impl HyperstackProvider {
             environment_name
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .header("api_key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to create keypair: {}", e),
-            })?;
+        // Mutation operation with 429 retry loop
+        let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
-        let response = handle_error_response(response, "hyperstack").await?;
+        loop {
+            // Acquire rate limit token (mutation - has timeout)
+            self.acquire_mutation_token().await?;
 
-        let create_response: CreateKeypairResponse =
-            response
-                .json()
+            let response = self
+                .client
+                .post(&url)
+                .header("api_key", &self.api_key)
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
                 .await
                 .map_err(|e| AggregatorError::Provider {
                     provider: "hyperstack".to_string(),
-                    message: format!("Failed to parse keypair response: {}", e),
+                    message: format!("Failed to create keypair: {}", e),
                 })?;
 
-        if !create_response.status {
-            tracing::error!(
-                "Hyperstack keypair creation failed: {}",
-                create_response.message
+            // Check for 429 before handle_error_response
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                // Refund the token since Hyperstack rejected us
+                self.rate_limiter.refund().await;
+
+                tracing::warn!(
+                    "Hyperstack rate limited (429), retrying after {:?}",
+                    self.rate_limit_config.retry_delay
+                );
+
+                // Check if we've exceeded the deadline
+                if std::time::Instant::now() + self.rate_limit_config.retry_delay > deadline {
+                    return Err(AggregatorError::Provider {
+                        provider: "hyperstack".to_string(),
+                        message: "Service temporarily unavailable".to_string(),
+                    });
+                }
+
+                tokio::time::sleep(self.rate_limit_config.retry_delay).await;
+                continue;
+            }
+
+            let response = handle_error_response(response, "hyperstack").await?;
+
+            let create_response: CreateKeypairResponse =
+                response
+                    .json()
+                    .await
+                    .map_err(|e| AggregatorError::Provider {
+                        provider: "hyperstack".to_string(),
+                        message: format!("Failed to parse keypair response: {}", e),
+                    })?;
+
+            if !create_response.status {
+                tracing::error!(
+                    "Hyperstack keypair creation failed: {}",
+                    create_response.message
+                );
+                return Err(AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to create keypair: {}", create_response.message),
+                });
+            }
+
+            tracing::info!(
+                "✓ Successfully created SSH keypair in Hyperstack: id={}, name='{}', environment='{}', fingerprint='{}'",
+                create_response.keypair.id,
+                create_response.keypair.name,
+                environment_name,
+                create_response.keypair.fingerprint
             );
-            return Err(AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to create keypair: {}", create_response.message),
-            });
+
+            return Ok(create_response.keypair);
         }
-
-        tracing::info!(
-            "✓ Successfully created SSH keypair in Hyperstack: id={}, name='{}', environment='{}', fingerprint='{}'",
-            create_response.keypair.id,
-            create_response.keypair.name,
-            environment_name,
-            create_response.keypair.fingerprint
-        );
-
-        Ok(create_response.keypair)
     }
 
     /// Delete an SSH keypair
@@ -237,22 +340,49 @@ impl HyperstackProvider {
 
         tracing::debug!("Deleting SSH keypair: {}", keypair_id);
 
-        let response = self
-            .client
-            .delete(&url)
-            .header("api_key", &self.api_key)
-            .send()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to delete keypair: {}", e),
-            })?;
+        // Mutation operation with 429 retry loop
+        let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
-        handle_error_response(response, "hyperstack").await?;
+        loop {
+            // Acquire rate limit token (mutation - has timeout)
+            self.acquire_mutation_token().await?;
 
-        tracing::info!("Successfully deleted SSH keypair: {}", keypair_id);
+            let response = self
+                .client
+                .delete(&url)
+                .header("api_key", &self.api_key)
+                .send()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to delete keypair: {}", e),
+                })?;
 
-        Ok(())
+            // Check for 429 before handle_error_response
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.rate_limiter.refund().await;
+                tracing::warn!(
+                    "Hyperstack rate limited (429), retrying after {:?}",
+                    self.rate_limit_config.retry_delay
+                );
+
+                if std::time::Instant::now() + self.rate_limit_config.retry_delay > deadline {
+                    return Err(AggregatorError::Provider {
+                        provider: "hyperstack".to_string(),
+                        message: "Service temporarily unavailable".to_string(),
+                    });
+                }
+
+                tokio::time::sleep(self.rate_limit_config.retry_delay).await;
+                continue;
+            }
+
+            handle_error_response(response, "hyperstack").await?;
+
+            tracing::info!("Successfully deleted SSH keypair: {}", keypair_id);
+
+            return Ok(());
+        }
     }
 
     // ========================================================================
@@ -269,57 +399,87 @@ impl HyperstackProvider {
             request.flavor_name
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .header("api_key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to deploy VM: {}", e),
-            })?;
+        // Mutation operation with 429 retry loop
+        let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
-        let response = handle_error_response(response, "hyperstack").await?;
+        loop {
+            // Acquire rate limit token (mutation - has timeout)
+            self.acquire_mutation_token().await?;
 
-        let deploy_response: DeployVmResponse =
-            response
-                .json()
+            let response = self
+                .client
+                .post(&url)
+                .header("api_key", &self.api_key)
+                .header("Content-Type", "application/json")
+                .json(&request)
+                .send()
                 .await
                 .map_err(|e| AggregatorError::Provider {
                     provider: "hyperstack".to_string(),
-                    message: format!("Failed to parse deploy VM response: {}", e),
+                    message: format!("Failed to deploy VM: {}", e),
                 })?;
 
-        if !deploy_response.status {
-            return Err(AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to deploy VM: {}", deploy_response.message),
-            });
+            // Check for 429 before handle_error_response
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.rate_limiter.refund().await;
+                tracing::warn!(
+                    "Hyperstack rate limited (429), retrying after {:?}",
+                    self.rate_limit_config.retry_delay
+                );
+
+                if std::time::Instant::now() + self.rate_limit_config.retry_delay > deadline {
+                    return Err(AggregatorError::Provider {
+                        provider: "hyperstack".to_string(),
+                        message: "Service temporarily unavailable".to_string(),
+                    });
+                }
+
+                tokio::time::sleep(self.rate_limit_config.retry_delay).await;
+                continue;
+            }
+
+            let response = handle_error_response(response, "hyperstack").await?;
+
+            let deploy_response: DeployVmResponse =
+                response
+                    .json()
+                    .await
+                    .map_err(|e| AggregatorError::Provider {
+                        provider: "hyperstack".to_string(),
+                        message: format!("Failed to parse deploy VM response: {}", e),
+                    })?;
+
+            if !deploy_response.status {
+                return Err(AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to deploy VM: {}", deploy_response.message),
+                });
+            }
+
+            let instance = deploy_response
+                .instances
+                .into_iter()
+                .next()
+                .ok_or_else(|| AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: "No instance in deploy response".to_string(),
+                })?;
+
+            // Convert DeployVmInstance to VirtualMachine
+            let vm: VirtualMachine = instance.into();
+
+            tracing::info!("Successfully deployed VM: {}", vm.id);
+
+            return Ok(vm);
         }
-
-        let instance = deploy_response
-            .instances
-            .into_iter()
-            .next()
-            .ok_or_else(|| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: "No instance in deploy response".to_string(),
-            })?;
-
-        // Convert DeployVmInstance to VirtualMachine
-        let vm: VirtualMachine = instance.into();
-
-        tracing::info!("Successfully deployed VM: {}", vm.id);
-
-        Ok(vm)
     }
 
     /// Get virtual machine details by ID
     pub async fn get_vm(&self, vm_id: u32) -> Result<VirtualMachine> {
         let url = format!("{}/core/virtual-machines/{}", self.base_url, vm_id);
+
+        // Acquire rate limit token (read operation - waits indefinitely)
+        self.acquire_read_token().await?;
 
         let response = self
             .client
@@ -371,24 +531,51 @@ impl HyperstackProvider {
 
         tracing::debug!("Deleting VM: {}", vm_id);
 
-        let response = self
-            .client
-            .delete(&url)
-            .header("api_key", &self.api_key)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .send()
-            .await
-            .map_err(|e| AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: format!("Failed to delete VM: {}", e),
-            })?;
+        // Mutation operation with 429 retry loop
+        let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
-        handle_error_response(response, "hyperstack").await?;
+        loop {
+            // Acquire rate limit token (mutation - has timeout)
+            self.acquire_mutation_token().await?;
 
-        tracing::info!("Successfully deleted VM: {}", vm_id);
+            let response = self
+                .client
+                .delete(&url)
+                .header("api_key", &self.api_key)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .send()
+                .await
+                .map_err(|e| AggregatorError::Provider {
+                    provider: "hyperstack".to_string(),
+                    message: format!("Failed to delete VM: {}", e),
+                })?;
 
-        Ok(())
+            // Check for 429 before handle_error_response
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                self.rate_limiter.refund().await;
+                tracing::warn!(
+                    "Hyperstack rate limited (429), retrying after {:?}",
+                    self.rate_limit_config.retry_delay
+                );
+
+                if std::time::Instant::now() + self.rate_limit_config.retry_delay > deadline {
+                    return Err(AggregatorError::Provider {
+                        provider: "hyperstack".to_string(),
+                        message: "Service temporarily unavailable".to_string(),
+                    });
+                }
+
+                tokio::time::sleep(self.rate_limit_config.retry_delay).await;
+                continue;
+            }
+
+            handle_error_response(response, "hyperstack").await?;
+
+            tracing::info!("Successfully deleted VM: {}", vm_id);
+
+            return Ok(());
+        }
     }
 }
 
