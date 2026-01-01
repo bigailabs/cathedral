@@ -160,14 +160,14 @@ impl Default for AggregatorConfig {
 /// GPU providers configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AggregatorProvidersConfig {
-    #[serde(default)]
-    pub datacrunch: basilica_aggregator::config::ProviderConfig,
+    // #[serde(default)]
+    // pub datacrunch: basilica_aggregator::config::ProviderConfig,
     #[serde(default)]
     pub hyperstack: Option<basilica_aggregator::config::HyperstackConfig>,
-    #[serde(default)]
-    pub lambda: basilica_aggregator::config::ProviderConfig,
-    #[serde(default)]
-    pub hydrahost: basilica_aggregator::config::ProviderConfig,
+    // #[serde(default)]
+    // pub lambda: basilica_aggregator::config::ProviderConfig,
+    // #[serde(default)]
+    // pub hydrahost: basilica_aggregator::config::ProviderConfig,
 }
 
 /// Pricing configuration for marketplace markups
@@ -348,10 +348,7 @@ impl Config {
                 ttl_seconds: self.aggregator.ttl_seconds,
             },
             providers: basilica_aggregator::config::ProvidersConfig {
-                datacrunch: self.aggregator.providers.datacrunch.clone(),
                 hyperstack: self.aggregator.providers.hyperstack.clone(),
-                lambda: self.aggregator.providers.lambda.clone(),
-                hydrahost: self.aggregator.providers.hydrahost.clone(),
             },
             database: basilica_aggregator::config::DatabaseConfig {
                 path: self.database.url.clone(), // Uses PostgreSQL URL from API config

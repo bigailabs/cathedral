@@ -40,14 +40,14 @@ fn default_ttl() -> u64 {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProvidersConfig {
-    #[serde(default)]
-    pub datacrunch: ProviderConfig,
+    // #[serde(default)]
+    // pub datacrunch: ProviderConfig,
     #[serde(default)]
     pub hyperstack: Option<HyperstackConfig>,
-    #[serde(default)]
-    pub lambda: ProviderConfig,
-    #[serde(default)]
-    pub hydrahost: ProviderConfig,
+    // #[serde(default)]
+    // pub lambda: ProviderConfig,
+    // #[serde(default)]
+    // pub hydrahost: ProviderConfig,
 }
 
 /// Hyperstack-specific configuration with required webhook fields
@@ -231,14 +231,11 @@ impl Config {
     /// Validate configuration
     pub fn validate(&self) -> Result<()> {
         // Check at least one provider is enabled (has auth configured)
-        let any_enabled = self.providers.datacrunch.is_enabled()
-            || self.providers.hyperstack.is_some()
-            || self.providers.lambda.is_enabled()
-            || self.providers.hydrahost.is_enabled();
+        let any_enabled = self.providers.hyperstack.is_some();
 
         if !any_enabled {
             return Err(AggregatorError::Config(
-                "At least one provider must be configured (has auth)".to_string(),
+                "Hyperstack provider must be configured".to_string(),
             ));
         }
 
@@ -288,12 +285,7 @@ impl Config {
             cache: CacheConfig {
                 ttl_seconds: default_ttl(),
             },
-            providers: ProvidersConfig {
-                datacrunch: ProviderConfig::default(),
-                hyperstack: None,
-                lambda: ProviderConfig::default(),
-                hydrahost: ProviderConfig::default(),
-            },
+            providers: ProvidersConfig { hyperstack: None },
             database: DatabaseConfig {
                 path: default_db_path(),
             },
@@ -320,12 +312,7 @@ mod tests {
                 port: 8080,
             },
             cache: CacheConfig { ttl_seconds: 45 },
-            providers: ProvidersConfig {
-                datacrunch: ProviderConfig::default(),
-                hyperstack: None,
-                lambda: ProviderConfig::default(),
-                hydrahost: ProviderConfig::default(),
-            },
+            providers: ProvidersConfig { hyperstack: None },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
             },
@@ -333,83 +320,6 @@ mod tests {
         };
 
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validation_missing_credentials() {
-        let config = Config {
-            server: ServerConfig {
-                host: "0.0.0.0".to_string(),
-                port: 8080,
-            },
-            cache: CacheConfig { ttl_seconds: 45 },
-            providers: ProvidersConfig {
-                datacrunch: ProviderConfig::default(),
-                hyperstack: None,
-                lambda: ProviderConfig::default(),
-                hydrahost: ProviderConfig::default(),
-            },
-            database: DatabaseConfig {
-                path: "test.db".to_string(),
-            },
-            vip: None,
-        };
-
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_validation_valid_oauth() {
-        let config = Config {
-            server: ServerConfig {
-                host: "0.0.0.0".to_string(),
-                port: 8080,
-            },
-            cache: CacheConfig { ttl_seconds: 45 },
-            providers: ProvidersConfig {
-                datacrunch: ProviderConfig {
-                    client_id: Some("test-client-id".to_string()),
-                    client_secret: Some("test-client-secret".to_string()),
-                    api_key: None,
-                },
-                hyperstack: None,
-                lambda: ProviderConfig::default(),
-                hydrahost: ProviderConfig::default(),
-            },
-            database: DatabaseConfig {
-                path: "test.db".to_string(),
-            },
-            vip: None,
-        };
-
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_config_validation_valid_api_key() {
-        let config = Config {
-            server: ServerConfig {
-                host: "0.0.0.0".to_string(),
-                port: 8080,
-            },
-            cache: CacheConfig { ttl_seconds: 45 },
-            providers: ProvidersConfig {
-                datacrunch: ProviderConfig::default(),
-                hyperstack: None,
-                lambda: ProviderConfig {
-                    client_id: None,
-                    client_secret: None,
-                    api_key: Some("test-api-key".to_string()),
-                },
-                hydrahost: ProviderConfig::default(),
-            },
-            database: DatabaseConfig {
-                path: "test.db".to_string(),
-            },
-            vip: None,
-        };
-
-        assert!(config.validate().is_ok());
     }
 
     #[test]
@@ -421,14 +331,11 @@ mod tests {
             },
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
-                datacrunch: ProviderConfig::default(),
                 hyperstack: Some(HyperstackConfig {
                     api_key: "test-api-key".to_string(),
                     webhook_secret: "test-webhook-secret".to_string(),
                     callback_base_url: "https://api.example.com".to_string(),
                 }),
-                lambda: ProviderConfig::default(),
-                hydrahost: ProviderConfig::default(),
             },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
@@ -462,14 +369,11 @@ mod tests {
             },
             cache: CacheConfig { ttl_seconds: 45 },
             providers: ProvidersConfig {
-                datacrunch: ProviderConfig::default(),
                 hyperstack: Some(HyperstackConfig {
                     api_key: "test-api-key".to_string(),
                     webhook_secret: "bad&token".to_string(),
                     callback_base_url: "https://api.example.com".to_string(),
                 }),
-                lambda: ProviderConfig::default(),
-                hydrahost: ProviderConfig::default(),
             },
             database: DatabaseConfig {
                 path: "test.db".to_string(),
@@ -481,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_deserialization_oauth() {
+    fn test_config_deserialization_hyperstack() {
         let toml = r#"
 [server]
 host = "0.0.0.0"
@@ -493,51 +397,17 @@ ttl_seconds = 45
 [database]
 path = "test.db"
 
-[providers.datacrunch]
-api_base_url = "https://api.datacrunch.io/v1"
-client_id = "test-id"
-client_secret = "test-secret"
+[providers.hyperstack]
+api_key = "test-api-key"
+webhook_secret = "test-webhook-secret"
+callback_base_url = "https://api.example.com"
         "#;
 
         let config: Config = toml::from_str(toml).unwrap();
-        assert!(config.providers.datacrunch.is_enabled());
-        match config.providers.datacrunch.get_auth() {
-            Some(AuthConfig::OAuth {
-                client_id,
-                client_secret,
-            }) => {
-                assert_eq!(client_id, "test-id");
-                assert_eq!(client_secret, "test-secret");
-            }
-            _ => panic!("Expected OAuth auth"),
-        }
-    }
-
-    #[test]
-    fn test_config_deserialization_api_key() {
-        let toml = r#"
-[server]
-host = "0.0.0.0"
-port = 8080
-
-[cache]
-ttl_seconds = 45
-
-[database]
-path = "test.db"
-
-[providers.lambda]
-api_base_url = "https://cloud.lambdalabs.com/api/v1"
-api_key = "test-key"
-        "#;
-
-        let config: Config = toml::from_str(toml).unwrap();
-        assert!(config.providers.lambda.is_enabled());
-        match config.providers.lambda.get_auth() {
-            Some(AuthConfig::ApiKey { api_key }) => {
-                assert_eq!(api_key, "test-key");
-            }
-            _ => panic!("Expected ApiKey auth"),
-        }
+        assert!(config.providers.hyperstack.is_some());
+        let hyperstack = config.providers.hyperstack.unwrap();
+        assert_eq!(hyperstack.api_key, "test-api-key");
+        assert_eq!(hyperstack.webhook_secret, "test-webhook-secret");
+        assert_eq!(hyperstack.callback_base_url, "https://api.example.com");
     }
 }
