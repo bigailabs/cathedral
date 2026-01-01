@@ -560,6 +560,74 @@ async fn process_secure_cloud_health_check(
     }
 }
 
+/// Cleanup deleted Hyperstack rentals that were missed before webhook-based finalization.
+async fn cleanup_deleted_hyperstack_rental(
+    rental_id: &str,
+    db: &PgPool,
+    billing_client: Option<&BillingClient>,
+) {
+    tracing::info!(
+        rental_id = %rental_id,
+        "Secure Cloud health check: finalizing and archiving deleted Hyperstack rental"
+    );
+
+    if let Some(billing_client) = billing_client {
+        use basilica_protocol::billing::{FinalizeRentalRequest, RentalStatus};
+        use prost_types::Timestamp;
+
+        let now = chrono::Utc::now();
+        let end_timestamp = Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        };
+
+        let finalize_request = FinalizeRentalRequest {
+            rental_id: rental_id.to_string(),
+            end_time: Some(end_timestamp),
+            termination_reason: "vm_deleted_externally".to_string(),
+            target_status: RentalStatus::Stopped.into(),
+        };
+
+        if let Err(e) = billing_client.finalize_rental(finalize_request).await {
+            tracing::error!(
+                rental_id = %rental_id,
+                error = %e,
+                "Failed to finalize billing for deleted Hyperstack rental"
+            );
+        } else {
+            tracing::info!(
+                rental_id = %rental_id,
+                "Finalized billing for deleted Hyperstack rental"
+            );
+        }
+    } else {
+        tracing::warn!(
+            rental_id = %rental_id,
+            "Billing client unavailable; skipping finalize for deleted Hyperstack rental"
+        );
+    }
+
+    if let Err(e) = crate::api::extractors::ownership::archive_secure_cloud_rental(
+        db,
+        rental_id,
+        Some("Health check: Hyperstack rental already deleted"),
+        Some("deleted"),
+    )
+    .await
+    {
+        tracing::error!(
+            rental_id = %rental_id,
+            error = %e,
+            "Failed to archive deleted Hyperstack rental"
+        );
+    } else {
+        tracing::info!(
+            rental_id = %rental_id,
+            "Archived deleted Hyperstack rental"
+        );
+    }
+}
+
 impl Server {
     /// Create a new server instance
     pub async fn new(config: Config) -> Result<Self> {
@@ -1141,10 +1209,11 @@ impl Server {
                 interval.tick().await;
 
                 // Query all active secure cloud rentals from the database (excluding VIP rentals
-                // which don't need health checks - they're manually managed and assumed always up,
-                // and excluding Hyperstack rentals which use webhook callbacks instead of polling)
-                match sqlx::query_as::<_, (String,)>(
-                    "SELECT id FROM secure_cloud_rentals WHERE is_vip = FALSE AND provider != 'hyperstack'",
+                // which don't need health checks - they're manually managed and assumed always up),
+                // and include Hyperstack rentals only if already marked deleted for cleanup.
+                match sqlx::query_as::<_, (String, String, String)>(
+                    "SELECT id, provider, status FROM secure_cloud_rentals \
+                     WHERE is_vip = FALSE AND (provider != 'hyperstack' OR status = 'deleted')",
                 )
                 .fetch_all(&health_check_db)
                 .await
@@ -1153,6 +1222,19 @@ impl Server {
                         // Process rentals sequentially to avoid overwhelming provider APIs
                         for record in &rental_records {
                             let rental_id = &record.0;
+                            let provider = &record.1;
+                            let status = &record.2;
+
+                            if provider == "hyperstack" && status == "deleted" {
+                                cleanup_deleted_hyperstack_rental(
+                                    rental_id,
+                                    &health_check_db,
+                                    health_check_billing_client.as_ref().map(|c| c.as_ref()),
+                                )
+                                .await;
+                                continue;
+                            }
+
                             process_secure_cloud_health_check(
                                 rental_id,
                                 &health_check_aggregator_service,
