@@ -7,7 +7,7 @@ use super::types::MinerInfo;
 use crate::metrics::ValidatorMetrics;
 use anyhow::Result;
 use basilica_common::identity::{Hotkey, MinerUid};
-use bittensor::{AccountId, AxonInfo, Service as BittensorService};
+use bittensor::{AxonInfo, Service as BittensorService};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 

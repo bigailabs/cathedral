@@ -197,7 +197,9 @@ async fn fetch_and_filter_community_cloud(
 }
 
 /// Helper function to display secure cloud GPUs
-fn display_secure_cloud_table(gpus: &[basilica_common::types::GpuOffering]) -> Result<(), CliError> {
+fn display_secure_cloud_table(
+    gpus: &[basilica_common::types::GpuOffering],
+) -> Result<(), CliError> {
     if gpus.is_empty() {
         print_info("No GPUs available matching your criteria");
         return Ok(());
