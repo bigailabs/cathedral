@@ -8,7 +8,7 @@ REGISTRY="${REGISTRY:-ghcr.io/one-covenant}"
 TAG="${TAG:-latest}"
 PLATFORM="${PLATFORM:-linux/amd64}"
 
-echo "Building Basilica Docker images"
+echo "Building Basilica Public Docker images"
 echo "Registry: $REGISTRY"
 echo "Tag: $TAG"
 echo "Platform: $PLATFORM"
@@ -16,16 +16,11 @@ echo "----------------------------------------"
 
 cd "$PROJECT_ROOT"
 
-# Components to build
+# Public components only
 COMPONENTS=(
-  "operator"
-  "api"
   "miner"
   "validator"
-  "billing"
-  "payments"
   "cli"
-  "storage-daemon"
 )
 
 FAILED=()
@@ -76,13 +71,11 @@ if [ ${#FAILED[@]} -gt 0 ]; then
   exit 1
 else
   echo ""
-  echo "🎉 All images built successfully!"
+  echo "🎉 All public images built successfully!"
   echo ""
   echo "To push images to registry:"
-  echo "  ./scripts/push-all-images.sh"
-  echo ""
-  echo "Or push individually:"
   for comp in "${SUCCEEDED[@]}"; do
     echo "  docker push ${REGISTRY}/basilica-${comp}:${TAG}"
   done
 fi
+
