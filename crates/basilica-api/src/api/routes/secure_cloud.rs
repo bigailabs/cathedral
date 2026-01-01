@@ -608,6 +608,7 @@ pub async fn start_secure_cloud_rental(
 /// Returns Ok(total_cost) on success, where total_cost is the accumulated rental cost.
 /// Returns an error if the deployment could not be deleted.
 /// Note: Billing and archiving failures are logged but don't cause the function to fail.
+#[tracing::instrument(skip_all, fields(rental_id = %rental_id, cloud_type = "secure"))]
 pub async fn stop_secure_cloud_rental_internal(
     aggregator_service: &basilica_aggregator::service::AggregatorService,
     billing_client: Option<&basilica_billing::BillingClient>,

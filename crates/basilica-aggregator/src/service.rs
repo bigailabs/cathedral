@@ -119,10 +119,10 @@ impl AggregatorService {
             if self.should_fetch(provider_id).await? {
                 match self.fetch_and_cache(provider).await {
                     Ok(offerings) => {
-                        tracing::info!(
-                            "Refreshed {} offerings from {}",
-                            offerings.len(),
-                            provider_id
+                        tracing::debug!(
+                            provider = %provider_id,
+                            count = offerings.len(),
+                            "Refreshed offerings"
                         );
                         total_count += offerings.len();
                     }
@@ -428,8 +428,8 @@ impl AggregatorService {
             // Extract key_name from multi-environment metadata
             let key_name = if let Some(metadata) = &provider_ssh_key.metadata {
                 tracing::debug!(
-                    "Provider SSH key metadata: {}",
-                    serde_json::to_string_pretty(metadata).unwrap_or_default()
+                    metadata = %serde_json::to_string(metadata).unwrap_or_default(),
+                    "Provider SSH key metadata"
                 );
 
                 metadata

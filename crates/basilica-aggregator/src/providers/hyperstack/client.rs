@@ -145,7 +145,7 @@ impl HyperstackProvider {
             );
         }
 
-        tracing::info!(
+        tracing::debug!(
             "Loaded {} price entries from Hyperstack pricebook",
             price_map.len()
         );
@@ -508,7 +508,7 @@ impl Provider for HyperstackProvider {
             }
         }
 
-        tracing::info!("Fetched {} offerings from Hyperstack", offerings.len());
+        tracing::debug!("Fetched {} offerings from Hyperstack", offerings.len());
         Ok(offerings)
     }
 
