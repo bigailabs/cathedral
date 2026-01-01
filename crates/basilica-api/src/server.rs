@@ -1017,7 +1017,7 @@ impl Server {
             tracing::info!("Starting initial GPU offerings refresh...");
             match refresh_aggregator_service.refresh_all_providers().await {
                 Ok(count) => {
-                    tracing::info!("Initial GPU offerings refresh: fetched {} offerings", count);
+                    tracing::debug!(count, "Initial GPU offerings refresh completed");
                 }
                 Err(e) => {
                     tracing::error!("Failed initial GPU offerings refresh: {}", e);
@@ -1329,6 +1329,19 @@ impl Server {
         tracing::info!(
             "Started node token cleanup task (interval: {} seconds)",
             cleanup_interval.as_secs()
+        );
+
+        tracing::info!(
+            k8s = state.k8s.is_some(),
+            payments = state.payments_client.is_some(),
+            billing = state.billing_client.is_some(),
+            dns = state.dns_provider.is_some(),
+            vip = config
+                .aggregator
+                .vip
+                .as_ref()
+                .is_some_and(|v| v.is_configured()),
+            "Startup complete"
         );
 
         // Build the application router

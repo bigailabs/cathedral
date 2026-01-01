@@ -23,6 +23,7 @@ pub struct WebhookQuery {
 
 /// Handle Hyperstack webhook callback
 /// POST /webhooks/hyperstack?token=...
+#[tracing::instrument(skip_all, fields(provider = "hyperstack", cloud_type = "secure"))]
 pub async fn hyperstack_callback(
     State(state): State<AppState>,
     Query(query): Query<WebhookQuery>,
