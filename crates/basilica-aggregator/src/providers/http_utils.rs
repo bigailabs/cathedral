@@ -2,10 +2,11 @@ use crate::error::{AggregatorError, Result};
 use reqwest::{Client, Response};
 
 /// Builder for creating HTTP clients with consistent configuration across providers
+#[derive(Default)]
 pub struct HttpClientBuilder {}
 
 impl HttpClientBuilder {
-    /// Create a new HTTP client builder with default settings (no request timeout).
+    /// Create a new HTTP client builder with default settings.
     pub fn new() -> Self {
         Self {}
     }

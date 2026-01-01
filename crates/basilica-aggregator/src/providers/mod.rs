@@ -19,9 +19,6 @@ pub const HYPERSTACK_API_BASE_URL: &str = "https://infrahub-api.nexgencloud.com/
 pub const LAMBDA_API_BASE_URL: &str = "https://cloud.lambda.ai/api/v1";
 pub const HYDRAHOST_API_BASE_URL: &str = "https://api.brokkr.hydrahost.com/api/v0.1.0";
 
-/// Default timeout for HTTP requests to provider APIs (in seconds)
-pub const DEFAULT_TIMEOUT_SECONDS: u64 = 10;
-
 /// Default cooldown between fetches from the same provider (in seconds)
 pub const DEFAULT_COOLDOWN_SECONDS: u64 = 30;
 
