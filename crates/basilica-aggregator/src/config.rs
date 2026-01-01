@@ -285,9 +285,7 @@ impl Config {
             cache: CacheConfig {
                 ttl_seconds: default_ttl(),
             },
-            providers: ProvidersConfig {
-                hyperstack: None,
-            },
+            providers: ProvidersConfig { hyperstack: None },
             database: DatabaseConfig {
                 path: default_db_path(),
             },
