@@ -745,18 +745,6 @@ impl Server {
         // Initialize GPU Aggregator service (Secure Cloud)
         info!("Initializing GPU Aggregator service (Secure Cloud)");
 
-        // Debug: Show provider configuration
-        tracing::debug!(
-            "DataCrunch config: client_id={:?}, has_secret={}",
-            config.aggregator.providers.datacrunch.client_id,
-            config
-                .aggregator
-                .providers
-                .datacrunch
-                .client_secret
-                .is_some()
-        );
-
         let aggregator_db = Arc::new(
             AggregatorDatabase::new(&config.database.url)
                 .await

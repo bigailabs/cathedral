@@ -1,11 +1,10 @@
-use crate::config::{AuthConfig, Config};
+use crate::config::Config;
 use crate::db::Database;
 use crate::error::{AggregatorError, Result};
 use crate::models::{
     Deployment, DeploymentStatus, GpuOffering, Provider as ProviderEnum, ProviderHealth,
     ProviderSshKey, SshKey,
 };
-use crate::providers::datacrunch::{DataCrunchProvider, OsImage};
 use crate::providers::hyperstack::HyperstackProvider;
 use crate::providers::{DeployRequest, Provider, ProviderClient};
 use basilica_common::types::GpuCategory;
@@ -74,28 +73,6 @@ pub struct AggregatorService {
 impl AggregatorService {
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
         let mut providers = Vec::new();
-
-        // Initialize DataCrunch provider (optional)
-        if config.providers.datacrunch.is_enabled() {
-            if let Some(auth) = config.providers.datacrunch.get_auth() {
-                let (client_id, client_secret) = match auth {
-                    AuthConfig::OAuth {
-                        client_id,
-                        client_secret,
-                    } => (client_id, client_secret),
-                    AuthConfig::ApiKey { .. } => {
-                        return Err(AggregatorError::Config(
-                            "DataCrunch requires OAuth authentication".into(),
-                        ))
-                    }
-                };
-
-                let provider = DataCrunchProvider::new(client_id, client_secret)?;
-
-                providers.push(ProviderClient::DataCrunch(provider));
-                tracing::info!("DataCrunch provider initialized");
-            }
-        }
 
         // Initialize Hyperstack provider (optional - requires HyperstackConfig with webhook fields)
         if let Some(ref hyperstack_config) = config.providers.hyperstack {
@@ -252,20 +229,6 @@ impl AggregatorService {
             })
     }
 
-    /// Get DataCrunch provider (for legacy APIs that need provider-specific methods)
-    fn get_datacrunch_provider(&self) -> Result<&DataCrunchProvider> {
-        self.providers
-            .iter()
-            .find_map(|p| match p {
-                ProviderClient::DataCrunch(dc) => Some(dc),
-                _ => None,
-            })
-            .ok_or_else(|| AggregatorError::Provider {
-                provider: "DataCrunch".to_string(),
-                message: "DataCrunch provider not enabled".to_string(),
-            })
-    }
-
     /// Ensure SSH key is registered with the provider (lazy registration)
     /// Returns the provider SSH key mapping (creates it if doesn't exist)
     async fn ensure_provider_ssh_key(
@@ -302,72 +265,71 @@ impl AggregatorService {
         if provider_enum == ProviderEnum::Hyperstack {
             // Hyperstack requires SSH keys to be registered in each environment (region)
             // Register in all 3 default environments upfront
-            if let ProviderClient::Hyperstack(hyperstack_provider) = provider {
-                tracing::info!(
-                    "Registering SSH key {} in all Hyperstack environments",
-                    ssh_key.id
+            let ProviderClient::Hyperstack(hyperstack_provider) = provider;
+            tracing::info!(
+                "Registering SSH key {} in all Hyperstack environments",
+                ssh_key.id
+            );
+
+            let mut environments_metadata = serde_json::Map::new();
+
+            for environment in get_hyperstack_environments() {
+                tracing::debug!(
+                    "Registering SSH key {} in Hyperstack environment {}",
+                    ssh_key.id,
+                    environment
                 );
 
-                let mut environments_metadata = serde_json::Map::new();
-
-                for environment in get_hyperstack_environments() {
-                    tracing::debug!(
-                        "Registering SSH key {} in Hyperstack environment {}",
-                        ssh_key.id,
-                        environment
-                    );
-
-                    let keypair = hyperstack_provider
-                        .create_keypair_impl(
-                            key_name.clone(),
-                            environment.to_string(),
-                            ssh_key.public_key.clone(),
-                        )
-                        .await?;
-
-                    environments_metadata.insert(
+                let keypair = hyperstack_provider
+                    .create_keypair_impl(
+                        key_name.clone(),
                         environment.to_string(),
-                        json!({
-                            "key_id": keypair.id.to_string(),
-                            "key_name": keypair.name,
-                            "fingerprint": keypair.fingerprint
-                        }),
-                    );
+                        ssh_key.public_key.clone(),
+                    )
+                    .await?;
 
-                    tracing::info!(
-                        "Successfully registered SSH key {} in environment {} (key_id: {})",
-                        ssh_key.id,
-                        environment,
-                        keypair.id
-                    );
-                }
-
-                // Create metadata with all environment registrations
-                let metadata = Some(json!({
-                    "environments": environments_metadata
-                }));
-
-                // Create provider SSH key mapping in database
-                // Use "multi-region" as sentinel since we have multiple provider key IDs
-                let now = Utc::now();
-                let mapping = ProviderSshKey {
-                    id: Uuid::new_v4().to_string(),
-                    ssh_key_id: ssh_key.id.clone(),
-                    provider: provider_enum,
-                    provider_key_id: "multi-region".to_string(),
-                    created_at: now,
-                    metadata,
-                };
-
-                self.db.create_provider_ssh_key(&mapping).await?;
-
-                tracing::info!(
-                    "Successfully registered SSH key {} with Hyperstack across all environments",
-                    ssh_key.id
+                environments_metadata.insert(
+                    environment.to_string(),
+                    json!({
+                        "key_id": keypair.id.to_string(),
+                        "key_name": keypair.name,
+                        "fingerprint": keypair.fingerprint
+                    }),
                 );
 
-                return Ok(mapping);
+                tracing::info!(
+                    "Successfully registered SSH key {} in environment {} (key_id: {})",
+                    ssh_key.id,
+                    environment,
+                    keypair.id
+                );
             }
+
+            // Create metadata with all environment registrations
+            let metadata = Some(json!({
+                "environments": environments_metadata
+            }));
+
+            // Create provider SSH key mapping in database
+            // Use "multi-region" as sentinel since we have multiple provider key IDs
+            let now = Utc::now();
+            let mapping = ProviderSshKey {
+                id: Uuid::new_v4().to_string(),
+                ssh_key_id: ssh_key.id.clone(),
+                provider: provider_enum,
+                provider_key_id: "multi-region".to_string(),
+                created_at: now,
+                metadata,
+            };
+
+            self.db.create_provider_ssh_key(&mapping).await?;
+
+            tracing::info!(
+                "Successfully registered SSH key {} with Hyperstack across all environments",
+                ssh_key.id
+            );
+
+            return Ok(mapping);
         }
 
         // Standard single-environment registration for other providers
@@ -376,12 +338,7 @@ impl AggregatorService {
             .await?;
 
         // Create metadata to store provider-specific information
-        let metadata = match provider_enum {
-            ProviderEnum::DataCrunch => Some(json!({
-                "key_name": provider_key.name
-            })),
-            _ => None,
-        };
+        let metadata: Option<serde_json::Value> = None;
 
         // Create provider SSH key mapping in database
         let now = Utc::now();
@@ -406,13 +363,7 @@ impl AggregatorService {
         Ok(mapping)
     }
 
-    /// List available OS images from DataCrunch
-    pub async fn list_images(&self) -> Result<Vec<OsImage>> {
-        let provider = self.get_datacrunch_provider()?;
-        provider.list_images().await
-    }
-
-    /// Deploy a new GPU instance (supports DataCrunch and Hyperstack)
+    /// Deploy a new GPU instance (supports Hyperstack)
     pub async fn deploy_instance(
         &self,
         offering_id: String,
@@ -569,29 +520,6 @@ impl AggregatorService {
         provider: ProviderEnum,
     ) -> DeploymentStatus {
         match provider {
-            ProviderEnum::DataCrunch => {
-                // Status from DataCrunch Instance will be in Debug format (e.g., "Running", "Provisioning")
-                match status {
-                    s if s.contains("Running") => DeploymentStatus::Running,
-                    s if s.contains("Provisioning")
-                        || s.contains("Ordered")
-                        || s.contains("New")
-                        || s.contains("Validating") =>
-                    {
-                        DeploymentStatus::Provisioning
-                    }
-                    s if s.contains("Error")
-                        || s.contains("NoCapacity")
-                        || s.contains("NotFound") =>
-                    {
-                        DeploymentStatus::Error
-                    }
-                    s if s.contains("Deleting") || s.contains("Discontinued") => {
-                        DeploymentStatus::Deleted
-                    }
-                    _ => DeploymentStatus::Pending,
-                }
-            }
             ProviderEnum::Hyperstack => {
                 // Hyperstack status strings are UPPERCASE (e.g., "ACTIVE", "BUILDING")
                 match status.to_uppercase().as_str() {
