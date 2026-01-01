@@ -2,7 +2,7 @@
 
 use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
-use basilica_aggregator::models::GpuOffering;
+use basilica_common::types::GpuOffering;
 use basilica_common::types::ComputeCategory;
 use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, NodeSelection, RentalState};
 use basilica_sdk::{ApiError, BasilicaClient};

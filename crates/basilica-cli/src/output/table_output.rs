@@ -1,7 +1,7 @@
 //! Table formatting for CLI output
 
 use crate::error::Result;
-use basilica_aggregator::GpuOffering;
+use basilica_common::types::GpuOffering;
 use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{

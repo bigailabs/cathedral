@@ -915,7 +915,7 @@ impl WeightSetter {
     }
 
     /// Get current metagraph from Bittensor network with retry logic
-    async fn get_metagraph(&self) -> Result<Metagraph<AccountId>> {
+    async fn get_metagraph(&self) -> Result<Metagraph> {
         const MAX_RETRIES: u32 = 3;
         const BASE_DELAY: Duration = Duration::from_secs(2);
 

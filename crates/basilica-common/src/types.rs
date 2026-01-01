@@ -1,5 +1,7 @@
 //! Common types used across Basilica components
 
+use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fmt;
@@ -581,4 +583,75 @@ mod tests {
             "Miner-provided GPUs"
         );
     }
+}
+
+/// Cloud provider identifier for GPU offerings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudProvider {
+    DataCrunch,
+    Hyperstack,
+    Lambda,
+    HydraHost,
+    /// VIP managed machines (not a real cloud provider, but uses Deployment model)
+    Vip,
+}
+
+impl CloudProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CloudProvider::DataCrunch => "datacrunch",
+            CloudProvider::Hyperstack => "hyperstack",
+            CloudProvider::Lambda => "lambda",
+            CloudProvider::HydraHost => "hydrahost",
+            CloudProvider::Vip => "vip",
+        }
+    }
+}
+
+impl fmt::Display for CloudProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for CloudProvider {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "datacrunch" => Ok(CloudProvider::DataCrunch),
+            "hyperstack" => Ok(CloudProvider::Hyperstack),
+            "lambda" => Ok(CloudProvider::Lambda),
+            "hydrahost" => Ok(CloudProvider::HydraHost),
+            "vip" => Ok(CloudProvider::Vip),
+            _ => Err(format!("Unknown provider: {}", s)),
+        }
+    }
+}
+
+/// Unified GPU offering structure for marketplace
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GpuOffering {
+    pub id: String,
+    pub provider: CloudProvider,
+    pub gpu_type: GpuCategory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_memory_gb_per_gpu: Option<u32>,
+    pub gpu_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interconnect: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_type: Option<String>,
+    pub system_memory_gb: u32,
+    pub vcpu_count: u32,
+    pub region: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub hourly_rate_per_gpu: Decimal,
+    pub availability: bool,
+    pub fetched_at: DateTime<Utc>,
+    #[serde(skip)]
+    pub raw_metadata: serde_json::Value,
 }

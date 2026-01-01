@@ -497,11 +497,8 @@ pub struct RentalUsageResponse {
 
 // Secure Cloud (GPU Aggregator) Types
 
-// Re-export ComputeCategory from basilica-common
-pub use basilica_common::types::ComputeCategory;
-
-// Re-export GpuOffering from basilica-aggregator
-pub use basilica_aggregator::GpuOffering;
+// Re-export ComputeCategory and GpuOffering from basilica-common
+pub use basilica_common::types::{ComputeCategory, GpuOffering};
 
 /// Secure cloud rental list item for PS command display
 #[derive(Debug, Clone, Serialize, Deserialize)]
