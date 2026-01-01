@@ -2696,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "basilica-sdk"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64 0.21.7",
  "basilica-aggregator",

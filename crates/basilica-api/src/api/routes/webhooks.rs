@@ -1,6 +1,6 @@
 //! Webhook handlers for external provider callbacks
 
-use crate::server::AppState;
+use crate::{api::extractors::ownership::archive_secure_cloud_rental, server::AppState};
 use axum::{
     extract::{rejection::JsonRejection, Query, State},
     http::StatusCode,
@@ -9,6 +9,9 @@ use axum::{
 };
 use basilica_aggregator::models::DeploymentStatus;
 use basilica_aggregator::providers::hyperstack::HyperstackCallback;
+use basilica_protocol::billing::{FinalizeRentalRequest, RentalStatus};
+use chrono::Utc;
+use prost_types::Timestamp;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -142,6 +145,68 @@ pub async fn hyperstack_callback(
             "ssh_user": "ubuntu"
         })
     });
+
+    // Determine whether this is a terminal delete event (not just "deleting")
+    let raw_status = payload
+        .data
+        .as_ref()
+        .and_then(|d| d.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(payload.operation_status());
+    let raw_status_lower = raw_status.to_lowercase();
+
+    if matches!(new_status, DeploymentStatus::Deleted) && raw_status_lower != "deleting" {
+        tracing::info!(
+            rental_id = %rental_id,
+            raw_status = %raw_status,
+            "Webhook indicates VM deletion; finalizing billing and archiving rental"
+        );
+
+        if let Some(billing_client) = state.billing_client.as_deref() {
+            let now = Utc::now();
+            let end_timestamp = Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            };
+
+            let finalize_request = FinalizeRentalRequest {
+                rental_id: rental_id.clone(),
+                end_time: Some(end_timestamp),
+                termination_reason: "vm_deleted_externally".to_string(),
+                target_status: RentalStatus::Stopped.into(),
+            };
+
+            if let Err(e) = billing_client.finalize_rental(finalize_request).await {
+                tracing::error!(
+                    error = %e,
+                    rental_id = %rental_id,
+                    "Failed to finalize billing for webhook-deleted rental"
+                );
+            } else {
+                tracing::info!(
+                    rental_id = %rental_id,
+                    "Finalized billing for webhook-deleted rental"
+                );
+            }
+        }
+
+        if let Err(e) = archive_secure_cloud_rental(
+            &state.db,
+            &rental_id,
+            Some("Webhook: VM deleted externally"),
+            Some("deleted"),
+        )
+        .await
+        {
+            tracing::error!(
+                error = %e,
+                rental_id = %rental_id,
+                "Failed to archive rental after webhook delete"
+            );
+        }
+
+        return (StatusCode::OK, Json(json!({ "status": "archived" })));
+    }
 
     // Handle based on new status
     match new_status {
