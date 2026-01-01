@@ -59,8 +59,7 @@ pub struct DataCrunchProvider {
 
 impl DataCrunchProvider {
     pub fn new(client_id: String, client_secret: String) -> Result<Self> {
-        let client = HttpClientBuilder::new(crate::providers::DEFAULT_TIMEOUT_SECONDS)
-            .build("datacrunch")?;
+        let client = HttpClientBuilder::new().build("datacrunch")?;
 
         Ok(Self {
             client,

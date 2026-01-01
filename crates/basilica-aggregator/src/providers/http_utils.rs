@@ -1,16 +1,14 @@
 use crate::error::{AggregatorError, Result};
 use reqwest::{Client, Response};
-use std::time::Duration;
 
 /// Builder for creating HTTP clients with consistent configuration across providers
-pub struct HttpClientBuilder {
-    timeout_seconds: u64,
-}
+#[derive(Default)]
+pub struct HttpClientBuilder {}
 
 impl HttpClientBuilder {
-    /// Create a new HTTP client builder with specified timeout
-    pub fn new(timeout_seconds: u64) -> Self {
-        Self { timeout_seconds }
+    /// Create a new HTTP client builder with default settings.
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Build an HTTP client for the specified provider
@@ -22,7 +20,6 @@ impl HttpClientBuilder {
     /// A configured `reqwest::Client` or an error if client creation fails
     pub fn build(&self, provider_name: &str) -> Result<Client> {
         Client::builder()
-            .timeout(Duration::from_secs(self.timeout_seconds))
             .build()
             .map_err(|e| AggregatorError::Provider {
                 provider: provider_name.to_string(),
@@ -73,17 +70,8 @@ mod tests {
 
     #[test]
     fn test_http_client_builder_creates_client() {
-        let builder = HttpClientBuilder::new(30);
+        let builder = HttpClientBuilder::new();
         let result = builder.build("test-provider");
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_http_client_builder_with_different_timeouts() {
-        let builder_short = HttpClientBuilder::new(10);
-        let builder_long = HttpClientBuilder::new(60);
-
-        assert!(builder_short.build("test").is_ok());
-        assert!(builder_long.build("test").is_ok());
     }
 }
