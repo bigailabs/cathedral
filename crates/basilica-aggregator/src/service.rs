@@ -82,7 +82,6 @@ impl AggregatorService {
             let rate_limit_config = RateLimitConfig {
                 rps: hyperstack_config.rate_limit_rps,
                 token_timeout: std::time::Duration::from_secs(hyperstack_config.token_timeout_secs),
-                retry_delay: std::time::Duration::from_millis(hyperstack_config.retry_delay_ms),
             };
 
             let provider = HyperstackProvider::with_rate_limit_config(

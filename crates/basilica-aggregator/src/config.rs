@@ -65,9 +65,6 @@ pub struct HyperstackConfig {
     /// Timeout in seconds waiting for a rate limit token (default: 5)
     #[serde(default = "default_token_timeout_secs")]
     pub token_timeout_secs: u64,
-    /// Delay in milliseconds between 429 retry attempts (default: 1000)
-    #[serde(default = "default_retry_delay_ms")]
-    pub retry_delay_ms: u64,
 }
 
 fn default_rate_limit_rps() -> u32 {
@@ -76,10 +73,6 @@ fn default_rate_limit_rps() -> u32 {
 
 fn default_token_timeout_secs() -> u64 {
     5
-}
-
-fn default_retry_delay_ms() -> u64 {
-    1000
 }
 
 impl HyperstackConfig {
@@ -358,7 +351,6 @@ mod tests {
                     callback_base_url: "https://api.example.com".to_string(),
                     rate_limit_rps: default_rate_limit_rps(),
                     token_timeout_secs: default_token_timeout_secs(),
-                    retry_delay_ms: default_retry_delay_ms(),
                 }),
             },
             database: DatabaseConfig {
@@ -378,7 +370,6 @@ mod tests {
             callback_base_url: "https://api.example.com/".to_string(),
             rate_limit_rps: default_rate_limit_rps(),
             token_timeout_secs: default_token_timeout_secs(),
-            retry_delay_ms: default_retry_delay_ms(),
         };
 
         assert_eq!(
@@ -402,7 +393,6 @@ mod tests {
                     callback_base_url: "https://api.example.com".to_string(),
                     rate_limit_rps: default_rate_limit_rps(),
                     token_timeout_secs: default_token_timeout_secs(),
-                    retry_delay_ms: default_retry_delay_ms(),
                 }),
             },
             database: DatabaseConfig {
