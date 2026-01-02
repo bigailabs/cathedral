@@ -42,9 +42,11 @@ pub struct ReleaseInfo {
 ///
 /// # Examples
 /// ```
-/// extract_version_from_tag("basilica-cli-v0.5.5") // Some(Version(0.5.5))
-/// extract_version_from_tag("basilica-cli-0.5.5")  // Some(Version(0.5.5))
-/// extract_version_from_tag("invalid")              // None
+/// use basilica_cli::github_releases::extract_version_from_tag;
+///
+/// assert!(extract_version_from_tag("basilica-cli-v0.5.5").is_some());
+/// assert!(extract_version_from_tag("basilica-cli-0.5.5").is_some());
+/// assert!(extract_version_from_tag("invalid").is_none());
 /// ```
 pub fn extract_version_from_tag(tag: &str) -> Option<Version> {
     let version_str = tag
@@ -61,8 +63,10 @@ pub fn extract_version_from_tag(tag: &str) -> Option<Version> {
 ///
 /// # Examples
 /// ```
-/// format_cli_tag("0.5.5")   // "basilica-cli-v0.5.5"
-/// format_cli_tag("v0.5.5")  // "basilica-cli-v0.5.5"
+/// use basilica_cli::github_releases::format_cli_tag;
+///
+/// assert_eq!(format_cli_tag("0.5.5"), "basilica-cli-v0.5.5");
+/// assert_eq!(format_cli_tag("v0.5.5"), "basilica-cli-v0.5.5");
 /// ```
 pub fn format_cli_tag(version: &str) -> String {
     let clean_version = version.trim_start_matches('v');

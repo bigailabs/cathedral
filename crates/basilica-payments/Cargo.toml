@@ -48,4 +48,4 @@ path = "../basilica-common"
 features = ["postgres"]
 
 [dependencies.bittensor]
-path = "../bittensor"
+workspace = true

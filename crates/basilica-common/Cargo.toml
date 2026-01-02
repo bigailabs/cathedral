@@ -31,9 +31,8 @@ libc = { workspace = true }
 # SS58 format validation (adjust version as needed)
 # ss58-registry = "1.0"  # TODO: Add when implementing Hotkey validation
 
-# Bittensor integration via crabtensor
-crabtensor = { workspace = true }
-sp-core = { workspace = true }
+# Bittensor integration
+bittensor = { workspace = true }
 chrono = { workspace = true }
 
 # Cryptographic dependencies

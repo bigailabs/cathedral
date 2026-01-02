@@ -60,7 +60,6 @@ jobs:
               - 'crates/basilica-miner/**'
               - 'crates/basilica-common/**'
               - 'crates/basilica-protocol/**'
-              - 'crates/bittensor/**'
               - 'scripts/miner/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -138,10 +137,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Quick check builds
         run: |
-          cargo check -p basilica-common -p basilica-protocol -p bittensor
+          cargo check -p basilica-common -p basilica-protocol
       - name: Run clippy on core packages
         run: |
-          cargo clippy -p basilica-common -p basilica-protocol -p bittensor --all-targets -- -D warnings
+          cargo clippy -p basilica-common -p basilica-protocol --all-targets -- -D warnings
 
   # Lint complex packages
   lint-complex:

@@ -43,7 +43,7 @@ hex = { workspace = true }
 # Internal dependencies
 basilica-common = { path = "../basilica-common", features = ["sqlite"] }
 basilica-protocol = { path = "../basilica-protocol" }
-bittensor = { path = "../bittensor" }
+bittensor = { workspace = true }
 
 # Miner-specific dependencies
 # Configuration

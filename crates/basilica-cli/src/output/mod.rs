@@ -59,6 +59,8 @@ pub fn compress_path(path: &std::path::Path) -> String {
 ///
 /// # Examples
 /// ```
+/// use basilica_cli::output::format_credits;
+///
 /// let formatted = format_credits("1234.56789");
 /// assert_eq!(formatted, "1234.57");
 /// ```
