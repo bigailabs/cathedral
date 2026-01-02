@@ -296,8 +296,13 @@ async def main():
     else:
         api_url = "https://api.basilica.ai"
 
-    print(f"Loading token for {args.env} environment...")
-    token = load_token(args.env)
+    # Use dev auth for localhost URLs unless explicitly overridden
+    auth_env = args.env
+    if args.api_url and "localhost" in args.api_url:
+        auth_env = "dev"
+
+    print(f"Loading token for {auth_env} environment...")
+    token = load_token(auth_env)
 
     async with BasilicaClient(api_url, token) as client:
         # Check for existing rentals first
