@@ -335,7 +335,7 @@ impl HyperstackCallback {
 
     /// Get the operation status
     pub fn operation_status(&self) -> &str {
-        &self.operation.status
+        self.operation.status.as_deref().unwrap_or("")
     }
 
     /// Get the operation name
@@ -361,8 +361,9 @@ pub struct HyperstackCallbackResource {
 pub struct HyperstackCallbackOperation {
     /// Operation name e.g., "createVM", "deleteVM"
     pub name: String,
-    /// Status: "SUCCESS" or "FAILED"
-    pub status: String,
+    /// Status: "SUCCESS" or "FAILED" (can be null)
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Deserialize ID from either string or integer

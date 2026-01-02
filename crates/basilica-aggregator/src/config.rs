@@ -59,6 +59,20 @@ pub struct HyperstackConfig {
     pub webhook_secret: String,
     /// Base URL for webhooks, e.g., "https://api.basilica.ai"
     pub callback_base_url: String,
+    /// Rate limit: maximum requests per second to Hyperstack API (default: 5)
+    #[serde(default = "default_rate_limit_rps")]
+    pub rate_limit_rps: u32,
+    /// Timeout in seconds waiting for a rate limit token (default: 5)
+    #[serde(default = "default_token_timeout_secs")]
+    pub token_timeout_secs: u64,
+}
+
+fn default_rate_limit_rps() -> u32 {
+    5
+}
+
+fn default_token_timeout_secs() -> u64 {
+    5
 }
 
 impl HyperstackConfig {
@@ -335,6 +349,8 @@ mod tests {
                     api_key: "test-api-key".to_string(),
                     webhook_secret: "test-webhook-secret".to_string(),
                     callback_base_url: "https://api.example.com".to_string(),
+                    rate_limit_rps: default_rate_limit_rps(),
+                    token_timeout_secs: default_token_timeout_secs(),
                 }),
             },
             database: DatabaseConfig {
@@ -352,6 +368,8 @@ mod tests {
             api_key: "test-key".to_string(),
             webhook_secret: "secret123".to_string(),
             callback_base_url: "https://api.example.com/".to_string(),
+            rate_limit_rps: default_rate_limit_rps(),
+            token_timeout_secs: default_token_timeout_secs(),
         };
 
         assert_eq!(
@@ -373,6 +391,8 @@ mod tests {
                     api_key: "test-api-key".to_string(),
                     webhook_secret: "bad&token".to_string(),
                     callback_base_url: "https://api.example.com".to_string(),
+                    rate_limit_rps: default_rate_limit_rps(),
+                    token_timeout_secs: default_token_timeout_secs(),
                 }),
             },
             database: DatabaseConfig {

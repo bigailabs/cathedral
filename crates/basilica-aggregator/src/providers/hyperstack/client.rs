@@ -12,9 +12,30 @@ use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
 use crate::providers::Provider;
 use async_trait::async_trait;
 use chrono::Utc;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::time::Duration;
+
+/// Configuration for the Hyperstack rate limiter
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Requests per second limit
+    pub rps: u32,
+    /// Timeout waiting for a token
+    pub token_timeout: Duration,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            rps: 5,
+            token_timeout: Duration::from_secs(5),
+        }
+    }
+}
 
 pub struct HyperstackProvider {
     client: Client,
@@ -22,24 +43,60 @@ pub struct HyperstackProvider {
     base_url: String,
     /// Pre-built callback URL with token for webhook notifications
     callback_url: Option<String>,
+    /// Rate limiter for Hyperstack API calls
+    rate_limiter: DefaultDirectRateLimiter,
+    /// Rate limit configuration
+    rate_limit_config: RateLimitConfig,
 }
 
 impl HyperstackProvider {
     pub fn new(api_key: String, callback_url: Option<String>) -> Result<Self> {
+        Self::with_rate_limit_config(api_key, callback_url, RateLimitConfig::default())
+    }
+
+    pub fn with_rate_limit_config(
+        api_key: String,
+        callback_url: Option<String>,
+        rate_limit_config: RateLimitConfig,
+    ) -> Result<Self> {
         let client = HttpClientBuilder::new().build("hyperstack")?;
+
+        let rps = NonZeroU32::new(rate_limit_config.rps).expect("rate_limit_rps must be > 0");
+        let quota = Quota::per_second(rps);
+        let rate_limiter = RateLimiter::direct(quota);
 
         Ok(Self {
             client,
             api_key,
             base_url: crate::providers::HYPERSTACK_API_BASE_URL.to_string(),
             callback_url,
+            rate_limiter,
+            rate_limit_config,
         })
+    }
+
+    /// Acquire a rate limit token (bounded wait).
+    async fn acquire_token(&self) -> Result<()> {
+        let wait = self.rate_limiter.until_ready();
+        tokio::time::timeout(self.rate_limit_config.token_timeout, wait)
+            .await
+            .map(|_| ())
+            .map_err(|_| AggregatorError::Provider {
+                provider: "hyperstack".to_string(),
+                message: format!(
+                    "Rate limit timeout: failed to acquire token within {:?}",
+                    self.rate_limit_config.token_timeout
+                ),
+            })
     }
 
     async fn fetch_flavors(&self) -> Result<FlavorsResponse> {
         let url = format!("{}/core/flavors", self.base_url);
 
         tracing::debug!("Fetching flavors from Hyperstack: {}", url);
+
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client
@@ -70,6 +127,9 @@ impl HyperstackProvider {
         let url = format!("{}/pricebook", self.base_url);
 
         tracing::trace!("Fetching pricebook from Hyperstack: {}", url);
+
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client
@@ -185,6 +245,9 @@ impl HyperstackProvider {
             environment_name
         );
 
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
+
         let response = self
             .client
             .post(&url)
@@ -237,6 +300,9 @@ impl HyperstackProvider {
 
         tracing::debug!("Deleting SSH keypair: {}", keypair_id);
 
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
+
         let response = self
             .client
             .delete(&url)
@@ -268,6 +334,9 @@ impl HyperstackProvider {
             request.name,
             request.flavor_name
         );
+
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client
@@ -321,6 +390,9 @@ impl HyperstackProvider {
     pub async fn get_vm(&self, vm_id: u32) -> Result<VirtualMachine> {
         let url = format!("{}/core/virtual-machines/{}", self.base_url, vm_id);
 
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
+
         let response = self
             .client
             .get(&url)
@@ -370,6 +442,9 @@ impl HyperstackProvider {
         let url = format!("{}/core/virtual-machines/{}", self.base_url, vm_id);
 
         tracing::debug!("Deleting VM: {}", vm_id);
+
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client

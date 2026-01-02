@@ -2,7 +2,7 @@
 
 use crate::{api::extractors::ownership::archive_secure_cloud_rental, server::AppState};
 use axum::{
-    extract::{rejection::JsonRejection, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -27,12 +27,13 @@ pub struct WebhookQuery {
 pub async fn hyperstack_callback(
     State(state): State<AppState>,
     Query(query): Query<WebhookQuery>,
-    payload: Result<Json<HyperstackCallback>, JsonRejection>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let payload = match payload {
-        Ok(Json(payload)) => payload,
+    let payload: HyperstackCallback = match serde_json::from_slice(&body) {
+        Ok(payload) => payload,
         Err(err) => {
-            tracing::warn!(error = %err, "Invalid Hyperstack webhook payload");
+            let body_str = String::from_utf8_lossy(&body);
+            tracing::warn!(error = %err, raw_body = %body_str, "Invalid Hyperstack webhook payload");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "invalid_payload" })),
