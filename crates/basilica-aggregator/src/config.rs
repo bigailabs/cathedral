@@ -62,7 +62,7 @@ pub struct HyperstackConfig {
     /// Rate limit: maximum requests per second to Hyperstack API (default: 5)
     #[serde(default = "default_rate_limit_rps")]
     pub rate_limit_rps: u32,
-    /// Timeout in seconds for mutations waiting for a rate limit token (default: 5)
+    /// Timeout in seconds waiting for a rate limit token (default: 5)
     #[serde(default = "default_token_timeout_secs")]
     pub token_timeout_secs: u64,
     /// Delay in milliseconds between 429 retry attempts (default: 1000)

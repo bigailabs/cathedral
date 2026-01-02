@@ -14,6 +14,7 @@ prost-types = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
+governor = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }

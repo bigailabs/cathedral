@@ -1,7 +1,6 @@
 use super::normalize::{
     normalize_gpu_type, normalize_region, parse_gpu_memory, parse_interconnect,
 };
-use super::rate_limiter::RateLimiter;
 use super::types::{
     CreateKeypairRequest, CreateKeypairResponse, DeployVmRequest, DeployVmResponse,
     FlavorsResponse, GetVmResponse, Keypair, PricebookResponse, SecurityRuleRequest,
@@ -13,10 +12,11 @@ use crate::providers::http_utils::{handle_error_response, HttpClientBuilder};
 use crate::providers::Provider;
 use async_trait::async_trait;
 use chrono::Utc;
+use governor::{DefaultDirectRateLimiter, Jitter, Quota, RateLimiter};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 /// Configuration for the Hyperstack rate limiter
@@ -24,7 +24,7 @@ use std::time::Duration;
 pub struct RateLimitConfig {
     /// Requests per second limit
     pub rps: u32,
-    /// Timeout for mutations waiting for a token
+    /// Timeout waiting for a token
     pub token_timeout: Duration,
     /// Delay between 429 retries
     pub retry_delay: Duration,
@@ -47,7 +47,8 @@ pub struct HyperstackProvider {
     /// Pre-built callback URL with token for webhook notifications
     callback_url: Option<String>,
     /// Rate limiter for Hyperstack API calls
-    rate_limiter: Arc<RateLimiter>,
+    rate_limiter: DefaultDirectRateLimiter,
+    rate_limiter_jitter: Jitter,
     /// Rate limit configuration
     rate_limit_config: RateLimitConfig,
 }
@@ -64,7 +65,12 @@ impl HyperstackProvider {
     ) -> Result<Self> {
         let client = HttpClientBuilder::new().build("hyperstack")?;
 
-        let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config.rps));
+        let rps = NonZeroU32::new(rate_limit_config.rps).expect("rate_limit_rps must be > 0");
+        let quota = Quota::per_second(rps);
+        let refill_interval = Duration::from_secs_f64(1.0 / rps.get() as f64);
+        let jitter_max = std::cmp::min(refill_interval / 2, Duration::from_millis(50));
+        let rate_limiter = RateLimiter::direct(quota);
+        let rate_limiter_jitter = Jitter::up_to(jitter_max);
 
         Ok(Self {
             client,
@@ -72,35 +78,26 @@ impl HyperstackProvider {
             base_url: crate::providers::HYPERSTACK_API_BASE_URL.to_string(),
             callback_url,
             rate_limiter,
+            rate_limiter_jitter,
             rate_limit_config,
         })
     }
 
-    /// Acquire a rate limit token for a mutation operation (5s timeout by default).
-    async fn acquire_mutation_token(&self) -> Result<()> {
-        let timeout = Some(self.rate_limit_config.token_timeout);
-        self.rate_limiter.acquire(timeout).await.map_err(|_| {
-            tracing::warn!(
-                "Rate limit timeout: failed to acquire token within {:?}",
-                self.rate_limit_config.token_timeout
-            );
-            AggregatorError::Provider {
+    /// Acquire a rate limit token (bounded wait).
+    async fn acquire_token(&self) -> Result<()> {
+        let wait = self
+            .rate_limiter
+            .until_ready_with_jitter(self.rate_limiter_jitter);
+        tokio::time::timeout(self.rate_limit_config.token_timeout, wait)
+            .await
+            .map(|_| ())
+            .map_err(|_| AggregatorError::Provider {
                 provider: "hyperstack".to_string(),
-                message: "Service temporarily unavailable".to_string(),
-            }
-        })
-    }
-
-    /// Acquire a rate limit token for a read operation (waits indefinitely).
-    async fn acquire_read_token(&self) -> Result<()> {
-        // Reads wait indefinitely for a token
-        self.rate_limiter.acquire(None).await.map_err(|_| {
-            // This should never happen with None timeout, but handle it anyway
-            AggregatorError::Provider {
-                provider: "hyperstack".to_string(),
-                message: "Rate limit error".to_string(),
-            }
-        })
+                message: format!(
+                    "Rate limit timeout: failed to acquire token within {:?}",
+                    self.rate_limit_config.token_timeout
+                ),
+            })
     }
 
     async fn fetch_flavors(&self) -> Result<FlavorsResponse> {
@@ -108,8 +105,8 @@ impl HyperstackProvider {
 
         tracing::debug!("Fetching flavors from Hyperstack: {}", url);
 
-        // Acquire rate limit token (read operation - waits indefinitely)
-        self.acquire_read_token().await?;
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client
@@ -141,8 +138,8 @@ impl HyperstackProvider {
 
         tracing::trace!("Fetching pricebook from Hyperstack: {}", url);
 
-        // Acquire rate limit token (read operation - waits indefinitely)
-        self.acquire_read_token().await?;
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client
@@ -262,8 +259,8 @@ impl HyperstackProvider {
         let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
         loop {
-            // Acquire rate limit token (mutation - has timeout)
-            self.acquire_mutation_token().await?;
+            // Acquire rate limit token (bounded wait)
+            self.acquire_token().await?;
 
             let response = self
                 .client
@@ -280,9 +277,6 @@ impl HyperstackProvider {
 
             // Check for 429 before handle_error_response
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                // Refund the token since Hyperstack rejected us
-                self.rate_limiter.refund().await;
-
                 tracing::warn!(
                     "Hyperstack rate limited (429), retrying after {:?}",
                     self.rate_limit_config.retry_delay
@@ -344,8 +338,8 @@ impl HyperstackProvider {
         let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
         loop {
-            // Acquire rate limit token (mutation - has timeout)
-            self.acquire_mutation_token().await?;
+            // Acquire rate limit token (bounded wait)
+            self.acquire_token().await?;
 
             let response = self
                 .client
@@ -360,7 +354,6 @@ impl HyperstackProvider {
 
             // Check for 429 before handle_error_response
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                self.rate_limiter.refund().await;
                 tracing::warn!(
                     "Hyperstack rate limited (429), retrying after {:?}",
                     self.rate_limit_config.retry_delay
@@ -403,8 +396,8 @@ impl HyperstackProvider {
         let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
         loop {
-            // Acquire rate limit token (mutation - has timeout)
-            self.acquire_mutation_token().await?;
+            // Acquire rate limit token (bounded wait)
+            self.acquire_token().await?;
 
             let response = self
                 .client
@@ -421,7 +414,6 @@ impl HyperstackProvider {
 
             // Check for 429 before handle_error_response
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                self.rate_limiter.refund().await;
                 tracing::warn!(
                     "Hyperstack rate limited (429), retrying after {:?}",
                     self.rate_limit_config.retry_delay
@@ -478,8 +470,8 @@ impl HyperstackProvider {
     pub async fn get_vm(&self, vm_id: u32) -> Result<VirtualMachine> {
         let url = format!("{}/core/virtual-machines/{}", self.base_url, vm_id);
 
-        // Acquire rate limit token (read operation - waits indefinitely)
-        self.acquire_read_token().await?;
+        // Acquire rate limit token (bounded wait)
+        self.acquire_token().await?;
 
         let response = self
             .client
@@ -535,8 +527,8 @@ impl HyperstackProvider {
         let deadline = std::time::Instant::now() + self.rate_limit_config.token_timeout;
 
         loop {
-            // Acquire rate limit token (mutation - has timeout)
-            self.acquire_mutation_token().await?;
+            // Acquire rate limit token (bounded wait)
+            self.acquire_token().await?;
 
             let response = self
                 .client
@@ -553,7 +545,6 @@ impl HyperstackProvider {
 
             // Check for 429 before handle_error_response
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                self.rate_limiter.refund().await;
                 tracing::warn!(
                     "Hyperstack rate limited (429), retrying after {:?}",
                     self.rate_limit_config.retry_delay
