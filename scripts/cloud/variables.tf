@@ -177,6 +177,18 @@ variable "hyperstack_callback_base_url" {
   default     = ""
 }
 
+variable "hyperstack_rate_limit_rps" {
+  type        = number
+  description = "Rate limit for Hyperstack API requests per second (default: 10)"
+  default     = 10
+}
+
+variable "hyperstack_token_timeout_secs" {
+  type        = number
+  description = "Timeout in seconds waiting for a rate limit token (default: 300)"
+  default     = 300
+}
+
 # WireGuard VPN Configuration
 variable "wireguard_enabled" {
   type        = bool

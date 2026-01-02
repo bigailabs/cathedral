@@ -114,6 +114,10 @@ hyperstack_webhook_secret = "your-url-safe-webhook-secret"
 # Base URL for webhooks (where Hyperstack will send callbacks)
 hyperstack_callback_base_url = "https://api.basilica.ai"
 
+# Rate limiting for Hyperstack API calls
+hyperstack_rate_limit_rps     = 10   # Requests per second
+hyperstack_token_timeout_secs = 300  # 5 minutes timeout
+
 # =============================================================================
 # VPC PEERING CONFIGURATION (Required for K3s SSH connectivity)
 # =============================================================================

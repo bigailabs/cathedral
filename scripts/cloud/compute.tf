@@ -414,8 +414,10 @@ module "basilica_api_service" {
     BASILICA_API_AGGREGATOR__VIP__S3_REGION          = var.vip_s3_region != "" ? var.vip_s3_region : var.aws_region
     BASILICA_API_AGGREGATOR__VIP__POLL_INTERVAL_SECS = tostring(var.vip_poll_interval_secs)
 
-    # Hyperstack callback URL (non-sensitive, passed as env var)
-    BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__CALLBACK_BASE_URL = var.hyperstack_callback_base_url
+    # Hyperstack configuration (non-sensitive, passed as env vars)
+    BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__CALLBACK_BASE_URL  = var.hyperstack_callback_base_url
+    BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__RATE_LIMIT_RPS     = tostring(var.hyperstack_rate_limit_rps)
+    BASILICA_API_AGGREGATOR__PROVIDERS__HYPERSTACK__TOKEN_TIMEOUT_SECS = tostring(var.hyperstack_token_timeout_secs)
 
     # Logging
     RUST_LOG = "basilica_api=debug,basilica_aggregator=debug,basilica_protocol=info,kube=debug"
