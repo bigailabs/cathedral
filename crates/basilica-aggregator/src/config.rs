@@ -59,20 +59,20 @@ pub struct HyperstackConfig {
     pub webhook_secret: String,
     /// Base URL for webhooks, e.g., "https://api.basilica.ai"
     pub callback_base_url: String,
-    /// Rate limit: maximum requests per second to Hyperstack API (default: 5)
+    /// Rate limit: maximum requests per second to Hyperstack API (default: 400)
     #[serde(default = "default_rate_limit_rps")]
     pub rate_limit_rps: u32,
-    /// Timeout in seconds waiting for a rate limit token (default: 5)
+    /// Timeout in seconds waiting for a rate limit token (default: 30)
     #[serde(default = "default_token_timeout_secs")]
     pub token_timeout_secs: u64,
 }
 
 fn default_rate_limit_rps() -> u32 {
-    5
+    400
 }
 
 fn default_token_timeout_secs() -> u64 {
-    5
+    30
 }
 
 impl HyperstackConfig {
