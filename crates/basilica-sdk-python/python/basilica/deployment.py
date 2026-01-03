@@ -12,9 +12,11 @@ Example:
     >>> deployment.delete()             # Clean up
 """
 
+import socket
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
+from urllib.parse import urlparse
 
 from basilica.exceptions import DeploymentFailed, DeploymentTimeout
 
@@ -350,6 +352,13 @@ class Deployment:
                 last_phase = last_status.phase
 
             if last_status.is_ready:
+                # Verify DNS resolution before declaring ready
+                if self._url:
+                    hostname = urlparse(self._url).hostname
+                    if hostname and not self._is_dns_resolvable(hostname):
+                        time.sleep(poll_interval)
+                        elapsed += poll_interval
+                        continue
                 if callback and not on_progress and not silent:
                     print(f"[{self._name}] Deployment ready!")
                 return last_status
@@ -380,6 +389,14 @@ class Deployment:
         if status.phase == "storage_sync" and status.progress:
             if status.progress.percentage is not None:
                 print(f"  Storage sync: {status.progress.percentage:.1f}%")
+
+    def _is_dns_resolvable(self, hostname: str) -> bool:
+        """Check if hostname resolves to an IP address."""
+        try:
+            socket.gethostbyname(hostname)
+            return True
+        except socket.gaierror:
+            return False
 
     def delete(self) -> None:
         """

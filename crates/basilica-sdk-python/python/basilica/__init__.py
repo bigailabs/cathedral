@@ -141,7 +141,7 @@ DEFAULT_COMMAND = ["/bin/bash"]
 # Default Python image for source deployments
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 __all__ = [
     # Main client
     "BasilicaClient",

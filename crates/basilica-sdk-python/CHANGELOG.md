@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2025-12-31
+
+### Fixed
+- Fix DNS propagation race condition in `wait_until_ready()` where the method could return before the deployment URL was DNS-resolvable
+- Add `_is_dns_resolvable()` helper to verify DNS resolution before returning ready status
+
+### Added
+- Unit tests for DNS resolution verification in `wait_until_ready()`
+- End-to-end integration test for DNS propagation fix
+
 ## [0.10.0] - 2025-12-19
 
 ### Added
@@ -130,7 +140,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline API documentation
 - Example code for common workflows
 
-[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.10.0...HEAD
+[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.11.0...HEAD
+[0.11.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.10.0...basilica-sdk-python-v0.11.0
 [0.10.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...basilica-sdk-python-v0.10.0
 [0.9.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.8.0...basilica-sdk-python-v0.9.0
 [0.8.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.7.0...basilica-sdk-python-v0.8.0
