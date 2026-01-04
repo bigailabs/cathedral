@@ -82,7 +82,7 @@ async fn fetch_and_filter_secure_cloud(
     api_client: &basilica_sdk::BasilicaClient,
     gpu_category: Option<GpuCategory>,
     filters: &ListFilters,
-) -> Result<Vec<basilica_aggregator::GpuOffering>, CliError> {
+) -> Result<Vec<basilica_common::types::GpuOffering>, CliError> {
     let gpus = api_client
         .list_secure_cloud_gpus()
         .await
@@ -197,7 +197,9 @@ async fn fetch_and_filter_community_cloud(
 }
 
 /// Helper function to display secure cloud GPUs
-fn display_secure_cloud_table(gpus: &[basilica_aggregator::GpuOffering]) -> Result<(), CliError> {
+fn display_secure_cloud_table(
+    gpus: &[basilica_common::types::GpuOffering],
+) -> Result<(), CliError> {
     if gpus.is_empty() {
         print_info("No GPUs available matching your criteria");
         return Ok(());
@@ -312,7 +314,7 @@ pub async fn handle_ls(
             if json {
                 #[derive(serde::Serialize)]
                 struct CombinedResponse<'a> {
-                    secure_cloud: &'a [basilica_aggregator::GpuOffering],
+                    secure_cloud: &'a [basilica_common::types::GpuOffering],
                     community_cloud: &'a [basilica_sdk::AvailableNode],
                 }
                 let response = CombinedResponse {
@@ -397,7 +399,7 @@ pub async fn ensure_ssh_key_registered(
 /// Handle secure cloud rental with a pre-selected offering (from unified selector)
 async fn handle_secure_cloud_rental_with_offering(
     api_client: basilica_sdk::BasilicaClient,
-    offering: basilica_aggregator::models::GpuOffering,
+    offering: basilica_common::types::GpuOffering,
     options: UpOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {

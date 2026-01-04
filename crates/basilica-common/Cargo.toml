@@ -35,6 +35,9 @@ libc = { workspace = true }
 bittensor = { workspace = true }
 chrono = { workspace = true }
 
+# Decimal precision for prices
+rust_decimal = { workspace = true, features = ["serde-with-str"] }
+
 # Cryptographic dependencies
 ed25519-dalek = { workspace = true }
 p256 = { workspace = true }
