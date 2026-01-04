@@ -88,6 +88,13 @@ message CommunityCloudData {
     string miner_hotkey = 6;       // Bittensor miner hotkey for payment reconciliation
 }
 
+// Compute type discriminator for rentals
+// GPU is 0 so that unset fields default to GPU (backwards compatible)
+enum ComputeType {
+    COMPUTE_TYPE_GPU = 0;
+    COMPUTE_TYPE_CPU = 1;
+}
+
 // Secure cloud rental data (direct provider API)
 message SecureCloudData {
     string provider_instance_id = 1; // Provider's instance ID
@@ -95,6 +102,7 @@ message SecureCloudData {
     string offering_id = 3;           // Original offering ID from aggregator
     double base_price_per_gpu = 4;    // Final price per GPU per hour (already includes markup)
     uint32 gpu_count = 5;             // Number of GPUs in this rental
+    ComputeType compute_type = 6;     // CPU or GPU rental
 }
 
 // Orchestrator cloud rental data (K3s UserDeployment billing)

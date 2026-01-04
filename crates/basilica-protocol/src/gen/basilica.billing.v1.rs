@@ -124,6 +124,9 @@ pub struct SecureCloudData {
     /// Number of GPUs in this rental
     #[prost(uint32, tag = "5")]
     pub gpu_count: u32,
+    /// CPU or GPU rental
+    #[prost(enumeration = "ComputeType", tag = "6")]
+    pub compute_type: i32,
 }
 /// Orchestrator cloud rental data (K3s UserDeployment billing)
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -611,6 +614,35 @@ pub struct MarkMinerRevenuePaidResponse {
     pub success: bool,
     #[prost(string, tag = "2")]
     pub error_message: ::prost::alloc::string::String,
+}
+/// Compute type discriminator for rentals
+/// GPU is 0 so that unset fields default to GPU (backwards compatible)
+#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ComputeType {
+    Gpu = 0,
+    Cpu = 1,
+}
+impl ComputeType {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            ComputeType::Gpu => "COMPUTE_TYPE_GPU",
+            ComputeType::Cpu => "COMPUTE_TYPE_CPU",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "COMPUTE_TYPE_GPU" => Some(Self::Gpu),
+            "COMPUTE_TYPE_CPU" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
