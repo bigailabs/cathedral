@@ -889,3 +889,49 @@ impl WaitOptions {
         }
     }
 }
+
+// ============================================================================
+// CPU-Only Secure Cloud Types
+// ============================================================================
+
+/// CPU-only offering from secure cloud providers (no GPU)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuOffering {
+    /// Unique offering identifier
+    pub id: String,
+
+    /// Provider name (e.g., "hyperstack")
+    pub provider: String,
+
+    /// Number of vCPU cores
+    pub vcpu_count: u32,
+
+    /// System memory in GB
+    pub system_memory_gb: u32,
+
+    /// Storage description (e.g., "500GB SSD")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+
+    /// Region/location code
+    pub region: String,
+
+    /// Hourly rate in USD (flat rate, not per-GPU)
+    pub hourly_rate: String,
+
+    /// Whether the offering is currently available
+    pub availability: bool,
+
+    /// When this offering data was fetched
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response for listing CPU-only offerings
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListCpuOfferingsResponse {
+    /// List of available CPU offerings
+    pub nodes: Vec<CpuOffering>,
+
+    /// Total count of offerings
+    pub count: usize,
+}

@@ -285,18 +285,28 @@ pub async fn resolve_target_rental_unified(
     Ok((selected.rental_id.clone(), selected.compute_type))
 }
 
-/// Represents a selected GPU offering from either cloud type
+/// Represents a selected offering from either cloud type
 pub enum SelectedOffering {
-    /// Secure cloud offering (from aggregator)
+    /// Secure cloud GPU offering (from aggregator)
     SecureCloud(GpuOffering),
     /// Community cloud offering (node selection)
     CommunityCloud(NodeSelection),
+    /// Secure cloud CPU-only offering (no GPU)
+    CpuOnly(basilica_sdk::types::CpuOffering),
+}
+
+/// Offering type for display
+#[derive(Clone, PartialEq)]
+enum OfferingType {
+    SecureGpu,
+    SecureCpu,
+    Community,
 }
 
 /// Internal struct for unified offering display
 #[derive(Clone)]
 struct UnifiedOfferingItem {
-    compute_type: ComputeCategory,
+    offering_type: OfferingType,
     display_gpu: String,
     display_provider: String,
     display_memory: String,
@@ -304,6 +314,7 @@ struct UnifiedOfferingItem {
     // Original data for creating the offering
     secure_offering: Option<GpuOffering>,
     community_node: Option<AvailableNode>,
+    cpu_offering: Option<basilica_sdk::types::CpuOffering>,
 }
 
 /// Resolve GPU offering with unified selection across compute types
@@ -349,25 +360,30 @@ pub async fn resolve_offering_unified(
         }),
     };
 
-    // Conditionally fetch based on cloud filter
-    let (secure_result, community_result) = match cloud_filter {
+    // Conditionally fetch based on cloud filter (include CPU offerings for secure cloud)
+    let (secure_result, community_result, cpu_result) = match cloud_filter {
         Some(ComputeCategory::SecureCloud) => {
-            // Only fetch secure cloud
-            let secure = api_client.list_secure_cloud_gpus().await;
-            (secure, Err(ApiError::Timeout)) // Dummy error for community - will be ignored
+            // Fetch secure cloud GPU and CPU offerings
+            let (secure, cpu) = tokio::join!(
+                api_client.list_secure_cloud_gpus(),
+                api_client.list_cpu_offerings()
+            );
+            (secure, Err(ApiError::Timeout), cpu) // Dummy error for community - will be ignored
         }
         Some(ComputeCategory::CommunityCloud) => {
-            // Only fetch community cloud
+            // Only fetch community cloud (no CPU offerings available)
             let community = api_client.list_available_nodes(Some(community_query)).await;
-            (Err(ApiError::Timeout), community) // Dummy error for secure - will be ignored
+            (Err(ApiError::Timeout), community, Err(ApiError::Timeout))
         }
         None => {
-            // Fetch both in parallel (current behavior)
+            // Fetch all in parallel
             let community_future = api_client.list_available_nodes(Some(community_query));
-            tokio::join!(
+            let (secure, community, cpu) = tokio::join!(
                 api_client.list_secure_cloud_gpus(),
-                with_validator_timeout(community_future)
-            )
+                with_validator_timeout(community_future),
+                api_client.list_cpu_offerings()
+            );
+            (secure, community, cpu)
         }
     };
 
@@ -376,7 +392,7 @@ pub async fn resolve_offering_unified(
     // Build unified list
     let mut unified_items: Vec<UnifiedOfferingItem> = Vec::new();
 
-    // Add secure cloud offerings
+    // Add secure cloud GPU offerings
     if let Ok(offerings) = secure_result {
         for offering in offerings {
             // Apply GPU type filter if specified
@@ -409,7 +425,7 @@ pub async fn resolve_offering_unified(
             };
 
             unified_items.push(UnifiedOfferingItem {
-                compute_type: ComputeCategory::SecureCloud,
+                offering_type: OfferingType::SecureGpu,
                 display_gpu: format!(
                     "{}x {}",
                     offering.gpu_count,
@@ -420,7 +436,28 @@ pub async fn resolve_offering_unified(
                 display_price: format!("${:.2}/hr", total_price),
                 secure_offering: Some(offering),
                 community_node: None,
+                cpu_offering: None,
             });
+        }
+    }
+
+    // Add CPU-only offerings (only if no GPU filter is specified)
+    if gpu_filter.is_none() && gpu_count_filter.is_none() {
+        if let Ok(cpu_offerings) = cpu_result {
+            for offering in cpu_offerings {
+                let hourly_rate: f64 = offering.hourly_rate.parse().unwrap_or(0.0);
+
+                unified_items.push(UnifiedOfferingItem {
+                    offering_type: OfferingType::SecureCpu,
+                    display_gpu: format!("{} vCPU (CPU-only)", offering.vcpu_count),
+                    display_provider: offering.provider.to_string(),
+                    display_memory: format!("{}GB RAM", offering.system_memory_gb),
+                    display_price: format!("${:.2}/hr", hourly_rate),
+                    secure_offering: None,
+                    community_node: None,
+                    cpu_offering: Some(offering),
+                });
+            }
         }
     }
 
@@ -469,20 +506,21 @@ pub async fn resolve_offering_unified(
                 .unwrap_or_else(|| "Unknown".to_string());
 
             unified_items.push(UnifiedOfferingItem {
-                compute_type: ComputeCategory::CommunityCloud,
+                offering_type: OfferingType::Community,
                 display_gpu: gpu_info,
                 display_provider: location,
                 display_memory: memory_str,
                 display_price: price_str,
                 secure_offering: None,
                 community_node: Some(node),
+                cpu_offering: None,
             });
         }
     }
 
     if unified_items.is_empty() {
         return Err(eyre!(
-            "No GPU offerings available. Try different filters or check back later."
+            "No offerings available. Try different filters or check back later."
         ));
     }
 
@@ -501,9 +539,10 @@ pub async fn resolve_offering_unified(
     let items: Vec<String> = unified_items
         .iter()
         .map(|item| {
-            let type_label = match item.compute_type {
-                ComputeCategory::CommunityCloud => "Community",
-                ComputeCategory::SecureCloud => "Secure   ",
+            let type_label = match item.offering_type {
+                OfferingType::Community => "Community",
+                OfferingType::SecureGpu => "Secure   ",
+                OfferingType::SecureCpu => "CPU-Only ",
             };
 
             format!(
@@ -520,13 +559,13 @@ pub async fn resolve_offering_unified(
     // Show header hint
     println!(
         "{}",
-        style("  Cloud     │ GPU                  │ Provider/Location    │ Memory   │ Price").dim()
+        style("  Type      │ GPU/CPU              │ Provider/Location    │ Memory   │ Price").dim()
     );
 
     // Use dialoguer to select
     let theme = dialoguer::theme::ColorfulTheme::default();
     let selection = Select::with_theme(&theme)
-        .with_prompt("Select GPU offering")
+        .with_prompt("Select offering")
         .items(&items)
         .default(0)
         .interact_opt()
@@ -544,15 +583,22 @@ pub async fn resolve_offering_unified(
     let selected = &unified_items[selection];
 
     // Return appropriate offering type
-    match selected.compute_type {
-        ComputeCategory::SecureCloud => {
+    match selected.offering_type {
+        OfferingType::SecureGpu => {
             let offering = selected
                 .secure_offering
                 .clone()
                 .ok_or_else(|| eyre!("Internal error: secure cloud offering data missing"))?;
             Ok(SelectedOffering::SecureCloud(offering))
         }
-        ComputeCategory::CommunityCloud => {
+        OfferingType::SecureCpu => {
+            let offering = selected
+                .cpu_offering
+                .clone()
+                .ok_or_else(|| eyre!("Internal error: CPU offering data missing"))?;
+            Ok(SelectedOffering::CpuOnly(offering))
+        }
+        OfferingType::Community => {
             let node = selected
                 .community_node
                 .clone()

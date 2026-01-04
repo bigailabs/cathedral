@@ -834,3 +834,136 @@ pub fn display_secure_cloud_rentals(
 
     Ok(())
 }
+
+/// Display CPU-only offerings in detailed table format
+pub fn display_cpu_offerings_detailed(
+    offerings: &[basilica_sdk::types::CpuOffering],
+) -> Result<()> {
+    if offerings.is_empty() {
+        println!("{}", style("No CPU instances available").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CpuOfferingRow {
+        #[tabled(rename = "PROVIDER")]
+        provider: String,
+        #[tabled(rename = "vCPU")]
+        vcpu: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "STORAGE")]
+        storage: String,
+        #[tabled(rename = "REGION")]
+        region: String,
+        #[tabled(rename = "PRICE/HR")]
+        price: String,
+    }
+
+    let rows: Vec<CpuOfferingRow> = offerings
+        .iter()
+        .map(|offering| CpuOfferingRow {
+            provider: offering.provider.clone(),
+            vcpu: format!("{} cores", offering.vcpu_count),
+            ram: format!("{}GB", offering.system_memory_gb),
+            storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
+            region: offering.region.clone(),
+            price: format!("${}/hr", offering.hourly_rate),
+        })
+        .collect();
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    println!("\nTotal CPU offerings: {}", offerings.len());
+
+    Ok(())
+}
+
+/// Display CPU-only rentals in table format (no GPU column)
+pub fn display_cpu_rentals(
+    rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
+) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No CPU-only rentals found").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CpuRentalRow {
+        #[tabled(rename = "Provider")]
+        provider: String,
+        #[tabled(rename = "vCPU")]
+        vcpu: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "State")]
+        status: String,
+        #[tabled(rename = "IP")]
+        ip: String,
+        #[tabled(rename = "SSH")]
+        ssh: String,
+        #[tabled(rename = "Region")]
+        region: String,
+        #[tabled(rename = "Rate/hr")]
+        hourly_cost: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Created")]
+        created: String,
+    }
+
+    let rows: Vec<CpuRentalRow> = rentals
+        .iter()
+        .map(|rental| {
+            let ssh = if rental.ssh_command.is_some() {
+                "✓"
+            } else {
+                "✗"
+            };
+
+            // Format vCPU
+            let vcpu = rental
+                .vcpu_count
+                .map(|cores| format!("{} cores", cores))
+                .unwrap_or_else(|| "-".to_string());
+
+            // Format RAM
+            let ram = rental
+                .system_memory_gb
+                .map(|gb| format!("{}GB", gb))
+                .unwrap_or_else(|| "-".to_string());
+
+            // Use accumulated cost from billing service
+            let total_cost = rental
+                .accumulated_cost
+                .as_ref()
+                .and_then(|c| c.parse::<f64>().ok())
+                .map(|cost| format!("${:.2}", cost))
+                .unwrap_or_else(|| "-".to_string());
+
+            CpuRentalRow {
+                provider: rental.provider.clone(),
+                vcpu,
+                ram,
+                status: rental.status.clone(),
+                ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                ssh: ssh.to_string(),
+                region: rental
+                    .location_code
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
+                hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
+                total_cost,
+                created: format_timestamp(&rental.created_at.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    Ok(())
+}
