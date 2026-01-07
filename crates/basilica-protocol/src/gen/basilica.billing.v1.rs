@@ -65,7 +65,7 @@ pub struct TrackRentalRequest {
         ::prost::alloc::string::String,
     >,
     /// Cloud type specific data
-    #[prost(oneof = "track_rental_request::CloudType", tags = "20, 21")]
+    #[prost(oneof = "track_rental_request::CloudType", tags = "20, 21, 22")]
     pub cloud_type: ::core::option::Option<track_rental_request::CloudType>,
 }
 /// Nested message and enum types in `TrackRentalRequest`.
@@ -78,6 +78,8 @@ pub mod track_rental_request {
         Community(super::CommunityCloudData),
         #[prost(message, tag = "21")]
         Secure(super::SecureCloudData),
+        #[prost(message, tag = "22")]
+        Orchestrator(super::OrchestratorCloudData),
     }
 }
 /// Community cloud rental data (validator-based)
@@ -121,6 +123,35 @@ pub struct SecureCloudData {
     pub base_price_per_gpu: f64,
     /// Number of GPUs in this rental
     #[prost(uint32, tag = "5")]
+    pub gpu_count: u32,
+}
+/// Orchestrator cloud rental data (K3s UserDeployment billing)
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct OrchestratorCloudData {
+    /// User namespace (e.g., "u-github-12345")
+    #[prost(string, tag = "1")]
+    pub namespace: ::prost::alloc::string::String,
+    /// UserDeployment instance name
+    #[prost(string, tag = "2")]
+    pub instance_name: ::prost::alloc::string::String,
+    /// User identifier
+    #[prost(string, tag = "3")]
+    pub user_id: ::prost::alloc::string::String,
+    /// Number of replicas
+    #[prost(uint32, tag = "4")]
+    pub replicas: u32,
+    /// FUSE storage enabled
+    #[prost(bool, tag = "5")]
+    pub storage_enabled: bool,
+    /// Publicly accessible
+    #[prost(bool, tag = "6")]
+    pub public: bool,
+    /// Base price per GPU hour (required for billing)
+    #[prost(double, tag = "7")]
+    pub base_price_per_gpu: f64,
+    /// Total GPU count (required for billing)
+    #[prost(uint32, tag = "8")]
     pub gpu_count: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -240,7 +271,7 @@ pub struct ActiveRental {
         ::prost::alloc::string::String,
     >,
     /// Cloud type specific data
-    #[prost(oneof = "active_rental::CloudType", tags = "20, 21")]
+    #[prost(oneof = "active_rental::CloudType", tags = "20, 21, 22")]
     pub cloud_type: ::core::option::Option<active_rental::CloudType>,
 }
 /// Nested message and enum types in `ActiveRental`.
@@ -253,6 +284,8 @@ pub mod active_rental {
         Community(super::CommunityCloudData),
         #[prost(message, tag = "21")]
         Secure(super::SecureCloudData),
+        #[prost(message, tag = "22")]
+        Orchestrator(super::OrchestratorCloudData),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
