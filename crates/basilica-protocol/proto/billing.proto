@@ -74,6 +74,7 @@ message TrackRentalRequest {
     oneof cloud_type {
         CommunityCloudData community = 20;
         SecureCloudData secure = 21;
+        OrchestratorCloudData orchestrator = 22;
     }
 }
 
@@ -94,6 +95,18 @@ message SecureCloudData {
     string offering_id = 3;           // Original offering ID from aggregator
     double base_price_per_gpu = 4;    // Final price per GPU per hour (already includes markup)
     uint32 gpu_count = 5;             // Number of GPUs in this rental
+}
+
+// Orchestrator cloud rental data (K3s UserDeployment billing)
+message OrchestratorCloudData {
+    string namespace = 1;             // User namespace (e.g., "u-github-12345")
+    string instance_name = 2;         // UserDeployment instance name
+    string user_id = 3;               // User identifier
+    uint32 replicas = 4;              // Number of replicas
+    bool storage_enabled = 5;         // FUSE storage enabled
+    bool public = 6;                  // Publicly accessible
+    double base_price_per_gpu = 7;    // Base price per GPU hour (required for billing)
+    uint32 gpu_count = 8;             // Total GPU count (required for billing)
 }
 
 message ResourceSpec {
@@ -176,6 +189,7 @@ message ActiveRental {
     oneof cloud_type {
         CommunityCloudData community = 20;
         SecureCloudData secure = 21;
+        OrchestratorCloudData orchestrator = 22;
     }
 }
 
