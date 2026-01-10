@@ -29,6 +29,11 @@ fn format_timestamp(timestamp: &str) -> String {
 
 /// Display rental items in table format
 pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No community cloud rentals found").yellow());
+        return Ok(());
+    }
+
     // Helper to get rate and cost for a rental from the API response fields
     let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
         let rate = rental
