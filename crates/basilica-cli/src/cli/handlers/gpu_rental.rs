@@ -977,6 +977,12 @@ async fn poll_cpu_rental_status(
                             rental.status
                         )));
                     }
+                } else {
+                    // Rental not found in list - fail immediately
+                    return Err(CliError::Internal(eyre!(
+                        "CPU rental {} not found in rental list",
+                        rental_id
+                    )));
                 }
             }
             Err(e) => {
