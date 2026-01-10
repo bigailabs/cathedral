@@ -20,6 +20,15 @@ use tracing::warn;
 /// The validator can be slower due to network hops through the Bittensor network.
 pub const VALIDATOR_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Create a default query for listing active rentals (no filters).
+pub fn active_rentals_query() -> Option<ListRentalsQuery> {
+    Some(ListRentalsQuery {
+        status: Some(RentalState::Active),
+        gpu_type: None,
+        min_gpu_count: None,
+    })
+}
+
 /// Wrap a community cloud (validator) request with timeout.
 /// Returns ApiError::Timeout on timeout with a warning logged.
 pub async fn with_validator_timeout<T>(
@@ -69,14 +78,8 @@ pub async fn resolve_target_rental(
     };
 
     // Fetch active rentals
-    let query = Some(ListRentalsQuery {
-        status: Some(RentalState::Active),
-        gpu_type: None,
-        min_gpu_count: None,
-    });
-
     let rentals_list = api_client
-        .list_rentals(query)
+        .list_rentals(active_rentals_query())
         .await
         .inspect_err(|_| complete_spinner_error(spinner.clone(), "Failed to load rentals"))?;
 
@@ -147,14 +150,15 @@ pub async fn resolve_target_rental_unified(
     let (community_rentals, secure_rentals) = match compute_filter {
         Some(ComputeCategory::CommunityCloud) => {
             // Fetch only community cloud
-            let query = Some(ListRentalsQuery {
-                status: Some(RentalState::Active),
-                gpu_type: None,
-                min_gpu_count: None,
-            });
-            let rentals = api_client.list_rentals(query).await.inspect_err(|_| {
-                complete_spinner_error(spinner.clone(), "Failed to load community cloud rentals")
-            })?;
+            let rentals = api_client
+                .list_rentals(active_rentals_query())
+                .await
+                .inspect_err(|_| {
+                    complete_spinner_error(
+                        spinner.clone(),
+                        "Failed to load community cloud rentals",
+                    )
+                })?;
             (Some(rentals), None)
         }
         Some(ComputeCategory::SecureCloud) => {
@@ -169,11 +173,7 @@ pub async fn resolve_target_rental_unified(
         }
         None => {
             // Fetch both types in parallel with timeout for community cloud
-            let community_future = api_client.list_rentals(Some(ListRentalsQuery {
-                status: Some(RentalState::Active),
-                gpu_type: None,
-                min_gpu_count: None,
-            }));
+            let community_future = api_client.list_rentals(active_rentals_query());
             let (community_result, secure_result) = tokio::join!(
                 with_validator_timeout(community_future),
                 api_client.list_secure_cloud_rentals()
@@ -662,11 +662,7 @@ pub async fn resolve_rental_by_id(
 ) -> Result<ComputeCategory, CliError> {
     let spinner = create_spinner("Looking up rental...");
 
-    let community_future = api_client.list_rentals(Some(ListRentalsQuery {
-        status: Some(RentalState::Active),
-        gpu_type: None,
-        min_gpu_count: None,
-    }));
+    let community_future = api_client.list_rentals(active_rentals_query());
 
     let (community_result, secure_result) = tokio::join!(
         with_validator_timeout(community_future),
@@ -705,6 +701,23 @@ pub struct RentalWithSsh {
     pub ssh_public_key: Option<String>,
 }
 
+/// Get the user's registered SSH key and find the corresponding private key path.
+///
+/// This is a common operation needed when displaying SSH connection instructions.
+/// Returns an error if no SSH key is registered or the private key cannot be found locally.
+pub async fn get_ssh_private_key_path(api_client: &BasilicaClient) -> Result<std::path::PathBuf> {
+    let ssh_key = api_client
+        .get_ssh_key()
+        .await
+        .map_err(|e| eyre!(e))?
+        .ok_or_else(|| {
+            eyre!("No SSH key registered with Basilica")
+                .suggestion("Run 'basilica ssh-keys add' to register your SSH key")
+        })?;
+
+    crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
+}
+
 /// Resolve a rental ID to its compute category and fetch SSH credentials.
 ///
 /// When `target_id` is provided, locates the rental and fetches SSH credentials.
@@ -717,11 +730,7 @@ pub async fn resolve_rental_with_ssh(
         // Rental ID provided - find it and get SSH credentials
         let spinner = create_spinner("Looking up rental...");
 
-        let community_future = api_client.list_rentals(Some(ListRentalsQuery {
-            status: Some(RentalState::Active),
-            gpu_type: None,
-            min_gpu_count: None,
-        }));
+        let community_future = api_client.list_rentals(active_rentals_query());
 
         let (community_result, secure_result) = tokio::join!(
             with_validator_timeout(community_future),

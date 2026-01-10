@@ -2,9 +2,9 @@
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
 use crate::cli::handlers::gpu_rental_helpers::{
-    print_cloud_section_header, resolve_offering_unified, resolve_rental_by_id,
-    resolve_rental_with_ssh, resolve_target_rental_unified, with_validator_timeout, RentalWithSsh,
-    SelectedOffering,
+    active_rentals_query, get_ssh_private_key_path, print_cloud_section_header,
+    resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
+    resolve_target_rental_unified, with_validator_timeout, RentalWithSsh, SelectedOffering,
 };
 use crate::cli::handlers::region_mapping::region_matches_country;
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
@@ -669,22 +669,9 @@ async fn handle_secure_cloud_rental_with_offering(
 
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
-            // Look up the private key for display
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
             display_secure_cloud_reconnection_instructions(
                 &response.rental_id,
                 ssh_cmd,
@@ -713,21 +700,9 @@ async fn handle_secure_cloud_rental_with_offering(
                 username,
             };
 
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
 
             let ssh_client = SshClient::new(&config.ssh)?;
             match retry_ssh_connection(
@@ -846,22 +821,9 @@ async fn handle_cpu_rental_with_offering(
 
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
-            // Look up the private key for display
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
             display_secure_cloud_reconnection_instructions(
                 &response.rental_id,
                 ssh_cmd,
@@ -890,21 +852,9 @@ async fn handle_cpu_rental_with_offering(
                 username,
             };
 
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
 
             let ssh_client = SshClient::new(&config.ssh)?;
             match retry_ssh_connection(
@@ -1071,21 +1021,9 @@ async fn handle_community_cloud_rental_with_selection(
 
     if options.detach {
         // Look up the private key for display
-        let private_key_path = {
-            let ssh_key = api_client
-                .get_ssh_key()
-                .await
-                .map_err(|e| CliError::Internal(eyre!(e)))?
-                .ok_or_else(|| {
-                    CliError::Internal(
-                        eyre!("No SSH key registered with Basilica")
-                            .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                    )
-                })?;
-
-            crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                .map_err(CliError::Internal)?
-        };
+        let private_key_path = get_ssh_private_key_path(&api_client)
+            .await
+            .map_err(CliError::Internal)?;
         display_ssh_connection_instructions(
             &response.rental_id,
             ssh_creds,
@@ -1105,21 +1043,9 @@ async fn handle_community_cloud_rental_with_selection(
                 username,
             };
 
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
 
             let ssh_client = SshClient::new(&config.ssh)?;
             match retry_ssh_connection(
@@ -1969,15 +1895,13 @@ pub async fn handle_down(
         let (community_rentals, secure_rentals, cpu_rentals) = match compute_filter {
             Some(ComputeCategory::CommunityCloud) => {
                 // Fetch only community cloud
-                let query = Some(ListRentalsQuery {
-                    status: Some(RentalState::Active),
-                    gpu_type: None,
-                    min_gpu_count: None,
-                });
-                let rentals = api_client.list_rentals(query).await.map_err(|e| {
-                    complete_spinner_error(spinner.clone(), "Failed to fetch rentals");
-                    CliError::Internal(eyre!(e).wrap_err("Failed to fetch active rentals"))
-                })?;
+                let rentals = api_client
+                    .list_rentals(active_rentals_query())
+                    .await
+                    .map_err(|e| {
+                        complete_spinner_error(spinner.clone(), "Failed to fetch rentals");
+                        CliError::Internal(eyre!(e).wrap_err("Failed to fetch active rentals"))
+                    })?;
                 (Some(rentals), None, None)
             }
             Some(ComputeCategory::SecureCloud) => {
@@ -1994,11 +1918,7 @@ pub async fn handle_down(
             }
             None => {
                 // Fetch all types with timeout for community cloud
-                let community_future = api_client.list_rentals(Some(ListRentalsQuery {
-                    status: Some(RentalState::Active),
-                    gpu_type: None,
-                    min_gpu_count: None,
-                }));
+                let community_future = api_client.list_rentals(active_rentals_query());
                 let (community_result, secure_result, cpu_result) = tokio::join!(
                     with_validator_timeout(community_future),
                     api_client.list_secure_cloud_rentals(),
