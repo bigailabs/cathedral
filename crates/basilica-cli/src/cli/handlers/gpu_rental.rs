@@ -6,6 +6,7 @@ use crate::cli::handlers::gpu_rental_helpers::{
     resolve_rental_with_ssh, resolve_target_rental_unified, with_validator_timeout, RentalWithSsh,
     SelectedOffering,
 };
+use crate::cli::handlers::region_mapping::region_matches_country;
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
@@ -118,9 +119,29 @@ async fn fetch_and_filter_secure_cloud(
                 }
             }
 
-            // Filter by country
+            // Filter by minimum GPU memory
+            if let Some(min_memory) = filters.memory_min {
+                if let Some(mem_per_gpu) = gpu.gpu_memory_gb_per_gpu {
+                    let total_memory = mem_per_gpu * gpu.gpu_count;
+                    if total_memory < min_memory {
+                        return false;
+                    }
+                }
+            }
+
+            // Filter by country using region mapping
             if let Some(ref country) = filters.country {
-                if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
+                if !region_matches_country(&gpu.region, country) {
+                    return false;
+                }
+            }
+
+            // Filter by max price (total hourly cost for all GPUs)
+            if let Some(max_price) = filters.price_max {
+                use rust_decimal::prelude::ToPrimitive;
+                let total_price =
+                    gpu.hourly_rate_per_gpu.to_f64().unwrap_or(f64::MAX) * (gpu.gpu_count as f64);
+                if total_price > max_price {
                     return false;
                 }
             }
@@ -173,10 +194,28 @@ async fn fetch_and_filter_community_cloud(
             )
         })?;
 
+    // Apply client-side max price filter if specified
+    let filtered_nodes: Vec<_> = if let Some(max_price) = filters.price_max {
+        response
+            .available_nodes
+            .into_iter()
+            .filter(|node| {
+                if let Some(rate_cents) = node.node.hourly_rate_cents {
+                    let rate_dollars = rate_cents as f64 / 100.0;
+                    rate_dollars <= max_price
+                } else {
+                    // Include nodes without pricing (will show as "Market")
+                    true
+                }
+            })
+            .collect()
+    } else {
+        response.available_nodes
+    };
+
     // Build pricing map from nodes' hourly_rate_cents field
     // Map GPU type -> hourly rate string (e.g., "h100" -> "2.50")
-    let pricing_map: HashMap<String, String> = response
-        .available_nodes
+    let pricing_map: HashMap<String, String> = filtered_nodes
         .iter()
         .filter_map(|node| {
             // Get the first GPU spec to determine GPU type
@@ -193,7 +232,7 @@ async fn fetch_and_filter_community_cloud(
         })
         .collect();
 
-    Ok((response.available_nodes, pricing_map))
+    Ok((filtered_nodes, pricing_map))
 }
 
 /// Helper function to display secure cloud GPUs
@@ -225,6 +264,82 @@ fn display_community_cloud_table(
     Ok(())
 }
 
+/// Filter secure cloud rentals based on PsFilters
+///
+/// Applies gpu_type and min_gpu_count filters to secure cloud rentals.
+fn filter_secure_cloud_rentals<'a>(
+    rentals: &'a [basilica_sdk::types::SecureCloudRentalListItem],
+    filters: &PsFilters,
+) -> Vec<&'a basilica_sdk::types::SecureCloudRentalListItem> {
+    rentals
+        .iter()
+        .filter(|r| {
+            // Skip stopped rentals unless showing history
+            if !filters.history && r.stopped_at.is_some() {
+                return false;
+            }
+
+            // Filter by GPU type if specified
+            if let Some(ref gpu_type) = filters.gpu_type {
+                if !r.gpu_type.to_uppercase().contains(&gpu_type.to_uppercase()) {
+                    return false;
+                }
+            }
+
+            // Filter by min GPU count if specified
+            if let Some(min_count) = filters.min_gpu_count {
+                if r.gpu_count < min_count {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect()
+}
+
+/// Filter CPU offerings based on ListFilters
+///
+/// Applies country, memory, and price filters to CPU offerings.
+fn filter_cpu_offerings(
+    offerings: Vec<basilica_sdk::types::CpuOffering>,
+    filters: &ListFilters,
+) -> Vec<basilica_sdk::types::CpuOffering> {
+    offerings
+        .into_iter()
+        .filter(|offering| {
+            // Filter by availability
+            if !offering.availability {
+                return false;
+            }
+
+            // Filter by country using region mapping
+            if let Some(ref country) = filters.country {
+                if !region_matches_country(&offering.region, country) {
+                    return false;
+                }
+            }
+
+            // Filter by memory (system memory for CPU offerings)
+            if let Some(min_memory) = filters.memory_min {
+                if offering.system_memory_gb < min_memory {
+                    return false;
+                }
+            }
+
+            // Filter by max price
+            if let Some(max_price) = filters.price_max {
+                let hourly_rate = offering.hourly_rate.parse::<f64>().unwrap_or(f64::MAX);
+                if hourly_rate > max_price {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect()
+}
+
 /// Handle the `ls` command - list available nodes for rental
 pub async fn handle_ls(
     gpu_category: Option<GpuCategory>,
@@ -244,37 +359,53 @@ pub async fn handle_ls(
     // Branch based on compute type
     match compute_category {
         Some(ComputeCategory::SecureCloud) => {
-            // Fetch both GPU and CPU offerings in parallel
+            // Only fetch CPU offerings if no GPU type filter is specified
+            let show_cpu = gpu_category.is_none();
+
             let spinner = create_spinner("Fetching available instances...");
-            let (gpu_result, cpu_result) = tokio::join!(
-                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
-                api_client.list_cpu_offerings()
-            );
+            let (gpu_result, cpu_result) = if show_cpu {
+                let (gpu, cpu) = tokio::join!(
+                    fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                    api_client.list_cpu_offerings()
+                );
+                (gpu, Some(cpu))
+            } else {
+                let gpu = fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters).await;
+                (gpu, None)
+            };
             complete_spinner_and_clear(spinner);
 
             let filtered_gpus = gpu_result?;
-            let cpu_offerings = cpu_result.map_err(|e| CliError::Internal(eyre!(e)))?;
+            let filtered_cpu = if let Some(cpu_res) = cpu_result {
+                let cpu_offerings = cpu_res.map_err(|e| CliError::Internal(eyre!(e)))?;
+                filter_cpu_offerings(cpu_offerings, &filters)
+            } else {
+                vec![]
+            };
 
             if json {
                 #[derive(serde::Serialize)]
                 struct CombinedSecureCloudOfferings<'a> {
                     gpu_offerings: &'a [basilica_common::types::GpuOffering],
+                    #[serde(skip_serializing_if = "<[_]>::is_empty")]
                     cpu_offerings: &'a [basilica_sdk::types::CpuOffering],
                 }
                 let response = CombinedSecureCloudOfferings {
                     gpu_offerings: &filtered_gpus,
-                    cpu_offerings: &cpu_offerings,
+                    cpu_offerings: &filtered_cpu,
                 };
                 json_output(&response)?;
             } else {
                 // Display GPU offerings section
                 println!("{}", style("GPU Offerings").bold().cyan());
                 display_secure_cloud_table(&filtered_gpus)?;
-                println!();
 
-                // Display CPU offerings section
-                println!("{}", style("Secure Cloud (CPU)").bold().cyan());
-                table_output::display_cpu_offerings_detailed(&cpu_offerings)?;
+                // Only display CPU offerings section if no GPU type filter
+                if show_cpu {
+                    println!();
+                    println!("{}", style("Secure Cloud (CPU)").bold().cyan());
+                    table_output::display_cpu_offerings_detailed(&filtered_cpu)?;
+                }
             }
         }
         Some(ComputeCategory::CommunityCloud) => {
@@ -303,6 +434,9 @@ pub async fn handle_ls(
             // Display all tables when --compute flag is not specified
             use crate::cli::handlers::gpu_rental_helpers::VALIDATOR_REQUEST_TIMEOUT;
 
+            // Only show CPU offerings if no GPU type filter is specified
+            let show_cpu = gpu_category.is_none();
+
             let spinner = create_spinner("Fetching available instances...");
 
             // Fetch all in parallel with timeout for community cloud
@@ -310,40 +444,70 @@ pub async fn handle_ls(
             // so we use inline timeout here instead of with_validator_timeout
             let community_future =
                 fetch_and_filter_community_cloud(&api_client, gpu_category.clone(), &filters);
-            let (secure_result, community_result, cpu_result) = tokio::join!(
-                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
-                async {
-                    match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(
-                                "Validator request timed out after {} seconds",
-                                VALIDATOR_REQUEST_TIMEOUT.as_secs()
-                            );
-                            Ok((vec![], std::collections::HashMap::new()))
+
+            let (secure_result, community_result, cpu_result) = if show_cpu {
+                let (secure, community, cpu) = tokio::join!(
+                    fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                    async {
+                        match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!(
+                                    "Validator request timed out after {} seconds",
+                                    VALIDATOR_REQUEST_TIMEOUT.as_secs()
+                                );
+                                Ok((vec![], std::collections::HashMap::new()))
+                            }
+                        }
+                    },
+                    api_client.list_cpu_offerings()
+                );
+                (secure, community, Some(cpu))
+            } else {
+                let (secure, community) = tokio::join!(
+                    fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                    async {
+                        match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!(
+                                    "Validator request timed out after {} seconds",
+                                    VALIDATOR_REQUEST_TIMEOUT.as_secs()
+                                );
+                                Ok((vec![], std::collections::HashMap::new()))
+                            }
                         }
                     }
-                },
-                api_client.list_cpu_offerings()
-            );
+                );
+                (secure, community, None)
+            };
 
             complete_spinner_and_clear(spinner);
 
             let secure_gpus = secure_result?;
             let (community_nodes, pricing_map) = community_result?;
-            let cpu_offerings = cpu_result.unwrap_or_default();
+            let filtered_cpu = if let Some(cpu_res) = cpu_result {
+                filter_cpu_offerings(cpu_res.unwrap_or_default(), &filters)
+            } else {
+                vec![]
+            };
 
             if json {
                 #[derive(serde::Serialize)]
                 struct CombinedResponse<'a> {
                     secure_cloud: &'a [basilica_common::types::GpuOffering],
                     community_cloud: &'a [basilica_sdk::AvailableNode],
+                    #[serde(skip_serializing_if = "<[_]>::is_empty")]
                     cpu_offerings: &'a [basilica_sdk::types::CpuOffering],
                 }
                 let response = CombinedResponse {
                     secure_cloud: &secure_gpus,
                     community_cloud: &community_nodes,
-                    cpu_offerings: &cpu_offerings,
+                    cpu_offerings: &filtered_cpu,
                 };
                 json_output(&response)?;
             } else {
@@ -355,10 +519,13 @@ pub async fn handle_ls(
                 print_cloud_section_header("Secure Cloud (GPU)", false);
                 display_secure_cloud_table(&secure_gpus)?;
 
-                println!();
+                // Only display CPU offerings section if no GPU type filter
+                if show_cpu {
+                    println!();
 
-                print_cloud_section_header("Secure Cloud (CPU)", false);
-                table_output::display_cpu_offerings_detailed(&cpu_offerings)?;
+                    print_cloud_section_header("Secure Cloud (CPU)", false);
+                    table_output::display_cpu_offerings_detailed(&filtered_cpu)?;
+                }
             }
         }
     }
@@ -1266,12 +1433,12 @@ pub async fn handle_ps(
                     });
                     json_output(&output)?;
                 } else {
-                    // Show active GPU rentals
-                    let gpu_rentals_to_display: Vec<_> = gpu_rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none() && r.gpu_count > 0)
-                        .collect();
+                    // Show active GPU rentals with filters applied
+                    let gpu_rentals_to_display: Vec<_> =
+                        filter_secure_cloud_rentals(&gpu_rentals_list.rentals, &filters)
+                            .into_iter()
+                            .filter(|r| r.gpu_count > 0)
+                            .collect();
 
                     println!("{}", style("Secure Cloud (GPU)").bold().cyan());
                     table_output::display_secure_cloud_rentals(&gpu_rentals_to_display)?;
@@ -1283,7 +1450,7 @@ pub async fn handle_ps(
 
                     println!();
 
-                    // Show active CPU-only rentals
+                    // Show active CPU-only rentals (no gpu_type or min_gpu_count filters apply)
                     let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
                         .rentals
                         .iter()
@@ -1416,7 +1583,7 @@ pub async fn handle_ps(
             } else {
                 // Active rentals mode
                 let query = Some(ListRentalsQuery {
-                    status: filters.status.or(Some(RentalState::Active)),
+                    status: filters.status.clone().or(Some(RentalState::Active)),
                     gpu_type: filters.gpu_type.clone(),
                     min_gpu_count: filters.min_gpu_count,
                 });
@@ -1472,14 +1639,14 @@ pub async fn handle_ps(
 
                     println!();
 
-                    // Section 2: Secure Cloud (GPU)
+                    // Section 2: Secure Cloud (GPU) with filters applied
                     print_cloud_section_header("Secure Cloud (GPU)", false);
 
-                    let secure_rentals_to_display: Vec<_> = secure_rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none() && r.gpu_count > 0)
-                        .collect();
+                    let secure_rentals_to_display: Vec<_> =
+                        filter_secure_cloud_rentals(&secure_rentals_list.rentals, &filters)
+                            .into_iter()
+                            .filter(|r| r.gpu_count > 0)
+                            .collect();
 
                     table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
 
@@ -1490,7 +1657,7 @@ pub async fn handle_ps(
 
                     println!();
 
-                    // Section 3: Secure Cloud (CPU)
+                    // Section 3: Secure Cloud (CPU) (no gpu_type or min_gpu_count filters apply)
                     print_cloud_section_header("Secure Cloud (CPU)", false);
 
                     let cpu_rentals_to_display: Vec<_> = cpu_rentals_list

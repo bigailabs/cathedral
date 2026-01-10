@@ -1,5 +1,6 @@
 //! Common helper functions for GPU rental operations
 
+use crate::cli::handlers::region_mapping::region_matches_country;
 use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use basilica_common::types::ComputeCategory;
@@ -414,6 +415,23 @@ pub async fn resolve_offering_unified(
                 }
             }
 
+            // Apply memory filter if specified
+            if let Some(min_mem) = min_gpu_memory_filter {
+                if let Some(mem_per_gpu) = offering.gpu_memory_gb_per_gpu {
+                    let total_memory = mem_per_gpu * offering.gpu_count;
+                    if total_memory < min_mem {
+                        continue;
+                    }
+                }
+            }
+
+            // Apply country filter if specified
+            if let Some(country) = country_filter {
+                if !region_matches_country(&offering.region, country) {
+                    continue;
+                }
+            }
+
             // Calculate total instance price (API already includes markup)
             let price_per_gpu = offering.hourly_rate_per_gpu.to_f64().unwrap_or(0.0);
             let total_price = price_per_gpu * (offering.gpu_count as f64);
@@ -445,7 +463,31 @@ pub async fn resolve_offering_unified(
     if gpu_filter.is_none() && gpu_count_filter.is_none() {
         if let Ok(cpu_offerings) = cpu_result {
             for offering in cpu_offerings {
-                let hourly_rate: f64 = offering.hourly_rate.parse().unwrap_or(0.0);
+                // Apply country filter if specified
+                if let Some(country) = country_filter {
+                    if !region_matches_country(&offering.region, country) {
+                        continue;
+                    }
+                }
+
+                // Apply memory filter (system memory for CPU offerings)
+                if let Some(min_mem) = min_gpu_memory_filter {
+                    if offering.system_memory_gb < min_mem {
+                        continue;
+                    }
+                }
+
+                // Parse hourly rate with proper error handling
+                let hourly_rate: f64 = match offering.hourly_rate.parse() {
+                    Ok(rate) => rate,
+                    Err(_) => {
+                        warn!(
+                            "Invalid hourly_rate '{}' for CPU offering {}, skipping",
+                            offering.hourly_rate, offering.id
+                        );
+                        continue;
+                    }
+                };
 
                 unified_items.push(UnifiedOfferingItem {
                     offering_type: OfferingType::SecureCpu,
