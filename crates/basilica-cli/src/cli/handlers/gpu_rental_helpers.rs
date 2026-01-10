@@ -449,7 +449,7 @@ pub async fn resolve_offering_unified(
 
                 unified_items.push(UnifiedOfferingItem {
                     offering_type: OfferingType::SecureCpu,
-                    display_gpu: format!("{} vCPU (CPU-only)", offering.vcpu_count),
+                    display_gpu: format!("{} vCPU", offering.vcpu_count),
                     display_provider: offering.provider.to_string(),
                     display_memory: format!("{}GB RAM", offering.system_memory_gb),
                     display_price: format!("${:.2}/hr", hourly_rate),
@@ -542,7 +542,7 @@ pub async fn resolve_offering_unified(
             let type_label = match item.offering_type {
                 OfferingType::Community => "Community",
                 OfferingType::SecureGpu => "Secure   ",
-                OfferingType::SecureCpu => "CPU-Only ",
+                OfferingType::SecureCpu => "Secure   ",
             };
 
             format!(

@@ -876,7 +876,7 @@ pub fn display_cpu_offerings_detailed(
     table.with(Style::modern());
     println!("{}", table);
 
-    println!("\nTotal CPU offerings: {}", offerings.len());
+    println!("\nTotal Secure Cloud (CPU) offerings: {}", offerings.len());
 
     Ok(())
 }

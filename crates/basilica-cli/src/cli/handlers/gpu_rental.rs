@@ -273,7 +273,7 @@ pub async fn handle_ls(
                 println!();
 
                 // Display CPU offerings section
-                println!("{}", style("CPU-Only Offerings").bold().cyan());
+                println!("{}", style("Secure Cloud (CPU)").bold().cyan());
                 table_output::display_cpu_offerings_detailed(&cpu_offerings)?;
             }
         }
@@ -352,12 +352,12 @@ pub async fn handle_ls(
 
                 println!();
 
-                print_cloud_section_header("Secure Cloud GPUs", false);
+                print_cloud_section_header("Secure Cloud (GPU)", false);
                 display_secure_cloud_table(&secure_gpus)?;
 
                 println!();
 
-                print_cloud_section_header("CPU-Only Instances", false);
+                print_cloud_section_header("Secure Cloud (CPU)", false);
                 table_output::display_cpu_offerings_detailed(&cpu_offerings)?;
             }
         }
@@ -1273,11 +1273,11 @@ pub async fn handle_ps(
                         .filter(|r| r.stopped_at.is_none())
                         .collect();
 
-                    println!("{}", style("GPU Rentals").bold().cyan());
+                    println!("{}", style("Secure Cloud (GPU)").bold().cyan());
                     table_output::display_secure_cloud_rentals(&gpu_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} active GPU rentals",
+                        "\nTotal: {} Secure Cloud (GPU) rentals",
                         gpu_rentals_to_display.len()
                     );
 
@@ -1290,11 +1290,11 @@ pub async fn handle_ps(
                         .filter(|r| r.stopped_at.is_none())
                         .collect();
 
-                    println!("{}", style("CPU-Only Rentals").bold().cyan());
+                    println!("{}", style("Secure Cloud (CPU)").bold().cyan());
                     table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} active CPU-only rentals",
+                        "\nTotal: {} Secure Cloud (CPU) rentals",
                         cpu_rentals_to_display.len()
                     );
 
@@ -1472,8 +1472,8 @@ pub async fn handle_ps(
 
                     println!();
 
-                    // Section 2: Secure Cloud GPU Rentals
-                    print_cloud_section_header("Secure Cloud GPU Rentals", false);
+                    // Section 2: Secure Cloud (GPU)
+                    print_cloud_section_header("Secure Cloud (GPU)", false);
 
                     let secure_rentals_to_display: Vec<_> = secure_rentals_list
                         .rentals
@@ -1484,14 +1484,14 @@ pub async fn handle_ps(
                     table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} secure cloud GPU rentals",
+                        "\nTotal: {} Secure Cloud (GPU) rentals",
                         secure_rentals_to_display.len()
                     );
 
                     println!();
 
-                    // Section 3: CPU-Only Secure Cloud
-                    print_cloud_section_header("CPU-Only Secure Cloud", false);
+                    // Section 3: Secure Cloud (CPU)
+                    print_cloud_section_header("Secure Cloud (CPU)", false);
 
                     let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
                         .rentals
@@ -1501,7 +1501,10 @@ pub async fn handle_ps(
 
                     table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
 
-                    println!("\nTotal: {} CPU-only rentals", cpu_rentals_to_display.len());
+                    println!(
+                        "\nTotal: {} Secure Cloud (CPU) rentals",
+                        cpu_rentals_to_display.len()
+                    );
 
                     display_ps_quick_start_commands();
                 }
