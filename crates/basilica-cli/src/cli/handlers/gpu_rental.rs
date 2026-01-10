@@ -1270,7 +1270,7 @@ pub async fn handle_ps(
                     let gpu_rentals_to_display: Vec<_> = gpu_rentals_list
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_none())
+                        .filter(|r| r.stopped_at.is_none() && r.gpu_count > 0)
                         .collect();
 
                     println!("{}", style("Secure Cloud (GPU)").bold().cyan());
@@ -1287,7 +1287,7 @@ pub async fn handle_ps(
                     let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_none())
+                        .filter(|r| r.stopped_at.is_none() && r.gpu_count == 0)
                         .collect();
 
                     println!("{}", style("Secure Cloud (CPU)").bold().cyan());
@@ -1478,7 +1478,7 @@ pub async fn handle_ps(
                     let secure_rentals_to_display: Vec<_> = secure_rentals_list
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_none())
+                        .filter(|r| r.stopped_at.is_none() && r.gpu_count > 0)
                         .collect();
 
                     table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
@@ -1496,7 +1496,7 @@ pub async fn handle_ps(
                     let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
                         .rentals
                         .iter()
-                        .filter(|r| r.stopped_at.is_none())
+                        .filter(|r| r.stopped_at.is_none() && r.gpu_count == 0)
                         .collect();
 
                     table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
