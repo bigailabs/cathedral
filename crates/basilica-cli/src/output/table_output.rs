@@ -873,7 +873,10 @@ pub fn display_cpu_offerings_detailed(
             ram: format!("{}GB", offering.system_memory_gb),
             storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
             region: offering.region.clone(),
-            price: format!("${}/hr", offering.hourly_rate),
+            price: format!(
+                "${:.2}/hr",
+                offering.hourly_rate.parse::<f64>().unwrap_or(0.0)
+            ),
         })
         .collect();
 
