@@ -126,16 +126,16 @@ pub struct SecureCloudData {
     #[prost(uint32, tag = "5")]
     pub gpu_count: u32,
     /// Price per vCPU per hour (0 for GPU rentals)
-    #[prost(double, tag = "7")]
+    #[prost(double, tag = "6")]
     pub base_price_per_cpu: f64,
     /// Number of vCPUs in this rental
-    #[prost(uint32, tag = "8")]
+    #[prost(uint32, tag = "7")]
     pub cpu_count: u32,
     /// Price per GB RAM per hour (0 for GPU rentals)
-    #[prost(double, tag = "9")]
+    #[prost(double, tag = "8")]
     pub base_price_per_ram: f64,
     /// Amount of RAM in GB
-    #[prost(uint32, tag = "10")]
+    #[prost(uint32, tag = "9")]
     pub ram_gb: u32,
 }
 /// Orchestrator cloud rental data (K3s UserDeployment billing)

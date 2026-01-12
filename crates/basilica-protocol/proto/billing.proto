@@ -96,11 +96,10 @@ message SecureCloudData {
     string offering_id = 3;           // Original offering ID from aggregator
     double base_price_per_gpu = 4;    // Price per GPU per hour (0 for CPU-only rentals)
     uint32 gpu_count = 5;             // Number of GPUs in this rental (0 for CPU-only rentals)
-    reserved 6;                       // Previously: compute_type (removed - use additive pricing instead)
-    double base_price_per_cpu = 7;    // Price per vCPU per hour (0 for GPU rentals)
-    uint32 cpu_count = 8;             // Number of vCPUs in this rental
-    double base_price_per_ram = 9;    // Price per GB RAM per hour (0 for GPU rentals)
-    uint32 ram_gb = 10;               // Amount of RAM in GB
+    double base_price_per_cpu = 6;    // Price per vCPU per hour (0 for GPU rentals)
+    uint32 cpu_count = 7;             // Number of vCPUs in this rental
+    double base_price_per_ram = 8;    // Price per GB RAM per hour (0 for GPU rentals)
+    uint32 ram_gb = 9;                // Amount of RAM in GB
 }
 
 // Orchestrator cloud rental data (K3s UserDeployment billing)
