@@ -581,9 +581,11 @@ pub async fn resolve_offering_unified(
                 format!("{}GB", total_mem)
             };
 
-            // Format price (convert from cents to dollars)
+            // Format price (convert from cents to dollars, multiply by GPU count for total node cost)
             let price_str = if let Some(rate_cents) = node.node.hourly_rate_cents {
-                format!("${:.2}/hr", rate_cents as f64 / 100.0)
+                let gpu_count = node.node.gpu_specs.len() as f64;
+                let total_rate = (rate_cents as f64 / 100.0) * gpu_count;
+                format!("${:.2}/hr", total_rate)
             } else {
                 "Market".to_string()
             };
