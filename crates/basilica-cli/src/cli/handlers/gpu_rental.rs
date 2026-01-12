@@ -201,8 +201,10 @@ async fn fetch_and_filter_community_cloud(
             .into_iter()
             .filter(|node| {
                 if let Some(rate_cents) = node.node.hourly_rate_cents {
+                    let gpu_count = node.node.gpu_specs.len() as f64;
                     let rate_dollars = rate_cents as f64 / 100.0;
-                    rate_dollars <= max_price
+                    let total_rate = rate_dollars * gpu_count;
+                    total_rate <= max_price
                 } else {
                     // Include nodes without pricing (will show as "Market")
                     true
