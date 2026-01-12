@@ -19,8 +19,9 @@ use crate::CliError;
 use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
-    HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile,
-    NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
+    HistoricalRentalItem, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
+    LocationProfile, NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess,
+    StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use color_eyre::eyre::eyre;
@@ -298,6 +299,10 @@ fn filter_secure_cloud_rentals<'a>(
             true
         })
         .collect()
+}
+
+fn is_secure_cpu_history_item(rental: &HistoricalRentalItem) -> bool {
+    rental.compute_type.eq_ignore_ascii_case("cpu")
 }
 
 /// Filter CPU offerings based on ListFilters
@@ -1289,37 +1294,48 @@ pub async fn handle_ps(
                 complete_spinner_and_clear(spinner);
 
                 if json {
-                    // Filter to only secure cloud rentals and sort by start time (most recent first)
-                    let mut secure_history: Vec<_> = history
+                    use serde_json::json;
+                    let mut secure_gpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
                         .cloned()
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-                    let filtered_response = HistoricalRentalsResponse {
-                        rentals: secure_history.clone(),
-                        total_count: secure_history.len(),
-                        total_cost: secure_history
-                            .iter()
-                            .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
-                            .sum::<rust_decimal::Decimal>()
-                            .to_string(),
-                    };
-                    json_output(&filtered_response)?;
-                } else {
-                    // Filter to only secure cloud rentals and sort by start time (most recent first)
-                    let mut secure_history: Vec<_> = history
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    let mut secure_cpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .cloned()
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    table_output::display_rental_history(&secure_history)?;
+                    let output = json!({
+                        "secure_cloud_history": secure_gpu_history,
+                        "secure_cloud_cpu_history": secure_cpu_history
+                    });
+                    json_output(&output)?;
+                } else {
+                    // Filter to only secure cloud rentals and sort by start time (most recent first)
+                    let mut secure_gpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
+                        .collect();
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    // Calculate total cost for secure cloud only
-                    let total_cost: rust_decimal::Decimal = secure_history
+                    let mut secure_cpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .collect();
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    print_cloud_section_header("Secure Cloud (GPU) Rental History", true);
+                    table_output::display_rental_history(&secure_gpu_history)?;
+
+                    let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
                         .iter()
                         .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
@@ -1328,11 +1344,36 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", total_cost)).green().bold()
+                        style(format!("${:.2}", secure_gpu_total_cost))
+                            .green()
+                            .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud rentals",
-                        secure_history.len()
+                        "\nTotal: {} historical secure cloud GPU rentals",
+                        secure_gpu_history.len()
+                    );
+
+                    println!();
+
+                    print_cloud_section_header("Secure Cloud (CPU) Rental History", false);
+                    table_output::display_cpu_rental_history(&secure_cpu_history)?;
+
+                    let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", secure_cpu_total_cost))
+                            .green()
+                            .bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical secure cloud CPU rentals",
+                        secure_cpu_history.len()
                     );
 
                     display_ps_quick_start_commands();
@@ -1439,16 +1480,24 @@ pub async fn handle_ps(
                         .cloned()
                         .collect();
                     community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-                    let mut secure_history: Vec<_> = history
+                    let mut secure_gpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
                         .cloned()
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let mut secure_cpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .cloned()
+                        .collect();
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
                     let output = json!({
                         "community_cloud_history": community_history,
-                        "secure_cloud_history": secure_history
+                        "secure_cloud_history": secure_gpu_history,
+                        "secure_cloud_cpu_history": secure_cpu_history
                     });
                     json_output(&output)?;
                 } else {
@@ -1460,12 +1509,19 @@ pub async fn handle_ps(
                         .collect();
                     community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    let mut secure_history: Vec<_> = history
+                    let mut secure_gpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    let mut secure_cpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .collect();
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
                     // Display community cloud history
                     print_cloud_section_header("Community Cloud Rental History", true);
@@ -1491,11 +1547,11 @@ pub async fn handle_ps(
 
                     println!();
 
-                    // Display secure cloud history
-                    print_cloud_section_header("Secure Cloud Rental History", false);
-                    table_output::display_rental_history(&secure_history)?;
+                    // Display secure cloud GPU history
+                    print_cloud_section_header("Secure Cloud (GPU) Rental History", false);
+                    table_output::display_rental_history(&secure_gpu_history)?;
 
-                    let secure_total_cost: rust_decimal::Decimal = secure_history
+                    let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
                         .iter()
                         .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
@@ -1504,11 +1560,37 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_total_cost)).green().bold()
+                        style(format!("${:.2}", secure_gpu_total_cost))
+                            .green()
+                            .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud rentals",
-                        secure_history.len()
+                        "\nTotal: {} historical secure cloud GPU rentals",
+                        secure_gpu_history.len()
+                    );
+
+                    println!();
+
+                    // Display secure cloud CPU history
+                    print_cloud_section_header("Secure Cloud (CPU) Rental History", false);
+                    table_output::display_cpu_rental_history(&secure_cpu_history)?;
+
+                    let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", secure_cpu_total_cost))
+                            .green()
+                            .bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical secure cloud CPU rentals",
+                        secure_cpu_history.len()
                     );
 
                     display_ps_quick_start_commands();

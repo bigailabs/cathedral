@@ -27,6 +27,16 @@ fn format_timestamp(timestamp: &str) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
+fn format_duration(seconds: i64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
 /// Display rental items in table format
 pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
     if rentals.is_empty() {
@@ -676,17 +686,6 @@ pub fn display_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
         return Ok(());
     }
 
-    // Helper to format duration
-    let format_duration = |seconds: i64| -> String {
-        let hours = seconds / 3600;
-        let minutes = (seconds % 3600) / 60;
-        if hours > 0 {
-            format!("{}h {}m", hours, minutes)
-        } else {
-            format!("{}m", minutes)
-        }
-    };
-
     #[derive(Tabled)]
     struct HistoryRow {
         #[tabled(rename = "Rental ID")]
@@ -719,6 +718,91 @@ pub fn display_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
                 rental_id: rental.rental_id.clone(),
                 gpu_count: format!("{}x GPU", rental.gpu_count),
                 status: rental.status.clone(),
+                total_cost,
+                started: rental
+                    .started_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+                stopped: rental
+                    .stopped_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+                duration: format_duration(rental.duration_seconds),
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{table}");
+
+    Ok(())
+}
+
+/// Display historical CPU rental data from billing service
+pub fn display_cpu_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No CPU rental history found").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CpuHistoryRow {
+        #[tabled(rename = "Provider")]
+        provider: String,
+        #[tabled(rename = "vCPU")]
+        vcpu: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "Status")]
+        status: String,
+        #[tabled(rename = "Rate/hr")]
+        rate: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Started")]
+        started: String,
+        #[tabled(rename = "Stopped")]
+        stopped: String,
+        #[tabled(rename = "Duration")]
+        duration: String,
+    }
+
+    let mut rows: Vec<CpuHistoryRow> = rentals
+        .iter()
+        .map(|rental| {
+            let total_cost = rental
+                .total_cost
+                .parse::<Decimal>()
+                .ok()
+                .map(|c| format!("${:.2}", c))
+                .unwrap_or_else(|| rental.total_cost.clone());
+
+            let rate = rental
+                .hourly_rate
+                .map(|r| format!("${:.2}/hr", r))
+                .unwrap_or_else(|| "-".to_string());
+
+            let vcpu = rental
+                .vcpu_count
+                .map(|cores| format!("{} cores", cores))
+                .unwrap_or_else(|| "-".to_string());
+
+            let ram = rental
+                .system_memory_gb
+                .map(|gb| format!("{}GB", gb))
+                .unwrap_or_else(|| "-".to_string());
+
+            CpuHistoryRow {
+                provider: rental.provider.clone().unwrap_or_else(|| "-".to_string()),
+                vcpu,
+                ram,
+                status: rental.status.clone(),
+                rate,
                 total_cost,
                 started: rental
                     .started_at

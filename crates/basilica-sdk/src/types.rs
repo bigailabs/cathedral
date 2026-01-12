@@ -120,6 +120,10 @@ pub struct HistoricalRentalItem {
     pub duration_seconds: i64,
     pub gpu_count: u32,
     pub cloud_type: String, // "community" or "secure"
+    pub compute_type: String,
+    pub vcpu_count: Option<u32>,
+    pub system_memory_gb: Option<u32>,
+    pub provider: Option<String>,
 }
 
 /// API response for historical rentals
