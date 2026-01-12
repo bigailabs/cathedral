@@ -800,7 +800,12 @@ async fn handle_rental_with_offering(
             println!();
             print_info(&format!(
                 "{} is active but SSH is not yet available",
-                rental_noun.chars().next().unwrap().to_uppercase().collect::<String>()
+                rental_noun
+                    .chars()
+                    .next()
+                    .unwrap()
+                    .to_uppercase()
+                    .collect::<String>()
                     + &rental_noun[1..]
             ));
             print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
@@ -809,7 +814,12 @@ async fn handle_rental_with_offering(
         println!();
         print_info(&format!(
             "{} is taking longer than expected to become active",
-            rental_noun.chars().next().unwrap().to_uppercase().collect::<String>()
+            rental_noun
+                .chars()
+                .next()
+                .unwrap()
+                .to_uppercase()
+                .collect::<String>()
                 + &rental_noun[1..]
         ));
         print_info("Check status with: basilica ps");
@@ -2694,7 +2704,7 @@ async fn poll_secure_cloud_rental_status(
 /// SSH services may not be immediately available after a rental becomes active.
 /// This function retries the connection for up to `max_wait` duration with exponential backoff.
 ///
-/// Uses try_connect_silently() for retries (suppresses stderr, allows passphrases)
+/// Uses try_connect_silently() for non-interactive readiness probes (no passphrase prompts)
 /// then interactive_session() once connected.
 async fn retry_ssh_connection(
     ssh_client: &SshClient,
@@ -2741,12 +2751,23 @@ async fn retry_ssh_connection(
             .try_connect_silently(ssh_access, private_key_path.clone())
             .await
         {
-            Ok(_) => {
-                // Connection succeeded, start interactive session
+            Ok(crate::ssh::SshProbeStatus::Ready)
+            | Ok(crate::ssh::SshProbeStatus::ReadyAuthRequired) => {
+                // SSH is reachable; start interactive session (will prompt once if needed).
                 return ssh_client
                     .interactive_session(ssh_access, private_key_path)
                     .await
                     .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
+            }
+            Ok(crate::ssh::SshProbeStatus::NotReady(reason)) => {
+                debug!(
+                    "SSH attempt {} not ready ({}s elapsed): {}. Retrying in {}s...",
+                    attempt,
+                    start_time.elapsed().as_secs(),
+                    reason,
+                    interval.as_secs()
+                );
+                // Continue to next iteration for retry
             }
             Err(e) => {
                 debug!(
