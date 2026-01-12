@@ -1355,7 +1355,7 @@ pub async fn handle_ps(
 
                     println!();
 
-                    print_cloud_section_header("Secure Cloud (CPU) Rental History", false);
+                    print_cloud_section_header("Secure Cloud (CPU) History", false);
                     table_output::display_cpu_rental_history(&secure_cpu_history)?;
 
                     let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
@@ -1524,7 +1524,7 @@ pub async fn handle_ps(
                     secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
                     // Display community cloud history
-                    print_cloud_section_header("Community Cloud Rental History", true);
+                    print_cloud_section_header("Community Cloud History", true);
                     table_output::display_rental_history(&community_history)?;
 
                     let community_total_cost: rust_decimal::Decimal = community_history
@@ -1548,7 +1548,7 @@ pub async fn handle_ps(
                     println!();
 
                     // Display secure cloud GPU history
-                    print_cloud_section_header("Secure Cloud (GPU) Rental History", false);
+                    print_cloud_section_header("Secure Cloud (GPU) History", false);
                     table_output::display_rental_history(&secure_gpu_history)?;
 
                     let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
@@ -1572,7 +1572,7 @@ pub async fn handle_ps(
                     println!();
 
                     // Display secure cloud CPU history
-                    print_cloud_section_header("Secure Cloud (CPU) Rental History", false);
+                    print_cloud_section_header("Secure Cloud (CPU) History", false);
                     table_output::display_cpu_rental_history(&secure_cpu_history)?;
 
                     let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
@@ -1643,7 +1643,7 @@ pub async fn handle_ps(
                     json_output(&output)?;
                 } else {
                     // Section 1: Community Cloud
-                    print_cloud_section_header("Community Cloud Rentals", true);
+                    print_cloud_section_header("Community Cloud", true);
 
                     table_output::display_rental_items(&community_rentals_list.rentals[..])?;
 
