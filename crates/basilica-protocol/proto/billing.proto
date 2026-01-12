@@ -89,7 +89,7 @@ message CommunityCloudData {
 }
 
 // Secure cloud rental data (direct provider API)
-// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost)
+// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost + storage_cost)
 message SecureCloudData {
     string provider_instance_id = 1; // Provider's instance ID
     string provider = 2;              // Provider name (e.g., "datacrunch", "hyperstack")
@@ -100,10 +100,12 @@ message SecureCloudData {
     uint32 cpu_count = 7;             // Number of vCPUs in this rental
     double base_price_per_ram = 8;    // Price per GB RAM per hour (0 for GPU rentals)
     uint32 ram_gb = 9;                // Amount of RAM in GB
+    double base_price_per_storage = 10; // Price per GB storage per hour (0 for GPU rentals)
+    uint32 storage_gb = 11;             // Amount of storage in GB
 }
 
 // Orchestrator cloud rental data (K3s UserDeployment billing)
-// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost)
+// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost + storage_cost)
 message OrchestratorCloudData {
     string namespace = 1;             // User namespace (e.g., "u-github-12345")
     string instance_name = 2;         // UserDeployment instance name
@@ -117,6 +119,8 @@ message OrchestratorCloudData {
     uint32 cpu_count = 10;            // Number of vCPUs
     double base_price_per_ram = 11;   // Price per GB RAM per hour
     uint32 ram_gb = 12;               // Amount of RAM in GB
+    double base_price_per_storage = 13; // Price per GB storage per hour
+    uint32 storage_gb = 14;             // Amount of storage in GB
 }
 
 message ResourceSpec {

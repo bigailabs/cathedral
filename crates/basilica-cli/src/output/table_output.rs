@@ -955,7 +955,11 @@ pub fn display_cpu_offerings_detailed(
             provider: offering.provider.clone(),
             vcpu: format!("{} cores", offering.vcpu_count),
             ram: format!("{}GB", offering.system_memory_gb),
-            storage: offering.storage.clone().unwrap_or_else(|| "-".to_string()),
+            storage: if offering.storage_gb > 0 {
+                format!("{}GB", offering.storage_gb)
+            } else {
+                "-".to_string()
+            },
             region: offering.region.clone(),
             price: format!(
                 "${:.2}/hr",

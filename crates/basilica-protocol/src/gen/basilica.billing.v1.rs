@@ -106,7 +106,7 @@ pub struct CommunityCloudData {
     pub miner_hotkey: ::prost::alloc::string::String,
 }
 /// Secure cloud rental data (direct provider API)
-/// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost)
+/// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost + storage_cost)
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SecureCloudData {
@@ -137,9 +137,15 @@ pub struct SecureCloudData {
     /// Amount of RAM in GB
     #[prost(uint32, tag = "9")]
     pub ram_gb: u32,
+    /// Price per GB storage per hour (0 for GPU rentals)
+    #[prost(double, tag = "10")]
+    pub base_price_per_storage: f64,
+    /// Amount of storage in GB
+    #[prost(uint32, tag = "11")]
+    pub storage_gb: u32,
 }
 /// Orchestrator cloud rental data (K3s UserDeployment billing)
-/// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost)
+/// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost + storage_cost)
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrchestratorCloudData {
@@ -179,6 +185,12 @@ pub struct OrchestratorCloudData {
     /// Amount of RAM in GB
     #[prost(uint32, tag = "12")]
     pub ram_gb: u32,
+    /// Price per GB storage per hour
+    #[prost(double, tag = "13")]
+    pub base_price_per_storage: f64,
+    /// Amount of storage in GB
+    #[prost(uint32, tag = "14")]
+    pub storage_gb: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

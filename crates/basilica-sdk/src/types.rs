@@ -913,9 +913,8 @@ pub struct CpuOffering {
     /// System memory in GB
     pub system_memory_gb: u32,
 
-    /// Storage description (e.g., "500GB SSD")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage: Option<String>,
+    /// Storage in GB
+    pub storage_gb: u32,
 
     /// Region/location code
     pub region: String,
