@@ -106,6 +106,7 @@ pub struct CommunityCloudData {
     pub miner_hotkey: ::prost::alloc::string::String,
 }
 /// Secure cloud rental data (direct provider API)
+/// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost)
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SecureCloudData {
@@ -118,17 +119,27 @@ pub struct SecureCloudData {
     /// Original offering ID from aggregator
     #[prost(string, tag = "3")]
     pub offering_id: ::prost::alloc::string::String,
-    /// Final price per GPU per hour (already includes markup)
+    /// Price per GPU per hour (0 for CPU-only rentals)
     #[prost(double, tag = "4")]
     pub base_price_per_gpu: f64,
-    /// Number of GPUs in this rental
+    /// Number of GPUs in this rental (0 for CPU-only rentals)
     #[prost(uint32, tag = "5")]
     pub gpu_count: u32,
-    /// CPU or GPU rental
-    #[prost(enumeration = "ComputeType", tag = "6")]
-    pub compute_type: i32,
+    /// Price per vCPU per hour (0 for GPU rentals)
+    #[prost(double, tag = "7")]
+    pub base_price_per_cpu: f64,
+    /// Number of vCPUs in this rental
+    #[prost(uint32, tag = "8")]
+    pub cpu_count: u32,
+    /// Price per GB RAM per hour (0 for GPU rentals)
+    #[prost(double, tag = "9")]
+    pub base_price_per_ram: f64,
+    /// Amount of RAM in GB
+    #[prost(uint32, tag = "10")]
+    pub ram_gb: u32,
 }
 /// Orchestrator cloud rental data (K3s UserDeployment billing)
+/// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost)
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OrchestratorCloudData {
@@ -150,12 +161,24 @@ pub struct OrchestratorCloudData {
     /// Publicly accessible
     #[prost(bool, tag = "6")]
     pub public: bool,
-    /// Base price per GPU hour (required for billing)
+    /// Price per GPU per hour (0 for CPU-only)
     #[prost(double, tag = "7")]
     pub base_price_per_gpu: f64,
-    /// Total GPU count (required for billing)
+    /// Number of GPUs (0 for CPU-only)
     #[prost(uint32, tag = "8")]
     pub gpu_count: u32,
+    /// Price per vCPU per hour
+    #[prost(double, tag = "9")]
+    pub base_price_per_cpu: f64,
+    /// Number of vCPUs
+    #[prost(uint32, tag = "10")]
+    pub cpu_count: u32,
+    /// Price per GB RAM per hour
+    #[prost(double, tag = "11")]
+    pub base_price_per_ram: f64,
+    /// Amount of RAM in GB
+    #[prost(uint32, tag = "12")]
+    pub ram_gb: u32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -614,35 +637,6 @@ pub struct MarkMinerRevenuePaidResponse {
     pub success: bool,
     #[prost(string, tag = "2")]
     pub error_message: ::prost::alloc::string::String,
-}
-/// Compute type discriminator for rentals
-/// GPU is 0 so that unset fields default to GPU (backwards compatible)
-#[derive(serde::Serialize, serde::Deserialize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum ComputeType {
-    Gpu = 0,
-    Cpu = 1,
-}
-impl ComputeType {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            ComputeType::Gpu => "COMPUTE_TYPE_GPU",
-            ComputeType::Cpu => "COMPUTE_TYPE_CPU",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "COMPUTE_TYPE_GPU" => Some(Self::Gpu),
-            "COMPUTE_TYPE_CPU" => Some(Self::Cpu),
-            _ => None,
-        }
-    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
