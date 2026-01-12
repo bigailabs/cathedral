@@ -38,6 +38,42 @@ use tracing::{debug, warn};
 /// Maximum time to wait for rental to become active and SSH to be ready
 const RENTAL_READY_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Enum representing the type of rental offering (GPU or CPU-only)
+enum RentalOffering {
+    SecureCloud(basilica_common::types::GpuOffering),
+    CpuOnly(basilica_sdk::types::CpuOffering),
+}
+
+impl RentalOffering {
+    fn id(&self) -> &str {
+        match self {
+            RentalOffering::SecureCloud(o) => &o.id,
+            RentalOffering::CpuOnly(o) => &o.id,
+        }
+    }
+
+    fn rental_type_name(&self) -> &'static str {
+        match self {
+            RentalOffering::SecureCloud(_) => "rental",
+            RentalOffering::CpuOnly(_) => "CPU-only rental",
+        }
+    }
+
+    fn rental_noun(&self) -> &'static str {
+        match self {
+            RentalOffering::SecureCloud(_) => "rental",
+            RentalOffering::CpuOnly(_) => "CPU rental",
+        }
+    }
+
+    fn instance_noun(&self) -> &'static str {
+        match self {
+            RentalOffering::SecureCloud(_) => "Instance",
+            RentalOffering::CpuOnly(_) => "CPU instance",
+        }
+    }
+}
+
 /// Represents a GPU target for the `up` command
 #[derive(Debug, Clone)]
 pub struct GpuTarget(pub GpuCategory);
@@ -599,13 +635,17 @@ pub async fn ensure_ssh_key_registered(
     }
 }
 
-/// Handle secure cloud rental with a pre-selected offering (from unified selector)
-async fn handle_secure_cloud_rental_with_offering(
+/// Unified handler for both secure cloud (GPU) and CPU-only rentals
+async fn handle_rental_with_offering(
     api_client: basilica_sdk::BasilicaClient,
-    offering: basilica_common::types::GpuOffering,
+    offering: RentalOffering,
     options: UpOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    let rental_type = offering.rental_type_name();
+    let rental_noun = offering.rental_noun();
+    let instance_noun = offering.instance_noun();
+
     // Get SSH key ID (SSH key registration already done in handle_up)
     let ssh_key_id = api_client
         .get_ssh_key()
@@ -620,7 +660,7 @@ async fn handle_secure_cloud_rental_with_offering(
         .id;
 
     // Start rental
-    let spinner = create_spinner("Starting rental...");
+    let spinner = create_spinner(&format!("Starting {}...", rental_type));
 
     use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
 
@@ -653,25 +693,32 @@ async fn handle_secure_cloud_rental_with_offering(
     };
 
     let request = StartSecureCloudRentalRequest {
-        offering_id: offering.id.clone(),
+        offering_id: offering.id().to_string(),
         ssh_public_key_id: ssh_key_id,
         container_image: options.image.clone(),
         environment,
         ports,
     };
 
-    let response = api_client
-        .start_secure_cloud_rental(request)
-        .await
-        .map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Failed to start rental");
+    // Start the rental using the appropriate API method
+    let response = match &offering {
+        RentalOffering::SecureCloud(_) => api_client
+            .start_secure_cloud_rental(request)
+            .await
+            .map_err(|e| {
+                complete_spinner_error(spinner.clone(), "Failed to start rental");
+                CliError::Api(e)
+            })?,
+        RentalOffering::CpuOnly(_) => api_client.start_cpu_rental(request).await.map_err(|e| {
+            complete_spinner_error(spinner.clone(), &format!("Failed to start {}", rental_noun));
             CliError::Api(e)
-        })?;
+        })?,
+    };
     complete_spinner_and_clear(spinner);
 
     print_success(&format!(
-        "Successfully started secure cloud rental {}",
-        response.rental_id
+        "Successfully started {} {}",
+        rental_type, response.rental_id
     ));
 
     if options.detach {
@@ -683,23 +730,33 @@ async fn handle_secure_cloud_rental_with_offering(
                 &response.rental_id,
                 ssh_cmd,
                 &private_key_path,
-                "To connect to this rental:",
+                &format!("To connect to this {}:", rental_noun),
             )?;
         } else {
             println!();
-            print_info("Instance is starting up. Use 'basilica ps' to check status.");
+            print_info(&format!(
+                "{} is starting up. Use 'basilica ps' to check status.",
+                instance_noun
+            ));
             print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
         }
         return Ok(());
     }
 
     // Wait for rental to become active
-    print_info("Waiting for rental to become active...");
-    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
+    print_info(&format!("Waiting for {} to become active...", rental_noun));
+    let rental = match &offering {
+        RentalOffering::SecureCloud(_) => {
+            poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?
+        }
+        RentalOffering::CpuOnly(_) => {
+            poll_cpu_rental_status(&response.rental_id, &api_client).await?
+        }
+    };
 
     if let Some(rental) = rental {
         if let Some(ssh_cmd) = &rental.ssh_command {
-            print_info("Connecting to rental...");
+            print_info(&format!("Connecting to {}...", rental_noun));
             let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
             let ssh_access = SshAccess {
                 host,
@@ -726,7 +783,7 @@ async fn handle_secure_cloud_rental_with_offering(
                         &response.rental_id,
                         ssh_cmd,
                         &private_key_path,
-                        "To reconnect to this rental:",
+                        &format!("To reconnect to this {}:", rental_noun),
                     )?;
                 }
                 Err(e) => {
@@ -741,164 +798,20 @@ async fn handle_secure_cloud_rental_with_offering(
             }
         } else {
             println!();
-            print_info("Rental is active but SSH is not yet available");
+            print_info(&format!(
+                "{} is active but SSH is not yet available",
+                rental_noun.chars().next().unwrap().to_uppercase().collect::<String>()
+                    + &rental_noun[1..]
+            ));
             print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
         }
     } else {
         println!();
-        print_info("Rental is taking longer than expected to become active");
-        print_info("Check status with: basilica ps");
-        print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-    }
-
-    Ok(())
-}
-
-/// Handle CPU-only rental with a pre-selected offering (from unified selector)
-async fn handle_cpu_rental_with_offering(
-    api_client: basilica_sdk::BasilicaClient,
-    offering: basilica_sdk::types::CpuOffering,
-    options: UpOptions,
-    config: &CliConfig,
-) -> Result<(), CliError> {
-    // Get SSH key ID (SSH key registration already done in handle_up)
-    let ssh_key_id = api_client
-        .get_ssh_key()
-        .await
-        .map_err(|e| CliError::Internal(eyre!(e)))?
-        .ok_or_else(|| {
-            CliError::Internal(
-                eyre!("No SSH key registered with Basilica")
-                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-            )
-        })?
-        .id;
-
-    // Start rental
-    let spinner = create_spinner("Starting CPU-only rental...");
-
-    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
-
-    // Parse port mappings if provided
-    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
-        basilica_common::utils::parse_port_mappings(&options.ports)
-            .map_err(|e| {
-                complete_spinner_error(spinner.clone(), "Invalid port mapping");
-                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
-            })?
-            .into_iter()
-            .map(|pm| PortMappingRequest {
-                container_port: pm.container_port,
-                host_port: pm.host_port,
-                protocol: pm.protocol,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Parse environment variables if provided
-    let environment = if !options.env.is_empty() {
-        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Invalid environment variables");
-            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
-        })?
-    } else {
-        HashMap::new()
-    };
-
-    let request = StartSecureCloudRentalRequest {
-        offering_id: offering.id.clone(),
-        ssh_public_key_id: ssh_key_id,
-        container_image: options.image.clone(),
-        environment,
-        ports,
-    };
-
-    let response = api_client.start_cpu_rental(request).await.map_err(|e| {
-        complete_spinner_error(spinner.clone(), "Failed to start CPU rental");
-        CliError::Api(e)
-    })?;
-    complete_spinner_and_clear(spinner);
-
-    print_success(&format!(
-        "Successfully started CPU-only rental {}",
-        response.rental_id
-    ));
-
-    if options.detach {
-        if let Some(ssh_cmd) = &response.ssh_command {
-            let private_key_path = get_ssh_private_key_path(&api_client)
-                .await
-                .map_err(CliError::Internal)?;
-            display_secure_cloud_reconnection_instructions(
-                &response.rental_id,
-                ssh_cmd,
-                &private_key_path,
-                "To connect to this CPU rental:",
-            )?;
-        } else {
-            println!();
-            print_info("CPU instance is starting up. Use 'basilica ps' to check status.");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-        }
-        return Ok(());
-    }
-
-    // Wait for rental to become active
-    print_info("Waiting for CPU rental to become active...");
-    let rental = poll_cpu_rental_status(&response.rental_id, &api_client).await?;
-
-    if let Some(rental) = rental {
-        if let Some(ssh_cmd) = &rental.ssh_command {
-            print_info("Connecting to CPU rental...");
-            let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
-            let ssh_access = SshAccess {
-                host,
-                port,
-                username,
-            };
-
-            let private_key_path = get_ssh_private_key_path(&api_client)
-                .await
-                .map_err(CliError::Internal)?;
-
-            let ssh_client = SshClient::new(&config.ssh)?;
-            match retry_ssh_connection(
-                &ssh_client,
-                &ssh_access,
-                private_key_path.clone(),
-                RENTAL_READY_TIMEOUT,
-            )
-            .await
-            {
-                Ok(_) => {
-                    print_info("SSH session closed");
-                    display_secure_cloud_reconnection_instructions(
-                        &response.rental_id,
-                        ssh_cmd,
-                        &private_key_path,
-                        "To reconnect to this CPU rental:",
-                    )?;
-                }
-                Err(e) => {
-                    print_error(&format!("SSH connection failed: {}", e));
-                    display_secure_cloud_reconnection_instructions(
-                        &response.rental_id,
-                        ssh_cmd,
-                        &private_key_path,
-                        "Try manually connecting using:",
-                    )?;
-                }
-            }
-        } else {
-            println!();
-            print_info("CPU rental is active but SSH is not yet available");
-            print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
-        }
-    } else {
-        println!();
-        print_info("CPU rental is taking longer than expected to become active");
+        print_info(&format!(
+            "{} is taking longer than expected to become active",
+            rental_noun.chars().next().unwrap().to_uppercase().collect::<String>()
+                + &rental_noun[1..]
+        ));
         print_info("Check status with: basilica ps");
         print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
     }
@@ -1173,7 +1086,13 @@ pub async fn handle_up(
     match selected {
         SelectedOffering::SecureCloud(offering) => {
             validate_no_community_cloud_options(&options)?;
-            handle_secure_cloud_rental_with_offering(api_client, offering, options, config).await
+            handle_rental_with_offering(
+                api_client,
+                RentalOffering::SecureCloud(offering),
+                options,
+                config,
+            )
+            .await
         }
         SelectedOffering::CommunityCloud(node_selection) => {
             handle_community_cloud_rental_with_selection(
@@ -1186,7 +1105,13 @@ pub async fn handle_up(
         }
         SelectedOffering::CpuOnly(offering) => {
             validate_no_community_cloud_options(&options)?;
-            handle_cpu_rental_with_offering(api_client, offering, options, config).await
+            handle_rental_with_offering(
+                api_client,
+                RentalOffering::CpuOnly(offering),
+                options,
+                config,
+            )
+            .await
         }
     }
 }
