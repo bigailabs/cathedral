@@ -50,6 +50,9 @@ from basilica._basilica import (
     BasilicaClient as _BasilicaClient,
 )  # Core client binding; Helper functions; Response types; Request types; Deployment types; Constants from Rust
 from basilica._basilica import (
+    CpuOffering,
+    CpuRentalListItem,
+    CpuRentalResponse,
     CpuSpec,
     CreateDeploymentRequest,
     DeleteDeploymentResponse,
@@ -61,6 +64,7 @@ from basilica._basilica import (
     GpuSpec,
     HealthCheckResponse,
     ListAvailableNodesQuery,
+    ListCpuRentalsResponse,
     ListRentalsQuery,
     NodeDetails,
     NodeSelection,
@@ -74,7 +78,10 @@ from basilica._basilica import (
     ResourceRequirements,
     ResourceRequirementsRequest,
     SshAccess,
+    SshKeyResponse,
+    StartCpuRentalRequest,
     StartRentalApiRequest,
+    StopCpuRentalResponse,
     StorageBackend,
     StorageSpec,
     VolumeMountRequest,
@@ -204,6 +211,15 @@ __all__ = [
     "DeploymentSummary",
     "DeploymentListResponse",
     "DeleteDeploymentResponse",
+    # SSH Key types
+    "SshKeyResponse",
+    # CPU Rental types
+    "CpuOffering",
+    "StartCpuRentalRequest",
+    "CpuRentalResponse",
+    "StopCpuRentalResponse",
+    "CpuRentalListItem",
+    "ListCpuRentalsResponse",
 ]
 
 
@@ -1070,3 +1086,153 @@ class BasilicaClient:
     def list_usage_history(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         """Get usage history for billing."""
         return self._client.list_usage_history(limit, offset)
+
+    # -------------------------------------------------------------------------
+    # SSH Key Management Methods
+    # -------------------------------------------------------------------------
+
+    def register_ssh_key(
+        self,
+        name: str,
+        public_key: Optional[str] = None,
+        public_key_path: Optional[str] = None,
+    ) -> SshKeyResponse:
+        """
+        Register an SSH key for secure cloud rentals.
+
+        Only one SSH key per user is allowed. This key is required before
+        starting CPU rentals.
+
+        Args:
+            name: A friendly name for the SSH key (e.g., "my-laptop")
+            public_key: The SSH public key content directly
+            public_key_path: Path to SSH public key file (default: ~/.ssh/id_ed25519.pub)
+
+        Returns:
+            SshKeyResponse with the registered key details including its ID
+
+        Example:
+            >>> key = client.register_ssh_key("my-laptop")
+            >>> print(f"Key ID: {key.id}")
+        """
+        if public_key is None:
+            if public_key_path is None:
+                public_key_path = "~/.ssh/id_ed25519.pub"
+
+            key_path = os.path.expanduser(public_key_path)
+            if not os.path.exists(key_path):
+                raise FileNotFoundError(f"SSH public key file not found: {key_path}")
+
+            with open(key_path) as f:
+                public_key = f.read().strip()
+
+        return self._client.register_ssh_key(name, public_key)
+
+    def get_ssh_key(self) -> Optional[SshKeyResponse]:
+        """
+        Get the authenticated user's registered SSH key.
+
+        Returns:
+            SshKeyResponse if a key is registered, None otherwise
+        """
+        return self._client.get_ssh_key()
+
+    def delete_ssh_key(self) -> None:
+        """Delete the authenticated user's SSH key."""
+        self._client.delete_ssh_key()
+
+    # -------------------------------------------------------------------------
+    # CPU Rental Methods
+    # -------------------------------------------------------------------------
+
+    def list_cpu_offerings(self) -> List[CpuOffering]:
+        """
+        List available CPU-only offerings from secure cloud providers.
+
+        Returns:
+            List of CpuOffering objects with specs and pricing
+
+        Example:
+            >>> offerings = client.list_cpu_offerings()
+            >>> for o in offerings:
+            ...     print(f"{o.id}: {o.vcpu_count} vCPUs @ ${o.hourly_rate}/hr")
+        """
+        return self._client.list_cpu_offerings()
+
+    def start_cpu_rental(
+        self,
+        offering_id: str,
+        ssh_public_key_id: Optional[str] = None,
+        container_image: Optional[str] = None,
+        environment: Optional[Dict[str, str]] = None,
+        ports: Optional[List[Dict[str, Any]]] = None,
+    ) -> CpuRentalResponse:
+        """
+        Start a CPU-only rental.
+
+        Args:
+            offering_id: The offering ID from list_cpu_offerings()
+            ssh_public_key_id: SSH key ID (auto-detected if not provided)
+            container_image: Optional Docker container image
+            environment: Environment variables for the container
+            ports: Port mappings (list of dicts with container_port, host_port, protocol)
+
+        Returns:
+            CpuRentalResponse with rental details and SSH command
+
+        Example:
+            >>> offerings = client.list_cpu_offerings()
+            >>> rental = client.start_cpu_rental(offerings[0].id)
+            >>> print(f"SSH: {rental.ssh_command}")
+        """
+        # Auto-detect SSH key ID if not provided
+        if ssh_public_key_id is None:
+            key = self.get_ssh_key()
+            if key is None:
+                raise ValidationError(
+                    "No SSH key registered. Use register_ssh_key() first."
+                )
+            ssh_public_key_id = key.id
+
+        # Build port mappings
+        port_mappings = []
+        if ports:
+            for port in ports:
+                port_mappings.append(
+                    PortMappingRequest(
+                        container_port=port.get("container_port", 0),
+                        host_port=port.get("host_port", 0),
+                        protocol=port.get("protocol", "tcp"),
+                    )
+                )
+
+        request = StartCpuRentalRequest(
+            offering_id=offering_id,
+            ssh_public_key_id=ssh_public_key_id,
+            container_image=container_image,
+            environment=environment,
+            ports=port_mappings,
+        )
+
+        return self._client.start_cpu_rental(request)
+
+    def stop_cpu_rental(self, rental_id: str) -> StopCpuRentalResponse:
+        """
+        Stop a CPU rental.
+
+        Args:
+            rental_id: The rental ID to stop
+
+        Returns:
+            StopCpuRentalResponse with duration and total cost
+        """
+        return self._client.stop_cpu_rental(rental_id)
+
+    def list_cpu_rentals(self) -> ListCpuRentalsResponse:
+        """
+        List all CPU rentals for the authenticated user.
+
+        Returns:
+            ListCpuRentalsResponse with rental list and total count
+        """
+        return self._client.list_cpu_rentals()
