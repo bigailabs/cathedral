@@ -1369,7 +1369,6 @@ pub async fn handle_ps(
                     let gpu_rentals_to_display: Vec<_> =
                         filter_secure_cloud_rentals(&gpu_rentals_list.rentals, &filters)
                             .into_iter()
-                            .filter(|r| r.gpu_count > 0)
                             .collect();
 
                     println!("{}", style("Secure Cloud (GPU)").bold().cyan());
@@ -1577,7 +1576,6 @@ pub async fn handle_ps(
                     let secure_rentals_to_display: Vec<_> =
                         filter_secure_cloud_rentals(&secure_rentals_list.rentals, &filters)
                             .into_iter()
-                            .filter(|r| r.gpu_count > 0)
                             .collect();
 
                     table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
@@ -1674,72 +1672,158 @@ pub async fn handle_status(
             }
         }
         ComputeCategory::SecureCloud => {
-            // Fetch secure cloud status
-            let rentals = api_client.list_secure_cloud_rentals().await.map_err(|e| {
+            // Fetch secure cloud status (GPU + CPU)
+            let (gpu_result, cpu_result) = tokio::join!(
+                api_client.list_secure_cloud_rentals(),
+                api_client.list_cpu_rentals()
+            );
+
+            let mut gpu_error: Option<ApiError> = None;
+            let mut cpu_error: Option<ApiError> = None;
+
+            let gpu_rentals = match gpu_result {
+                Ok(list) => Some(list),
+                Err(err) => {
+                    gpu_error = Some(err);
+                    None
+                }
+            };
+
+            let cpu_rentals = match cpu_result {
+                Ok(list) => Some(list),
+                Err(err) => {
+                    cpu_error = Some(err);
+                    None
+                }
+            };
+
+            if gpu_error.is_some() && cpu_error.is_some() {
                 complete_spinner_error(spinner.clone(), "Failed to get status");
-                CliError::Internal(
-                    eyre!(e).suggestion("Check your internet connection and try again"),
-                )
-            })?;
+                let err = gpu_error.or(cpu_error).unwrap();
+                return Err(CliError::Internal(
+                    eyre!(err).suggestion("Check your internet connection and try again"),
+                ));
+            }
 
-            let rental = rentals
-                .rentals
-                .iter()
-                .find(|r| r.rental_id == rental_id)
-                .ok_or_else(|| {
-                    complete_spinner_error(spinner.clone(), "Rental not found");
-                    CliError::Internal(
-                        eyre!("Rental '{}' not found", rental_id)
-                            .suggestion("Try 'basilica ps' to see your active rentals")
-                            .note("The rental may have expired or been terminated"),
-                    )
-                })?;
+            if let Some(rental) = cpu_rentals
+                .as_ref()
+                .and_then(|list| list.rentals.iter().find(|r| r.rental_id == rental_id))
+            {
+                complete_spinner_and_clear(spinner);
 
-            complete_spinner_and_clear(spinner);
-
-            if json {
-                json_output(&rental)?;
-            } else {
-                // Display secure cloud rental details
-                println!("Rental Status: {}", rental.rental_id);
-                println!("  Provider: {}", rental.provider);
-                println!("  Status: {}", rental.status);
-                println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
-                if let Some(ip) = &rental.ip_address {
-                    println!("  IP Address: {}", ip);
-                }
-                println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
-                println!("  Created: {}", rental.created_at);
-                if let Some(stopped_at) = &rental.stopped_at {
-                    println!("  Stopped: {}", stopped_at);
-                }
-                // Show SSH command with private key path if available locally
-                if let Some(ip) = &rental.ip_address {
-                    if let Some(ref ssh_public_key) = rental.ssh_public_key {
-                        if let Ok(private_key_path) =
-                            find_private_key_for_public_key(ssh_public_key)
-                        {
-                            // Full SSH command with private key
-                            println!(
-                                "  SSH: {}",
-                                style(format!(
-                                    "ssh -i {} ubuntu@{}",
-                                    compress_path(&private_key_path),
-                                    ip
-                                ))
-                                .cyan()
-                            );
-                        } else {
-                            // Key not found locally, show basic command
-                            println!("  SSH: ssh ubuntu@{}", ip);
-                            println!("  SSH Key: {}", style("Not found locally").yellow());
-                        }
+                if json {
+                    json_output(&rental)?;
+                } else {
+                    // Display secure cloud CPU rental details
+                    println!("Rental Status: {}", rental.rental_id);
+                    println!("  Provider: {}", rental.provider);
+                    println!("  Status: {}", rental.status);
+                    if let Some(vcpu) = rental.vcpu_count {
+                        println!("  vCPU: {}", vcpu);
                     } else {
-                        // No public key info, show basic command
-                        println!("  SSH: ssh ubuntu@{}", ip);
+                        println!("  vCPU: N/A");
+                    }
+                    if let Some(mem) = rental.system_memory_gb {
+                        println!("  Memory: {}GB", mem);
+                    }
+                    if let Some(ip) = &rental.ip_address {
+                        println!("  IP Address: {}", ip);
+                    }
+                    println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
+                    println!("  Created: {}", rental.created_at);
+                    if let Some(stopped_at) = &rental.stopped_at {
+                        println!("  Stopped: {}", stopped_at);
+                    }
+                    // Show SSH command with private key path if available locally
+                    if let Some(ip) = &rental.ip_address {
+                        if let Some(ref ssh_public_key) = rental.ssh_public_key {
+                            if let Ok(private_key_path) =
+                                find_private_key_for_public_key(ssh_public_key)
+                            {
+                                // Full SSH command with private key
+                                println!(
+                                    "  SSH: {}",
+                                    style(format!(
+                                        "ssh -i {} ubuntu@{}",
+                                        compress_path(&private_key_path),
+                                        ip
+                                    ))
+                                    .cyan()
+                                );
+                            } else {
+                                // Key not found locally, show basic command
+                                println!("  SSH: ssh ubuntu@{}", ip);
+                                println!("  SSH Key: {}", style("Not found locally").yellow());
+                            }
+                        } else {
+                            // No public key info, show basic command
+                            println!("  SSH: ssh ubuntu@{}", ip);
+                        }
                     }
                 }
+
+                return Ok(());
             }
+
+            if let Some(rental) = gpu_rentals
+                .as_ref()
+                .and_then(|list| list.rentals.iter().find(|r| r.rental_id == rental_id))
+            {
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    json_output(&rental)?;
+                } else {
+                    // Display secure cloud GPU rental details
+                    println!("Rental Status: {}", rental.rental_id);
+                    println!("  Provider: {}", rental.provider);
+                    println!("  Status: {}", rental.status);
+                    println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
+                    if let Some(ip) = &rental.ip_address {
+                        println!("  IP Address: {}", ip);
+                    }
+                    println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
+                    println!("  Created: {}", rental.created_at);
+                    if let Some(stopped_at) = &rental.stopped_at {
+                        println!("  Stopped: {}", stopped_at);
+                    }
+                    // Show SSH command with private key path if available locally
+                    if let Some(ip) = &rental.ip_address {
+                        if let Some(ref ssh_public_key) = rental.ssh_public_key {
+                            if let Ok(private_key_path) =
+                                find_private_key_for_public_key(ssh_public_key)
+                            {
+                                // Full SSH command with private key
+                                println!(
+                                    "  SSH: {}",
+                                    style(format!(
+                                        "ssh -i {} ubuntu@{}",
+                                        compress_path(&private_key_path),
+                                        ip
+                                    ))
+                                    .cyan()
+                                );
+                            } else {
+                                // Key not found locally, show basic command
+                                println!("  SSH: ssh ubuntu@{}", ip);
+                                println!("  SSH Key: {}", style("Not found locally").yellow());
+                            }
+                        } else {
+                            // No public key info, show basic command
+                            println!("  SSH: ssh ubuntu@{}", ip);
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+
+            complete_spinner_error(spinner.clone(), "Rental not found");
+            return Err(CliError::Internal(
+                eyre!("Rental '{}' not found", rental_id)
+                    .suggestion("Try 'basilica ps' to see your active rentals")
+                    .note("The rental may have expired or been terminated"),
+            ));
         }
     }
 

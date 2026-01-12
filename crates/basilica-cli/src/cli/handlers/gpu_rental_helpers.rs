@@ -147,7 +147,7 @@ pub async fn resolve_target_rental_unified(
     let spinner = create_spinner("Fetching active rentals...");
 
     // Fetch rentals based on filter
-    let (community_rentals, secure_rentals) = match compute_filter {
+    let (community_rentals, secure_rentals, cpu_rentals) = match compute_filter {
         Some(ComputeCategory::CommunityCloud) => {
             // Fetch only community cloud
             let rentals = api_client
@@ -159,27 +159,39 @@ pub async fn resolve_target_rental_unified(
                         "Failed to load community cloud rentals",
                     )
                 })?;
-            (Some(rentals), None)
+            (Some(rentals), None, None)
         }
         Some(ComputeCategory::SecureCloud) => {
-            // Fetch only secure cloud
-            let rentals = api_client
-                .list_secure_cloud_rentals()
-                .await
-                .inspect_err(|_| {
-                    complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
-                })?;
-            (None, Some(rentals))
+            // Fetch secure cloud GPU + CPU rentals
+            let (gpu_result, cpu_result) = tokio::join!(
+                api_client.list_secure_cloud_rentals(),
+                api_client.list_cpu_rentals()
+            );
+
+            let rentals = gpu_result.inspect_err(|_| {
+                complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+            })?;
+
+            let cpu_rentals = match cpu_result {
+                Ok(list) => Some(list),
+                Err(e) => {
+                    warn!("Failed to load CPU-only rentals: {}", e);
+                    None
+                }
+            };
+
+            (None, Some(rentals), cpu_rentals)
         }
         None => {
             // Fetch both types in parallel with timeout for community cloud
             let community_future = api_client.list_rentals(active_rentals_query());
-            let (community_result, secure_result) = tokio::join!(
+            let (community_result, secure_result, cpu_result) = tokio::join!(
                 with_validator_timeout(community_future),
-                api_client.list_secure_cloud_rentals()
+                api_client.list_secure_cloud_rentals(),
+                api_client.list_cpu_rentals()
             );
 
-            (community_result.ok(), secure_result.ok())
+            (community_result.ok(), secure_result.ok(), cpu_result.ok())
         }
     };
 
@@ -210,7 +222,7 @@ pub async fn resolve_target_rental_unified(
         }
     }
 
-    // Add secure cloud rentals (only active ones - where stopped_at is None)
+    // Add secure cloud GPU rentals (only active ones - where stopped_at is None)
     if let Some(secure) = secure_rentals {
         for rental in secure.rentals.iter() {
             // Skip stopped rentals
@@ -234,6 +246,42 @@ pub async fn resolve_target_rental_unified(
                 compute_type: ComputeCategory::SecureCloud,
                 provider_or_node: rental.provider.clone(),
                 gpu_info,
+                status: rental.status.clone(),
+                created_at: rental.created_at.to_rfc3339(),
+            });
+        }
+    }
+
+    // Add secure cloud CPU rentals (only active ones - where stopped_at is None)
+    if let Some(cpu) = cpu_rentals {
+        for rental in cpu.rentals.iter() {
+            // Skip stopped rentals
+            if rental.stopped_at.is_some() {
+                continue;
+            }
+
+            // Skip GPU rentals if any are returned (CPU endpoint should be CPU-only)
+            if rental.gpu_count > 0 {
+                continue;
+            }
+
+            // Skip VIP rentals if exclude_vip is true (e.g., for `down` command)
+            if exclude_vip && rental.is_vip {
+                continue;
+            }
+
+            let cpu_info = match (rental.vcpu_count, rental.system_memory_gb) {
+                (Some(vcpu), Some(mem)) => format!("{} vCPU / {}GB", vcpu, mem),
+                (Some(vcpu), None) => format!("{} vCPU", vcpu),
+                (None, Some(mem)) => format!("{}GB RAM", mem),
+                (None, None) => "CPU-only".to_string(),
+            };
+
+            unified_items.push(UnifiedRentalItem {
+                rental_id: rental.rental_id.clone(),
+                compute_type: ComputeCategory::SecureCloud,
+                provider_or_node: rental.provider.clone(),
+                gpu_info: cpu_info,
                 status: rental.status.clone(),
                 created_at: rental.created_at.to_rfc3339(),
             });
@@ -664,9 +712,10 @@ pub async fn resolve_rental_by_id(
 
     let community_future = api_client.list_rentals(active_rentals_query());
 
-    let (community_result, secure_result) = tokio::join!(
+    let (community_result, secure_result, cpu_result) = tokio::join!(
         with_validator_timeout(community_future),
-        api_client.list_secure_cloud_rentals()
+        api_client.list_secure_cloud_rentals(),
+        api_client.list_cpu_rentals()
     );
 
     complete_spinner_and_clear(spinner);
@@ -678,7 +727,14 @@ pub async fn resolve_rental_by_id(
         }
     }
 
-    // Check secure cloud
+    // Check secure cloud CPU rentals
+    if let Ok(cpu) = &cpu_result {
+        if cpu.rentals.iter().any(|r| r.rental_id == target_id) {
+            return Ok(ComputeCategory::SecureCloud);
+        }
+    }
+
+    // Check secure cloud GPU rentals
     if let Ok(secure) = &secure_result {
         if secure.rentals.iter().any(|r| r.rental_id == target_id) {
             return Ok(ComputeCategory::SecureCloud);
@@ -732,9 +788,10 @@ pub async fn resolve_rental_with_ssh(
 
         let community_future = api_client.list_rentals(active_rentals_query());
 
-        let (community_result, secure_result) = tokio::join!(
+        let (community_result, secure_result, cpu_result) = tokio::join!(
             with_validator_timeout(community_future),
-            api_client.list_secure_cloud_rentals()
+            api_client.list_secure_cloud_rentals(),
+            api_client.list_cpu_rentals()
         );
 
         complete_spinner_and_clear(spinner);
@@ -752,24 +809,30 @@ pub async fn resolve_rental_with_ssh(
             }
         }
 
-        // Check secure cloud
-        if let Ok(secure) = secure_result {
-            if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
-                let ssh_command = rental.ssh_command.clone().ok_or_else(|| {
-                    CliError::Internal(
-                        eyre!("SSH command not available")
-                            .wrap_err(format!(
-                                "The rental '{}' does not have SSH access configured",
-                                target_id
-                            ))
-                            .note("The rental may still be provisioning or SSH may not be enabled"),
-                    )
-                })?;
+        // Check secure cloud CPU rentals
+        if let Ok(cpu) = cpu_result {
+            if let Some(rental) = cpu.rentals.iter().find(|r| r.rental_id == target_id) {
+                let (ssh_command, ssh_public_key) =
+                    secure_rental_ssh_info(target_id, rental, api_client).await?;
                 return Ok(RentalWithSsh {
                     rental_id: target_id.to_string(),
                     compute_type: ComputeCategory::SecureCloud,
                     ssh_command,
-                    ssh_public_key: rental.ssh_public_key.clone(),
+                    ssh_public_key,
+                });
+            }
+        }
+
+        // Check secure cloud GPU rentals
+        if let Ok(secure) = secure_result {
+            if let Some(rental) = secure.rentals.iter().find(|r| r.rental_id == target_id) {
+                let (ssh_command, ssh_public_key) =
+                    secure_rental_ssh_info(target_id, rental, api_client).await?;
+                return Ok(RentalWithSsh {
+                    rental_id: target_id.to_string(),
+                    compute_type: ComputeCategory::SecureCloud,
+                    ssh_command,
+                    ssh_public_key,
                 });
             }
         }
@@ -829,17 +892,61 @@ async fn fetch_secure_ssh_info(
     rental_id: &str,
     api_client: &BasilicaClient,
 ) -> Result<(String, Option<String>), CliError> {
-    let secure_rentals = api_client
-        .list_secure_cloud_rentals()
-        .await
-        .map_err(|e| CliError::Internal(eyre!(e)))?;
+    let (cpu_result, secure_result) = tokio::join!(
+        api_client.list_cpu_rentals(),
+        api_client.list_secure_cloud_rentals()
+    );
 
-    let rental = secure_rentals
-        .rentals
-        .iter()
-        .find(|r| r.rental_id == rental_id)
-        .ok_or_else(|| CliError::Internal(eyre!("Rental '{}' not found", rental_id)))?;
+    let mut cpu_error: Option<ApiError> = None;
+    let mut secure_error: Option<ApiError> = None;
 
+    match cpu_result {
+        Ok(cpu_rentals) => {
+            if let Some(rental) = cpu_rentals
+                .rentals
+                .iter()
+                .find(|r| r.rental_id == rental_id)
+            {
+                return secure_rental_ssh_info(rental_id, rental, api_client).await;
+            }
+        }
+        Err(err) => {
+            cpu_error = Some(err);
+        }
+    }
+
+    match secure_result {
+        Ok(secure_rentals) => {
+            if let Some(rental) = secure_rentals
+                .rentals
+                .iter()
+                .find(|r| r.rental_id == rental_id)
+            {
+                return secure_rental_ssh_info(rental_id, rental, api_client).await;
+            }
+        }
+        Err(err) => {
+            secure_error = Some(err);
+        }
+    }
+
+    if cpu_error.is_some() || secure_error.is_some() {
+        let err = secure_error.or(cpu_error).unwrap();
+        return Err(CliError::Internal(eyre!(err)));
+    }
+
+    Err(CliError::Internal(eyre!(
+        "Rental '{}' not found",
+        rental_id
+    )))
+}
+
+/// Common SSH info extraction for secure cloud GPU/CPU rentals
+async fn secure_rental_ssh_info(
+    rental_id: &str,
+    rental: &basilica_sdk::types::SecureCloudRentalListItem,
+    api_client: &BasilicaClient,
+) -> Result<(String, Option<String>), CliError> {
     let ssh_command = rental.ssh_command.clone().ok_or_else(|| {
         CliError::Internal(
             eyre!("SSH command not available")
