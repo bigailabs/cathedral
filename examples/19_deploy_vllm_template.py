@@ -31,7 +31,6 @@ deployment2 = client.deploy_vllm(
     model="meta-llama/Llama-2-7b-hf",
     name="llama2-7b-server",
     gpu_count=1,
-    gpu_models=["A100", "H100"],
     memory="32Gi",
     dtype="float16",
     trust_remote_code=True,

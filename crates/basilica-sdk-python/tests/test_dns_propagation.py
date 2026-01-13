@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from basilica.deployment import Deployment, DeploymentStatus
+from basilica import Deployment, DeploymentStatus
 
 
 class TestDnsResolutionInWaitUntilReady:
@@ -85,7 +85,10 @@ class TestDnsResolutionInWaitUntilReady:
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
             with patch("time.sleep"):  # Don't actually sleep in tests
-                status = deployment.wait_until_ready(timeout=30, poll_interval=1, silent=True)
+                with patch.object(deployment, "_is_http_ready", return_value=True):
+                    status = deployment.wait_until_ready(
+                        timeout=30, poll_interval=1, silent=True
+                    )
 
         # Verify: DNS was checked multiple times before returning
         assert len(dns_attempts) == 3, f"Expected 3 DNS attempts, got {len(dns_attempts)}"
@@ -105,7 +108,10 @@ class TestDnsResolutionInWaitUntilReady:
             return "1.2.3.4"  # DNS resolves immediately
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
-            status = deployment.wait_until_ready(timeout=30, poll_interval=1, silent=True)
+            with patch.object(deployment, "_is_http_ready", return_value=True):
+                status = deployment.wait_until_ready(
+                    timeout=30, poll_interval=1, silent=True
+                )
 
         # Verify: DNS was checked only once
         assert len(dns_attempts) == 1
@@ -125,8 +131,11 @@ class TestDnsResolutionInWaitUntilReady:
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
             with patch("time.sleep"):
-                with pytest.raises(DeploymentTimeout):
-                    deployment.wait_until_ready(timeout=5, poll_interval=1, silent=True)
+                with patch.object(deployment, "_is_http_ready", return_value=True):
+                    with pytest.raises(DeploymentTimeout):
+                        deployment.wait_until_ready(
+                            timeout=5, poll_interval=1, silent=True
+                        )
 
     def test_wait_until_ready_skips_dns_check_if_no_url(self):
         """Verify wait_until_ready() skips DNS check if deployment has no URL."""
@@ -143,7 +152,9 @@ class TestDnsResolutionInWaitUntilReady:
             return "1.2.3.4"
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
-            status = deployment.wait_until_ready(timeout=30, poll_interval=1, silent=True)
+            status = deployment.wait_until_ready(
+                timeout=30, poll_interval=1, silent=True
+            )
 
         # Verify: DNS check was not called because URL is empty
         assert dns_check_called is False
@@ -164,7 +175,9 @@ class TestDnsResolutionInWaitUntilReady:
             return "1.2.3.4"
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
-            status = deployment.wait_until_ready(timeout=30, poll_interval=1, silent=True)
+            status = deployment.wait_until_ready(
+                timeout=30, poll_interval=1, silent=True
+            )
 
         # Verify: DNS check was not called because hostname is None
         assert dns_check_called is False
@@ -205,7 +218,10 @@ class TestDnsResolutionIntegration:
             return "1.2.3.4"
 
         with patch("socket.gethostbyname", side_effect=mock_gethostbyname):
-            deployment.wait_until_ready(timeout=30, poll_interval=1, silent=True)
+            with patch.object(deployment, "_is_http_ready", return_value=True):
+                deployment.wait_until_ready(
+                    timeout=30, poll_interval=1, silent=True
+                )
 
         # Verify: Correct hostname was extracted (without port or path)
         assert checked_hostname == "my-app.deployments.basilica.ai"
