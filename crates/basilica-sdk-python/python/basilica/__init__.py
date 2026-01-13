@@ -27,11 +27,13 @@ Authentication:
     Create a token using: basilica tokens create
 """
 
+import asyncio
 import os
 import re
 import time
+import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from basilica._basilica import (
     DEFAULT_API_URL,
@@ -115,7 +117,7 @@ except ImportError:
 from .decorators import DeployedFunction, deployment
 
 # Import new modules
-from .deployment import Deployment, DeploymentStatus, ProgressInfo
+from ._deployment import Deployment, DeploymentStatus, ProgressInfo
 from .exceptions import (
     AuthenticationError,
     AuthorizationError,
@@ -140,6 +142,44 @@ DEFAULT_COMMAND = ["/bin/bash"]
 
 # Default Python image for source deployments
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
+
+
+def _extract_gpu_model_id(full_name: str) -> str:
+    """Extract short GPU model ID from full NVML name for K8s scheduling.
+
+    Examples:
+        "NVIDIA A100 80GB PCIe" -> "A100"
+        "NVIDIA H100 80GB HBM3" -> "H100"
+        "NVIDIA GeForce RTX 3090" -> "RTX-3090"
+        "Tesla V100-SXM2-16GB" -> "V100"
+        "NVIDIA L40S" -> "L40S"
+    """
+    if not full_name:
+        return full_name
+
+    # Pattern to match common GPU model identifiers
+    # Matches: A100, H100, V100, L40S, RTX 4090, RTX 3090, etc.
+    patterns = [
+        r"\b(A100|H100|H200|B100|B200)\b",  # Data center: Ampere, Hopper, Blackwell
+        r"\b(V100|P100|T4|A10|A30|A40|L4|L40|L40S)\b",  # Other data center
+        r"\bRTX\s*(\d{4})\b",  # Consumer RTX (RTX 4090 -> RTX-4090)
+        r"\bGTX\s*(\d{4})\b",  # Consumer GTX
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, full_name, re.IGNORECASE)
+        if match:
+            model = match.group(1) if match.lastindex else match.group(0)
+            # Normalize RTX/GTX patterns
+            if "RTX" in full_name.upper() and model.isdigit():
+                return f"RTX-{model}"
+            if "GTX" in full_name.upper() and model.isdigit():
+                return f"GTX-{model}"
+            return model.upper()
+
+    # Fallback: return original name if no pattern matches
+    return full_name
+
 
 __version__ = "0.11.0"
 __all__ = [
@@ -276,10 +316,99 @@ class BasilicaClient:
         """The API endpoint URL."""
         return self._base_url
 
+    def _build_deploy_request(
+        self,
+        name: str,
+        source: Optional[Union[str, Path, Callable]],
+        image: str,
+        port: int,
+        env: Optional[Dict[str, str]],
+        cpu: str,
+        memory: str,
+        storage: Union[bool, str],
+        gpu_count: Optional[int],
+        gpu_models: Optional[List[str]],
+        min_cuda_version: Optional[str],
+        min_gpu_memory_gb: Optional[int],
+        replicas: int,
+        ttl_seconds: Optional[int],
+        public: bool,
+        pip_packages: Optional[List[str]],
+    ) -> CreateDeploymentRequest:
+        """Build CreateDeploymentRequest from deploy parameters."""
+        command = None
+        if source is not None:
+            if callable(source):
+                packager = SourcePackager.from_function(source)
+            else:
+                packager = SourcePackager(source)
+            command = packager.build_command(pip_packages=pip_packages)
+
+        storage_spec = None
+        if storage:
+            mount_path = storage if isinstance(storage, str) else "/data"
+            storage_spec = StorageSpec(
+                persistent=PersistentStorageSpec(
+                    enabled=True,
+                    backend=StorageBackend.R2,
+                    bucket="",
+                    credentials_secret=None,
+                    sync_interval_ms=1000,
+                    cache_size_mb=1024,
+                    mount_path=mount_path,
+                )
+            )
+
+        gpu_spec = None
+        if gpu_count is not None:
+            effective_gpu_models = gpu_models
+            if not effective_gpu_models:
+                nodes = self.list_nodes(
+                    available=True,
+                    min_gpu_memory=min_gpu_memory_gb,
+                )
+                if not nodes:
+                    raise ResourceError(
+                        "No GPU nodes available"
+                        + (f" with {min_gpu_memory_gb}GB+ VRAM" if min_gpu_memory_gb else "")
+                    )
+                seen = set()
+                effective_gpu_models = []
+                for node in nodes:
+                    for gpu in node.node.gpu_specs:
+                        if gpu.name:
+                            model_id = _extract_gpu_model_id(gpu.name)
+                            if model_id not in seen:
+                                seen.add(model_id)
+                                effective_gpu_models.append(model_id)
+
+            gpu_spec = GpuRequirementsSpec(
+                count=gpu_count,
+                model=effective_gpu_models,
+                min_cuda_version=min_cuda_version,
+                min_gpu_memory_gb=min_gpu_memory_gb,
+            )
+
+        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec)
+
+        return CreateDeploymentRequest(
+            instance_name=name,
+            image=image,
+            replicas=replicas,
+            port=port,
+            command=command,
+            args=None,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds,
+            public=public,
+            storage=storage_spec,
+        )
+
     def deploy(
         self,
         name: str,
-        source: Optional[Union[str, Path]] = None,
+        source: Optional[Union[str, Path, Callable]] = None,
         image: str = DEFAULT_PYTHON_IMAGE,
         port: int = 8000,
         env: Optional[Dict[str, str]] = None,
@@ -309,6 +438,7 @@ class BasilicaClient:
             source: Python source code to deploy. Can be:
                    - A file path: "app.py" or "/path/to/app.py"
                    - Inline code: "print('Hello!')"
+                   - A callable: A Python function (source extracted via inspect)
                    - None: Just deploy the image without custom code
             image: Container image. Default: python:3.11-slim
                   For GPU: "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime"
@@ -379,57 +509,25 @@ class BasilicaClient:
             ...     port=8080,
             ... )
         """
-        # Build command from source if provided
-        command = None
-        if source is not None:
-            packager = SourcePackager(source)
-            command = packager.build_command(pip_packages=pip_packages)
-
-        # Build storage spec
-        storage_spec = None
-        if storage:
-            mount_path = storage if isinstance(storage, str) else "/data"
-            storage_spec = StorageSpec(
-                persistent=PersistentStorageSpec(
-                    enabled=True,
-                    backend=StorageBackend.R2,
-                    bucket="",
-                    credentials_secret=None,
-                    sync_interval_ms=1000,
-                    cache_size_mb=1024,
-                    mount_path=mount_path,
-                )
-            )
-
-        # Build GPU spec if requested
-        gpu_spec = None
-        if gpu_count is not None:
-            gpu_spec = GpuRequirementsSpec(
-                count=gpu_count,
-                model=gpu_models or [],
-                min_cuda_version=min_cuda_version,
-                min_gpu_memory_gb=min_gpu_memory_gb,
-            )
-
-        # Build resources
-        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec)
-
-        # Create the deployment request
-        request = CreateDeploymentRequest(
-            instance_name=name,
+        request = self._build_deploy_request(
+            name=name,
+            source=source,
             image=image,
-            replicas=replicas,
             port=port,
-            command=command,
-            args=None,
             env=env,
-            resources=resources,
+            cpu=cpu,
+            memory=memory,
+            storage=storage,
+            gpu_count=gpu_count,
+            gpu_models=gpu_models,
+            min_cuda_version=min_cuda_version,
+            min_gpu_memory_gb=min_gpu_memory_gb,
+            replicas=replicas,
             ttl_seconds=ttl_seconds,
             public=public,
-            storage=storage_spec,
+            pip_packages=pip_packages,
         )
 
-        # Create deployment via API
         response = self._client.create_deployment(request)
 
         # Create Deployment facade
@@ -504,8 +602,21 @@ class BasilicaClient:
         if gpu_count is None:
             gpu_count = reqs.gpu_count
 
-        # Use user-specified GPU models or recommended GPU
-        effective_gpu_models = gpu_models if gpu_models else [reqs.recommended_gpu]
+        # Use user-specified GPU models or auto-detect from available nodes
+        effective_gpu_models = gpu_models
+        if not effective_gpu_models:
+            nodes = self.list_nodes(available=True, min_gpu_memory=reqs.memory_gb)
+            if not nodes:
+                raise ResourceError(f"No GPU nodes available with {reqs.memory_gb}GB+ VRAM")
+            seen = set()
+            effective_gpu_models = []
+            for node in nodes:
+                for gpu in node.node.gpu_specs:
+                    if gpu.name:
+                        model_id = _extract_gpu_model_id(gpu.name)
+                        if model_id not in seen:
+                            seen.add(model_id)
+                            effective_gpu_models.append(model_id)
 
         # Generate name if not provided
         if name is None:
@@ -650,8 +761,21 @@ class BasilicaClient:
         if gpu_count is None:
             gpu_count = reqs.gpu_count
 
-        # Use user-specified GPU models or recommended GPU
-        effective_gpu_models = gpu_models if gpu_models else [reqs.recommended_gpu]
+        # Use user-specified GPU models or auto-detect from available nodes
+        effective_gpu_models = gpu_models
+        if not effective_gpu_models:
+            nodes = self.list_nodes(available=True, min_gpu_memory=reqs.memory_gb)
+            if not nodes:
+                raise ResourceError(f"No GPU nodes available with {reqs.memory_gb}GB+ VRAM")
+            seen = set()
+            effective_gpu_models = []
+            for node in nodes:
+                for gpu in node.node.gpu_specs:
+                    if gpu.name:
+                        model_id = _extract_gpu_model_id(gpu.name)
+                        if model_id not in seen:
+                            seen.add(model_id)
+                            effective_gpu_models.append(model_id)
 
         # Generate name if not provided
         if name is None:
@@ -777,13 +901,17 @@ class BasilicaClient:
         response = self.list_deployments()
         deployments = []
         for summary in response.deployments:
-            # Get full deployment details for each
             try:
                 full_response = self.get_deployment(summary.instance_name)
                 deployments.append(Deployment._from_response(self, full_response))
-            except Exception:
-                # Skip deployments we can't fetch
-                pass
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "not found" in error_msg:
+                    continue
+                warnings.warn(
+                    f"Failed to fetch deployment '{summary.instance_name}': {e}",
+                    stacklevel=2,
+                )
         return deployments
 
     # -------------------------------------------------------------------------
@@ -1070,3 +1198,288 @@ class BasilicaClient:
     def list_usage_history(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
         """Get usage history for billing."""
         return self._client.list_usage_history(limit, offset)
+
+    # -------------------------------------------------------------------------
+    # Async API Methods
+    # -------------------------------------------------------------------------
+
+    async def deploy_async(
+        self,
+        name: str,
+        source: Optional[Union[str, Path, Callable]] = None,
+        image: str = DEFAULT_PYTHON_IMAGE,
+        port: int = 8000,
+        env: Optional[Dict[str, str]] = None,
+        cpu: str = "500m",
+        memory: str = "512Mi",
+        storage: Union[bool, str] = False,
+        gpu_count: Optional[int] = None,
+        gpu_models: Optional[List[str]] = None,
+        min_cuda_version: Optional[str] = None,
+        min_gpu_memory_gb: Optional[int] = None,
+        replicas: int = 1,
+        ttl_seconds: Optional[int] = None,
+        public: bool = True,
+        timeout: int = 300,
+        pip_packages: Optional[List[str]] = None,
+    ) -> Deployment:
+        """
+        Deploy an application asynchronously.
+
+        This is the async version of deploy(). It uses asyncio.sleep() for
+        waiting, allowing other coroutines to run concurrently.
+
+        Args:
+            name: Deployment name (DNS-safe: lowercase, numbers, hyphens).
+            source: Python source code to deploy (file path, inline code, or callable).
+            image: Container image. Default: python:3.11-slim
+            port: Port your application listens on. Default: 8000
+            env: Environment variables as a dict.
+            cpu: CPU allocation. Default: "500m"
+            memory: Memory allocation. Default: "512Mi"
+            storage: Persistent storage configuration.
+            gpu_count: Number of GPUs (1-8).
+            gpu_models: Acceptable GPU models.
+            min_cuda_version: Minimum CUDA version.
+            min_gpu_memory_gb: Minimum GPU VRAM in GB.
+            replicas: Number of instances. Default: 1
+            ttl_seconds: Auto-delete after N seconds.
+            public: Create public URL. Default: True
+            timeout: Seconds to wait for deployment. Default: 300
+            pip_packages: Additional pip packages to install.
+
+        Returns:
+            Deployment: A deployment object with url, logs(), delete(), etc.
+
+        Example:
+            >>> async def main():
+            ...     client = BasilicaClient()
+            ...     deployment = await client.deploy_async("my-app", source="app.py")
+            ...     print(deployment.url)
+        """
+        request = self._build_deploy_request(
+            name=name,
+            source=source,
+            image=image,
+            port=port,
+            env=env,
+            cpu=cpu,
+            memory=memory,
+            storage=storage,
+            gpu_count=gpu_count,
+            gpu_models=gpu_models,
+            min_cuda_version=min_cuda_version,
+            min_gpu_memory_gb=min_gpu_memory_gb,
+            replicas=replicas,
+            ttl_seconds=ttl_seconds,
+            public=public,
+            pip_packages=pip_packages,
+        )
+
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, self._client.create_deployment, request
+        )
+
+        deployment = Deployment._from_response(self, response)
+        await deployment.wait_until_ready_async(timeout=timeout)
+        await deployment.refresh_async()
+
+        return deployment
+
+    async def get_async(self, name: str) -> Deployment:
+        """
+        Get an existing deployment by name asynchronously.
+
+        Args:
+            name: The deployment instance name
+
+        Returns:
+            Deployment: A deployment object
+
+        Raises:
+            DeploymentNotFound: If deployment doesn't exist
+
+        Example:
+            >>> deployment = await client.get_async("my-api")
+            >>> print(deployment.url)
+        """
+        try:
+            response = await self.get_deployment_async(name)
+            return Deployment._from_response(self, response)
+        except (KeyError, Exception) as e:
+            error_msg = str(e)
+            if "not found" in error_msg.lower() or "Not found" in error_msg:
+                raise DeploymentNotFound(name) from None
+            raise
+
+    async def list_async(self) -> List[Deployment]:
+        """
+        List all deployments asynchronously.
+
+        Returns:
+            List of Deployment objects
+
+        Example:
+            >>> deployments = await client.list_async()
+            >>> for d in deployments:
+            ...     print(f"{d.name}: {d.state}")
+        """
+        response = await self.list_deployments_async()
+        deployments = []
+        for summary in response.deployments:
+            try:
+                full_response = await self.get_deployment_async(summary.instance_name)
+                deployments.append(Deployment._from_response(self, full_response))
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "not found" in error_msg:
+                    continue
+                warnings.warn(
+                    f"Failed to fetch deployment '{summary.instance_name}': {e}",
+                    stacklevel=2,
+                )
+        return deployments
+
+    async def create_deployment_async(
+        self,
+        instance_name: str,
+        image: str,
+        replicas: int = 1,
+        port: int = 80,
+        command: Optional[List[str]] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        cpu: str = "500m",
+        memory: str = "512Mi",
+        gpu_count: Optional[int] = None,
+        gpu_models: Optional[List[str]] = None,
+        min_cuda_version: Optional[str] = None,
+        min_gpu_memory_gb: Optional[int] = None,
+        ttl_seconds: Optional[int] = None,
+        public: bool = True,
+        storage: Optional[Union[str, StorageSpec]] = None,
+    ) -> DeploymentResponse:
+        """
+        Create a deployment asynchronously (low-level API).
+
+        For most use cases, prefer the high-level deploy_async() method.
+        """
+        gpu_spec = None
+        if gpu_count is not None:
+            gpu_spec = GpuRequirementsSpec(
+                count=gpu_count,
+                model=gpu_models or [],
+                min_cuda_version=min_cuda_version,
+                min_gpu_memory_gb=min_gpu_memory_gb,
+            )
+
+        resources = ResourceRequirements(cpu=cpu, memory=memory, gpus=gpu_spec)
+
+        storage_spec = None
+        if storage is not None:
+            if isinstance(storage, str):
+                storage_spec = StorageSpec(
+                    persistent=PersistentStorageSpec(
+                        enabled=True,
+                        backend=StorageBackend.R2,
+                        bucket="",
+                        credentials_secret=None,
+                        sync_interval_ms=1000,
+                        cache_size_mb=1024,
+                        mount_path=storage,
+                    )
+                )
+            else:
+                storage_spec = storage
+
+        request = CreateDeploymentRequest(
+            instance_name=instance_name,
+            image=image,
+            replicas=replicas,
+            port=port,
+            command=command,
+            args=args,
+            env=env,
+            resources=resources,
+            ttl_seconds=ttl_seconds,
+            public=public,
+            storage=storage_spec,
+        )
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._client.create_deployment, request
+        )
+
+    async def get_deployment_async(self, instance_name: str) -> DeploymentResponse:
+        """Get deployment status by name asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._client.get_deployment, instance_name
+        )
+
+    async def delete_deployment_async(self, instance_name: str) -> DeleteDeploymentResponse:
+        """Delete a deployment by name asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._client.delete_deployment, instance_name
+        )
+
+    async def list_deployments_async(self) -> DeploymentListResponse:
+        """List all deployments asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._client.list_deployments)
+
+    async def get_deployment_logs_async(
+        self, instance_name: str, follow: bool = False, tail: Optional[int] = None
+    ) -> str:
+        """Get deployment logs asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._client.get_deployment_logs(instance_name, follow, tail)
+        )
+
+    async def health_check_async(self) -> HealthCheckResponse:
+        """Check API health status asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._client.health_check)
+
+    async def list_nodes_async(
+        self,
+        available: Optional[bool] = None,
+        gpu_type: Optional[str] = None,
+        min_gpu_count: Optional[int] = None,
+        min_gpu_memory: Optional[int] = None,
+    ) -> List[AvailableNode]:
+        """List available compute nodes asynchronously."""
+        query = None
+        if any([
+            available is not None,
+            gpu_type is not None,
+            min_gpu_count is not None,
+            min_gpu_memory is not None,
+        ]):
+            query = ListAvailableNodesQuery(
+                available=available,
+                gpu_type=gpu_type,
+                min_gpu_count=min_gpu_count,
+                min_gpu_memory=min_gpu_memory,
+            )
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._client.list_nodes, query)
+
+    async def get_balance_async(self) -> Dict[str, Any]:
+        """Get account balance asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._client.get_balance)
+
+    async def list_usage_history_async(
+        self, limit: int = 50, offset: int = 0
+    ) -> Dict[str, Any]:
+        """Get usage history for billing asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self._client.list_usage_history(limit, offset)
+        )
