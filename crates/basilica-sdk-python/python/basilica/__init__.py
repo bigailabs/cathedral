@@ -181,7 +181,7 @@ def _extract_gpu_model_id(full_name: str) -> str:
     return full_name
 
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 __all__ = [
     # Main client
     "BasilicaClient",
