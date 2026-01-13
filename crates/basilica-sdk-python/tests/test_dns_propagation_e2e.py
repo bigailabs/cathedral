@@ -19,8 +19,7 @@ from urllib.parse import urlparse
 # Add the SDK to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
-from basilica import BasilicaClient
-from basilica.deployment import Deployment
+from basilica import BasilicaClient, Deployment
 
 
 def test_dns_resolves_after_wait_until_ready():
