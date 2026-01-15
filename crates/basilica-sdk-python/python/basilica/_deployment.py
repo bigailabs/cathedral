@@ -10,15 +10,29 @@ Example:
     >>> print(deployment.url)           # Public URL
     >>> print(deployment.logs())        # Get logs
     >>> deployment.delete()             # Clean up
+
+Async Support:
+    All methods have async variants with `_async` suffix:
+    >>> status = await deployment.wait_until_ready_async()
+    >>> await deployment.delete_async()
 """
 
+import asyncio
 import socket
+import ssl
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 from urllib.parse import urlparse
 
 from basilica.exceptions import DeploymentFailed, DeploymentTimeout
+
+
+# HTTP readiness verification settings
+# Node scaling can take up to 10 minutes, so we need generous retry settings
+HTTP_READY_TIMEOUT = 10.0  # seconds per attempt
 
 if TYPE_CHECKING:
     from . import BasilicaClient
@@ -216,6 +230,32 @@ class Deployment:
         """
         return self._state
 
+    def _parse_status_response(self, response) -> DeploymentStatus:
+        """Parse API response into DeploymentStatus and update cached state."""
+        self._state = response.state
+        self._replicas_ready = response.replicas.ready
+        self._replicas_desired = response.replicas.desired
+
+        progress = None
+        if hasattr(response, "progress") and response.progress:
+            progress = ProgressInfo(
+                bytes_synced=getattr(response.progress, "bytes_synced", None),
+                bytes_total=getattr(response.progress, "bytes_total", None),
+                percentage=getattr(response.progress, "percentage", None),
+                current_step=getattr(response.progress, "current_step", ""),
+                started_at=getattr(response.progress, "started_at", ""),
+                elapsed_seconds=getattr(response.progress, "elapsed_seconds", 0),
+            )
+
+        return DeploymentStatus(
+            state=response.state,
+            replicas_ready=response.replicas.ready,
+            replicas_desired=response.replicas.desired,
+            message=None,
+            phase=getattr(response, "phase", None),
+            progress=progress,
+        )
+
     def status(self) -> DeploymentStatus:
         """
         Get the current deployment status from the API.
@@ -239,32 +279,7 @@ class Deployment:
             ...         print(f"Progress: {status.progress.percentage}%")
         """
         response = self._client.get_deployment(self._name)
-
-        # Update cached state
-        self._state = response.state
-        self._replicas_ready = response.replicas.ready
-        self._replicas_desired = response.replicas.desired
-
-        # Parse progress if present
-        progress = None
-        if hasattr(response, "progress") and response.progress:
-            progress = ProgressInfo(
-                bytes_synced=getattr(response.progress, "bytes_synced", None),
-                bytes_total=getattr(response.progress, "bytes_total", None),
-                percentage=getattr(response.progress, "percentage", None),
-                current_step=getattr(response.progress, "current_step", ""),
-                started_at=getattr(response.progress, "started_at", ""),
-                elapsed_seconds=getattr(response.progress, "elapsed_seconds", 0),
-            )
-
-        return DeploymentStatus(
-            state=response.state,
-            replicas_ready=response.replicas.ready,
-            replicas_desired=response.replicas.desired,
-            message=None,
-            phase=getattr(response, "phase", None),
-            progress=progress,
-        )
+        return self._parse_status_response(response)
 
     def logs(self, tail: Optional[int] = None, follow: bool = False) -> str:
         """
@@ -306,6 +321,9 @@ class Deployment:
         Polls the deployment status until it reaches a ready state,
         fails, or times out. By default, prints progress to stdout.
         Use silent=True to suppress output, or provide a custom on_progress callback.
+
+        After the deployment is marked ready, also verifies DNS resolution and
+        HTTP endpoint responsiveness before returning.
 
         Args:
             timeout: Maximum seconds to wait (default: 300)
@@ -352,13 +370,19 @@ class Deployment:
                 last_phase = last_status.phase
 
             if last_status.is_ready:
-                # Verify DNS resolution before declaring ready
                 if self._url:
                     hostname = urlparse(self._url).hostname
-                    if hostname and not self._is_dns_resolvable(hostname):
-                        time.sleep(poll_interval)
-                        elapsed += poll_interval
-                        continue
+                    if hostname:
+                        # Verify DNS resolution
+                        if not self._is_dns_resolvable(hostname):
+                            time.sleep(poll_interval)
+                            elapsed += poll_interval
+                            continue
+                        # Verify HTTP endpoint is responding
+                        if not self._is_http_ready(self._url):
+                            time.sleep(poll_interval)
+                            elapsed += poll_interval
+                            continue
                 if callback and not on_progress and not silent:
                     print(f"[{self._name}] Deployment ready!")
                 return last_status
@@ -397,6 +421,211 @@ class Deployment:
             return True
         except socket.gaierror:
             return False
+
+    async def _is_dns_resolvable_async(self, hostname: str) -> bool:
+        """Check if hostname resolves to an IP address asynchronously."""
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.getaddrinfo(hostname, None)
+            return True
+        except socket.gaierror:
+            return False
+
+    def _is_http_ready(self, url: str, timeout: float = HTTP_READY_TIMEOUT) -> bool:
+        """Check if HTTP endpoint is responding."""
+        try:
+            # Create SSL context that doesn't verify certificates for health checks
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                # Any response (even 4xx/5xx) means the server is up
+                return True
+        except urllib.error.HTTPError:
+            # HTTP errors (4xx, 5xx) mean server is responding
+            return True
+        except Exception:
+            return False
+
+    async def _is_http_ready_async(self, url: str, timeout: float = HTTP_READY_TIMEOUT) -> bool:
+        """Check if HTTP endpoint is responding asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._is_http_ready, url, timeout)
+
+
+    async def status_async(self) -> DeploymentStatus:
+        """
+        Get the current deployment status from the API asynchronously.
+
+        Returns:
+            DeploymentStatus with current state, replica counts, phase, and progress
+
+        Raises:
+            DeploymentNotFound: If the deployment no longer exists
+            NetworkError: If the API is unreachable
+
+        Example:
+            >>> status = await deployment.status_async()
+            >>> if status.is_ready:
+            ...     print("Deployment is healthy!")
+        """
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, self._client.get_deployment, self._name
+        )
+        return self._parse_status_response(response)
+
+    async def wait_until_ready_async(
+        self,
+        timeout: int = 300,
+        poll_interval: int = 5,
+        raise_on_failure: bool = True,
+        on_progress: Optional[Callable[[DeploymentStatus], None]] = None,
+        silent: bool = False,
+    ) -> DeploymentStatus:
+        """
+        Wait for the deployment to become ready asynchronously.
+
+        This is the async version of wait_until_ready(). It uses asyncio.sleep()
+        instead of time.sleep(), allowing other coroutines to run while waiting.
+
+        After the deployment is marked ready, also verifies DNS resolution and
+        HTTP endpoint responsiveness before returning.
+
+        Args:
+            timeout: Maximum seconds to wait (default: 300)
+            poll_interval: Seconds between status checks (default: 5)
+            raise_on_failure: If True, raises DeploymentFailed on failure state
+            on_progress: Optional callback invoked on each phase change.
+            silent: If True, suppresses default progress output (default: False)
+
+        Returns:
+            Final DeploymentStatus when ready or failed
+
+        Raises:
+            DeploymentTimeout: If deployment doesn't become ready within timeout
+            DeploymentFailed: If deployment enters Failed state (when raise_on_failure=True)
+
+        Example:
+            >>> # Wait for multiple deployments concurrently
+            >>> async def deploy_many():
+            ...     deployments = [d1, d2, d3]
+            ...     tasks = [d.wait_until_ready_async() for d in deployments]
+            ...     await asyncio.gather(*tasks)
+        """
+        elapsed = 0
+        last_status = None
+        last_phase = None
+
+        callback = on_progress
+        if callback is None and not silent:
+            callback = self._default_progress_callback
+
+        while elapsed < timeout:
+            last_status = await self.status_async()
+
+            if callback and last_status.phase != last_phase:
+                callback(last_status)
+                last_phase = last_status.phase
+
+            if last_status.is_ready:
+                if self._url:
+                    hostname = urlparse(self._url).hostname
+                    if hostname:
+                        # Verify DNS resolution
+                        if not await self._is_dns_resolvable_async(hostname):
+                            await asyncio.sleep(poll_interval)
+                            elapsed += poll_interval
+                            continue
+                        # Verify HTTP endpoint is responding
+                        if not await self._is_http_ready_async(self._url):
+                            await asyncio.sleep(poll_interval)
+                            elapsed += poll_interval
+                            continue
+                if callback and not on_progress and not silent:
+                    print(f"[{self._name}] Deployment ready!")
+                return last_status
+
+            if last_status.is_failed and raise_on_failure:
+                raise DeploymentFailed(
+                    instance_name=self._name,
+                    reason=last_status.message,
+                )
+
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+        raise DeploymentTimeout(
+            instance_name=self._name,
+            timeout_seconds=timeout,
+            last_state=last_status.state if last_status else "Unknown",
+            replicas_ready=last_status.replicas_ready if last_status else 0,
+            replicas_desired=last_status.replicas_desired if last_status else 1,
+        )
+
+    async def refresh_async(self) -> "Deployment":
+        """
+        Refresh the deployment data from the API asynchronously.
+
+        Returns:
+            Self, for method chaining
+
+        Example:
+            >>> await deployment.refresh_async()
+            >>> print(f"Current state: {deployment.state}")
+        """
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None, self._client.get_deployment, self._name
+        )
+
+        self._url = response.url
+        self._state = response.state
+        self._replicas_ready = response.replicas.ready
+        self._replicas_desired = response.replicas.desired
+        if response.updated_at:
+            self._updated_at = response.updated_at
+
+        return self
+
+    async def delete_async(self) -> None:
+        """
+        Delete the deployment asynchronously.
+
+        Raises:
+            DeploymentNotFound: If the deployment doesn't exist
+            NetworkError: If the API is unreachable
+
+        Example:
+            >>> await deployment.delete_async()
+        """
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, self._client.delete_deployment, self._name
+        )
+        self._state = "Deleted"
+
+    async def logs_async(self, tail: Optional[int] = None, follow: bool = False) -> str:
+        """
+        Get deployment logs asynchronously.
+
+        Args:
+            tail: Number of lines from the end to return.
+            follow: If True, streams logs continuously (blocking).
+
+        Returns:
+            Log content as a string
+
+        Example:
+            >>> logs = await deployment.logs_async(tail=100)
+        """
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self._client.get_deployment_logs(self._name, follow=follow, tail=tail)
+        )
 
     def delete(self) -> None:
         """

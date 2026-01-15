@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-01-13
+
+### Added
+- Async API methods: `deploy_async()`, `get_async()`, `list_async()` for concurrent operations
+- Async low-level methods: `create_deployment_async()`, `get_deployment_async()`, `delete_deployment_async()`
+- Async utility methods: `health_check_async()`, `list_nodes_async()`, `get_balance_async()`
+- GPU model auto-detection from available nodes when `gpu_models` not specified
+- `_extract_gpu_model_id()` for NVML name to K8s label conversion
+- Callable source support in `deploy()` via `SourcePackager.from_function()`
+- HTTP endpoint readiness verification in `wait_until_ready()`
+- Async DNS resolution and HTTP readiness checks
+- Comprehensive async test suite (`test_async_methods.py`)
+- GPU model extraction test suite (`test_gpu_model_extraction.py`)
+- Async concurrent deployment example (`21_async_concurrent.py`)
+
+### Changed
+- Rename `deployment.py` to `_deployment.py` (internal module)
+- `deploy()` now accepts `Callable` source in addition to file paths and inline code
+- Improved error handling in `list()` with warnings instead of silent failures
+- Examples updated to use `min_gpu_memory_gb` instead of hardcoded `gpu_models`
+
 ## [0.11.0] - 2025-12-31
 
 ### Fixed
@@ -140,7 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline API documentation
 - Example code for common workflows
 
-[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.11.0...HEAD
+[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.12.0...HEAD
+[0.12.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.11.0...basilica-sdk-python-v0.12.0
 [0.11.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.10.0...basilica-sdk-python-v0.11.0
 [0.10.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...basilica-sdk-python-v0.10.0
 [0.9.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.8.0...basilica-sdk-python-v0.9.0
