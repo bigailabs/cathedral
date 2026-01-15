@@ -2,10 +2,11 @@
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
 use crate::cli::handlers::gpu_rental_helpers::{
-    print_cloud_section_header, resolve_offering_unified, resolve_rental_by_id,
-    resolve_rental_with_ssh, resolve_target_rental_unified, with_validator_timeout, RentalWithSsh,
-    SelectedOffering,
+    active_rentals_query, get_ssh_private_key_path, print_cloud_section_header,
+    resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
+    resolve_target_rental_unified, with_validator_timeout, RentalWithSsh, SelectedOffering,
 };
+use crate::cli::handlers::region_mapping::region_matches_country;
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
@@ -18,8 +19,9 @@ use crate::CliError;
 use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
-    HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery, LocationProfile,
-    NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
+    HistoricalRentalItem, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
+    LocationProfile, NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess,
+    StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use color_eyre::eyre::eyre;
@@ -35,6 +37,42 @@ use tracing::{debug, warn};
 
 /// Maximum time to wait for rental to become active and SSH to be ready
 const RENTAL_READY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Enum representing the type of rental offering (GPU or CPU-only)
+enum RentalOffering {
+    SecureCloud(basilica_common::types::GpuOffering),
+    CpuOnly(basilica_sdk::types::CpuOffering),
+}
+
+impl RentalOffering {
+    fn id(&self) -> &str {
+        match self {
+            RentalOffering::SecureCloud(o) => &o.id,
+            RentalOffering::CpuOnly(o) => &o.id,
+        }
+    }
+
+    fn rental_type_name(&self) -> &'static str {
+        match self {
+            RentalOffering::SecureCloud(_) => "rental",
+            RentalOffering::CpuOnly(_) => "CPU-only rental",
+        }
+    }
+
+    fn rental_noun(&self) -> &'static str {
+        match self {
+            RentalOffering::SecureCloud(_) => "rental",
+            RentalOffering::CpuOnly(_) => "CPU rental",
+        }
+    }
+
+    fn instance_noun(&self) -> &'static str {
+        match self {
+            RentalOffering::SecureCloud(_) => "Instance",
+            RentalOffering::CpuOnly(_) => "CPU instance",
+        }
+    }
+}
 
 /// Represents a GPU target for the `up` command
 #[derive(Debug, Clone)]
@@ -118,9 +156,29 @@ async fn fetch_and_filter_secure_cloud(
                 }
             }
 
-            // Filter by country
+            // Filter by minimum GPU memory
+            if let Some(min_memory) = filters.memory_min {
+                if let Some(mem_per_gpu) = gpu.gpu_memory_gb_per_gpu {
+                    let total_memory = mem_per_gpu * gpu.gpu_count;
+                    if total_memory < min_memory {
+                        return false;
+                    }
+                }
+            }
+
+            // Filter by country using region mapping
             if let Some(ref country) = filters.country {
-                if !gpu.region.to_lowercase().contains(&country.to_lowercase()) {
+                if !region_matches_country(&gpu.region, country) {
+                    return false;
+                }
+            }
+
+            // Filter by max price (total hourly cost for all GPUs)
+            if let Some(max_price) = filters.price_max {
+                use rust_decimal::prelude::ToPrimitive;
+                let total_price =
+                    gpu.hourly_rate_per_gpu.to_f64().unwrap_or(f64::MAX) * (gpu.gpu_count as f64);
+                if total_price > max_price {
                     return false;
                 }
             }
@@ -173,10 +231,30 @@ async fn fetch_and_filter_community_cloud(
             )
         })?;
 
+    // Apply client-side max price filter if specified
+    let filtered_nodes: Vec<_> = if let Some(max_price) = filters.price_max {
+        response
+            .available_nodes
+            .into_iter()
+            .filter(|node| {
+                if let Some(rate_cents) = node.node.hourly_rate_cents {
+                    let gpu_count = node.node.gpu_specs.len() as f64;
+                    let rate_dollars = rate_cents as f64 / 100.0;
+                    let total_rate = rate_dollars * gpu_count;
+                    total_rate <= max_price
+                } else {
+                    // Include nodes without pricing (will show as "Market")
+                    true
+                }
+            })
+            .collect()
+    } else {
+        response.available_nodes
+    };
+
     // Build pricing map from nodes' hourly_rate_cents field
     // Map GPU type -> hourly rate string (e.g., "h100" -> "2.50")
-    let pricing_map: HashMap<String, String> = response
-        .available_nodes
+    let pricing_map: HashMap<String, String> = filtered_nodes
         .iter()
         .filter_map(|node| {
             // Get the first GPU spec to determine GPU type
@@ -193,7 +271,7 @@ async fn fetch_and_filter_community_cloud(
         })
         .collect();
 
-    Ok((response.available_nodes, pricing_map))
+    Ok((filtered_nodes, pricing_map))
 }
 
 /// Helper function to display secure cloud GPUs
@@ -225,6 +303,86 @@ fn display_community_cloud_table(
     Ok(())
 }
 
+/// Filter secure cloud rentals based on PsFilters
+///
+/// Applies gpu_type and min_gpu_count filters to secure cloud rentals.
+fn filter_secure_cloud_rentals<'a>(
+    rentals: &'a [basilica_sdk::types::SecureCloudRentalListItem],
+    filters: &PsFilters,
+) -> Vec<&'a basilica_sdk::types::SecureCloudRentalListItem> {
+    rentals
+        .iter()
+        .filter(|r| {
+            // Skip stopped rentals unless showing history
+            if !filters.history && r.stopped_at.is_some() {
+                return false;
+            }
+
+            // Filter by GPU type if specified
+            if let Some(ref gpu_type) = filters.gpu_type {
+                if !r.gpu_type.to_uppercase().contains(&gpu_type.to_uppercase()) {
+                    return false;
+                }
+            }
+
+            // Filter by min GPU count if specified
+            if let Some(min_count) = filters.min_gpu_count {
+                if r.gpu_count < min_count {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect()
+}
+
+fn is_secure_cpu_history_item(rental: &HistoricalRentalItem) -> bool {
+    rental.compute_type.eq_ignore_ascii_case("cpu")
+}
+
+/// Filter CPU offerings based on ListFilters
+///
+/// Applies country, memory, and price filters to CPU offerings.
+fn filter_cpu_offerings(
+    offerings: Vec<basilica_sdk::types::CpuOffering>,
+    filters: &ListFilters,
+) -> Vec<basilica_sdk::types::CpuOffering> {
+    offerings
+        .into_iter()
+        .filter(|offering| {
+            // Filter by availability
+            if !offering.availability {
+                return false;
+            }
+
+            // Filter by country using region mapping
+            if let Some(ref country) = filters.country {
+                if !region_matches_country(&offering.region, country) {
+                    return false;
+                }
+            }
+
+            // Filter by memory (system memory for CPU offerings)
+            if let Some(min_memory) = filters.memory_min {
+                if offering.system_memory_gb < min_memory {
+                    return false;
+                }
+            }
+
+            // Filter by max price
+            if let Some(max_price) = filters.price_max {
+                let hourly_rate = offering.hourly_rate.parse::<f64>().unwrap_or(f64::MAX);
+                if hourly_rate > max_price {
+                    return false;
+                }
+            }
+
+            true
+        })
+        .collect()
+}
+
 /// Handle the `ls` command - list available nodes for rental
 pub async fn handle_ls(
     gpu_category: Option<GpuCategory>,
@@ -244,17 +402,53 @@ pub async fn handle_ls(
     // Branch based on compute type
     match compute_category {
         Some(ComputeCategory::SecureCloud) => {
-            // Fetch and filter secure cloud GPUs
-            let spinner = create_spinner("Fetching available GPUs...");
-            let filtered_gpus =
-                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters).await;
+            // Only fetch CPU offerings if no GPU type filter is specified
+            let show_cpu = gpu_category.is_none();
+
+            let spinner = create_spinner("Fetching available instances...");
+            let (gpu_result, cpu_result) = if show_cpu {
+                let (gpu, cpu) = tokio::join!(
+                    fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                    api_client.list_cpu_offerings()
+                );
+                (gpu, Some(cpu))
+            } else {
+                let gpu = fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters).await;
+                (gpu, None)
+            };
             complete_spinner_and_clear(spinner);
-            let filtered_gpus = filtered_gpus?;
+
+            let filtered_gpus = gpu_result?;
+            let filtered_cpu = if let Some(cpu_res) = cpu_result {
+                let cpu_offerings = cpu_res.map_err(|e| CliError::Internal(eyre!(e)))?;
+                filter_cpu_offerings(cpu_offerings, &filters)
+            } else {
+                vec![]
+            };
 
             if json {
-                json_output(&filtered_gpus)?;
+                #[derive(serde::Serialize)]
+                struct CombinedSecureCloudOfferings<'a> {
+                    gpu_offerings: &'a [basilica_common::types::GpuOffering],
+                    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+                    cpu_offerings: &'a [basilica_sdk::types::CpuOffering],
+                }
+                let response = CombinedSecureCloudOfferings {
+                    gpu_offerings: &filtered_gpus,
+                    cpu_offerings: &filtered_cpu,
+                };
+                json_output(&response)?;
             } else {
+                // Display GPU offerings section
+                println!("{}", style("GPU Offerings").bold().cyan());
                 display_secure_cloud_table(&filtered_gpus)?;
+
+                // Only display CPU offerings section if no GPU type filter
+                if show_cpu {
+                    println!();
+                    println!("{}", style("Secure Cloud (CPU)").bold().cyan());
+                    table_output::display_cpu_offerings_detailed(&filtered_cpu)?;
+                }
             }
         }
         Some(ComputeCategory::CommunityCloud) => {
@@ -280,46 +474,83 @@ pub async fn handle_ls(
             }
         }
         None => {
-            // Display both tables when --compute flag is not specified
+            // Display all tables when --compute flag is not specified
             use crate::cli::handlers::gpu_rental_helpers::VALIDATOR_REQUEST_TIMEOUT;
 
-            let spinner = create_spinner("Fetching available GPUs...");
+            // Only show CPU offerings if no GPU type filter is specified
+            let show_cpu = gpu_category.is_none();
 
-            // Fetch both in parallel with timeout for community cloud
+            let spinner = create_spinner("Fetching available instances...");
+
+            // Fetch all in parallel with timeout for community cloud
             // Note: fetch_and_filter_community_cloud returns CliError, not ApiError,
             // so we use inline timeout here instead of with_validator_timeout
             let community_future =
                 fetch_and_filter_community_cloud(&api_client, gpu_category.clone(), &filters);
-            let (secure_result, community_result) = tokio::join!(
-                fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
-                async {
-                    match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future).await {
-                        Ok(result) => result,
-                        Err(_) => {
-                            warn!(
-                                "Validator request timed out after {} seconds",
-                                VALIDATOR_REQUEST_TIMEOUT.as_secs()
-                            );
-                            Ok((vec![], std::collections::HashMap::new()))
+
+            let (secure_result, community_result, cpu_result) = if show_cpu {
+                let (secure, community, cpu) = tokio::join!(
+                    fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                    async {
+                        match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!(
+                                    "Validator request timed out after {} seconds",
+                                    VALIDATOR_REQUEST_TIMEOUT.as_secs()
+                                );
+                                Ok((vec![], std::collections::HashMap::new()))
+                            }
+                        }
+                    },
+                    api_client.list_cpu_offerings()
+                );
+                (secure, community, Some(cpu))
+            } else {
+                let (secure, community) = tokio::join!(
+                    fetch_and_filter_secure_cloud(&api_client, gpu_category, &filters),
+                    async {
+                        match tokio::time::timeout(VALIDATOR_REQUEST_TIMEOUT, community_future)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                warn!(
+                                    "Validator request timed out after {} seconds",
+                                    VALIDATOR_REQUEST_TIMEOUT.as_secs()
+                                );
+                                Ok((vec![], std::collections::HashMap::new()))
+                            }
                         }
                     }
-                }
-            );
+                );
+                (secure, community, None)
+            };
 
             complete_spinner_and_clear(spinner);
 
             let secure_gpus = secure_result?;
             let (community_nodes, pricing_map) = community_result?;
+            let filtered_cpu = if let Some(cpu_res) = cpu_result {
+                filter_cpu_offerings(cpu_res.unwrap_or_default(), &filters)
+            } else {
+                vec![]
+            };
 
             if json {
                 #[derive(serde::Serialize)]
                 struct CombinedResponse<'a> {
                     secure_cloud: &'a [basilica_common::types::GpuOffering],
                     community_cloud: &'a [basilica_sdk::AvailableNode],
+                    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+                    cpu_offerings: &'a [basilica_sdk::types::CpuOffering],
                 }
                 let response = CombinedResponse {
                     secure_cloud: &secure_gpus,
                     community_cloud: &community_nodes,
+                    cpu_offerings: &filtered_cpu,
                 };
                 json_output(&response)?;
             } else {
@@ -328,8 +559,16 @@ pub async fn handle_ls(
 
                 println!();
 
-                print_cloud_section_header("Secure Cloud GPUs", false);
+                print_cloud_section_header("Secure Cloud (GPU)", false);
                 display_secure_cloud_table(&secure_gpus)?;
+
+                // Only display CPU offerings section if no GPU type filter
+                if show_cpu {
+                    println!();
+
+                    print_cloud_section_header("Secure Cloud (CPU)", false);
+                    table_output::display_cpu_offerings_detailed(&filtered_cpu)?;
+                }
             }
         }
     }
@@ -396,13 +635,17 @@ pub async fn ensure_ssh_key_registered(
     }
 }
 
-/// Handle secure cloud rental with a pre-selected offering (from unified selector)
-async fn handle_secure_cloud_rental_with_offering(
+/// Unified handler for both secure cloud (GPU) and CPU-only rentals
+async fn handle_rental_with_offering(
     api_client: basilica_sdk::BasilicaClient,
-    offering: basilica_common::types::GpuOffering,
+    offering: RentalOffering,
     options: UpOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {
+    let rental_type = offering.rental_type_name();
+    let rental_noun = offering.rental_noun();
+    let instance_noun = offering.instance_noun();
+
     // Get SSH key ID (SSH key registration already done in handle_up)
     let ssh_key_id = api_client
         .get_ssh_key()
@@ -417,7 +660,7 @@ async fn handle_secure_cloud_rental_with_offering(
         .id;
 
     // Start rental
-    let spinner = create_spinner("Starting rental...");
+    let spinner = create_spinner(&format!("Starting {}...", rental_type));
 
     use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
 
@@ -450,66 +693,70 @@ async fn handle_secure_cloud_rental_with_offering(
     };
 
     let request = StartSecureCloudRentalRequest {
-        offering_id: offering.id.clone(),
+        offering_id: offering.id().to_string(),
         ssh_public_key_id: ssh_key_id,
         container_image: options.image.clone(),
         environment,
         ports,
     };
 
-    let response = api_client
-        .start_secure_cloud_rental(request)
-        .await
-        .map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Failed to start rental");
+    // Start the rental using the appropriate API method
+    let response = match &offering {
+        RentalOffering::SecureCloud(_) => api_client
+            .start_secure_cloud_rental(request)
+            .await
+            .map_err(|e| {
+                complete_spinner_error(spinner.clone(), "Failed to start rental");
+                CliError::Api(e)
+            })?,
+        RentalOffering::CpuOnly(_) => api_client.start_cpu_rental(request).await.map_err(|e| {
+            complete_spinner_error(spinner.clone(), &format!("Failed to start {}", rental_noun));
             CliError::Api(e)
-        })?;
+        })?,
+    };
     complete_spinner_and_clear(spinner);
 
     print_success(&format!(
-        "Successfully started secure cloud rental {}",
-        response.rental_id
+        "Successfully started {} {}",
+        rental_type, response.rental_id
     ));
 
     if options.detach {
         if let Some(ssh_cmd) = &response.ssh_command {
-            // Look up the private key for display
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
             display_secure_cloud_reconnection_instructions(
                 &response.rental_id,
                 ssh_cmd,
                 &private_key_path,
-                "To connect to this rental:",
+                &format!("To connect to this {}:", rental_noun),
             )?;
         } else {
             println!();
-            print_info("Instance is starting up. Use 'basilica ps' to check status.");
+            print_info(&format!(
+                "{} is starting up. Use 'basilica ps' to check status.",
+                instance_noun
+            ));
             print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
         }
         return Ok(());
     }
 
     // Wait for rental to become active
-    print_info("Waiting for rental to become active...");
-    let rental = poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?;
+    print_info(&format!("Waiting for {} to become active...", rental_noun));
+    let rental = match &offering {
+        RentalOffering::SecureCloud(_) => {
+            poll_secure_cloud_rental_status(&response.rental_id, &api_client).await?
+        }
+        RentalOffering::CpuOnly(_) => {
+            poll_cpu_rental_status(&response.rental_id, &api_client).await?
+        }
+    };
 
     if let Some(rental) = rental {
         if let Some(ssh_cmd) = &rental.ssh_command {
-            print_info("Connecting to rental...");
+            print_info(&format!("Connecting to {}...", rental_noun));
             let (host, port, username) = parse_ssh_credentials(ssh_cmd)?;
             let ssh_access = SshAccess {
                 host,
@@ -517,21 +764,9 @@ async fn handle_secure_cloud_rental_with_offering(
                 username,
             };
 
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
 
             let ssh_client = SshClient::new(&config.ssh)?;
             match retry_ssh_connection(
@@ -548,7 +783,7 @@ async fn handle_secure_cloud_rental_with_offering(
                         &response.rental_id,
                         ssh_cmd,
                         &private_key_path,
-                        "To reconnect to this rental:",
+                        &format!("To reconnect to this {}:", rental_noun),
                     )?;
                 }
                 Err(e) => {
@@ -563,17 +798,80 @@ async fn handle_secure_cloud_rental_with_offering(
             }
         } else {
             println!();
-            print_info("Rental is active but SSH is not yet available");
+            print_info(&format!(
+                "{} is active but SSH is not yet available",
+                rental_noun
+                    .chars()
+                    .next()
+                    .unwrap()
+                    .to_uppercase()
+                    .collect::<String>()
+                    + &rental_noun[1..]
+            ));
             print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
         }
     } else {
         println!();
-        print_info("Rental is taking longer than expected to become active");
+        print_info(&format!(
+            "{} is taking longer than expected to become active",
+            rental_noun
+                .chars()
+                .next()
+                .unwrap()
+                .to_uppercase()
+                .collect::<String>()
+                + &rental_noun[1..]
+        ));
         print_info("Check status with: basilica ps");
         print_info(&format!("SSH with: basilica ssh {}", response.rental_id));
     }
 
     Ok(())
+}
+
+/// Poll CPU rental status until it becomes active or times out
+async fn poll_cpu_rental_status(
+    rental_id: &str,
+    api_client: &basilica_sdk::BasilicaClient,
+) -> Result<Option<basilica_sdk::types::SecureCloudRentalListItem>, CliError> {
+    let start_time = std::time::Instant::now();
+    let poll_interval = Duration::from_secs(5);
+
+    loop {
+        if start_time.elapsed() > RENTAL_READY_TIMEOUT {
+            return Ok(None);
+        }
+
+        // Fetch CPU rentals and find our rental
+        match api_client.list_cpu_rentals().await {
+            Ok(list) => {
+                if let Some(rental) = list.rentals.iter().find(|r| r.rental_id == rental_id) {
+                    // Check if rental is running and has SSH
+                    if rental.status == "running" && rental.ssh_command.is_some() {
+                        return Ok(Some(rental.clone()));
+                    }
+                    // Check for failure states
+                    if rental.status == "failed" || rental.status == "error" {
+                        return Err(CliError::Internal(eyre!(
+                            "CPU rental failed to start: {}",
+                            rental.status
+                        )));
+                    }
+                } else {
+                    // Rental not found in list - fail immediately
+                    return Err(CliError::Internal(eyre!(
+                        "CPU rental {} not found in rental list",
+                        rental_id
+                    )));
+                }
+            }
+            Err(e) => {
+                debug!("Failed to poll CPU rental status: {}", e);
+            }
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
 }
 
 /// Handle community cloud rental with a pre-selected node (from unified selector)
@@ -653,21 +951,9 @@ async fn handle_community_cloud_rental_with_selection(
 
     if options.detach {
         // Look up the private key for display
-        let private_key_path = {
-            let ssh_key = api_client
-                .get_ssh_key()
-                .await
-                .map_err(|e| CliError::Internal(eyre!(e)))?
-                .ok_or_else(|| {
-                    CliError::Internal(
-                        eyre!("No SSH key registered with Basilica")
-                            .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                    )
-                })?;
-
-            crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                .map_err(CliError::Internal)?
-        };
+        let private_key_path = get_ssh_private_key_path(&api_client)
+            .await
+            .map_err(CliError::Internal)?;
         display_ssh_connection_instructions(
             &response.rental_id,
             ssh_creds,
@@ -687,21 +973,9 @@ async fn handle_community_cloud_rental_with_selection(
                 username,
             };
 
-            let private_key_path = {
-                let ssh_key = api_client
-                    .get_ssh_key()
-                    .await
-                    .map_err(|e| CliError::Internal(eyre!(e)))?
-                    .ok_or_else(|| {
-                        CliError::Internal(
-                            eyre!("No SSH key registered with Basilica")
-                                .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
-                        )
-                    })?;
-
-                crate::ssh::find_private_key_for_public_key(&ssh_key.public_key)
-                    .map_err(CliError::Internal)?
-            };
+            let private_key_path = get_ssh_private_key_path(&api_client)
+                .await
+                .map_err(CliError::Internal)?;
 
             let ssh_client = SshClient::new(&config.ssh)?;
             match retry_ssh_connection(
@@ -822,12 +1096,28 @@ pub async fn handle_up(
     match selected {
         SelectedOffering::SecureCloud(offering) => {
             validate_no_community_cloud_options(&options)?;
-            handle_secure_cloud_rental_with_offering(api_client, offering, options, config).await
+            handle_rental_with_offering(
+                api_client,
+                RentalOffering::SecureCloud(offering),
+                options,
+                config,
+            )
+            .await
         }
         SelectedOffering::CommunityCloud(node_selection) => {
             handle_community_cloud_rental_with_selection(
                 api_client,
                 node_selection,
+                options,
+                config,
+            )
+            .await
+        }
+        SelectedOffering::CpuOnly(offering) => {
+            validate_no_community_cloud_options(&options)?;
+            handle_rental_with_offering(
+                api_client,
+                RentalOffering::CpuOnly(offering),
                 options,
                 config,
             )
@@ -939,37 +1229,48 @@ pub async fn handle_ps(
                 complete_spinner_and_clear(spinner);
 
                 if json {
-                    // Filter to only secure cloud rentals and sort by start time (most recent first)
-                    let mut secure_history: Vec<_> = history
+                    use serde_json::json;
+                    let mut secure_gpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
                         .cloned()
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-                    let filtered_response = HistoricalRentalsResponse {
-                        rentals: secure_history.clone(),
-                        total_count: secure_history.len(),
-                        total_cost: secure_history
-                            .iter()
-                            .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
-                            .sum::<rust_decimal::Decimal>()
-                            .to_string(),
-                    };
-                    json_output(&filtered_response)?;
-                } else {
-                    // Filter to only secure cloud rentals and sort by start time (most recent first)
-                    let mut secure_history: Vec<_> = history
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    let mut secure_cpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .cloned()
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    table_output::display_rental_history(&secure_history)?;
+                    let output = json!({
+                        "secure_cloud_history": secure_gpu_history,
+                        "secure_cloud_cpu_history": secure_cpu_history
+                    });
+                    json_output(&output)?;
+                } else {
+                    // Filter to only secure cloud rentals and sort by start time (most recent first)
+                    let mut secure_gpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
+                        .collect();
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    // Calculate total cost for secure cloud only
-                    let total_cost: rust_decimal::Decimal = secure_history
+                    let mut secure_cpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .collect();
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    print_cloud_section_header("Secure Cloud (GPU) Rental History", true);
+                    table_output::display_rental_history(&secure_gpu_history)?;
+
+                    let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
                         .iter()
                         .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
@@ -978,42 +1279,99 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", total_cost)).green().bold()
+                        style(format!("${:.2}", secure_gpu_total_cost))
+                            .green()
+                            .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud rentals",
-                        secure_history.len()
+                        "\nTotal: {} historical secure cloud GPU rentals",
+                        secure_gpu_history.len()
+                    );
+
+                    println!();
+
+                    print_cloud_section_header("Secure Cloud (CPU) History", false);
+                    table_output::display_cpu_rental_history(&secure_cpu_history)?;
+
+                    let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", secure_cpu_total_cost))
+                            .green()
+                            .bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical secure cloud CPU rentals",
+                        secure_cpu_history.len()
                     );
 
                     display_ps_quick_start_commands();
                 }
             } else {
-                // Active rentals mode: fetch from secure cloud providers
+                // Active rentals mode: fetch GPU and CPU rentals from secure cloud providers
                 let spinner = create_spinner("Fetching active rentals...");
 
-                let rentals_result = api_client.list_secure_cloud_rentals().await;
+                let (gpu_result, cpu_result) = tokio::join!(
+                    api_client.list_secure_cloud_rentals(),
+                    api_client.list_cpu_rentals()
+                );
 
-                let rentals_list = rentals_result.inspect_err(|_| {
-                    complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
+                let gpu_rentals_list = gpu_result.inspect_err(|_| {
+                    complete_spinner_error(
+                        spinner.clone(),
+                        "Failed to load secure cloud GPU rentals",
+                    )
+                })?;
+
+                let cpu_rentals_list = cpu_result.inspect_err(|_| {
+                    complete_spinner_error(spinner.clone(), "Failed to load CPU-only rentals")
                 })?;
 
                 complete_spinner_and_clear(spinner);
 
                 if json {
-                    json_output(&rentals_list)?;
+                    use serde_json::json;
+                    let output = json!({
+                        "gpu_rentals": gpu_rentals_list,
+                        "cpu_rentals": cpu_rentals_list
+                    });
+                    json_output(&output)?;
                 } else {
-                    // Show active/running rentals only
-                    let rentals_to_display: Vec<_> = rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none())
-                        .collect();
+                    // Show active GPU rentals with filters applied
+                    let gpu_rentals_to_display: Vec<_> =
+                        filter_secure_cloud_rentals(&gpu_rentals_list.rentals, &filters)
+                            .into_iter()
+                            .collect();
 
-                    table_output::display_secure_cloud_rentals(&rentals_to_display)?;
+                    println!("{}", style("Secure Cloud (GPU)").bold().cyan());
+                    table_output::display_secure_cloud_rentals(&gpu_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} active secure cloud rentals",
-                        rentals_to_display.len()
+                        "\nTotal: {} Secure Cloud (GPU) rentals",
+                        gpu_rentals_to_display.len()
+                    );
+
+                    println!();
+
+                    // Show active CPU-only rentals (no gpu_type or min_gpu_count filters apply)
+                    let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_none() && r.gpu_count == 0)
+                        .collect();
+
+                    println!("{}", style("Secure Cloud (CPU)").bold().cyan());
+                    table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
+
+                    println!(
+                        "\nTotal: {} Secure Cloud (CPU) rentals",
+                        cpu_rentals_to_display.len()
                     );
 
                     display_ps_quick_start_commands();
@@ -1057,16 +1415,24 @@ pub async fn handle_ps(
                         .cloned()
                         .collect();
                     community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-                    let mut secure_history: Vec<_> = history
+                    let mut secure_gpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
                         .cloned()
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    let mut secure_cpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .cloned()
+                        .collect();
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
                     let output = json!({
                         "community_cloud_history": community_history,
-                        "secure_cloud_history": secure_history
+                        "secure_cloud_history": secure_gpu_history,
+                        "secure_cloud_cpu_history": secure_cpu_history
                     });
                     json_output(&output)?;
                 } else {
@@ -1078,15 +1444,22 @@ pub async fn handle_ps(
                         .collect();
                     community_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    let mut secure_history: Vec<_> = history
+                    let mut secure_gpu_history: Vec<_> = history
                         .rentals
                         .iter()
-                        .filter(|r| r.cloud_type == "secure")
+                        .filter(|r| r.cloud_type == "secure" && !is_secure_cpu_history_item(r))
                         .collect();
-                    secure_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                    secure_gpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+                    let mut secure_cpu_history: Vec<_> = history
+                        .rentals
+                        .iter()
+                        .filter(|r| r.cloud_type == "secure" && is_secure_cpu_history_item(r))
+                        .collect();
+                    secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
                     // Display community cloud history
-                    print_cloud_section_header("Community Cloud Rental History", true);
+                    print_cloud_section_header("Community Cloud History", true);
                     table_output::display_rental_history(&community_history)?;
 
                     let community_total_cost: rust_decimal::Decimal = community_history
@@ -1109,11 +1482,11 @@ pub async fn handle_ps(
 
                     println!();
 
-                    // Display secure cloud history
-                    print_cloud_section_header("Secure Cloud Rental History", false);
-                    table_output::display_rental_history(&secure_history)?;
+                    // Display secure cloud GPU history
+                    print_cloud_section_header("Secure Cloud (GPU) History", false);
+                    table_output::display_rental_history(&secure_gpu_history)?;
 
-                    let secure_total_cost: rust_decimal::Decimal = secure_history
+                    let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
                         .iter()
                         .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
                         .sum();
@@ -1122,11 +1495,37 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_total_cost)).green().bold()
+                        style(format!("${:.2}", secure_gpu_total_cost))
+                            .green()
+                            .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud rentals",
-                        secure_history.len()
+                        "\nTotal: {} historical secure cloud GPU rentals",
+                        secure_gpu_history.len()
+                    );
+
+                    println!();
+
+                    // Display secure cloud CPU history
+                    print_cloud_section_header("Secure Cloud (CPU) History", false);
+                    table_output::display_cpu_rental_history(&secure_cpu_history)?;
+
+                    let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
+                        .iter()
+                        .filter_map(|r| r.total_cost.parse::<rust_decimal::Decimal>().ok())
+                        .sum();
+
+                    println!();
+                    println!(
+                        "{}: {}",
+                        style("Total Cost").cyan(),
+                        style(format!("${:.2}", secure_cpu_total_cost))
+                            .green()
+                            .bold()
+                    );
+                    println!(
+                        "\nTotal: {} historical secure cloud CPU rentals",
+                        secure_cpu_history.len()
                     );
 
                     display_ps_quick_start_commands();
@@ -1134,14 +1533,16 @@ pub async fn handle_ps(
             } else {
                 // Active rentals mode
                 let query = Some(ListRentalsQuery {
-                    status: filters.status.or(Some(RentalState::Active)),
+                    status: filters.status.clone().or(Some(RentalState::Active)),
                     gpu_type: filters.gpu_type.clone(),
                     min_gpu_count: filters.min_gpu_count,
                 });
 
-                let (community_result, secure_result) = tokio::join!(
+                // Fetch community, secure cloud GPU, and CPU rentals in parallel
+                let (community_result, secure_result, cpu_result) = tokio::join!(
                     with_validator_timeout(api_client.list_rentals(query)),
-                    api_client.list_secure_cloud_rentals()
+                    api_client.list_secure_cloud_rentals(),
+                    api_client.list_cpu_rentals()
                 );
 
                 // Graceful degradation: use empty results on community cloud timeout
@@ -1157,17 +1558,27 @@ pub async fn handle_ps(
                     complete_spinner_error(spinner.clone(), "Failed to load secure cloud rentals")
                 })?;
 
+                let cpu_rentals_list = cpu_result.unwrap_or_else(|e| {
+                    warn!("Failed to load CPU-only rentals: {}", e);
+                    basilica_sdk::types::ListSecureCloudRentalsResponse {
+                        rentals: vec![],
+                        total_count: 0,
+                    }
+                });
+
                 complete_spinner_and_clear(spinner);
 
                 if json {
                     use serde_json::json;
                     let output = json!({
                         "community_cloud": community_rentals_list,
-                        "secure_cloud": secure_rentals_list
+                        "secure_cloud": secure_rentals_list,
+                        "cpu_only": cpu_rentals_list
                     });
                     json_output(&output)?;
                 } else {
-                    print_cloud_section_header("Community Cloud Rentals", true);
+                    // Section 1: Community Cloud
+                    print_cloud_section_header("Community Cloud", true);
 
                     table_output::display_rental_items(&community_rentals_list.rentals[..])?;
 
@@ -1178,19 +1589,37 @@ pub async fn handle_ps(
 
                     println!();
 
-                    print_cloud_section_header("Secure Cloud Rentals", false);
+                    // Section 2: Secure Cloud (GPU) with filters applied
+                    print_cloud_section_header("Secure Cloud (GPU)", false);
 
-                    let secure_rentals_to_display: Vec<_> = secure_rentals_list
-                        .rentals
-                        .iter()
-                        .filter(|r| r.stopped_at.is_none())
-                        .collect();
+                    let secure_rentals_to_display: Vec<_> =
+                        filter_secure_cloud_rentals(&secure_rentals_list.rentals, &filters)
+                            .into_iter()
+                            .collect();
 
                     table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} secure cloud rentals",
+                        "\nTotal: {} Secure Cloud (GPU) rentals",
                         secure_rentals_to_display.len()
+                    );
+
+                    println!();
+
+                    // Section 3: Secure Cloud (CPU) (no gpu_type or min_gpu_count filters apply)
+                    print_cloud_section_header("Secure Cloud (CPU)", false);
+
+                    let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
+                        .rentals
+                        .iter()
+                        .filter(|r| r.stopped_at.is_none() && r.gpu_count == 0)
+                        .collect();
+
+                    table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
+
+                    println!(
+                        "\nTotal: {} Secure Cloud (CPU) rentals",
+                        cpu_rentals_to_display.len()
                     );
 
                     display_ps_quick_start_commands();
@@ -1262,72 +1691,158 @@ pub async fn handle_status(
             }
         }
         ComputeCategory::SecureCloud => {
-            // Fetch secure cloud status
-            let rentals = api_client.list_secure_cloud_rentals().await.map_err(|e| {
+            // Fetch secure cloud status (GPU + CPU)
+            let (gpu_result, cpu_result) = tokio::join!(
+                api_client.list_secure_cloud_rentals(),
+                api_client.list_cpu_rentals()
+            );
+
+            let mut gpu_error: Option<ApiError> = None;
+            let mut cpu_error: Option<ApiError> = None;
+
+            let gpu_rentals = match gpu_result {
+                Ok(list) => Some(list),
+                Err(err) => {
+                    gpu_error = Some(err);
+                    None
+                }
+            };
+
+            let cpu_rentals = match cpu_result {
+                Ok(list) => Some(list),
+                Err(err) => {
+                    cpu_error = Some(err);
+                    None
+                }
+            };
+
+            if gpu_error.is_some() && cpu_error.is_some() {
                 complete_spinner_error(spinner.clone(), "Failed to get status");
-                CliError::Internal(
-                    eyre!(e).suggestion("Check your internet connection and try again"),
-                )
-            })?;
+                let err = gpu_error.or(cpu_error).unwrap();
+                return Err(CliError::Internal(
+                    eyre!(err).suggestion("Check your internet connection and try again"),
+                ));
+            }
 
-            let rental = rentals
-                .rentals
-                .iter()
-                .find(|r| r.rental_id == rental_id)
-                .ok_or_else(|| {
-                    complete_spinner_error(spinner.clone(), "Rental not found");
-                    CliError::Internal(
-                        eyre!("Rental '{}' not found", rental_id)
-                            .suggestion("Try 'basilica ps' to see your active rentals")
-                            .note("The rental may have expired or been terminated"),
-                    )
-                })?;
+            if let Some(rental) = cpu_rentals
+                .as_ref()
+                .and_then(|list| list.rentals.iter().find(|r| r.rental_id == rental_id))
+            {
+                complete_spinner_and_clear(spinner);
 
-            complete_spinner_and_clear(spinner);
-
-            if json {
-                json_output(&rental)?;
-            } else {
-                // Display secure cloud rental details
-                println!("Rental Status: {}", rental.rental_id);
-                println!("  Provider: {}", rental.provider);
-                println!("  Status: {}", rental.status);
-                println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
-                if let Some(ip) = &rental.ip_address {
-                    println!("  IP Address: {}", ip);
-                }
-                println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
-                println!("  Created: {}", rental.created_at);
-                if let Some(stopped_at) = &rental.stopped_at {
-                    println!("  Stopped: {}", stopped_at);
-                }
-                // Show SSH command with private key path if available locally
-                if let Some(ip) = &rental.ip_address {
-                    if let Some(ref ssh_public_key) = rental.ssh_public_key {
-                        if let Ok(private_key_path) =
-                            find_private_key_for_public_key(ssh_public_key)
-                        {
-                            // Full SSH command with private key
-                            println!(
-                                "  SSH: {}",
-                                style(format!(
-                                    "ssh -i {} ubuntu@{}",
-                                    compress_path(&private_key_path),
-                                    ip
-                                ))
-                                .cyan()
-                            );
-                        } else {
-                            // Key not found locally, show basic command
-                            println!("  SSH: ssh ubuntu@{}", ip);
-                            println!("  SSH Key: {}", style("Not found locally").yellow());
-                        }
+                if json {
+                    json_output(&rental)?;
+                } else {
+                    // Display secure cloud CPU rental details
+                    println!("Rental Status: {}", rental.rental_id);
+                    println!("  Provider: {}", rental.provider);
+                    println!("  Status: {}", rental.status);
+                    if let Some(vcpu) = rental.vcpu_count {
+                        println!("  vCPU: {}", vcpu);
                     } else {
-                        // No public key info, show basic command
-                        println!("  SSH: ssh ubuntu@{}", ip);
+                        println!("  vCPU: N/A");
+                    }
+                    if let Some(mem) = rental.system_memory_gb {
+                        println!("  Memory: {}GB", mem);
+                    }
+                    if let Some(ip) = &rental.ip_address {
+                        println!("  IP Address: {}", ip);
+                    }
+                    println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
+                    println!("  Created: {}", rental.created_at);
+                    if let Some(stopped_at) = &rental.stopped_at {
+                        println!("  Stopped: {}", stopped_at);
+                    }
+                    // Show SSH command with private key path if available locally
+                    if let Some(ip) = &rental.ip_address {
+                        if let Some(ref ssh_public_key) = rental.ssh_public_key {
+                            if let Ok(private_key_path) =
+                                find_private_key_for_public_key(ssh_public_key)
+                            {
+                                // Full SSH command with private key
+                                println!(
+                                    "  SSH: {}",
+                                    style(format!(
+                                        "ssh -i {} ubuntu@{}",
+                                        compress_path(&private_key_path),
+                                        ip
+                                    ))
+                                    .cyan()
+                                );
+                            } else {
+                                // Key not found locally, show basic command
+                                println!("  SSH: ssh ubuntu@{}", ip);
+                                println!("  SSH Key: {}", style("Not found locally").yellow());
+                            }
+                        } else {
+                            // No public key info, show basic command
+                            println!("  SSH: ssh ubuntu@{}", ip);
+                        }
                     }
                 }
+
+                return Ok(());
             }
+
+            if let Some(rental) = gpu_rentals
+                .as_ref()
+                .and_then(|list| list.rentals.iter().find(|r| r.rental_id == rental_id))
+            {
+                complete_spinner_and_clear(spinner);
+
+                if json {
+                    json_output(&rental)?;
+                } else {
+                    // Display secure cloud GPU rental details
+                    println!("Rental Status: {}", rental.rental_id);
+                    println!("  Provider: {}", rental.provider);
+                    println!("  Status: {}", rental.status);
+                    println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
+                    if let Some(ip) = &rental.ip_address {
+                        println!("  IP Address: {}", ip);
+                    }
+                    println!("  Hourly Cost: ${:.2}/hr", rental.hourly_cost);
+                    println!("  Created: {}", rental.created_at);
+                    if let Some(stopped_at) = &rental.stopped_at {
+                        println!("  Stopped: {}", stopped_at);
+                    }
+                    // Show SSH command with private key path if available locally
+                    if let Some(ip) = &rental.ip_address {
+                        if let Some(ref ssh_public_key) = rental.ssh_public_key {
+                            if let Ok(private_key_path) =
+                                find_private_key_for_public_key(ssh_public_key)
+                            {
+                                // Full SSH command with private key
+                                println!(
+                                    "  SSH: {}",
+                                    style(format!(
+                                        "ssh -i {} ubuntu@{}",
+                                        compress_path(&private_key_path),
+                                        ip
+                                    ))
+                                    .cyan()
+                                );
+                            } else {
+                                // Key not found locally, show basic command
+                                println!("  SSH: ssh ubuntu@{}", ip);
+                                println!("  SSH Key: {}", style("Not found locally").yellow());
+                            }
+                        } else {
+                            // No public key info, show basic command
+                            println!("  SSH: ssh ubuntu@{}", ip);
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+
+            complete_spinner_error(spinner.clone(), "Rental not found");
+            return Err(CliError::Internal(
+                eyre!("Rental '{}' not found", rental_id)
+                    .suggestion("Try 'basilica ps' to see your active rentals")
+                    .note("The rental may have expired or been terminated"),
+            ));
         }
     }
 
@@ -1480,40 +1995,39 @@ pub async fn handle_down(
         let spinner = create_spinner("Fetching active rentals...");
 
         // Determine what to fetch based on filter
-        let (community_rentals, secure_rentals) = match compute_filter {
+        let (community_rentals, secure_rentals, cpu_rentals) = match compute_filter {
             Some(ComputeCategory::CommunityCloud) => {
                 // Fetch only community cloud
-                let query = Some(ListRentalsQuery {
-                    status: Some(RentalState::Active),
-                    gpu_type: None,
-                    min_gpu_count: None,
-                });
-                let rentals = api_client.list_rentals(query).await.map_err(|e| {
-                    complete_spinner_error(spinner.clone(), "Failed to fetch rentals");
-                    CliError::Internal(eyre!(e).wrap_err("Failed to fetch active rentals"))
-                })?;
-                (Some(rentals), None)
+                let rentals = api_client
+                    .list_rentals(active_rentals_query())
+                    .await
+                    .map_err(|e| {
+                        complete_spinner_error(spinner.clone(), "Failed to fetch rentals");
+                        CliError::Internal(eyre!(e).wrap_err("Failed to fetch active rentals"))
+                    })?;
+                (Some(rentals), None, None)
             }
             Some(ComputeCategory::SecureCloud) => {
-                // Fetch only secure cloud
-                let rentals = api_client.list_secure_cloud_rentals().await.map_err(|e| {
+                // Fetch secure cloud GPU and CPU rentals
+                let (gpu_rentals, cpu_rentals) = tokio::join!(
+                    api_client.list_secure_cloud_rentals(),
+                    api_client.list_cpu_rentals()
+                );
+                let rentals = gpu_rentals.map_err(|e| {
                     complete_spinner_error(spinner.clone(), "Failed to fetch secure cloud rentals");
                     CliError::Internal(eyre!(e).wrap_err("Failed to fetch secure cloud rentals"))
                 })?;
-                (None, Some(rentals))
+                (None, Some(rentals), cpu_rentals.ok())
             }
             None => {
-                // Fetch both types with timeout for community cloud
-                let community_future = api_client.list_rentals(Some(ListRentalsQuery {
-                    status: Some(RentalState::Active),
-                    gpu_type: None,
-                    min_gpu_count: None,
-                }));
-                let (community_result, secure_result) = tokio::join!(
+                // Fetch all types with timeout for community cloud
+                let community_future = api_client.list_rentals(active_rentals_query());
+                let (community_result, secure_result, cpu_result) = tokio::join!(
                     with_validator_timeout(community_future),
-                    api_client.list_secure_cloud_rentals()
+                    api_client.list_secure_cloud_rentals(),
+                    api_client.list_cpu_rentals()
                 );
-                (community_result.ok(), secure_result.ok())
+                (community_result.ok(), secure_result.ok(), cpu_result.ok())
             }
         };
 
@@ -1550,7 +2064,7 @@ pub async fn handle_down(
             }
         }
 
-        // Stop secure cloud rentals (only active ones)
+        // Stop secure cloud GPU rentals (only active ones)
         if let Some(secure) = secure_rentals {
             for rental in secure.rentals {
                 // Skip stopped rentals
@@ -1566,7 +2080,7 @@ pub async fn handle_down(
                     Ok(_) => {
                         complete_spinner_and_clear(spinner);
                         print_success(&format!(
-                            "Successfully stopped secure cloud rental {}",
+                            "Successfully stopped secure cloud GPU rental {}",
                             rental_id
                         ));
                         success_count += 1;
@@ -1576,7 +2090,39 @@ pub async fn handle_down(
                             spinner,
                             &format!("Failed to stop rental: {}", rental_id),
                         );
-                        failed_rentals.push((rental_id.clone(), "secure".to_string(), e));
+                        failed_rentals.push((rental_id.clone(), "secure-gpu".to_string(), e));
+                    }
+                }
+            }
+        }
+
+        // Stop CPU-only rentals (only active ones)
+        if let Some(cpu) = cpu_rentals {
+            for rental in cpu.rentals {
+                // Skip stopped rentals
+                if rental.stopped_at.is_some() {
+                    continue;
+                }
+
+                total_count += 1;
+                let rental_id = &rental.rental_id;
+                let spinner = create_spinner(&format!("Stopping CPU rental: {}", rental_id));
+
+                match api_client.stop_cpu_rental(rental_id).await {
+                    Ok(_) => {
+                        complete_spinner_and_clear(spinner);
+                        print_success(&format!(
+                            "Successfully stopped CPU-only rental {}",
+                            rental_id
+                        ));
+                        success_count += 1;
+                    }
+                    Err(e) => {
+                        complete_spinner_error(
+                            spinner,
+                            &format!("Failed to stop CPU rental: {}", rental_id),
+                        );
+                        failed_rentals.push((rental_id.clone(), "cpu-only".to_string(), e));
                     }
                 }
             }
@@ -1644,30 +2190,68 @@ pub async fn handle_down(
                 ));
             }
             ComputeCategory::SecureCloud => {
-                // Stop secure cloud rental
-                api_client
-                    .stop_secure_cloud_rental(&rental_id)
+                // Check if this is a CPU rental by looking in CPU rentals list first
+                let is_cpu_rental = api_client
+                    .list_cpu_rentals()
                     .await
-                    .map_err(|e| -> CliError {
-                        complete_spinner_error(spinner.clone(), "Failed to stop rental");
-                        let report = match e {
-                            ApiError::NotFound { .. } => eyre!("Rental '{}' not found", rental_id)
+                    .map(|list| list.rentals.iter().any(|r| r.rental_id == rental_id))
+                    .unwrap_or(false);
+
+                if is_cpu_rental {
+                    // Stop CPU rental
+                    api_client
+                        .stop_cpu_rental(&rental_id)
+                        .await
+                        .map_err(|e| -> CliError {
+                            complete_spinner_error(spinner.clone(), "Failed to stop CPU rental");
+                            let report = match e {
+                                ApiError::NotFound { .. } => eyre!(
+                                    "CPU rental '{}' not found",
+                                    rental_id
+                                )
                                 .suggestion(
                                     "Try 'basilica ps --compute secure-cloud' to see your rentals",
                                 )
                                 .note("The rental may have already been stopped"),
-                            _ => {
-                                eyre!(e).suggestion("Check your internet connection and try again")
-                            }
-                        };
-                        CliError::Internal(report)
-                    })?;
+                                _ => eyre!(e)
+                                    .suggestion("Check your internet connection and try again"),
+                            };
+                            CliError::Internal(report)
+                        })?;
 
-                complete_spinner_and_clear(spinner);
-                print_success(&format!(
-                    "Successfully stopped secure cloud rental {}",
-                    rental_id
-                ));
+                    complete_spinner_and_clear(spinner);
+                    print_success(&format!(
+                        "Successfully stopped CPU-only rental {}",
+                        rental_id
+                    ));
+                } else {
+                    // Stop secure cloud GPU rental
+                    api_client
+                        .stop_secure_cloud_rental(&rental_id)
+                        .await
+                        .map_err(|e| -> CliError {
+                            complete_spinner_error(spinner.clone(), "Failed to stop rental");
+                            let report = match e {
+                                ApiError::NotFound { .. } => eyre!(
+                                    "Rental '{}' not found",
+                                    rental_id
+                                )
+                                .suggestion(
+                                    "Try 'basilica ps --compute secure-cloud' to see your rentals",
+                                )
+                                .note("The rental may have already been stopped"),
+                                _ => eyre!(e)
+                                    .suggestion("Check your internet connection and try again"),
+                            };
+                            CliError::Internal(report)
+                        })?;
+
+                    complete_spinner_and_clear(spinner);
+                    print_success(&format!(
+                        "Successfully stopped secure cloud rental {}",
+                        rental_id
+                    ));
+                }
             }
         }
     }
@@ -2120,7 +2704,7 @@ async fn poll_secure_cloud_rental_status(
 /// SSH services may not be immediately available after a rental becomes active.
 /// This function retries the connection for up to `max_wait` duration with exponential backoff.
 ///
-/// Uses try_connect_silently() for retries (suppresses stderr, allows passphrases)
+/// Uses try_connect_silently() for non-interactive readiness probes (no passphrase prompts)
 /// then interactive_session() once connected.
 async fn retry_ssh_connection(
     ssh_client: &SshClient,
@@ -2167,12 +2751,23 @@ async fn retry_ssh_connection(
             .try_connect_silently(ssh_access, private_key_path.clone())
             .await
         {
-            Ok(_) => {
-                // Connection succeeded, start interactive session
+            Ok(crate::ssh::SshProbeStatus::Ready)
+            | Ok(crate::ssh::SshProbeStatus::ReadyAuthRequired) => {
+                // SSH is reachable; start interactive session (will prompt once if needed).
                 return ssh_client
                     .interactive_session(ssh_access, private_key_path)
                     .await
                     .map_err(|e| CliError::Internal(eyre!("SSH session failed: {}", e)));
+            }
+            Ok(crate::ssh::SshProbeStatus::NotReady(reason)) => {
+                debug!(
+                    "SSH attempt {} not ready ({}s elapsed): {}. Retrying in {}s...",
+                    attempt,
+                    start_time.elapsed().as_secs(),
+                    reason,
+                    interval.as_secs()
+                );
+                // Continue to next iteration for retry
             }
             Err(e) => {
                 debug!(

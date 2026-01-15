@@ -120,6 +120,10 @@ pub struct HistoricalRentalItem {
     pub duration_seconds: i64,
     pub gpu_count: u32,
     pub cloud_type: String, // "community" or "secure"
+    pub compute_type: String,
+    pub vcpu_count: Option<u32>,
+    pub system_memory_gb: Option<u32>,
+    pub provider: Option<String>,
 }
 
 /// API response for historical rentals
@@ -888,4 +892,49 @@ impl WaitOptions {
             ..Default::default()
         }
     }
+}
+
+// ============================================================================
+// CPU-Only Secure Cloud Types
+// ============================================================================
+
+/// CPU-only offering from secure cloud providers (no GPU)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuOffering {
+    /// Unique offering identifier
+    pub id: String,
+
+    /// Provider name (e.g., "hyperstack")
+    pub provider: String,
+
+    /// Number of vCPU cores
+    pub vcpu_count: u32,
+
+    /// System memory in GB
+    pub system_memory_gb: u32,
+
+    /// Storage in GB
+    pub storage_gb: u32,
+
+    /// Region/location code
+    pub region: String,
+
+    /// Hourly rate in USD (flat rate, not per-GPU)
+    pub hourly_rate: String,
+
+    /// Whether the offering is currently available
+    pub availability: bool,
+
+    /// When this offering data was fetched
+    pub fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Response for listing CPU-only offerings
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListCpuOfferingsResponse {
+    /// List of available CPU offerings
+    pub nodes: Vec<CpuOffering>,
+
+    /// Total count of offerings
+    pub count: usize,
 }

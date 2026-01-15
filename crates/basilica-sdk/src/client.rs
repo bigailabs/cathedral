@@ -455,6 +455,49 @@ impl BasilicaClient {
         self.post(&path, &serde_json::json!({})).await
     }
 
+    // ===== CPU-Only Secure Cloud =====
+
+    /// List CPU-only offerings from secure cloud providers
+    ///
+    /// Returns CPU-only instances (no GPU) from providers like Hyperstack.
+    /// These have flat hourly rates rather than per-GPU pricing.
+    pub async fn list_cpu_offerings(&self) -> Result<Vec<crate::types::CpuOffering>> {
+        let response: crate::types::ListCpuOfferingsResponse = self
+            .get("/secure-cloud/cpu-prices?available_only=true")
+            .await?;
+        Ok(response.nodes)
+    }
+
+    /// List CPU-only rentals for the authenticated user
+    ///
+    /// Returns all CPU-only secure cloud rentals including their status,
+    /// IP addresses, and cost information.
+    pub async fn list_cpu_rentals(&self) -> Result<crate::types::ListSecureCloudRentalsResponse> {
+        self.get("/secure-cloud/cpu-rentals").await
+    }
+
+    /// Start a CPU-only rental
+    ///
+    /// Deploys a CPU-only instance via datacenter provider and registers
+    /// it with the billing service for incremental charging.
+    pub async fn start_cpu_rental(
+        &self,
+        request: crate::types::StartSecureCloudRentalRequest,
+    ) -> Result<crate::types::SecureCloudRentalResponse> {
+        self.post("/secure-cloud/cpu-rentals/start", &request).await
+    }
+
+    /// Stop a CPU-only rental
+    ///
+    /// Terminates the CPU instance, finalizes billing, and returns the total cost.
+    pub async fn stop_cpu_rental(
+        &self,
+        rental_id: &str,
+    ) -> Result<crate::types::StopSecureCloudRentalResponse> {
+        let path = format!("/secure-cloud/cpu-rentals/{}/stop", rental_id);
+        self.post(&path, &serde_json::json!({})).await
+    }
+
     // ===== SSH Key Management =====
 
     /// Get the authenticated user's registered SSH key

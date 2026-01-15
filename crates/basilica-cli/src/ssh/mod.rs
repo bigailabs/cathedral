@@ -23,6 +23,16 @@ pub struct SshClient {
     config: SshConfig,
 }
 
+/// Result of a non-interactive SSH readiness probe.
+pub enum SshProbeStatus {
+    /// SSH is reachable and key auth succeeded without interaction.
+    Ready,
+    /// SSH is reachable but requires interactive auth (e.g. encrypted key without agent).
+    ReadyAuthRequired,
+    /// SSH is not yet reachable or rejected the connection for other reasons.
+    NotReady(String),
+}
+
 impl SshClient {
     /// Create new SSH client
     pub fn new(config: &SshConfig) -> Result<Self> {
@@ -184,14 +194,14 @@ impl SshClient {
         }
     }
 
-    /// Try to connect silently - suppresses stderr but allows passphrase prompts.
-    /// Returns Ok(()) if connection succeeds, Err if it fails.
-    /// Unlike test_connection(), this doesn't use BatchMode so passphrases work.
+    /// Probe SSH readiness without triggering any interactive prompts.
+    /// Returns Ready if SSH accepts a non-interactive key, ReadyAuthRequired if SSH is up
+    /// but interactive auth is required (e.g. encrypted key without agent), or NotReady otherwise.
     pub async fn try_connect_silently(
         &self,
         ssh_access: &SshAccess,
         private_key_path: std::path::PathBuf,
-    ) -> Result<()> {
+    ) -> Result<SshProbeStatus> {
         let details = self.ssh_access_to_connection_details(ssh_access, private_key_path)?;
         let timeout_secs = std::cmp::min(details.timeout.as_secs(), 10); // Quick timeout for retry
 
@@ -210,26 +220,44 @@ impl SshClient {
             .arg("-o")
             .arg("UserKnownHostsFile=/dev/null")
             .arg("-o")
-            .arg("LogLevel=quiet") // Suppress all SSH messages
+            .arg("LogLevel=error")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("PreferredAuthentications=publickey")
+            .arg("-o")
+            .arg("PasswordAuthentication=no")
+            .arg("-o")
+            .arg("KbdInteractiveAuthentication=no")
             .arg("-o")
             .arg(format!("ConnectTimeout={}", timeout_secs))
             .arg(format!("{}@{}", details.username, details.host))
             .arg("true"); // Quick command that exits immediately
 
-        // Inherit stdin (for passphrase), inherit stdout, suppress stderr
-        cmd.stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::null());
+        // Disable stdin to prevent passphrase prompts; capture stderr for classification
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
 
-        let status = cmd
-            .status()
+        let output = cmd
+            .output()
             .map_err(|e| -> CliError { eyre!("Failed to run SSH: {}", e).into() })?;
 
-        if status.success() {
-            Ok(())
-        } else {
-            Err(eyre!("SSH connection failed (exit code: {:?})", status.code()).into())
+        if output.status.success() {
+            return Ok(SshProbeStatus::Ready);
         }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr_lc = stderr.to_lowercase();
+
+        if stderr_lc.contains("permission denied")
+            || stderr_lc.contains("no supported authentication methods")
+            || stderr_lc.contains("authentication failed")
+        {
+            return Ok(SshProbeStatus::ReadyAuthRequired);
+        }
+
+        Ok(SshProbeStatus::NotReady(stderr.trim().to_string()))
     }
 
     /// Open interactive SSH session

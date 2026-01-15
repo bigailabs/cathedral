@@ -8,13 +8,20 @@
 
 use basilica_sdk::types::{
     AvailabilityInfo as SdkAvailabilityInfo, AvailableNode as SdkAvailableNode,
-    CpuSpec as SdkCpuSpec, GpuRequirements as SdkGpuRequirements, GpuSpec as SdkGpuSpec,
-    ListAvailableNodesQuery as SdkListAvailableNodesQuery, ListRentalsQuery as SdkListRentalsQuery,
+    CpuOffering as SdkCpuOffering, CpuSpec as SdkCpuSpec, GpuRequirements as SdkGpuRequirements,
+    GpuSpec as SdkGpuSpec, ListAvailableNodesQuery as SdkListAvailableNodesQuery,
+    ListRentalsQuery as SdkListRentalsQuery,
+    ListSecureCloudRentalsResponse as SdkListSecureCloudRentalsResponse,
     NodeDetails as SdkNodeDetails, NodeSelection as SdkNodeSelection,
     PortMappingRequest as SdkPortMappingRequest, RentalState, RentalStatus as SdkRentalStatus,
     RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
-    ResourceRequirementsRequest as SdkResourceRequirementsRequest, SshAccess as SdkSshAccess,
-    StartRentalApiRequest as SdkStartRentalApiRequest, VolumeMountRequest as SdkVolumeMountRequest,
+    ResourceRequirementsRequest as SdkResourceRequirementsRequest,
+    SecureCloudRentalListItem as SdkSecureCloudRentalListItem,
+    SecureCloudRentalResponse as SdkSecureCloudRentalResponse, SshAccess as SdkSshAccess,
+    SshKeyResponse as SdkSshKeyResponse, StartRentalApiRequest as SdkStartRentalApiRequest,
+    StartSecureCloudRentalRequest as SdkStartSecureCloudRentalRequest,
+    StopSecureCloudRentalResponse as SdkStopSecureCloudRentalResponse,
+    VolumeMountRequest as SdkVolumeMountRequest,
 };
 use basilica_validator::rental::RentalResponse as SdkRentalResponse;
 use pyo3::prelude::*;
@@ -1196,6 +1203,284 @@ impl From<SdkDeleteDeploymentResponse> for DeleteDeploymentResponse {
             instance_name: response.instance_name,
             state: response.state,
             message: response.message,
+        }
+    }
+}
+
+// ============================================================================
+// SSH Key Management Types
+// ============================================================================
+
+/// SSH key response from registering or getting user's SSH key
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct SshKeyResponse {
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub user_id: String,
+    #[pyo3(get)]
+    pub name: String,
+    #[pyo3(get)]
+    pub public_key: String,
+    #[pyo3(get)]
+    pub created_at: String,
+    #[pyo3(get)]
+    pub updated_at: String,
+}
+
+impl From<SdkSshKeyResponse> for SshKeyResponse {
+    fn from(response: SdkSshKeyResponse) -> Self {
+        Self {
+            id: response.id,
+            user_id: response.user_id,
+            name: response.name,
+            public_key: response.public_key,
+            created_at: response.created_at.to_rfc3339(),
+            updated_at: response.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+// ============================================================================
+// CPU Rental Types
+// ============================================================================
+
+/// CPU-only offering from secure cloud providers (no GPU)
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct CpuOffering {
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub vcpu_count: u32,
+    #[pyo3(get)]
+    pub system_memory_gb: u32,
+    #[pyo3(get)]
+    pub storage_gb: u32,
+    #[pyo3(get)]
+    pub region: String,
+    #[pyo3(get)]
+    pub hourly_rate: String,
+    #[pyo3(get)]
+    pub availability: bool,
+    #[pyo3(get)]
+    pub fetched_at: String,
+}
+
+impl From<SdkCpuOffering> for CpuOffering {
+    fn from(offering: SdkCpuOffering) -> Self {
+        Self {
+            id: offering.id,
+            provider: offering.provider,
+            vcpu_count: offering.vcpu_count,
+            system_memory_gb: offering.system_memory_gb,
+            storage_gb: offering.storage_gb,
+            region: offering.region,
+            hourly_rate: offering.hourly_rate,
+            availability: offering.availability,
+            fetched_at: offering.fetched_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Request to start a CPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StartCpuRentalRequest {
+    #[pyo3(get, set)]
+    pub offering_id: String,
+    #[pyo3(get, set)]
+    pub ssh_public_key_id: String,
+    #[pyo3(get, set)]
+    pub container_image: Option<String>,
+    #[pyo3(get, set)]
+    pub environment: HashMap<String, String>,
+    #[pyo3(get, set)]
+    pub ports: Vec<PortMappingRequest>,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl StartCpuRentalRequest {
+    #[new]
+    #[pyo3(signature = (offering_id, ssh_public_key_id, container_image=None, environment=None, ports=None))]
+    fn new(
+        offering_id: String,
+        ssh_public_key_id: String,
+        container_image: Option<String>,
+        environment: Option<HashMap<String, String>>,
+        ports: Option<Vec<PortMappingRequest>>,
+    ) -> Self {
+        Self {
+            offering_id,
+            ssh_public_key_id,
+            container_image,
+            environment: environment.unwrap_or_default(),
+            ports: ports.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<StartCpuRentalRequest> for SdkStartSecureCloudRentalRequest {
+    fn from(req: StartCpuRentalRequest) -> Self {
+        Self {
+            offering_id: req.offering_id,
+            ssh_public_key_id: req.ssh_public_key_id,
+            container_image: req.container_image,
+            environment: req.environment,
+            ports: req.ports.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+/// Response from starting a CPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct CpuRentalResponse {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub deployment_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub ip_address: Option<String>,
+    #[pyo3(get)]
+    pub ssh_command: Option<String>,
+    #[pyo3(get)]
+    pub hourly_cost: f64,
+}
+
+impl From<SdkSecureCloudRentalResponse> for CpuRentalResponse {
+    fn from(response: SdkSecureCloudRentalResponse) -> Self {
+        Self {
+            rental_id: response.rental_id,
+            deployment_id: response.deployment_id,
+            provider: response.provider,
+            status: response.status,
+            ip_address: response.ip_address,
+            ssh_command: response.ssh_command,
+            hourly_cost: response.hourly_cost,
+        }
+    }
+}
+
+/// Response from stopping a CPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StopCpuRentalResponse {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub duration_hours: f64,
+    #[pyo3(get)]
+    pub total_cost: f64,
+}
+
+impl From<SdkStopSecureCloudRentalResponse> for StopCpuRentalResponse {
+    fn from(response: SdkStopSecureCloudRentalResponse) -> Self {
+        Self {
+            rental_id: response.rental_id,
+            status: response.status,
+            duration_hours: response.duration_hours,
+            total_cost: response.total_cost,
+        }
+    }
+}
+
+/// CPU rental list item
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct CpuRentalListItem {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub provider_instance_id: Option<String>,
+    #[pyo3(get)]
+    pub gpu_type: String,
+    #[pyo3(get)]
+    pub gpu_count: u32,
+    #[pyo3(get)]
+    pub instance_type: String,
+    #[pyo3(get)]
+    pub location_code: Option<String>,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub ip_address: Option<String>,
+    #[pyo3(get)]
+    pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub created_at: String,
+    #[pyo3(get)]
+    pub stopped_at: Option<String>,
+    #[pyo3(get)]
+    pub ssh_command: Option<String>,
+    #[pyo3(get)]
+    pub vcpu_count: Option<u32>,
+    #[pyo3(get)]
+    pub system_memory_gb: Option<u32>,
+    #[pyo3(get)]
+    pub accumulated_cost: Option<String>,
+    #[pyo3(get)]
+    pub is_vip: bool,
+}
+
+impl From<SdkSecureCloudRentalListItem> for CpuRentalListItem {
+    fn from(item: SdkSecureCloudRentalListItem) -> Self {
+        Self {
+            rental_id: item.rental_id,
+            provider: item.provider,
+            provider_instance_id: item.provider_instance_id,
+            gpu_type: item.gpu_type,
+            gpu_count: item.gpu_count,
+            instance_type: item.instance_type,
+            location_code: item.location_code,
+            status: item.status,
+            ip_address: item.ip_address,
+            hourly_cost: item.hourly_cost,
+            created_at: item.created_at.to_rfc3339(),
+            stopped_at: item.stopped_at.map(|dt| dt.to_rfc3339()),
+            ssh_command: item.ssh_command,
+            vcpu_count: item.vcpu_count,
+            system_memory_gb: item.system_memory_gb,
+            accumulated_cost: item.accumulated_cost,
+            is_vip: item.is_vip,
+        }
+    }
+}
+
+/// List CPU rentals response
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ListCpuRentalsResponse {
+    #[pyo3(get)]
+    pub rentals: Vec<CpuRentalListItem>,
+    #[pyo3(get)]
+    pub total_count: usize,
+}
+
+impl From<SdkListSecureCloudRentalsResponse> for ListCpuRentalsResponse {
+    fn from(response: SdkListSecureCloudRentalsResponse) -> Self {
+        Self {
+            rentals: response.rentals.into_iter().map(Into::into).collect(),
+            total_count: response.total_count,
         }
     }
 }

@@ -383,22 +383,25 @@ localnet-restart:
 # Develop Python SDK (install in editable mode with auto-generated stubs)
 develop-python:
     #!/usr/bin/env bash
-    
+
     # Create venv if needed
     if [ ! -d ".venv" ]; then
         echo "Creating virtual environment..."
         uv venv
     fi
-    
+
     # Install Python SDK in editable mode
     echo "Installing Python SDK..."
     uv pip install -e crates/basilica-sdk-python
-    
+
     # Generate type stubs
     echo "Generating type stubs..."
     cd crates/basilica-sdk-python
+
+    # Set PYTHONHOME for pyo3 stub generator to find Python's standard library
+    export PYTHONHOME=$(python3 -c "import sys; print(sys.base_prefix)")
     cargo run --bin stub_gen --features stub-gen
-    
+
     echo "Python SDK installed with type stubs"
     echo "Stub file generated at: python/basilica/_basilica.pyi"
     echo "Virtual environment: .venv (root directory)"

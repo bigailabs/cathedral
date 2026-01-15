@@ -21,9 +21,11 @@ use std::time::Duration;
 use tokio::runtime::Runtime;
 
 use crate::types::{
-    AvailableNode, CreateDeploymentRequest, DeleteDeploymentResponse, DeploymentListResponse,
-    DeploymentResponse, HealthCheckResponse, ListAvailableNodesQuery, ListRentalsQuery,
-    RentalResponse, RentalStatusWithSshResponse, StartRentalApiRequest,
+    AvailableNode, CpuOffering, CpuRentalResponse, CreateDeploymentRequest,
+    DeleteDeploymentResponse, DeploymentListResponse, DeploymentResponse, HealthCheckResponse,
+    ListAvailableNodesQuery, ListCpuRentalsResponse, ListRentalsQuery, RentalResponse,
+    RentalStatusWithSshResponse, SshKeyResponse, StartCpuRentalRequest, StartRentalApiRequest,
+    StopCpuRentalResponse,
 };
 
 /// Python wrapper for BasilicaClient
@@ -343,6 +345,123 @@ impl BasilicaClient {
 
         to_pyobject(py, &response)
     }
+
+    // ===== SSH Key Management =====
+
+    /// Register an SSH key for the authenticated user
+    ///
+    /// Args:
+    ///     name: A friendly name for the SSH key
+    ///     public_key: The SSH public key content
+    fn register_ssh_key(
+        &self,
+        py: Python,
+        name: String,
+        public_key: String,
+    ) -> PyResult<SshKeyResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.register_ssh_key(&name, &public_key).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Get the authenticated user's registered SSH key
+    fn get_ssh_key(&self, py: Python) -> PyResult<Option<SshKeyResponse>> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.get_ssh_key().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.map(Into::into))
+    }
+
+    /// Delete the authenticated user's SSH key
+    fn delete_ssh_key(&self, _py: Python) -> PyResult<()> {
+        let client = Arc::clone(&self.inner);
+
+        self.runtime
+            .block_on(async move { client.delete_ssh_key().await })
+            .map_err(|e| self.map_error_to_python(e))
+    }
+
+    // ===== CPU Rental Methods =====
+
+    /// List available CPU offerings from secure cloud providers
+    fn list_cpu_offerings(&self, py: Python) -> PyResult<Vec<CpuOffering>> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.list_cpu_offerings().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into_iter().map(Into::into).collect())
+    }
+
+    /// List CPU rentals for the authenticated user
+    fn list_cpu_rentals(&self, py: Python) -> PyResult<ListCpuRentalsResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.list_cpu_rentals().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Start a CPU rental
+    ///
+    /// Args:
+    ///     request: CPU rental request parameters
+    fn start_cpu_rental(
+        &self,
+        py: Python,
+        request: StartCpuRentalRequest,
+    ) -> PyResult<CpuRentalResponse> {
+        let client = Arc::clone(&self.inner);
+        let request = request.into();
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.start_cpu_rental(request).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Stop a CPU rental
+    ///
+    /// Args:
+    ///     rental_id: The rental ID to stop
+    fn stop_cpu_rental(&self, py: Python, rental_id: String) -> PyResult<StopCpuRentalResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.stop_cpu_rental(&rental_id).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
 }
 
 impl BasilicaClient {
@@ -440,6 +559,17 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::DeploymentSummary>()?;
     m.add_class::<types::DeploymentListResponse>()?;
     m.add_class::<types::DeleteDeploymentResponse>()?;
+
+    // SSH Key types
+    m.add_class::<types::SshKeyResponse>()?;
+
+    // CPU Rental types
+    m.add_class::<types::CpuOffering>()?;
+    m.add_class::<types::StartCpuRentalRequest>()?;
+    m.add_class::<types::CpuRentalResponse>()?;
+    m.add_class::<types::StopCpuRentalResponse>()?;
+    m.add_class::<types::CpuRentalListItem>()?;
+    m.add_class::<types::ListCpuRentalsResponse>()?;
 
     // Helper functions
     m.add_function(wrap_pyfunction!(node_by_id, m)?)?;

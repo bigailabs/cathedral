@@ -27,8 +27,23 @@ fn format_timestamp(timestamp: &str) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
+fn format_duration(seconds: i64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
 /// Display rental items in table format
 pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No community cloud rentals found").yellow());
+        return Ok(());
+    }
+
     // Helper to get rate and cost for a rental from the API response fields
     let get_rental_pricing = |rental: &ApiRentalListItem| -> (String, String) {
         let rate = rental
@@ -671,17 +686,6 @@ pub fn display_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
         return Ok(());
     }
 
-    // Helper to format duration
-    let format_duration = |seconds: i64| -> String {
-        let hours = seconds / 3600;
-        let minutes = (seconds % 3600) / 60;
-        if hours > 0 {
-            format!("{}h {}m", hours, minutes)
-        } else {
-            format!("{}m", minutes)
-        }
-    };
-
     #[derive(Tabled)]
     struct HistoryRow {
         #[tabled(rename = "Rental ID")]
@@ -714,6 +718,91 @@ pub fn display_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
                 rental_id: rental.rental_id.clone(),
                 gpu_count: format!("{}x GPU", rental.gpu_count),
                 status: rental.status.clone(),
+                total_cost,
+                started: rental
+                    .started_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+                stopped: rental
+                    .stopped_at
+                    .with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string(),
+                duration: format_duration(rental.duration_seconds),
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| b.started.cmp(&a.started));
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{table}");
+
+    Ok(())
+}
+
+/// Display historical CPU rental data from billing service
+pub fn display_cpu_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No CPU rental history found").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CpuHistoryRow {
+        #[tabled(rename = "Provider")]
+        provider: String,
+        #[tabled(rename = "vCPU")]
+        vcpu: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "Status")]
+        status: String,
+        #[tabled(rename = "Rate/hr")]
+        rate: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Started")]
+        started: String,
+        #[tabled(rename = "Stopped")]
+        stopped: String,
+        #[tabled(rename = "Duration")]
+        duration: String,
+    }
+
+    let mut rows: Vec<CpuHistoryRow> = rentals
+        .iter()
+        .map(|rental| {
+            let total_cost = rental
+                .total_cost
+                .parse::<Decimal>()
+                .ok()
+                .map(|c| format!("${:.2}", c))
+                .unwrap_or_else(|| rental.total_cost.clone());
+
+            let rate = rental
+                .hourly_rate
+                .map(|r| format!("${:.2}/hr", r))
+                .unwrap_or_else(|| "-".to_string());
+
+            let vcpu = rental
+                .vcpu_count
+                .map(|cores| format!("{} cores", cores))
+                .unwrap_or_else(|| "-".to_string());
+
+            let ram = rental
+                .system_memory_gb
+                .map(|gb| format!("{}GB", gb))
+                .unwrap_or_else(|| "-".to_string());
+
+            CpuHistoryRow {
+                provider: rental.provider.clone().unwrap_or_else(|| "-".to_string()),
+                vcpu,
+                ram,
+                status: rental.status.clone(),
+                rate,
                 total_cost,
                 started: rental
                     .started_at
@@ -817,6 +906,146 @@ pub fn display_secure_cloud_rentals(
                 ssh: ssh.to_string(),
                 cpu,
                 ram,
+                region: rental
+                    .location_code
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
+                hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
+                total_cost,
+                created: format_timestamp(&rental.created_at.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    Ok(())
+}
+
+/// Display CPU-only offerings in detailed table format
+pub fn display_cpu_offerings_detailed(
+    offerings: &[basilica_sdk::types::CpuOffering],
+) -> Result<()> {
+    if offerings.is_empty() {
+        println!("{}", style("No CPU instances available").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CpuOfferingRow {
+        #[tabled(rename = "PROVIDER")]
+        provider: String,
+        #[tabled(rename = "vCPU")]
+        vcpu: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "STORAGE")]
+        storage: String,
+        #[tabled(rename = "REGION")]
+        region: String,
+        #[tabled(rename = "PRICE/HR")]
+        price: String,
+    }
+
+    let rows: Vec<CpuOfferingRow> = offerings
+        .iter()
+        .map(|offering| CpuOfferingRow {
+            provider: offering.provider.clone(),
+            vcpu: format!("{} cores", offering.vcpu_count),
+            ram: format!("{}GB", offering.system_memory_gb),
+            storage: if offering.storage_gb > 0 {
+                format!("{}GB", offering.storage_gb)
+            } else {
+                "-".to_string()
+            },
+            region: offering.region.clone(),
+            price: format!(
+                "${:.2}/hr",
+                offering.hourly_rate.parse::<f64>().unwrap_or(0.0)
+            ),
+        })
+        .collect();
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    println!("\nTotal Secure Cloud (CPU) offerings: {}", offerings.len());
+
+    Ok(())
+}
+
+/// Display CPU-only rentals in table format (no GPU column)
+pub fn display_cpu_rentals(
+    rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
+) -> Result<()> {
+    if rentals.is_empty() {
+        println!("{}", style("No CPU-only rentals found").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct CpuRentalRow {
+        #[tabled(rename = "Provider")]
+        provider: String,
+        #[tabled(rename = "vCPU")]
+        vcpu: String,
+        #[tabled(rename = "RAM")]
+        ram: String,
+        #[tabled(rename = "State")]
+        status: String,
+        #[tabled(rename = "IP")]
+        ip: String,
+        #[tabled(rename = "SSH")]
+        ssh: String,
+        #[tabled(rename = "Region")]
+        region: String,
+        #[tabled(rename = "Rate/hr")]
+        hourly_cost: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Created")]
+        created: String,
+    }
+
+    let rows: Vec<CpuRentalRow> = rentals
+        .iter()
+        .map(|rental| {
+            let ssh = if rental.ssh_command.is_some() {
+                "✓"
+            } else {
+                "✗"
+            };
+
+            // Format vCPU
+            let vcpu = rental
+                .vcpu_count
+                .map(|cores| format!("{} cores", cores))
+                .unwrap_or_else(|| "-".to_string());
+
+            // Format RAM
+            let ram = rental
+                .system_memory_gb
+                .map(|gb| format!("{}GB", gb))
+                .unwrap_or_else(|| "-".to_string());
+
+            // Use accumulated cost from billing service
+            let total_cost = rental
+                .accumulated_cost
+                .as_ref()
+                .and_then(|c| c.parse::<f64>().ok())
+                .map(|cost| format!("${:.2}", cost))
+                .unwrap_or_else(|| "-".to_string());
+
+            CpuRentalRow {
+                provider: rental.provider.clone(),
+                vcpu,
+                ram,
+                status: rental.status.clone(),
+                ip: rental.ip_address.clone().unwrap_or_else(|| "-".to_string()),
+                ssh: ssh.to_string(),
                 region: rental
                     .location_code
                     .clone()
