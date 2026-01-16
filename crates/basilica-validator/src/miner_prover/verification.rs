@@ -903,6 +903,7 @@ impl VerificationEngine {
                                 miner_uid,
                                 &node_result.node_id.to_string(),
                                 nr,
+                                &node_result.failure_reasons,
                             )
                             .await
                         {
@@ -960,9 +961,10 @@ impl VerificationEngine {
         miner_uid: u16,
         node_id: &str,
         nr: &super::types::NodeResult,
+        failure_reasons: &[String],
     ) -> Result<()> {
         let (namespace, cr, maybe_labels) = self
-            .prepare_node_profile_cr_and_labels(miner_uid, node_id, nr)
+            .prepare_node_profile_cr_and_labels(miner_uid, node_id, nr, failure_reasons)
             .await?;
 
         if let Some(publisher) = &self.node_profile_publisher {
@@ -1061,6 +1063,7 @@ impl VerificationEngine {
         miner_uid: u16,
         node_id: &str,
         nr: &super::types::NodeResult,
+        failure_reasons: &[String],
     ) -> Result<(
         String,
         kube::core::DynamicObject,
@@ -1112,6 +1115,7 @@ impl VerificationEngine {
             kube_node_name,
             last_validated.as_deref(),
             Some("Valid"),
+            Some(failure_reasons),
         )?;
 
         // Base labels from validation
@@ -1666,7 +1670,7 @@ mod node_profile_wiring_tests {
 
         let nr = sample_node_result();
         let (ns, cr, maybe_labels) = engine
-            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr, &[])
             .await?;
 
         // Assert namespace
@@ -1713,7 +1717,7 @@ mod node_profile_wiring_tests {
             )
             .await?;
         let (_ns2, _cr2, maybe_labels2) = engine
-            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr, &[])
             .await?;
         let (_node2, labels2) = maybe_labels2.expect("labels present");
         assert_eq!(labels2.get("basilica.ai/docker-active").unwrap(), "true");
