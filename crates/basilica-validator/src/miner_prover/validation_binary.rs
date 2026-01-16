@@ -3,8 +3,8 @@
 //! Handles the execution and parsing of validator binary outputs for hardware attestation.
 
 use super::types::{
-    BinaryCpuInfo, BinaryMemoryInfo, BinaryNetworkInfo, CompressedMatrix, GpuInfo, NodeResult,
-    SmUtilizationStats, ValidatorBinaryOutput,
+    BandwidthPowResult, BinaryCpuInfo, BinaryMemoryInfo, BinaryNetworkInfo, CompressedMatrix,
+    CpuPowResult, GpuInfo, NodeResult, SmUtilizationStats, StoragePowResult, ValidatorBinaryOutput,
 };
 use anyhow::{Context, Result};
 use basilica_common::ssh::SshConnectionDetails;
@@ -1327,6 +1327,35 @@ impl BinaryValidator {
         }
 
         let average_score = total_score / gpu_count as f64;
+        let cpu_pow_valid = raw_json
+            .get("cpu_pow")
+            .and_then(|v| v.get("valid"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let storage_pow_valid = raw_json
+            .get("storage_pow")
+            .and_then(|v| v.get("valid"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let bandwidth_pow_valid = raw_json
+            .get("bandwidth_pow")
+            .and_then(|v| v.get("valid"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // TODO: Pull PoW weights from validator config instead of hardcoding.
+        let mut pow_bonus = 0.0;
+        if cpu_pow_valid {
+            pow_bonus += 0.1;
+        }
+        if storage_pow_valid {
+            pow_bonus += 0.1;
+        }
+        if bandwidth_pow_valid {
+            pow_bonus += 0.1;
+        }
+
+        let average_score = (average_score + pow_bonus).clamp(0.0, 1.0);
         info!(
             "[EVAL_FLOW] Calculated validation score from {} GPUs: {:.3}",
             gpu_count, average_score
@@ -1476,6 +1505,46 @@ impl BinaryValidator {
             .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
             .unwrap_or(0);
 
+        let cpu_pow = raw_json.get("cpu_pow").map(|v| CpuPowResult {
+            valid: v.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+            cpu_model: v
+                .get("cpu_model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string(),
+            iterations: v.get("iterations").and_then(|v| v.as_u64()).unwrap_or(0),
+            chunk_size: v.get("chunk_size").and_then(|v| v.as_u64()).unwrap_or(0),
+            duration_ms: v.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+
+        let storage_pow = raw_json.get("storage_pow").map(|v| StoragePowResult {
+            valid: v.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+            file_id: v
+                .get("file_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            file_size_bytes: v
+                .get("file_size_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            block_size: v.get("block_size").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            samples: v.get("samples").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+            duration_ms: v.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+
+        let bandwidth_pow = raw_json.get("bandwidth_pow").map(|v| BandwidthPowResult {
+            valid: v.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+            mode: v
+                .get("mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            bytes: v.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+            chunk_size: v.get("chunk_size").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            duration_ms: v.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        });
+
         let node_result = NodeResult {
             gpu_name,
             gpu_uuid,
@@ -1491,6 +1560,9 @@ impl BinaryValidator {
                 available_gb: 0.0,
             },
             network_info: BinaryNetworkInfo { interfaces: vec![] },
+            cpu_pow,
+            storage_pow,
+            bandwidth_pow,
             matrix_c: CompressedMatrix {
                 rows: 0,
                 cols: 0,
@@ -1624,6 +1696,36 @@ impl BinaryValidator {
             "[EVAL_FLOW] Score component - Computation timing ({}ms): +{:.3} (total: {:.3})",
             computation_time_ms, timing_score, score
         );
+
+        // PoW bonuses (CPU/Storage/Bandwidth)
+        // TODO: Pull PoW weights from validator config instead of hardcoding.
+        if node_result
+            .cpu_pow
+            .as_ref()
+            .map(|p| p.valid)
+            .unwrap_or(false)
+        {
+            score += 0.1;
+            score_breakdown.push(("cpu_pow", 0.1));
+        }
+        if node_result
+            .storage_pow
+            .as_ref()
+            .map(|p| p.valid)
+            .unwrap_or(false)
+        {
+            score += 0.1;
+            score_breakdown.push(("storage_pow", 0.1));
+        }
+        if node_result
+            .bandwidth_pow
+            .as_ref()
+            .map(|p| p.valid)
+            .unwrap_or(false)
+        {
+            score += 0.1;
+            score_breakdown.push(("bandwidth_pow", 0.1));
+        }
 
         // Final score clamping and summary
         let final_score = score.clamp(0.0, 1.0);

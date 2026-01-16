@@ -136,6 +136,15 @@ pub struct VerificationConfig {
     /// Node group assignment configuration
     #[serde(default)]
     pub node_groups: NodeGroupConfig,
+    /// CPU PoW configuration for veritas validator-binary
+    #[serde(default)]
+    pub cpu_pow: CpuPowConfig,
+    /// Storage PoW configuration for veritas validator-binary
+    #[serde(default)]
+    pub storage_pow: StoragePowConfig,
+    /// Bandwidth PoW configuration for veritas validator-binary
+    #[serde(default)]
+    pub bandwidth_pow: BandwidthPowConfig,
 }
 
 /// Configuration for node group assignment strategy
@@ -230,6 +239,75 @@ impl VerificationConfig {
             enable_worker_queue: false,
             storage_validation: StorageValidationConfig::default(),
             node_groups: NodeGroupConfig::default(),
+            cpu_pow: CpuPowConfig::default(),
+            storage_pow: StoragePowConfig::default(),
+            bandwidth_pow: BandwidthPowConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuPowConfig {
+    pub default_iterations: u64,
+    pub chunk_size: u64,
+    pub sample_count: u32,
+    pub baseline_cores: u32,
+    pub baseline_mhz: u32,
+    pub target_secs: u64,
+    #[serde(default)]
+    pub cpu_model_iterations: std::collections::HashMap<String, u64>,
+}
+
+impl Default for CpuPowConfig {
+    fn default() -> Self {
+        Self {
+            default_iterations: 500_000,
+            chunk_size: 4096,
+            sample_count: 4,
+            baseline_cores: 32,
+            baseline_mhz: 2800,
+            target_secs: 2,
+            cpu_model_iterations: std::collections::HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePowConfig {
+    pub data_dir: String,
+    pub file_size_bytes: u64,
+    pub block_size: u32,
+    pub sample_count: u32,
+}
+
+impl Default for StoragePowConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: "/tmp/veritas_storage".to_string(),
+            file_size_bytes: 256 * 1024 * 1024,
+            block_size: 4096,
+            sample_count: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthPowConfig {
+    pub bytes: u64,
+    pub chunk_size: u32,
+    pub mode: String,
+    pub target_secs: u64,
+    pub probe_bytes: u64,
+}
+
+impl Default for BandwidthPowConfig {
+    fn default() -> Self {
+        Self {
+            bytes: 64 * 1024 * 1024,
+            chunk_size: 1_048_576,
+            mode: "download".to_string(),
+            target_secs: 2,
+            probe_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -824,6 +902,9 @@ impl Default for ValidatorConfig {
                 gpu_assignment_cleanup_ttl: default_gpu_assignment_cleanup_ttl(),
                 enable_worker_queue: default_enable_worker_queue(),
                 node_groups: NodeGroupConfig::default(),
+                cpu_pow: CpuPowConfig::default(),
+                storage_pow: StoragePowConfig::default(),
+                bandwidth_pow: BandwidthPowConfig::default(),
             },
             automatic_verification: AutomaticVerificationConfig::default(),
             storage: StorageConfig {

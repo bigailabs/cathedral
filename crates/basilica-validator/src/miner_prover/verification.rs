@@ -24,6 +24,7 @@ use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use futures::future::join_all;
+use serde_json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -1244,6 +1245,16 @@ impl VerificationEngine {
     /// Initialize validation server mode
     pub async fn initialize_validation_server(&mut self) -> Result<()> {
         info!("Initializing validation server mode for VerificationEngine");
+        // Propagate PoW config to validator-binary via env vars (inherited by child process).
+        if let Ok(cpu_pow_json) = serde_json::to_string(&self.config.cpu_pow) {
+            std::env::set_var("VERITAS_CPU_POW_CONFIG", cpu_pow_json);
+        }
+        if let Ok(storage_pow_json) = serde_json::to_string(&self.config.storage_pow) {
+            std::env::set_var("VERITAS_STORAGE_POW_CONFIG", storage_pow_json);
+        }
+        if let Ok(bandwidth_pow_json) = serde_json::to_string(&self.config.bandwidth_pow) {
+            std::env::set_var("VERITAS_BANDWIDTH_POW_CONFIG", bandwidth_pow_json);
+        }
         let mut node = self.validation_node.write().await;
         node.initialize_server_mode(&self.config.binary_validation)
             .await?;
@@ -1585,6 +1596,9 @@ mod node_profile_wiring_tests {
                     ip_addresses: vec!["10.0.0.2".into()],
                 }],
             },
+            cpu_pow: None,
+            storage_pow: None,
+            bandwidth_pow: None,
             matrix_c: CompressedMatrix {
                 rows: 0,
                 cols: 0,

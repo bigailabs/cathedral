@@ -115,6 +115,9 @@ pub struct NodeResult {
     pub cpu_info: BinaryCpuInfo,
     pub memory_info: BinaryMemoryInfo,
     pub network_info: BinaryNetworkInfo,
+    pub cpu_pow: Option<CpuPowResult>,
+    pub storage_pow: Option<StoragePowResult>,
+    pub bandwidth_pow: Option<BandwidthPowResult>,
     pub matrix_c: CompressedMatrix,
     pub computation_time_ns: u64,
     pub checksum: [u8; 32],
@@ -195,6 +198,34 @@ pub struct SmStat {
     pub utilization: f64,
     pub active_warps: u32,
     pub max_warps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CpuPowResult {
+    pub valid: bool,
+    pub cpu_model: String,
+    pub iterations: u64,
+    pub chunk_size: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoragePowResult {
+    pub valid: bool,
+    pub file_id: String,
+    pub file_size_bytes: u64,
+    pub block_size: u32,
+    pub samples: usize,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthPowResult {
+    pub valid: bool,
+    pub mode: String,
+    pub bytes: u64,
+    pub chunk_size: u32,
+    pub duration_ms: u64,
 }
 
 /// Detailed node information for verification processes

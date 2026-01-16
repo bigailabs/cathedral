@@ -48,6 +48,39 @@ min_score_threshold = 0.1
 verification_interval = 600  # 10 minutes
 min_verification_interval = 1800  # 30 minutes
 
+[verification.cpu_pow]
+default_iterations = 500000
+chunk_size = 4096
+sample_count = 4
+baseline_cores = 32
+baseline_mhz = 2800
+target_secs = 2
+cpu_model_iterations = {
+  "AMD EPYC 9654" = 800000,
+  "AMD EPYC 7763" = 700000,
+  "AMD EPYC 7713" = 700000,
+  "AMD EPYC 7543" = 650000,
+  "AMD EPYC 7B13" = 650000,
+  "Intel(R) Xeon(R) Platinum 8480+" = 800000,
+  "Intel(R) Xeon(R) Platinum 8468" = 750000,
+  "Intel(R) Xeon(R) Gold 6348" = 600000,
+  "Intel(R) Xeon(R) Gold 6338" = 550000,
+  "Intel(R) Xeon(R) Silver 4314" = 350000
+}
+
+[verification.storage_pow]
+data_dir = "/tmp/veritas_storage"
+file_size_bytes = 268435456 # 256MB
+block_size = 4096
+sample_count = 4
+
+[verification.bandwidth_pow]
+bytes = 67108864 # 64MB
+chunk_size = 1048576 # 1MB
+mode = "download"
+target_secs = 2
+probe_bytes = 4194304 # 4MB
+
 # Scoring Configuration
 [scoring]
 min_stake_threshold = 1000.0
