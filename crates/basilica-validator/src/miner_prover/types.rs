@@ -245,6 +245,7 @@ pub struct ValidatorBinaryOutput {
     pub success: bool,
     pub node_result: Option<NodeResult>,
     pub error_message: Option<String>,
+    pub failure_reasons: Vec<String>,
     pub execution_time_ms: u64,
     pub validation_score: f64,
     pub gpu_count: u64,
