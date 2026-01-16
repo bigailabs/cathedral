@@ -856,6 +856,16 @@ impl ValidationNode {
             quality_validations_successful =
                 docker_result.is_some() && nat_successful && not_banned;
 
+            if docker_result.is_none() {
+                failure_reasons.push("docker_validation_failed".to_string());
+            }
+            if nat_result.is_none() || !nat_successful {
+                failure_reasons.push("nat_validation_failed".to_string());
+            }
+            if storage_result.is_none() {
+                failure_reasons.push("storage_validation_failed".to_string());
+            }
+
             // Track state transitions based on validation results
             if docker_result.is_none() {
                 // Failed at DockerValidating stage

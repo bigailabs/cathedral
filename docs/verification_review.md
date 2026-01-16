@@ -30,9 +30,11 @@ which did **not** require network transfer.
 
 **Fix:** Introduced streaming download path so the validator must receive actual bytes over the
 network to compute the proof:
-- Executor exposes `POST /bandwidth_stream` (download-only).
-- Executor streams deterministic bytes (seed/nonce) to the validator.
-- Validator hashes the received bytes and measures duration to compute proof.
+- Executor exposes `POST /bandwidth_stream` (download stream).
+- Executor exposes `POST /bandwidth_upload_stream` (upload stream, server-timed).
+- Executor streams deterministic bytes (seed/nonce) to the validator for download.
+- Validator uploads payload to executor for upload (server times receive).
+- Validator hashes the received/transmitted bytes and measures duration to compute proof.
 
 This makes the proof dependent on actual network throughput between validator and executor.
 
