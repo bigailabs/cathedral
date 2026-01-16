@@ -86,6 +86,7 @@ pub struct NodeVerificationResult {
     pub ssh_connection_successful: bool,
     pub binary_validation_successful: bool,
     pub node_result: Option<NodeResult>,
+    pub failure_reasons: Vec<String>,
     pub error: Option<String>,
     pub execution_time: Duration,
     pub validation_details: ValidationDetails,

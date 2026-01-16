@@ -608,11 +608,15 @@ impl ValidationNode {
 
         let total_duration = total_start.elapsed();
 
-        let verification_score = if validation_successful {
-            previous_score
-        } else {
-            0.0
-        };
+        let verification_score = if validation_successful { 1.0 } else { 0.0 };
+        let mut failure_reasons = Vec::new();
+        if !validation_successful {
+            if !connectivity_successful {
+                failure_reasons.push("connectivity_failed".to_string());
+            } else {
+                failure_reasons.push("nat_validation_failed".to_string());
+            }
+        }
 
         let details = ValidationDetails {
             ssh_test_duration: total_duration,
@@ -670,6 +674,7 @@ impl ValidationNode {
             ssh_connection_successful: validation_successful,
             binary_validation_successful: false,
             node_result,
+            failure_reasons,
             error: if validation_successful {
                 None
             } else if !connectivity_successful {
@@ -781,7 +786,7 @@ impl ValidationNode {
             };
 
         validation_details.ssh_test_duration = ssh_test_start.elapsed();
-        validation_details.ssh_score = if ssh_connection_successful { 0.8 } else { 0.0 };
+        validation_details.ssh_score = if ssh_connection_successful { 1.0 } else { 0.0 };
 
         // Phase 1.5: Node Profiling Collection
         let mut quality_validations_successful = false;
@@ -916,7 +921,11 @@ impl ValidationNode {
         let mut binary_validation_successful = false;
         let mut node_result = None;
         let mut binary_score = 0.0;
+        let mut failure_reasons: Vec<String> = Vec::new();
         let mut gpu_count = 0u64;
+        if !ssh_connection_successful {
+            failure_reasons.push("ssh_connection_failed".to_string());
+        }
         let pre_validations_successful =
             ssh_connection_successful && quality_validations_successful;
 
@@ -945,8 +954,9 @@ impl ValidationNode {
                 Ok(binary_result) => {
                     binary_validation_successful = binary_result.success;
                     node_result = binary_result.node_result;
-                    binary_score = binary_result.validation_score;
+                    binary_score = if binary_result.success { 1.0 } else { 0.0 };
                     gpu_count = binary_result.gpu_count;
+                    failure_reasons = binary_result.failure_reasons.clone();
                     validation_details.binary_execution_duration =
                         Duration::from_millis(binary_result.execution_time_ms);
 
@@ -981,6 +991,7 @@ impl ValidationNode {
                         error = %e,
                         "[EVAL_FLOW] Binary validation failed"
                     );
+                    failure_reasons.push("binary_execution_failed".to_string());
 
                     if let Some(ref metrics) = self.metrics {
                         metrics
@@ -998,12 +1009,10 @@ impl ValidationNode {
             }
         } else if !binary_config.enabled && quality_validations_successful {
             binary_validation_successful = true;
-            binary_score = 0.8;
+            binary_score = 1.0;
         }
 
         let combined_score = self.calculate_combined_verification_score(
-            validation_details.ssh_score,
-            binary_score,
             pre_validations_successful,
             binary_validation_successful,
             binary_config,
@@ -1030,6 +1039,16 @@ impl ValidationNode {
         }
         // Note: If failed, we keep the state where it failed (don't move to Completed)
 
+        let error_message = if pre_validations_successful && binary_validation_successful {
+            None
+        } else if !failure_reasons.is_empty() {
+            Some(failure_reasons.join("; "))
+        } else if !pre_validations_successful {
+            Some("pre_validations_failed".to_string())
+        } else {
+            Some("binary_validation_failed".to_string())
+        };
+
         Ok(NodeVerificationResult {
             node_id: node_info.id.clone(),
             node_ssh_endpoint: node_info.node_ssh_endpoint.clone(),
@@ -1038,7 +1057,8 @@ impl ValidationNode {
             binary_validation_successful: pre_validations_successful
                 && binary_validation_successful,
             node_result,
-            error: None,
+            failure_reasons,
+            error: error_message,
             execution_time: total_start.elapsed(),
             validation_details,
             gpu_count,
@@ -1136,54 +1156,19 @@ impl ValidationNode {
     /// Calculate combined verification score from SSH and binary validation
     pub fn calculate_combined_verification_score(
         &self,
-        ssh_score: f64,
-        binary_score: f64,
         pre_validations_successful: bool,
         binary_successful: bool,
         binary_config: &crate::config::BinaryValidationConfig,
     ) -> f64 {
-        info!(
-            "[EVAL_FLOW] Starting combined score calculation - pre-val: {:.3} (success: {}), Binary: {:.3} (success: {})",
-            ssh_score, pre_validations_successful, binary_score, binary_successful
-        );
-
-        // If SSH fails, total score is 0
         if !pre_validations_successful {
-            error!("[EVAL_FLOW] pre validations failed, returning combined score: 0.0");
             return 0.0;
         }
-
-        // If binary validation is disabled, use SSH score only
         if !binary_config.enabled {
-            info!(
-                "[EVAL_FLOW] Binary validation disabled, using SSH score only: {:.3}",
-                ssh_score
-            );
-            return ssh_score;
+            return 1.0;
         }
-
-        // If binary validation is enabled but failed, penalize but don't zero
         if !binary_successful {
-            let penalized_score = ssh_score * 0.5;
-            warn!(
-                "[EVAL_FLOW] Binary validation failed, applying 50% penalty to SSH score: {:.3} -> {:.3}",
-                ssh_score, penalized_score
-            );
-            return penalized_score;
+            return 0.0;
         }
-
-        // Calculate weighted combination
-        let ssh_weight = 1.0 - binary_config.score_weight;
-        let binary_weight = binary_config.score_weight;
-
-        let combined_score = (ssh_score * ssh_weight) + (binary_score * binary_weight);
-
-        info!(
-            "[EVAL_FLOW] Combined score calculation: ({:.3} × {:.3}) + ({:.3} × {:.3}) = {:.3}",
-            ssh_score, ssh_weight, binary_score, binary_weight, combined_score
-        );
-
-        // Ensure score is within bounds
-        combined_score.clamp(0.0, 1.0)
+        1.0
     }
 }

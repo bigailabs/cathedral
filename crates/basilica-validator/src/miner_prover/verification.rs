@@ -633,6 +633,7 @@ impl VerificationEngine {
                 "node_id": node_result.node_id.to_string(),
                 "ssh_connection_successful": node_result.ssh_connection_successful,
                 "binary_validation_successful": node_result.binary_validation_successful,
+                "failure_reasons": node_result.failure_reasons,
                 "verification_method": "ssh_automation",
                 "node_result": node_result.node_result,
                 "gpu_count": node_result.gpu_count,
@@ -648,7 +649,11 @@ impl VerificationEngine {
             } else if node_result.validation_type == ValidationType::Full
                 && !node_result.binary_validation_successful
             {
-                Some("Binary validation failed".to_string())
+                Some(if node_result.failure_reasons.is_empty() {
+                    "Binary validation failed".to_string()
+                } else {
+                    node_result.failure_reasons.join("; ")
+                })
             } else {
                 None
             },
