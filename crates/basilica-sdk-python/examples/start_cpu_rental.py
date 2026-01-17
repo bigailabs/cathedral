@@ -114,7 +114,7 @@ def wait_for_rental_ready(client: BasilicaClient, rental_id: str, timeout: int =
             raise TimeoutError(f"Rental did not become ready within {timeout} seconds")
 
         # Find the rental in the list
-        rentals_response = client.list_secure_cloud_cpu_rentals()
+        rentals_response = client.list_cpu_rentals()
         rental = None
         for r in rentals_response.rentals:
             if r.rental_id == rental_id:
@@ -169,7 +169,7 @@ def main():
 
     # Step 2: List available CPU offerings
     print("\n[Step 2] Fetching available CPU offerings...")
-    offerings = client.list_secure_cloud_cpu_offerings()
+    offerings = client.list_cpu_offerings()
 
     if not offerings:
         print("No CPU offerings available at this time.")
@@ -190,7 +190,7 @@ def main():
     print(f"  - Storage: {offering.storage_gb}GB")
     print(f"  - Hourly rate: ${offering.hourly_rate}")
 
-    rental = client.start_secure_cloud_cpu_rental(
+    rental = client.start_cpu_rental(
         offering_id=offering.id,
         # Optional: container configuration
         environment={"EXAMPLE_VAR": "hello_from_basilica"},
@@ -213,7 +213,7 @@ def main():
         print(f"\nError: {e}")
         print("Attempting to stop the rental...")
         try:
-            client.stop_secure_cloud_cpu_rental(rental.rental_id)
+            client.stop_cpu_rental(rental.rental_id)
             print("Rental stopped.")
         except Exception as stop_error:
             print(f"Failed to stop rental: {stop_error}")
@@ -274,13 +274,13 @@ def main():
         input()
     except KeyboardInterrupt:
         print("\n\nExiting without terminating the rental.")
-        print(f"To manually stop later, run: client.stop_secure_cloud_cpu_rental('{rental.rental_id}')")
+        print(f"To manually stop later, run: client.stop_cpu_rental('{rental.rental_id}')")
         return
 
     # Step 7: Stop the rental
     print("\n[Step 7] Stopping rental...")
     try:
-        result = client.stop_secure_cloud_cpu_rental(rental.rental_id)
+        result = client.stop_cpu_rental(rental.rental_id)
         print("\n" + "=" * 60)
         print("  RENTAL STOPPED")
         print("=" * 60)

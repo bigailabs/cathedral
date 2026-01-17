@@ -397,7 +397,7 @@ impl BasilicaClient {
     // ===== CPU Rental Methods =====
 
     /// List available CPU offerings from secure cloud providers
-    fn list_secure_cloud_cpu_offerings(&self, py: Python) -> PyResult<Vec<CpuOffering>> {
+    fn list_cpu_offerings(&self, py: Python) -> PyResult<Vec<CpuOffering>> {
         let client = Arc::clone(&self.inner);
 
         let response = py
@@ -411,7 +411,7 @@ impl BasilicaClient {
     }
 
     /// List CPU rentals for the authenticated user
-    fn list_secure_cloud_cpu_rentals(&self, py: Python) -> PyResult<ListCpuRentalsResponse> {
+    fn list_cpu_rentals(&self, py: Python) -> PyResult<ListCpuRentalsResponse> {
         let client = Arc::clone(&self.inner);
 
         let response = py
@@ -428,7 +428,7 @@ impl BasilicaClient {
     ///
     /// Args:
     ///     request: CPU rental request parameters
-    fn start_secure_cloud_cpu_rental(
+    fn start_cpu_rental(
         &self,
         py: Python,
         request: StartCpuRentalRequest,
@@ -450,11 +450,7 @@ impl BasilicaClient {
     ///
     /// Args:
     ///     rental_id: The rental ID to stop
-    fn stop_secure_cloud_cpu_rental(
-        &self,
-        py: Python,
-        rental_id: String,
-    ) -> PyResult<StopCpuRentalResponse> {
+    fn stop_cpu_rental(&self, py: Python, rental_id: String) -> PyResult<StopCpuRentalResponse> {
         let client = Arc::clone(&self.inner);
 
         let response = py

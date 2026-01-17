@@ -1286,7 +1286,7 @@ class BasilicaClient:
     # Secure Cloud CPU Rental Methods
     # -------------------------------------------------------------------------
 
-    def list_secure_cloud_cpu_offerings(self) -> List[CpuOffering]:
+    def list_cpu_offerings(self) -> List[CpuOffering]:
         """
         List available CPU-only offerings from secure cloud providers.
 
@@ -1294,13 +1294,13 @@ class BasilicaClient:
             List of CpuOffering objects with specs and pricing
 
         Example:
-            >>> offerings = client.list_secure_cloud_cpu_offerings()
+            >>> offerings = client.list_cpu_offerings()
             >>> for o in offerings:
             ...     print(f"{o.id}: {o.vcpu_count} vCPUs @ ${o.hourly_rate}/hr")
         """
-        return self._client.list_secure_cloud_cpu_offerings()
+        return self._client.list_cpu_offerings()
 
-    def start_secure_cloud_cpu_rental(
+    def start_cpu_rental(
         self,
         offering_id: str,
         ssh_public_key_id: Optional[str] = None,
@@ -1312,7 +1312,7 @@ class BasilicaClient:
         Start a CPU-only rental.
 
         Args:
-            offering_id: The offering ID from list_secure_cloud_cpu_offerings()
+            offering_id: The offering ID from list_cpu_offerings()
             ssh_public_key_id: SSH key ID (auto-detected if not provided)
             container_image: Optional Docker container image
             environment: Environment variables for the container
@@ -1322,8 +1322,8 @@ class BasilicaClient:
             CpuRentalResponse with rental details and SSH command
 
         Example:
-            >>> offerings = client.list_secure_cloud_cpu_offerings()
-            >>> rental = client.start_secure_cloud_cpu_rental(offerings[0].id)
+            >>> offerings = client.list_cpu_offerings()
+            >>> rental = client.start_cpu_rental(offerings[0].id)
             >>> print(f"SSH: {rental.ssh_command}")
         """
         # Auto-detect SSH key ID if not provided
@@ -1355,9 +1355,9 @@ class BasilicaClient:
             ports=port_mappings,
         )
 
-        return self._client.start_secure_cloud_cpu_rental(request)
+        return self._client.start_cpu_rental(request)
 
-    def stop_secure_cloud_cpu_rental(self, rental_id: str) -> StopCpuRentalResponse:
+    def stop_cpu_rental(self, rental_id: str) -> StopCpuRentalResponse:
         """
         Stop a CPU rental.
 
@@ -1367,16 +1367,16 @@ class BasilicaClient:
         Returns:
             StopCpuRentalResponse with duration and total cost
         """
-        return self._client.stop_secure_cloud_cpu_rental(rental_id)
+        return self._client.stop_cpu_rental(rental_id)
 
-    def list_secure_cloud_cpu_rentals(self) -> ListCpuRentalsResponse:
+    def list_cpu_rentals(self) -> ListCpuRentalsResponse:
         """
         List all CPU rentals for the authenticated user.
 
         Returns:
             ListCpuRentalsResponse with rental list and total count
         """
-        return self._client.list_secure_cloud_cpu_rentals()
+        return self._client.list_cpu_rentals()
 
     # -------------------------------------------------------------------------
     # Secure Cloud GPU Rental Methods
