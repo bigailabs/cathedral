@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0]
+
 ### Added
 - GPU interconnect type display in offering selection prompt (e.g., `8x H100 (SXM5)` instead of just `8x H100`)
 - CPU-only machine rental support across all commands (`ls`, `up`, `ps`, `status`, `ssh`)
