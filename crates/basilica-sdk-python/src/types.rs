@@ -8,9 +8,9 @@
 
 use basilica_sdk::types::{
     AvailabilityInfo as SdkAvailabilityInfo, AvailableNode as SdkAvailableNode,
-    CpuOffering as SdkCpuOffering, CpuSpec as SdkCpuSpec, GpuRequirements as SdkGpuRequirements,
-    GpuSpec as SdkGpuSpec, ListAvailableNodesQuery as SdkListAvailableNodesQuery,
-    ListRentalsQuery as SdkListRentalsQuery,
+    CpuOffering as SdkCpuOffering, CpuSpec as SdkCpuSpec, GpuOffering as SdkGpuOffering,
+    GpuRequirements as SdkGpuRequirements, GpuSpec as SdkGpuSpec,
+    ListAvailableNodesQuery as SdkListAvailableNodesQuery, ListRentalsQuery as SdkListRentalsQuery,
     ListSecureCloudRentalsResponse as SdkListSecureCloudRentalsResponse,
     NodeDetails as SdkNodeDetails, NodeSelection as SdkNodeSelection,
     PortMappingRequest as SdkPortMappingRequest, RentalState, RentalStatus as SdkRentalStatus,
@@ -1484,3 +1484,72 @@ impl From<SdkListSecureCloudRentalsResponse> for ListCpuRentalsResponse {
         }
     }
 }
+
+// ============================================================================
+// GPU Rental Types (Secure Cloud)
+// ============================================================================
+
+/// GPU offering from secure cloud providers
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct GpuOffering {
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub gpu_type: String,
+    #[pyo3(get)]
+    pub gpu_count: u32,
+    #[pyo3(get)]
+    pub vcpu_count: u32,
+    #[pyo3(get)]
+    pub system_memory_gb: u32,
+    #[pyo3(get)]
+    pub storage_gb: u32,
+    #[pyo3(get)]
+    pub region: String,
+    #[pyo3(get)]
+    pub hourly_rate: String,
+    #[pyo3(get)]
+    pub availability: bool,
+    #[pyo3(get)]
+    pub fetched_at: String,
+}
+
+impl From<SdkGpuOffering> for GpuOffering {
+    fn from(offering: SdkGpuOffering) -> Self {
+        Self {
+            id: offering.id,
+            provider: offering.provider.to_string(),
+            gpu_type: offering.gpu_type.to_string(),
+            gpu_count: offering.gpu_count,
+            vcpu_count: offering.vcpu_count,
+            system_memory_gb: offering.system_memory_gb,
+            storage_gb: offering.storage.unwrap_or_default().parse().unwrap_or(0),
+            region: offering.region,
+            hourly_rate: offering.hourly_rate_per_gpu.to_string(),
+            availability: offering.availability,
+            fetched_at: offering.fetched_at.to_rfc3339(),
+        }
+    }
+}
+
+// GPU rental request/response types are aliases to the shared secure cloud types
+// since they use the same API structure
+
+/// GPU rental request (alias to secure cloud request)
+pub type StartSecureCloudRentalRequest = StartCpuRentalRequest;
+
+/// GPU rental response (alias to secure cloud response)
+pub type SecureCloudRentalResponse = CpuRentalResponse;
+
+/// Stop GPU rental response (alias to secure cloud response)
+pub type StopSecureCloudRentalResponse = StopCpuRentalResponse;
+
+/// GPU rental list item (alias to secure cloud list item)
+pub type SecureCloudRentalListItem = CpuRentalListItem;
+
+/// List GPU rentals response (alias to secure cloud response)
+pub type ListSecureCloudRentalsResponse = ListCpuRentalsResponse;

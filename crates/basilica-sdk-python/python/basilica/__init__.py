@@ -62,12 +62,14 @@ from basilica._basilica import (
     DeploymentResponse,
     DeploymentSummary,
     EnvVar,
+    GpuOffering,
     GpuRequirements,
     GpuSpec,
     HealthCheckResponse,
     ListAvailableNodesQuery,
     ListCpuRentalsResponse,
     ListRentalsQuery,
+    ListSecureCloudRentalsResponse,
     NodeDetails,
     NodeSelection,
     PersistentStorageSpec,
@@ -79,11 +81,15 @@ from basilica._basilica import (
     ReplicaStatus,
     ResourceRequirements,
     ResourceRequirementsRequest,
+    SecureCloudRentalListItem,
+    SecureCloudRentalResponse,
     SshAccess,
     SshKeyResponse,
     StartCpuRentalRequest,
     StartRentalApiRequest,
+    StartSecureCloudRentalRequest,
     StopCpuRentalResponse,
+    StopSecureCloudRentalResponse,
     StorageBackend,
     StorageSpec,
     VolumeMountRequest,
@@ -260,6 +266,13 @@ __all__ = [
     "StopCpuRentalResponse",
     "CpuRentalListItem",
     "ListCpuRentalsResponse",
+    # GPU Rental types (secure cloud)
+    "GpuOffering",
+    "StartSecureCloudRentalRequest",
+    "SecureCloudRentalResponse",
+    "StopSecureCloudRentalResponse",
+    "SecureCloudRentalListItem",
+    "ListSecureCloudRentalsResponse",
 ]
 
 
@@ -1270,10 +1283,10 @@ class BasilicaClient:
         self._client.delete_ssh_key()
 
     # -------------------------------------------------------------------------
-    # CPU Rental Methods
+    # Secure Cloud CPU Rental Methods
     # -------------------------------------------------------------------------
 
-    def list_cpu_offerings(self) -> List[CpuOffering]:
+    def list_secure_cloud_cpu_offerings(self) -> List[CpuOffering]:
         """
         List available CPU-only offerings from secure cloud providers.
 
@@ -1281,13 +1294,13 @@ class BasilicaClient:
             List of CpuOffering objects with specs and pricing
 
         Example:
-            >>> offerings = client.list_cpu_offerings()
+            >>> offerings = client.list_secure_cloud_cpu_offerings()
             >>> for o in offerings:
             ...     print(f"{o.id}: {o.vcpu_count} vCPUs @ ${o.hourly_rate}/hr")
         """
-        return self._client.list_cpu_offerings()
+        return self._client.list_secure_cloud_cpu_offerings()
 
-    def start_cpu_rental(
+    def start_secure_cloud_cpu_rental(
         self,
         offering_id: str,
         ssh_public_key_id: Optional[str] = None,
@@ -1299,7 +1312,7 @@ class BasilicaClient:
         Start a CPU-only rental.
 
         Args:
-            offering_id: The offering ID from list_cpu_offerings()
+            offering_id: The offering ID from list_secure_cloud_cpu_offerings()
             ssh_public_key_id: SSH key ID (auto-detected if not provided)
             container_image: Optional Docker container image
             environment: Environment variables for the container
@@ -1309,8 +1322,8 @@ class BasilicaClient:
             CpuRentalResponse with rental details and SSH command
 
         Example:
-            >>> offerings = client.list_cpu_offerings()
-            >>> rental = client.start_cpu_rental(offerings[0].id)
+            >>> offerings = client.list_secure_cloud_cpu_offerings()
+            >>> rental = client.start_secure_cloud_cpu_rental(offerings[0].id)
             >>> print(f"SSH: {rental.ssh_command}")
         """
         # Auto-detect SSH key ID if not provided
@@ -1342,9 +1355,9 @@ class BasilicaClient:
             ports=port_mappings,
         )
 
-        return self._client.start_cpu_rental(request)
+        return self._client.start_secure_cloud_cpu_rental(request)
 
-    def stop_cpu_rental(self, rental_id: str) -> StopCpuRentalResponse:
+    def stop_secure_cloud_cpu_rental(self, rental_id: str) -> StopCpuRentalResponse:
         """
         Stop a CPU rental.
 
@@ -1354,16 +1367,133 @@ class BasilicaClient:
         Returns:
             StopCpuRentalResponse with duration and total cost
         """
-        return self._client.stop_cpu_rental(rental_id)
+        return self._client.stop_secure_cloud_cpu_rental(rental_id)
 
-    def list_cpu_rentals(self) -> ListCpuRentalsResponse:
+    def list_secure_cloud_cpu_rentals(self) -> ListCpuRentalsResponse:
         """
         List all CPU rentals for the authenticated user.
 
         Returns:
             ListCpuRentalsResponse with rental list and total count
         """
-        return self._client.list_cpu_rentals()
+        return self._client.list_secure_cloud_cpu_rentals()
+
+    # -------------------------------------------------------------------------
+    # Secure Cloud GPU Rental Methods
+    # -------------------------------------------------------------------------
+
+    def list_secure_cloud_gpus(self) -> List[GpuOffering]:
+        """
+        List available GPU offerings from secure cloud providers.
+
+        Returns GPU instances from datacenter providers like DataCrunch,
+        Hyperstack, Lambda Labs, etc.
+
+        Returns:
+            List of GpuOffering objects with GPU specs and pricing
+
+        Example:
+            >>> offerings = client.list_secure_cloud_gpus()
+            >>> for o in offerings:
+            ...     print(f"{o.gpu_count}x {o.gpu_type} @ ${o.hourly_rate}/hr ({o.provider})")
+        """
+        return self._client.list_secure_cloud_gpus()
+
+    def start_secure_cloud_rental(
+        self,
+        offering_id: str,
+        ssh_public_key_id: Optional[str] = None,
+        container_image: Optional[str] = None,
+        environment: Optional[Dict[str, str]] = None,
+        ports: Optional[List[Dict[str, Any]]] = None,
+    ) -> SecureCloudRentalResponse:
+        """
+        Start a secure cloud GPU rental from a datacenter provider.
+
+        Args:
+            offering_id: The offering ID from list_secure_cloud_gpus()
+            ssh_public_key_id: SSH key ID (auto-detected if not provided)
+            container_image: Optional Docker container image
+            environment: Environment variables for the container
+            ports: Port mappings (list of dicts with container_port, host_port, protocol)
+
+        Returns:
+            SecureCloudRentalResponse with rental details and SSH command
+
+        Example:
+            >>> offerings = client.list_secure_cloud_gpus()
+            >>> rental = client.start_secure_cloud_rental(
+            ...     offering_id=offerings[0].id,
+            ...     container_image="pytorch/pytorch:latest"
+            ... )
+            >>> print(f"SSH: {rental.ssh_command}")
+        """
+        # Auto-detect SSH key ID if not provided
+        if ssh_public_key_id is None:
+            key = self.get_ssh_key()
+            if key is None:
+                raise ValidationError(
+                    "No SSH key registered. Use register_ssh_key() first."
+                )
+            ssh_public_key_id = key.id
+
+        # Build port mappings
+        port_mappings = []
+        if ports:
+            for port in ports:
+                port_mappings.append(
+                    PortMappingRequest(
+                        container_port=port.get("container_port", 0),
+                        host_port=port.get("host_port", 0),
+                        protocol=port.get("protocol", "tcp"),
+                    )
+                )
+
+        request = StartSecureCloudRentalRequest(
+            offering_id=offering_id,
+            ssh_public_key_id=ssh_public_key_id,
+            container_image=container_image,
+            environment=environment,
+            ports=port_mappings,
+        )
+
+        return self._client.start_secure_cloud_rental(request)
+
+    def stop_secure_cloud_rental(self, rental_id: str) -> StopSecureCloudRentalResponse:
+        """
+        Stop a secure cloud GPU rental.
+
+        Terminates the provider instance, finalizes billing, and returns total cost.
+
+        Args:
+            rental_id: The rental ID to stop
+
+        Returns:
+            StopSecureCloudRentalResponse with duration and total cost
+
+        Example:
+            >>> result = client.stop_secure_cloud_rental(rental_id)
+            >>> print(f"Total cost: ${result.total_cost}")
+        """
+        return self._client.stop_secure_cloud_rental(rental_id)
+
+    def list_secure_cloud_rentals(self) -> ListSecureCloudRentalsResponse:
+        """
+        List all secure cloud GPU rentals for the authenticated user.
+
+        Returns all datacenter GPU rentals including their status, IP addresses,
+        and cost information.
+
+        Returns:
+            ListSecureCloudRentalsResponse with rental list and total count
+
+        Example:
+            >>> rentals = client.list_secure_cloud_rentals()
+            >>> print(f"Active rentals: {rentals.total_count}")
+            >>> for r in rentals.rentals:
+            ...     print(f"  {r.rental_id}: {r.gpu_count}x {r.gpu_type} - ${r.hourly_cost}/hr")
+        """
+        return self._client.list_secure_cloud_rentals()
 
     # -------------------------------------------------------------------------
     # Async API Methods
