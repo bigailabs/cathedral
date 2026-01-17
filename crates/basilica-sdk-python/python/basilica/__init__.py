@@ -268,6 +268,11 @@ __all__ = [
     "ListCpuRentalsResponse",
     # GPU Rental types (secure cloud)
     "GpuOffering",
+    "SecureCloudRentalListItem",
+    "SecureCloudRentalResponse",
+    "StartSecureCloudRentalRequest",
+    "StopSecureCloudRentalResponse",
+    "ListSecureCloudRentalsResponse",
 ]
 
 
@@ -1413,7 +1418,7 @@ class BasilicaClient:
             ports: Port mappings (list of dicts with container_port, host_port, protocol)
 
         Returns:
-            CpuRentalResponse with rental details and SSH command
+            SecureCloudRentalResponse with rental details and SSH command
 
         Example:
             >>> offerings = client.list_secure_cloud_gpus()
@@ -1444,7 +1449,7 @@ class BasilicaClient:
                     )
                 )
 
-        request = StartCpuRentalRequest(
+        request = StartSecureCloudRentalRequest(
             offering_id=offering_id,
             ssh_public_key_id=ssh_public_key_id,
             container_image=container_image,
