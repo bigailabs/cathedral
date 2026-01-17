@@ -492,11 +492,20 @@ pub async fn resolve_offering_unified(
 
             unified_items.push(UnifiedOfferingItem {
                 offering_type: OfferingType::SecureGpu,
-                display_gpu: format!(
-                    "{}x {}",
-                    offering.gpu_count,
-                    offering.gpu_type.as_str().to_uppercase()
-                ),
+                display_gpu: if let Some(ref interconnect) = offering.interconnect {
+                    format!(
+                        "{}x {} ({})",
+                        offering.gpu_count,
+                        offering.gpu_type.as_str().to_uppercase(),
+                        interconnect
+                    )
+                } else {
+                    format!(
+                        "{}x {}",
+                        offering.gpu_count,
+                        offering.gpu_type.as_str().to_uppercase()
+                    )
+                },
                 display_provider: format!("{}", offering.provider),
                 display_memory: memory_str,
                 display_price: format!("${:.2}/hr", total_price),
