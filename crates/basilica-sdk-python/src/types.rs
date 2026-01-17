@@ -1536,20 +1536,199 @@ impl From<SdkGpuOffering> for GpuOffering {
     }
 }
 
-// GPU rental request/response types are aliases to the shared secure cloud types
-// since they use the same API structure
+/// Request to start a secure cloud GPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StartSecureCloudRentalRequest {
+    #[pyo3(get, set)]
+    pub offering_id: String,
+    #[pyo3(get, set)]
+    pub ssh_public_key_id: String,
+    #[pyo3(get, set)]
+    pub container_image: Option<String>,
+    #[pyo3(get, set)]
+    pub environment: HashMap<String, String>,
+    #[pyo3(get, set)]
+    pub ports: Vec<PortMappingRequest>,
+}
 
-/// GPU rental request (alias to secure cloud request)
-pub type StartSecureCloudRentalRequest = StartCpuRentalRequest;
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl StartSecureCloudRentalRequest {
+    #[new]
+    #[pyo3(signature = (offering_id, ssh_public_key_id, container_image=None, environment=None, ports=None))]
+    fn new(
+        offering_id: String,
+        ssh_public_key_id: String,
+        container_image: Option<String>,
+        environment: Option<HashMap<String, String>>,
+        ports: Option<Vec<PortMappingRequest>>,
+    ) -> Self {
+        Self {
+            offering_id,
+            ssh_public_key_id,
+            container_image,
+            environment: environment.unwrap_or_default(),
+            ports: ports.unwrap_or_default(),
+        }
+    }
+}
 
-/// GPU rental response (alias to secure cloud response)
-pub type SecureCloudRentalResponse = CpuRentalResponse;
+impl From<StartSecureCloudRentalRequest> for SdkStartSecureCloudRentalRequest {
+    fn from(req: StartSecureCloudRentalRequest) -> Self {
+        Self {
+            offering_id: req.offering_id,
+            ssh_public_key_id: req.ssh_public_key_id,
+            container_image: req.container_image,
+            environment: req.environment,
+            ports: req.ports.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
-/// Stop GPU rental response (alias to secure cloud response)
-pub type StopSecureCloudRentalResponse = StopCpuRentalResponse;
+/// Response from starting a secure cloud GPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct SecureCloudRentalResponse {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub deployment_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub ip_address: Option<String>,
+    #[pyo3(get)]
+    pub ssh_command: Option<String>,
+    #[pyo3(get)]
+    pub hourly_cost: f64,
+}
 
-/// GPU rental list item (alias to secure cloud list item)
-pub type SecureCloudRentalListItem = CpuRentalListItem;
+impl From<SdkSecureCloudRentalResponse> for SecureCloudRentalResponse {
+    fn from(response: SdkSecureCloudRentalResponse) -> Self {
+        Self {
+            rental_id: response.rental_id,
+            deployment_id: response.deployment_id,
+            provider: response.provider,
+            status: response.status,
+            ip_address: response.ip_address,
+            ssh_command: response.ssh_command,
+            hourly_cost: response.hourly_cost,
+        }
+    }
+}
 
-/// List GPU rentals response (alias to secure cloud response)
-pub type ListSecureCloudRentalsResponse = ListCpuRentalsResponse;
+/// Response from stopping a secure cloud GPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StopSecureCloudRentalResponse {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub duration_hours: f64,
+    #[pyo3(get)]
+    pub total_cost: f64,
+}
+
+impl From<SdkStopSecureCloudRentalResponse> for StopSecureCloudRentalResponse {
+    fn from(response: SdkStopSecureCloudRentalResponse) -> Self {
+        Self {
+            rental_id: response.rental_id,
+            status: response.status,
+            duration_hours: response.duration_hours,
+            total_cost: response.total_cost,
+        }
+    }
+}
+
+/// Secure cloud GPU rental list item
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct SecureCloudRentalListItem {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub provider_instance_id: Option<String>,
+    #[pyo3(get)]
+    pub gpu_type: String,
+    #[pyo3(get)]
+    pub gpu_count: u32,
+    #[pyo3(get)]
+    pub instance_type: String,
+    #[pyo3(get)]
+    pub location_code: Option<String>,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub ip_address: Option<String>,
+    #[pyo3(get)]
+    pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub created_at: String,
+    #[pyo3(get)]
+    pub stopped_at: Option<String>,
+    #[pyo3(get)]
+    pub ssh_command: Option<String>,
+    #[pyo3(get)]
+    pub vcpu_count: Option<u32>,
+    #[pyo3(get)]
+    pub system_memory_gb: Option<u32>,
+    #[pyo3(get)]
+    pub accumulated_cost: Option<String>,
+    #[pyo3(get)]
+    pub is_vip: bool,
+}
+
+impl From<SdkSecureCloudRentalListItem> for SecureCloudRentalListItem {
+    fn from(item: SdkSecureCloudRentalListItem) -> Self {
+        Self {
+            rental_id: item.rental_id,
+            provider: item.provider,
+            provider_instance_id: item.provider_instance_id,
+            gpu_type: item.gpu_type,
+            gpu_count: item.gpu_count,
+            instance_type: item.instance_type,
+            location_code: item.location_code,
+            status: item.status,
+            ip_address: item.ip_address,
+            hourly_cost: item.hourly_cost,
+            created_at: item.created_at.to_rfc3339(),
+            stopped_at: item.stopped_at.map(|dt| dt.to_rfc3339()),
+            ssh_command: item.ssh_command,
+            vcpu_count: item.vcpu_count,
+            system_memory_gb: item.system_memory_gb,
+            accumulated_cost: item.accumulated_cost,
+            is_vip: item.is_vip,
+        }
+    }
+}
+
+/// List secure cloud GPU rentals response
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ListSecureCloudRentalsResponse {
+    #[pyo3(get)]
+    pub rentals: Vec<SecureCloudRentalListItem>,
+    #[pyo3(get)]
+    pub total_count: usize,
+}
+
+impl From<SdkListSecureCloudRentalsResponse> for ListSecureCloudRentalsResponse {
+    fn from(response: SdkListSecureCloudRentalsResponse) -> Self {
+        Self {
+            rentals: response.rentals.into_iter().map(Into::into).collect(),
+            total_count: response.total_count,
+        }
+    }
+}
