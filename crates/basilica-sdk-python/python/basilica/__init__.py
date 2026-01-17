@@ -1401,7 +1401,7 @@ class BasilicaClient:
         container_image: Optional[str] = None,
         environment: Optional[Dict[str, str]] = None,
         ports: Optional[List[Dict[str, Any]]] = None,
-    ) -> CpuRentalResponse:
+    ) -> SecureCloudRentalResponse:
         """
         Start a secure cloud GPU rental from a datacenter provider.
 
