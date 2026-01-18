@@ -1,7 +1,7 @@
 """
-SSH utilities for Basilica SDK
+Rental utilities for Basilica SDK examples
 
-Provides functions for parsing SSH credentials and generating SSH commands.
+Provides functions for SSH credential handling, key management, and rental lifecycle operations.
 """
 
 from typing import Optional, Tuple

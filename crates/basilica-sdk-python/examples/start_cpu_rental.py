@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from basilica import BasilicaClient
-from ssh_utils import format_ssh_command, find_private_key_for_public_key, wait_for_rental_ready
+from rental_utils import format_ssh_command, find_private_key_for_public_key, wait_for_rental_ready
 
 
 def main():
