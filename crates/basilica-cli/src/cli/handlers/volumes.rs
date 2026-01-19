@@ -101,7 +101,8 @@ fn prompt_region(provider: &str) -> Result<String, CliError> {
 
     println!(
         "{}",
-        style("Note: Volumes can only be attached to rentals in the same provider and region.").dim()
+        style("Note: Volumes can only be attached to rentals in the same provider and region.")
+            .dim()
     );
 
     let theme = ColorfulTheme::default();
@@ -165,10 +166,8 @@ async fn select_volume(
 
     // Format items for selection
     // Header: Name | Size | Status | Provider | Region
-    println!(
-        "{}",
-        style("  Name                 │   Size │     Status │   Provider │   Region").dim()
-    );
+    let header = "  Name                 │   Size │     Status │   Provider │   Region";
+    let full_prompt = format!("{}\n{}", prompt, style(header).dim());
 
     let items: Vec<String> = filtered_volumes
         .iter()
@@ -201,7 +200,7 @@ async fn select_volume(
 
     let theme = ColorfulTheme::default();
     let selection = Select::with_theme(&theme)
-        .with_prompt(prompt)
+        .with_prompt(&full_prompt)
         .items(&items)
         .default(0)
         .interact_opt()
@@ -216,7 +215,7 @@ async fn select_volume(
         }
     };
 
-    // Clear the header and selection prompt lines
+    // Clear the selection prompt lines (prompt + header + items become single block)
     let term = Term::stdout();
     let _ = term.clear_last_lines(2);
 
@@ -281,10 +280,9 @@ async fn select_rental_for_volume(
 
     // Format items for selection
     // Header: Compute | Status | Provider | Rental ID
-    println!(
-        "{}",
-        style("  Compute              │       Status │   Provider │ Rental ID").dim()
-    );
+    let header = "  Compute              │       Status │   Provider │ Rental ID";
+    let prompt = "Select rental to attach volume to";
+    let full_prompt = format!("{}\n{}", prompt, style(header).dim());
 
     let items: Vec<String> = compatible_rentals
         .iter()
@@ -314,7 +312,7 @@ async fn select_rental_for_volume(
 
     let theme = ColorfulTheme::default();
     let selection = Select::with_theme(&theme)
-        .with_prompt("Select rental to attach volume to")
+        .with_prompt(&full_prompt)
         .items(&items)
         .default(0)
         .interact_opt()
@@ -329,7 +327,7 @@ async fn select_rental_for_volume(
         }
     };
 
-    // Clear the header and selection prompt lines
+    // Clear the selection prompt lines (prompt + header + items become single block)
     let term = Term::stdout();
     let _ = term.clear_last_lines(2);
 
