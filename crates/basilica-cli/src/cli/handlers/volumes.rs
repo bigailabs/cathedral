@@ -99,6 +99,11 @@ fn prompt_region(provider: &str) -> Result<String, CliError> {
         return Ok(regions[0].to_string());
     }
 
+    println!(
+        "{}",
+        style("Note: Volumes can only be attached to rentals in the same provider and region.").dim()
+    );
+
     let theme = ColorfulTheme::default();
     let selection = Select::with_theme(&theme)
         .with_prompt("Select region")
@@ -428,11 +433,6 @@ pub async fn handle_create_volume(
     println!("{}", style("Estimated cost:").bold());
     println!("  Hourly:  ${:.4}/hr", hourly);
     println!("  Monthly: ~${:.2}/mo (estimated)", monthly);
-    println!();
-    println!(
-        "{}",
-        style("Note: Volumes can only be attached to rentals in the same provider and region.").dim()
-    );
     println!();
 
     // Confirm creation
