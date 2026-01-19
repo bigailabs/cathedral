@@ -276,6 +276,54 @@ impl Args {
                 handlers::deploy::handle_deploy(*cmd.clone(), config).await?;
             }
 
+            // Volume management
+            Commands::Volumes { action } => {
+                use crate::cli::commands::VolumeAction;
+                use crate::client::create_client;
+
+                // Create client with file-based auth (JWT required for volume management)
+                let client = create_client(config).await?;
+
+                match action {
+                    VolumeAction::Create {
+                        name,
+                        size,
+                        provider,
+                        region,
+                        description,
+                    } => {
+                        handlers::volumes::handle_create_volume(
+                            &client,
+                            name.clone(),
+                            *size,
+                            provider.clone(),
+                            region.clone(),
+                            description.clone(),
+                        )
+                        .await?;
+                    }
+                    VolumeAction::List => {
+                        handlers::volumes::handle_list_volumes(&client).await?;
+                    }
+                    VolumeAction::Delete { volume, yes } => {
+                        handlers::volumes::handle_delete_volume(&client, volume.clone(), *yes)
+                            .await?;
+                    }
+                    VolumeAction::Attach { volume, rental } => {
+                        handlers::volumes::handle_attach_volume(
+                            &client,
+                            volume.clone(),
+                            rental.clone(),
+                        )
+                        .await?;
+                    }
+                    VolumeAction::Detach { volume, yes } => {
+                        handlers::volumes::handle_detach_volume(&client, volume.clone(), *yes)
+                            .await?;
+                    }
+                }
+            }
+
             // Upgrade command is handled in main.rs before entering async runtime
             Commands::Upgrade { .. } => {
                 unreachable!("Upgrade command should be handled in main.rs")

@@ -455,6 +455,80 @@ impl BasilicaClient {
         self.post(&path, &serde_json::json!({})).await
     }
 
+    // ===== Volume Management =====
+
+    /// List all volumes for the authenticated user
+    ///
+    /// Returns all volumes including their status, size, and cost information.
+    pub async fn list_volumes(&self) -> Result<crate::types::ListVolumesResponse> {
+        self.get("/secure-cloud/volumes").await
+    }
+
+    /// Create a new volume
+    ///
+    /// Creates a block storage volume that can be attached to secure cloud rentals.
+    /// Volume names are unique per user (case-insensitive).
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Volume creation parameters including name, size, provider, and region
+    pub async fn create_volume(
+        &self,
+        request: crate::types::CreateVolumeRequest,
+    ) -> Result<crate::types::VolumeResponse> {
+        self.post("/secure-cloud/volumes", &request).await
+    }
+
+    /// Delete a volume
+    ///
+    /// Permanently deletes a volume. The volume must be detached before deletion.
+    ///
+    /// # Arguments
+    ///
+    /// * `volume_id` - The volume ID to delete
+    pub async fn delete_volume(&self, volume_id: &str) -> Result<()> {
+        let path = format!("/secure-cloud/volumes/{}", volume_id);
+        let response = self.delete_empty(&path).await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            self.handle_error_response(response).await
+        }
+    }
+
+    /// Attach a volume to a rental
+    ///
+    /// Attaches a volume to a running secure cloud rental.
+    /// The volume and rental must be in the same provider and region.
+    ///
+    /// # Arguments
+    ///
+    /// * `volume_id` - The volume ID to attach
+    /// * `request` - Attachment parameters including the rental ID
+    pub async fn attach_volume(
+        &self,
+        volume_id: &str,
+        request: crate::types::AttachVolumeRequest,
+    ) -> Result<crate::types::VolumeActionResponse> {
+        let path = format!("/secure-cloud/volumes/{}/attach", volume_id);
+        self.post(&path, &request).await
+    }
+
+    /// Detach a volume from its current rental
+    ///
+    /// Detaches a volume from its currently attached rental.
+    ///
+    /// # Arguments
+    ///
+    /// * `volume_id` - The volume ID to detach
+    pub async fn detach_volume(
+        &self,
+        volume_id: &str,
+    ) -> Result<crate::types::VolumeActionResponse> {
+        let path = format!("/secure-cloud/volumes/{}/detach", volume_id);
+        self.post(&path, &serde_json::json!({})).await
+    }
+
     // ===== CPU-Only Secure Cloud =====
 
     /// List CPU-only offerings from secure cloud providers

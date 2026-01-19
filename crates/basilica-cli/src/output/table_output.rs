@@ -6,7 +6,7 @@ use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{
         ApiKeyInfo, ApiRentalListItem, GpuSpec, HistoricalRentalItem, ListDepositsResponse,
-        RentalUsageResponse, UsageHistoryResponse,
+        RentalUsageResponse, UsageHistoryResponse, VolumeResponse,
     },
     AvailableNode,
 };
@@ -1053,6 +1053,87 @@ pub fn display_cpu_rentals(
                 hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
                 total_cost,
                 created: format_timestamp(&rental.created_at.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    Ok(())
+}
+
+/// Display volumes in table format
+pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
+    if volumes.is_empty() {
+        println!("{}", style("No volumes found").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct VolumeRow {
+        #[tabled(rename = "Name")]
+        name: String,
+        #[tabled(rename = "Size")]
+        size: String,
+        #[tabled(rename = "Status")]
+        status: String,
+        #[tabled(rename = "Provider")]
+        provider: String,
+        #[tabled(rename = "Region")]
+        region: String,
+        #[tabled(rename = "Rental")]
+        rental: String,
+        #[tabled(rename = "Rate/hr")]
+        hourly_cost: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Created")]
+        created: String,
+    }
+
+    let rows: Vec<VolumeRow> = volumes
+        .iter()
+        .map(|volume| {
+            // Format status
+            let status = match volume.status {
+                basilica_sdk::types::VolumeStatus::Available => "Available".to_string(),
+                basilica_sdk::types::VolumeStatus::Attached => "Attached".to_string(),
+                basilica_sdk::types::VolumeStatus::Pending => "Pending".to_string(),
+                basilica_sdk::types::VolumeStatus::Deleting => "Deleting".to_string(),
+                basilica_sdk::types::VolumeStatus::Error => "Error".to_string(),
+            };
+
+            // Use accumulated cost from billing service
+            let total_cost = volume
+                .accumulated_cost
+                .as_ref()
+                .and_then(|c| c.parse::<f64>().ok())
+                .map(|cost| format!("${:.2}", cost))
+                .unwrap_or_else(|| "-".to_string());
+
+            VolumeRow {
+                name: volume.name.clone(),
+                size: format!("{}GB", volume.size_gb),
+                status,
+                provider: volume.provider.clone(),
+                region: volume.region.clone(),
+                rental: volume
+                    .rental_id
+                    .as_ref()
+                    .map(|id| {
+                        // Truncate rental ID for display
+                        if id.len() > 12 {
+                            format!("{}...", &id[..12])
+                        } else {
+                            id.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| "-".to_string()),
+                hourly_cost: format!("${:.4}/hr", volume.estimated_hourly_cost),
+                total_cost,
+                created: format_timestamp(&volume.created_at.to_rfc3339()),
             }
         })
         .collect();

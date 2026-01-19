@@ -198,6 +198,12 @@ pub enum Commands {
     /// Deploy applications to Basilica
     #[command(name = "deploy", visible_alias = "d")]
     Deploy(Box<DeployCommand>),
+
+    /// Volume management commands
+    Volumes {
+        #[command(subcommand)]
+        action: VolumeAction,
+    },
 }
 
 /// Fund management actions
@@ -263,6 +269,68 @@ pub enum SshKeyAction {
     },
 }
 
+/// Volume management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum VolumeAction {
+    /// Create a new volume
+    Create {
+        /// Volume name (unique per user, will prompt if not provided)
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Volume size in GB (1-10240, will prompt if not provided)
+        #[arg(short, long)]
+        size: Option<u32>,
+
+        /// Cloud provider (e.g., hyperstack, will prompt if not provided)
+        #[arg(short, long)]
+        provider: Option<String>,
+
+        /// Region (e.g., US-1, CANADA-1, NORWAY-1, will prompt if not provided)
+        #[arg(short, long)]
+        region: Option<String>,
+
+        /// Optional description
+        #[arg(short, long)]
+        description: Option<String>,
+    },
+
+    /// List all volumes
+    #[command(alias = "ls")]
+    List,
+
+    /// Delete a volume (must be detached first)
+    #[command(alias = "rm")]
+    Delete {
+        /// Volume ID or name (will prompt if not provided)
+        volume: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+
+    /// Attach a volume to a rental
+    Attach {
+        /// Volume ID or name (will prompt if not provided)
+        volume: Option<String>,
+
+        /// Rental ID to attach to (will prompt if not provided)
+        #[arg(long)]
+        rental: Option<String>,
+    },
+
+    /// Detach a volume from its current rental
+    Detach {
+        /// Volume ID or name (will prompt if not provided)
+        volume: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
 impl Commands {
     /// Check if this command requires authentication
     pub fn requires_auth(&self) -> bool {
@@ -280,6 +348,7 @@ impl Commands {
             | Commands::Cp { .. }
             | Commands::Tokens { .. }
             | Commands::SshKeys { .. }
+            | Commands::Volumes { .. }
             | Commands::Fund { .. }
             | Commands::Balance { .. }
             | Commands::Deploy(_) => true,
