@@ -69,6 +69,7 @@ tempfile = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 fastrand = { workspace = true }
+sha2 = "0.10"
 
 # System information and process management
 sysinfo = { workspace = true }

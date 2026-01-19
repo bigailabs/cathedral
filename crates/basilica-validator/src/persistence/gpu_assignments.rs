@@ -326,6 +326,33 @@ impl SimplePersistence {
         Ok(())
     }
 
+    pub async fn get_node_gpu_uuids(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<Vec<String>> {
+        let query = r#"
+            SELECT gpu_uuid
+            FROM gpu_uuid_assignments
+            WHERE miner_id = ? AND node_id = ?
+        "#;
+
+        let rows = sqlx::query(query)
+            .bind(miner_id)
+            .bind(node_id)
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut uuids = Vec::new();
+        for row in rows {
+            let gpu_uuid: String = row.get("gpu_uuid");
+            if !gpu_uuid.is_empty() && gpu_uuid != "Unknown UUID" {
+                uuids.push(gpu_uuid);
+            }
+        }
+        Ok(uuids)
+    }
+
     /// Update last_verified timestamp for existing GPU assignments
     pub async fn update_gpu_assignment_timestamps(
         &self,

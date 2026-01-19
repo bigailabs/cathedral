@@ -136,6 +136,34 @@ impl SimplePersistence {
         Ok(count > 0)
     }
 
+    pub async fn get_last_rental_terminated_at(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, anyhow::Error> {
+        let query = r#"
+            SELECT MAX(terminated_at) as terminated_at
+            FROM rentals
+            WHERE node_id = ?
+              AND miner_id = ?
+              AND terminated_at IS NOT NULL
+        "#;
+
+        let row = sqlx::query(query)
+            .bind(node_id)
+            .bind(miner_id)
+            .fetch_one(&self.pool)
+            .await?;
+
+        let terminated_at: Option<String> = row.get("terminated_at");
+        if let Some(ts) = terminated_at {
+            let parsed = DateTime::parse_from_rfc3339(&ts)?.with_timezone(&Utc);
+            Ok(Some(parsed))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Helper function to parse rental state from string
     fn parse_rental_state(state_str: &str, rental_id: &str) -> RentalState {
         match state_str {
