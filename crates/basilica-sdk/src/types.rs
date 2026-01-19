@@ -1053,7 +1053,7 @@ pub struct AttachVolumeRequest {
 
 /// Response for volume attach/detach operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VolumeActionResponse {
+pub struct VolumeOperationResponse {
     /// Volume ID
     pub volume_id: String,
 

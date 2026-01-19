@@ -509,7 +509,7 @@ impl BasilicaClient {
         &self,
         volume_id: &str,
         request: crate::types::AttachVolumeRequest,
-    ) -> Result<crate::types::VolumeActionResponse> {
+    ) -> Result<crate::types::VolumeOperationResponse> {
         let path = format!("/secure-cloud/volumes/{}/attach", volume_id);
         self.post(&path, &request).await
     }
@@ -524,7 +524,7 @@ impl BasilicaClient {
     pub async fn detach_volume(
         &self,
         volume_id: &str,
-    ) -> Result<crate::types::VolumeActionResponse> {
+    ) -> Result<crate::types::VolumeOperationResponse> {
         let path = format!("/secure-cloud/volumes/{}/detach", volume_id);
         self.post(&path, &serde_json::json!({})).await
     }
