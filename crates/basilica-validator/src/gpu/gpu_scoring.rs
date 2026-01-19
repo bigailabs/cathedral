@@ -15,6 +15,8 @@ use std::str::FromStr;
 
 pub struct GpuScoringEngine {
     gpu_profile_repo: Arc<GpuProfileRepository>,
+    /// Persistence layer for uptime tracking (used by gRPC uptime endpoint)
+    #[allow(dead_code)]
     persistence: Arc<SimplePersistence>,
     metrics: Option<Arc<ValidatorMetrics>>,
     emission_config: EmissionConfig,
@@ -206,6 +208,10 @@ impl GpuScoringEngine {
 
     /// Calculate uptime-based multiplication factor for a specific node
     /// Uses 14-day linear ramp-up based on actual uptime from verification logs
+    /// 
+    /// Note: No longer used for weight calculation (miners get full weight immediately).
+    /// Kept for future gRPC endpoint that exposes uptime data to the payout service.
+    #[allow(dead_code)]
     async fn calculate_uptime_multiplication_factor(
         &self,
         miner_uid: MinerUid,
@@ -384,14 +390,11 @@ impl GpuScoringEngine {
                 })
                 .collect();
 
+            // Count GPUs per category (no uptime multiplier - miners get full weight immediately)
             let mut rewardable_gpu_counts: HashMap<String, f64> = HashMap::new();
-            for (node_id, category, count) in rewardable_gpus {
+            for (_node_id, category, count) in rewardable_gpus {
                 let normalized_model = category.to_string();
-                let uptime_factor = self
-                    .calculate_uptime_multiplication_factor(profile.miner_uid, &node_id)
-                    .await;
-                let weighted_count = count as f64 * uptime_factor;
-                *rewardable_gpu_counts.entry(normalized_model).or_insert(0.0) += weighted_count;
+                *rewardable_gpu_counts.entry(normalized_model).or_insert(0.0) += count as f64;
             }
 
             // Skip miners with no rewardable GPUs

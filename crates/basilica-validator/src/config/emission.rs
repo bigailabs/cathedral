@@ -304,15 +304,14 @@ impl EmissionConfig {
 
 impl Default for EmissionConfig {
     fn default() -> Self {
-        let gpu_allocations = HashMap::new();
-
         Self {
             burn_percentage: 0.0,
             burn_uid: DEFAULT_BURN_UID,
-            gpu_allocations,
+            gpu_allocations: HashMap::new(),
             min_miners_per_category: 1,
             weight_set_interval_blocks: 360,
             weight_version_key: 0,
         }
     }
 }
+
