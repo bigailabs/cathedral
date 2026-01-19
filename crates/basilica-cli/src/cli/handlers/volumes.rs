@@ -231,16 +231,23 @@ async fn select_rental_for_volume(
     client: &BasilicaClient,
     volume: &VolumeResponse,
 ) -> Result<String, CliError> {
-    // Fetch secure cloud rentals (volumes are only supported on secure cloud)
-    let rentals = client
-        .list_secure_cloud_rentals()
-        .await
-        .map_err(CliError::Api)?;
+    // Fetch both GPU and CPU secure cloud rentals in parallel
+    let (gpu_rentals, cpu_rentals) = tokio::try_join!(
+        client.list_secure_cloud_rentals(),
+        client.list_cpu_rentals()
+    )
+    .map_err(CliError::Api)?;
 
-    // Filter for active rentals in the same provider and region
-    let compatible_rentals: Vec<_> = rentals
+    // Merge all rentals for filtering
+    let all_rentals: Vec<_> = gpu_rentals
         .rentals
         .iter()
+        .chain(cpu_rentals.rentals.iter())
+        .collect();
+
+    // Filter for active rentals in the same provider and region
+    let compatible_rentals: Vec<_> = all_rentals
+        .into_iter()
         .filter(|r| {
             // Only active rentals (not stopped)
             if r.stopped_at.is_some() {
