@@ -399,6 +399,16 @@ impl RentalManager {
                 }
                 // TODO: Add location/latency constraints to bid selection once available.
                 // TODO: Consider per-node bids for multi-node rentals.
+                // TODO: Implement secure cloud fallback when all community miners fail.
+                //       If all bid winners fail deployment, fall back to aggregator_service
+                //       to provision on secure cloud (AWS/GCP/Lambda). The API layer should
+                //       handle this fallback since it has access to both validator and aggregator.
+                //       See: basilica-backend/crates/basilica-api/src/api/routes/secure_cloud.rs
+                // TODO: Integrate collateral-contract for stake slashing on bid failures.
+                //       Miners should deposit collateral when registering nodes. On repeated
+                //       deployment failures after winning bids, slash their stake proportionally.
+                //       This prevents bid-and-bail attacks where miners submit low bids they
+                //       don't intend to fulfill. See: basilica/crates/collateral-contract/
             }
         }
 
