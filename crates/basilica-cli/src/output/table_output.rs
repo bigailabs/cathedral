@@ -1,5 +1,6 @@
 //! Table formatting for CLI output
 
+use super::format_usd;
 use crate::error::Result;
 use basilica_common::types::GpuOffering;
 use basilica_common::{types::GpuCategory, LocationProfile};
@@ -53,9 +54,8 @@ pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
 
         let cost = rental
             .accumulated_cost
-            .as_ref()
-            .and_then(|c| c.parse::<f64>().ok())
-            .map(|c| format!("${:.2}", c))
+            .as_deref()
+            .map(format_usd)
             .unwrap_or_else(|| "-".to_string());
 
         (rate, cost)
@@ -625,12 +625,7 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
                 .map(|rate| format!("${:.2}/hr", rate))
                 .unwrap_or_else(|| rental.hourly_rate.clone());
 
-            let current_cost = rental
-                .current_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|cost| format!("${:.2}", cost))
-                .unwrap_or_else(|| rental.current_cost.clone());
+            let current_cost = format_usd(&rental.current_cost);
 
             UsageHistoryRow {
                 rental_id: rental.rental_id.clone(),
@@ -666,7 +661,7 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
     println!(
         "{}: {}",
         style("Total Cost (All Rentals)").cyan(),
-        style(format!("${:.2}", total_cost)).green().bold()
+        style(format_usd(&total_cost.to_string())).green().bold()
     );
     println!();
     println!("{}", style("Quick Commands:").cyan().bold());
@@ -707,12 +702,7 @@ pub fn display_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
     let mut rows: Vec<HistoryRow> = rentals
         .iter()
         .map(|rental| {
-            let total_cost = rental
-                .total_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|c| format!("${:.2}", c))
-                .unwrap_or_else(|| rental.total_cost.clone());
+            let total_cost = format_usd(&rental.total_cost);
 
             HistoryRow {
                 rental_id: rental.rental_id.clone(),
@@ -775,12 +765,7 @@ pub fn display_cpu_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<(
     let mut rows: Vec<CpuHistoryRow> = rentals
         .iter()
         .map(|rental| {
-            let total_cost = rental
-                .total_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|c| format!("${:.2}", c))
-                .unwrap_or_else(|| rental.total_cost.clone());
+            let total_cost = format_usd(&rental.total_cost);
 
             let rate = rental
                 .hourly_rate
@@ -893,9 +878,8 @@ pub fn display_secure_cloud_rentals(
             // Use accumulated cost from billing service - no fallback
             let total_cost = rental
                 .accumulated_cost
-                .as_ref()
-                .and_then(|c| c.parse::<f64>().ok())
-                .map(|cost| format!("${:.2}", cost))
+                .as_deref()
+                .map(format_usd)
                 .unwrap_or_else(|| "-".to_string());
 
             SecureCloudRentalRow {
@@ -1034,9 +1018,8 @@ pub fn display_cpu_rentals(
             // Use accumulated cost from billing service
             let total_cost = rental
                 .accumulated_cost
-                .as_ref()
-                .and_then(|c| c.parse::<f64>().ok())
-                .map(|cost| format!("${:.2}", cost))
+                .as_deref()
+                .map(format_usd)
                 .unwrap_or_else(|| "-".to_string());
 
             CpuRentalRow {
@@ -1108,9 +1091,8 @@ pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
             // Use accumulated cost from billing service
             let total_cost = volume
                 .accumulated_cost
-                .as_ref()
-                .and_then(|c| c.parse::<f64>().ok())
-                .map(|cost| format!("${:.2}", cost))
+                .as_deref()
+                .map(format_usd)
                 .unwrap_or_else(|| "-".to_string());
 
             VolumeRow {
