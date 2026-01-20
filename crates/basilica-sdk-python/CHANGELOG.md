@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-01-20
+
+### Changed
+- Remove pre-flight node availability check from deploy methods
+- SDK no longer calls `list_nodes` to auto-detect GPU models before deployment
+- Deployments now rely on `min_gpu_memory_gb` for GPU scheduling instead of specific models
+- Let the API/scheduler handle GPU selection and autoscaling
+
+### Removed
+- `_extract_gpu_model_id()` function (no longer needed)
+- GPU model auto-detection logic that blocked deployments when no nodes were immediately available
+
+### Fixed
+- Deployments no longer fail with "No GPU nodes available" when cluster is empty
+- Autoscaler can now provision nodes for pending GPU workloads
+
 ## [0.12.0] - 2026-01-13
 
 ### Added
@@ -161,7 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline API documentation
 - Example code for common workflows
 
-[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.12.0...HEAD
+[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.13.0...HEAD
+[0.13.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.12.0...basilica-sdk-python-v0.13.0
 [0.12.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.11.0...basilica-sdk-python-v0.12.0
 [0.11.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.10.0...basilica-sdk-python-v0.11.0
 [0.10.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...basilica-sdk-python-v0.10.0
