@@ -1,7 +1,7 @@
 //! Volume management handlers for the Basilica CLI
 
 use crate::error::CliError;
-use crate::output::{print_success, table_output};
+use crate::output::{json_output, print_success, table_output};
 use basilica_sdk::types::{AttachVolumeRequest, CreateVolumeRequest, VolumeResponse, VolumeStatus};
 use basilica_sdk::BasilicaClient;
 use console::{style, Term};
@@ -484,8 +484,13 @@ pub async fn handle_create_volume(
 }
 
 /// Handle listing volumes
-pub async fn handle_list_volumes(client: &BasilicaClient) -> Result<(), CliError> {
+pub async fn handle_list_volumes(client: &BasilicaClient, json: bool) -> Result<(), CliError> {
     let response = client.list_volumes().await.map_err(CliError::Api)?;
+
+    if json {
+        json_output(&response)?;
+        return Ok(());
+    }
 
     if response.volumes.is_empty() {
         println!("No volumes found.");

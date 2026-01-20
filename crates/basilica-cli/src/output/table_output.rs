@@ -1131,7 +1131,7 @@ pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
                         }
                     })
                     .unwrap_or_else(|| "-".to_string()),
-                hourly_cost: format!("${:.4}/hr", volume.estimated_hourly_cost),
+                hourly_cost: format!("${:.2}/hr", volume.estimated_hourly_cost),
                 total_cost,
                 created: format_timestamp(&volume.created_at.to_rfc3339()),
             }

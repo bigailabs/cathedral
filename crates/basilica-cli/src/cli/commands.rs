@@ -171,18 +171,10 @@ pub enum Commands {
     Fund {
         #[command(subcommand)]
         action: Option<FundAction>,
-
-        /// Output as JSON
-        #[arg(long, global = true)]
-        json: bool,
     },
 
     /// Check your account balance
-    Balance {
-        /// Output as JSON
-        #[arg(long, global = true)]
-        json: bool,
-    },
+    Balance,
 
     /// Upgrade the Basilica CLI to a newer version
     Upgrade {
@@ -350,7 +342,7 @@ impl Commands {
             | Commands::SshKeys { .. }
             | Commands::Volumes { .. }
             | Commands::Fund { .. }
-            | Commands::Balance { .. }
+            | Commands::Balance
             | Commands::Deploy(_) => true,
 
             // Authentication commands don't require auth
