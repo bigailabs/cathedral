@@ -98,7 +98,67 @@ pub fn region_to_country(region: &str) -> Option<&'static str> {
         return Some("ZA");
     }
 
+    // Norway
+    if region_upper.contains("NORWAY") || region_upper.starts_with("NO-") {
+        return Some("NO");
+    }
+
     None
+}
+
+/// Extract country code from various location formats
+///
+/// Handles multiple formats:
+/// - Region codes: "US-EAST-1" → "US"
+/// - Full location: "San Francisco/California/US" → "US"
+/// - Direct country: "US" → "US"
+pub fn extract_country_code(location: &str) -> Option<&'static str> {
+    // First try region_to_country for region codes
+    if let Some(country) = region_to_country(location) {
+        return Some(country);
+    }
+
+    // Try parsing as LocationProfile (City/Region/Country format)
+    // Format is typically: "City/State/Country" or just "Country"
+    let parts: Vec<&str> = location.split('/').collect();
+    if let Some(last_part) = parts.last() {
+        let trimmed = last_part.trim();
+        // Map common country names/codes to ISO codes
+        return map_country_string(trimmed);
+    }
+
+    None
+}
+
+/// Map country name or code strings to standard ISO codes
+fn map_country_string(country: &str) -> Option<&'static str> {
+    let upper = country.to_uppercase();
+    match upper.as_str() {
+        // Direct ISO codes
+        "US" | "USA" | "UNITED STATES" => Some("US"),
+        "CA" | "CANADA" => Some("CA"),
+        "GB" | "UK" | "UNITED KINGDOM" => Some("GB"),
+        "DE" | "GERMANY" => Some("DE"),
+        "FR" | "FRANCE" => Some("FR"),
+        "IT" | "ITALY" => Some("IT"),
+        "ES" | "SPAIN" => Some("ES"),
+        "NL" | "NETHERLANDS" => Some("NL"),
+        "SE" | "SWEDEN" => Some("SE"),
+        "IE" | "IRELAND" => Some("IE"),
+        "JP" | "JAPAN" => Some("JP"),
+        "SG" | "SINGAPORE" => Some("SG"),
+        "AU" | "AUSTRALIA" => Some("AU"),
+        "IN" | "INDIA" => Some("IN"),
+        "KR" | "KOREA" | "SOUTH KOREA" => Some("KR"),
+        "HK" | "HONG KONG" => Some("HK"),
+        "BR" | "BRAZIL" => Some("BR"),
+        "BH" | "BAHRAIN" => Some("BH"),
+        "AE" | "UAE" | "UNITED ARAB EMIRATES" => Some("AE"),
+        "ZA" | "SOUTH AFRICA" => Some("ZA"),
+        "NO" | "NORWAY" => Some("NO"),
+        "EU" | "EUROPE" => Some("EU"),
+        _ => None,
+    }
 }
 
 /// Check if a region matches a country filter (case-insensitive)
@@ -171,5 +231,46 @@ mod tests {
         assert_eq!(region_to_country("unknown-region"), None);
         // Unknown regions should still work with direct matching
         assert!(region_matches_country("custom-us-region", "US"));
+    }
+
+    #[test]
+    fn test_extract_country_code_region_codes() {
+        // Region codes should be handled via region_to_country
+        assert_eq!(extract_country_code("US-EAST-1"), Some("US"));
+        assert_eq!(extract_country_code("EU-WEST-1"), Some("EU"));
+        assert_eq!(extract_country_code("EU-Frankfurt"), Some("DE"));
+        assert_eq!(extract_country_code("AP-TOKYO-1"), Some("JP"));
+    }
+
+    #[test]
+    fn test_extract_country_code_location_profiles() {
+        // City/Region/Country format (community cloud)
+        assert_eq!(
+            extract_country_code("San Francisco/California/US"),
+            Some("US")
+        );
+        assert_eq!(extract_country_code("London/UK"), Some("GB"));
+        assert_eq!(extract_country_code("Tokyo/Japan"), Some("JP"));
+    }
+
+    #[test]
+    fn test_extract_country_code_direct() {
+        // Direct country codes or names
+        assert_eq!(extract_country_code("US"), Some("US"));
+        assert_eq!(extract_country_code("Germany"), Some("DE"));
+        assert_eq!(extract_country_code("Japan"), Some("JP"));
+    }
+
+    #[test]
+    fn test_extract_country_code_unknown() {
+        assert_eq!(extract_country_code("unknown-location"), None);
+        assert_eq!(extract_country_code("Some City/Some State/Unknown"), None);
+    }
+
+    #[test]
+    fn test_extract_country_code_norway() {
+        assert_eq!(extract_country_code("NORWAY"), Some("NO"));
+        assert_eq!(extract_country_code("NO-1"), Some("NO"));
+        assert_eq!(extract_country_code("Norway"), Some("NO"));
     }
 }
