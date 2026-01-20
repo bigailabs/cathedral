@@ -255,7 +255,29 @@ impl WeightSetter {
         );
 
         let now = Utc::now();
-        let since = last_weight_timestamp.unwrap_or(now - chrono::Duration::hours(24));
+        // Cold start: look back 7 days to capture historical data
+        // Normal operation: use stored timestamp from last successful weight set
+        let since = last_weight_timestamp.unwrap_or_else(|| {
+            warn!(
+                "No last_weight_set_timestamp found - using 7-day lookback for cold start. \
+                 This may indicate first run, storage corruption, or validator restart."
+            );
+            now - chrono::Duration::days(7)
+        });
+
+        // Alert if last weight set was too long ago (stale epoch detection)
+        if let Some(last_ts) = last_weight_timestamp {
+            let hours_since_last = (now - last_ts).num_hours();
+            if hours_since_last > 48 {
+                warn!(
+                    hours_since_last = hours_since_last,
+                    last_weight_timestamp = %last_ts,
+                    "Weight setting is stale - last successful run was {} hours ago. \
+                     Check for weight setting failures or network issues.",
+                    hours_since_last
+                );
+            }
+        }
 
         // 3. Get payment-based weights from billing summaries
         let deliveries = self
