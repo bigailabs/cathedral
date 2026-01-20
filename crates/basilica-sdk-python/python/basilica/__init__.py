@@ -151,44 +151,7 @@ DEFAULT_COMMAND = ["/bin/bash"]
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
 
-def _extract_gpu_model_id(full_name: str) -> str:
-    """Extract short GPU model ID from full NVML name for K8s scheduling.
-
-    Examples:
-        "NVIDIA A100 80GB PCIe" -> "A100"
-        "NVIDIA H100 80GB HBM3" -> "H100"
-        "NVIDIA GeForce RTX 3090" -> "RTX-3090"
-        "Tesla V100-SXM2-16GB" -> "V100"
-        "NVIDIA L40S" -> "L40S"
-    """
-    if not full_name:
-        return full_name
-
-    # Pattern to match common GPU model identifiers
-    # Matches: A100, H100, V100, L40S, RTX 4090, RTX 3090, etc.
-    patterns = [
-        r"\b(A100|H100|H200|B100|B200)\b",  # Data center: Ampere, Hopper, Blackwell
-        r"\b(V100|P100|T4|A10|A30|A40|L4|L40|L40S)\b",  # Other data center
-        r"\bRTX\s*(\d{4})\b",  # Consumer RTX (RTX 4090 -> RTX-4090)
-        r"\bGTX\s*(\d{4})\b",  # Consumer GTX
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, full_name, re.IGNORECASE)
-        if match:
-            model = match.group(1) if match.lastindex else match.group(0)
-            # Normalize RTX/GTX patterns
-            if "RTX" in full_name.upper() and model.isdigit():
-                return f"RTX-{model}"
-            if "GTX" in full_name.upper() and model.isdigit():
-                return f"GTX-{model}"
-            return model.upper()
-
-    # Fallback: return original name if no pattern matches
-    return full_name
-
-
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 __all__ = [
     # Main client
     "BasilicaClient",
@@ -377,30 +340,9 @@ class BasilicaClient:
 
         gpu_spec = None
         if gpu_count is not None:
-            effective_gpu_models = gpu_models
-            if not effective_gpu_models:
-                nodes = self.list_nodes(
-                    available=True,
-                    min_gpu_memory=min_gpu_memory_gb,
-                )
-                if not nodes:
-                    raise ResourceError(
-                        "No GPU nodes available"
-                        + (f" with {min_gpu_memory_gb}GB+ VRAM" if min_gpu_memory_gb else "")
-                    )
-                seen = set()
-                effective_gpu_models = []
-                for node in nodes:
-                    for gpu in node.node.gpu_specs:
-                        if gpu.name:
-                            model_id = _extract_gpu_model_id(gpu.name)
-                            if model_id not in seen:
-                                seen.add(model_id)
-                                effective_gpu_models.append(model_id)
-
             gpu_spec = GpuRequirementsSpec(
                 count=gpu_count,
-                model=effective_gpu_models,
+                model=gpu_models or [],
                 min_cuda_version=min_cuda_version,
                 min_gpu_memory_gb=min_gpu_memory_gb,
             )
@@ -618,22 +560,6 @@ class BasilicaClient:
         if gpu_count is None:
             gpu_count = reqs.gpu_count
 
-        # Use user-specified GPU models or auto-detect from available nodes
-        effective_gpu_models = gpu_models
-        if not effective_gpu_models:
-            nodes = self.list_nodes(available=True, min_gpu_memory=reqs.memory_gb)
-            if not nodes:
-                raise ResourceError(f"No GPU nodes available with {reqs.memory_gb}GB+ VRAM")
-            seen = set()
-            effective_gpu_models = []
-            for node in nodes:
-                for gpu in node.node.gpu_specs:
-                    if gpu.name:
-                        model_id = _extract_gpu_model_id(gpu.name)
-                        if model_id not in seen:
-                            seen.add(model_id)
-                            effective_gpu_models.append(model_id)
-
         # Generate name if not provided
         if name is None:
             import uuid
@@ -682,12 +608,12 @@ class BasilicaClient:
                 )
             )
 
-        # Build GPU spec
+        # Build GPU spec - use min_gpu_memory_gb for scheduling, let API find suitable GPUs
         gpu_spec = GpuRequirementsSpec(
             count=gpu_count,
-            model=effective_gpu_models,
+            model=gpu_models or [],
             min_cuda_version=None,
-            min_gpu_memory_gb=None,
+            min_gpu_memory_gb=reqs.memory_gb,
         )
 
         # Build resources
@@ -777,22 +703,6 @@ class BasilicaClient:
         if gpu_count is None:
             gpu_count = reqs.gpu_count
 
-        # Use user-specified GPU models or auto-detect from available nodes
-        effective_gpu_models = gpu_models
-        if not effective_gpu_models:
-            nodes = self.list_nodes(available=True, min_gpu_memory=reqs.memory_gb)
-            if not nodes:
-                raise ResourceError(f"No GPU nodes available with {reqs.memory_gb}GB+ VRAM")
-            seen = set()
-            effective_gpu_models = []
-            for node in nodes:
-                for gpu in node.node.gpu_specs:
-                    if gpu.name:
-                        model_id = _extract_gpu_model_id(gpu.name)
-                        if model_id not in seen:
-                            seen.add(model_id)
-                            effective_gpu_models.append(model_id)
-
         # Generate name if not provided
         if name is None:
             import uuid
@@ -834,12 +744,12 @@ class BasilicaClient:
                 )
             )
 
-        # Build GPU spec
+        # Build GPU spec - use min_gpu_memory_gb for scheduling, let API find suitable GPUs
         gpu_spec = GpuRequirementsSpec(
             count=gpu_count,
-            model=effective_gpu_models,
+            model=gpu_models or [],
             min_cuda_version=None,
-            min_gpu_memory_gb=None,
+            min_gpu_memory_gb=reqs.memory_gb,
         )
 
         # Build resources
