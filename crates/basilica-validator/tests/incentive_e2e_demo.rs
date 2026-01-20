@@ -32,8 +32,8 @@ struct Rental {
     gpu_category: String,
     gpu_count: u32,
     hours_used: f64,
-    user_rate: f64,       // What user paid per GPU-hour
-    miner_bid_rate: f64,  // What miner bid (what they get paid)
+    user_rate: f64,      // What user paid per GPU-hour
+    miner_bid_rate: f64, // What miner bid (what they get paid)
 }
 
 /// Simulates a delivery record (output of billing)
@@ -80,7 +80,11 @@ fn line() -> String {
 }
 
 /// Simulates the auction/bid selection logic
-fn select_winning_bidder(bids: &[MinerBid], gpu_category: &str, gpu_count: u32) -> Option<MinerBid> {
+fn select_winning_bidder(
+    bids: &[MinerBid],
+    gpu_category: &str,
+    gpu_count: u32,
+) -> Option<MinerBid> {
     bids.iter()
         .filter(|b| b.gpu_category == gpu_category && b.gpu_count >= gpu_count)
         .min_by(|a, b| a.bid_per_hour.partial_cmp(&b.bid_per_hour).unwrap())
@@ -256,12 +260,21 @@ fn demo_full_incentive_flow() {
     let winner = select_winning_bidder(&bids, user_request_category, user_request_gpus)
         .expect("Should find a winning bidder");
 
-    println!("  User wants: {} x{} GPUs", user_request_category, user_request_gpus);
+    println!(
+        "  User wants: {} x{} GPUs",
+        user_request_category, user_request_gpus
+    );
     println!("  User rate: ${:.2}/GPU-hour", user_rate);
     println!();
-    println!("  🏆 WINNER: {} (UID {})", winner.miner_hotkey, winner.miner_uid);
+    println!(
+        "  🏆 WINNER: {} (UID {})",
+        winner.miner_hotkey, winner.miner_uid
+    );
     println!("     Bid: ${:.2}/GPU-hour", winner.bid_per_hour);
-    println!("     Platform margin: ${:.2}/GPU-hour", user_rate - winner.bid_per_hour);
+    println!(
+        "     Platform margin: ${:.2}/GPU-hour",
+        user_rate - winner.bid_per_hour
+    );
     println!();
 
     // =========================================================================
@@ -311,11 +324,23 @@ fn demo_full_incentive_flow() {
         let user_revenue = gpu_hours * rental.user_rate;
         let miner_payment = gpu_hours * rental.miner_bid_rate;
 
-        println!("  📦 {}: {} (UID {})", rental.rental_id, rental.miner_hotkey, rental.miner_uid);
-        println!("     {} x{} for {:.1} hours", rental.gpu_category, rental.gpu_count, rental.hours_used);
+        println!(
+            "  📦 {}: {} (UID {})",
+            rental.rental_id, rental.miner_hotkey, rental.miner_uid
+        );
+        println!(
+            "     {} x{} for {:.1} hours",
+            rental.gpu_category, rental.gpu_count, rental.hours_used
+        );
         println!("     GPU-hours: {:.1}", gpu_hours);
-        println!("     User paid: ${:.2} (@ ${:.2}/GPU-hr)", user_revenue, rental.user_rate);
-        println!("     Miner gets: ${:.2} (@ ${:.2}/GPU-hr)", miner_payment, rental.miner_bid_rate);
+        println!(
+            "     User paid: ${:.2} (@ ${:.2}/GPU-hr)",
+            user_revenue, rental.user_rate
+        );
+        println!(
+            "     Miner gets: ${:.2} (@ ${:.2}/GPU-hr)",
+            miner_payment, rental.miner_bid_rate
+        );
         println!();
     }
 
@@ -357,7 +382,10 @@ fn demo_full_incentive_flow() {
         );
         println!("     GPU-hours: {:.1}", d.total_hours);
         println!("     User revenue: ${:.2}", d.user_revenue_usd);
-        println!("     Miner payment: ${:.2} ← WEIGHTS BASED ON THIS", d.miner_payment_usd);
+        println!(
+            "     Miner payment: ${:.2} ← WEIGHTS BASED ON THIS",
+            d.miner_payment_usd
+        );
         println!();
     }
 
@@ -426,13 +454,27 @@ fn demo_full_incentive_flow() {
     println!();
 
     // Within H100 category, weights should be proportional to payments
-    let charlie_h100_weight = weights.iter().find(|(uid, _)| *uid == 2).map(|(_, w)| *w).unwrap_or(0.0);
-    let bob_h100_weight = weights.iter().find(|(uid, _)| *uid == 1).map(|(_, w)| *w).unwrap_or(0.0);
+    let charlie_h100_weight = weights
+        .iter()
+        .find(|(uid, _)| *uid == 2)
+        .map(|(_, w)| *w)
+        .unwrap_or(0.0);
+    let bob_h100_weight = weights
+        .iter()
+        .find(|(uid, _)| *uid == 1)
+        .map(|(_, w)| *w)
+        .unwrap_or(0.0);
 
     if bob_h100_weight > 0.0 && charlie_h100_weight > 0.0 {
         println!("  H100 category weight distribution:");
-        println!("    Charlie: {:.4} (payment: ${:.2})", charlie_h100_weight, charlie_payment);
-        println!("    Bob: {:.4} (payment: ${:.2})", bob_h100_weight, bob_payment);
+        println!(
+            "    Charlie: {:.4} (payment: ${:.2})",
+            charlie_h100_weight, charlie_payment
+        );
+        println!(
+            "    Bob: {:.4} (payment: ${:.2})",
+            bob_h100_weight, bob_payment
+        );
 
         let h100_payment_ratio = charlie_payment / bob_payment;
         let h100_weight_ratio = charlie_h100_weight / bob_h100_weight;
@@ -440,7 +482,10 @@ fn demo_full_incentive_flow() {
         println!("    Weight ratio (Charlie/Bob): {:.2}", h100_weight_ratio);
 
         let ratio_match = (h100_payment_ratio - h100_weight_ratio).abs() < 0.1;
-        println!("    ✅ Ratios match: {}", if ratio_match { "YES" } else { "CLOSE" });
+        println!(
+            "    ✅ Ratios match: {}",
+            if ratio_match { "YES" } else { "CLOSE" }
+        );
     }
     println!();
 
@@ -453,10 +498,10 @@ fn demo_full_incentive_flow() {
     // Simulate Charlie deregistering (remove from metagraph)
     let metagraph_after_deregister = Metagraph {
         hotkeys: vec![
-            "5GrwvaEF...Alice".to_string(),   // UID 0
-            "5FHneW46...Bob".to_string(),     // UID 1
-            "5NewMiner...Eve".to_string(),    // UID 2 - NEW MINER took Charlie's slot!
-            "5DAAnrj7...Dave".to_string(),    // UID 3
+            "5GrwvaEF...Alice".to_string(), // UID 0
+            "5FHneW46...Bob".to_string(),   // UID 1
+            "5NewMiner...Eve".to_string(),  // UID 2 - NEW MINER took Charlie's slot!
+            "5DAAnrj7...Dave".to_string(),  // UID 3
         ],
     };
 
@@ -466,7 +511,8 @@ fn demo_full_incentive_flow() {
     println!("  Running weight calculation with OLD deliveries but NEW metagraph...");
     println!();
 
-    let weights_after = calculate_weights(&deliveries, &metagraph_after_deregister, &emission_config);
+    let weights_after =
+        calculate_weights(&deliveries, &metagraph_after_deregister, &emission_config);
 
     println!();
     println!("  🎯 Weights after deregistration:");
@@ -483,7 +529,11 @@ fn demo_full_incentive_flow() {
     println!();
 
     // Verify Eve (new UID 2) did NOT get Charlie's weight
-    let eve_weight = weights_after.iter().find(|(uid, _)| *uid == 2).map(|(_, w)| *w).unwrap_or(0.0);
+    let eve_weight = weights_after
+        .iter()
+        .find(|(uid, _)| *uid == 2)
+        .map(|(_, w)| *w)
+        .unwrap_or(0.0);
     println!("  ✅ Eve (new UID 2) weight: {:.4}", eve_weight);
     println!("     Charlie's pending revenue was CLEARED, not given to Eve!");
     println!();
@@ -529,8 +579,16 @@ fn demo_full_incentive_flow() {
     println!();
 
     // Verify Bob's weight went to UID 4 (his new UID), not UID 1 (Eve)
-    let bob_new_weight = weights_migrated.iter().find(|(uid, _)| *uid == 4).map(|(_, w)| *w).unwrap_or(0.0);
-    let eve_weight = weights_migrated.iter().find(|(uid, _)| *uid == 1).map(|(_, w)| *w).unwrap_or(0.0);
+    let bob_new_weight = weights_migrated
+        .iter()
+        .find(|(uid, _)| *uid == 4)
+        .map(|(_, w)| *w)
+        .unwrap_or(0.0);
+    let eve_weight = weights_migrated
+        .iter()
+        .find(|(uid, _)| *uid == 1)
+        .map(|(_, w)| *w)
+        .unwrap_or(0.0);
 
     println!("  ✅ Bob (new UID 4) weight: {:.4}", bob_new_weight);
     println!("  ✅ Eve (UID 1) weight: {:.4} (should be 0!)", eve_weight);
@@ -569,7 +627,10 @@ fn demo_bid_economics() {
     ];
 
     println!("User rate: ${:.2}/GPU-hour", user_rate);
-    println!("Rental: {} GPUs for {} hours = {} GPU-hours", gpus, hours, gpu_hours);
+    println!(
+        "Rental: {} GPUs for {} hours = {} GPU-hours",
+        gpus, hours, gpu_hours
+    );
     println!();
 
     for (name, bid, note) in &scenarios {
@@ -579,7 +640,10 @@ fn demo_bid_economics() {
         let miner_margin_pct = (miner_payment / user_revenue) * 100.0;
 
         println!("  {} bids ${:.2}/GPU-hr ({})", name, bid, note);
-        println!("    If wins: Miner gets ${:.2} ({:.0}% of user payment)", miner_payment, miner_margin_pct);
+        println!(
+            "    If wins: Miner gets ${:.2} ({:.0}% of user payment)",
+            miner_payment, miner_margin_pct
+        );
         println!("    Platform keeps: ${:.2}", platform_margin);
         println!();
     }
@@ -694,7 +758,11 @@ fn demo_category_caps() {
     println!();
 
     // Calculate what DominantMiner got
-    let dominant_weight = weights.iter().find(|(uid, _)| *uid == 0).map(|(_, w)| *w).unwrap_or(0.0);
+    let dominant_weight = weights
+        .iter()
+        .find(|(uid, _)| *uid == 0)
+        .map(|(_, w)| *w)
+        .unwrap_or(0.0);
     let dominant_pct = (dominant_weight / total) * 100.0;
 
     // They dominated 90% of H100 (50% pool) + 80% of A100 (30% pool)
