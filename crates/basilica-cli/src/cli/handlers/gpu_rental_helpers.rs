@@ -1,6 +1,6 @@
 //! Common helper functions for GPU rental operations
 
-use crate::cli::handlers::region_mapping::region_matches_country;
+use crate::cli::handlers::region_mapping::{extract_country_code, region_matches_country};
 use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use basilica_common::types::ComputeCategory;
@@ -117,6 +117,7 @@ struct UnifiedRentalItem {
     rental_id: String,
     compute_type: ComputeCategory,
     provider_or_node: String,
+    location: String,
     gpu_info: String,
     status: String,
     created_at: String,
@@ -211,10 +212,19 @@ pub async fn resolve_target_rental_unified(
                 format!("{}x {}", rental.gpu_specs.len(), rental.gpu_specs[0].name)
             };
 
+            // Extract country code from location
+            let location_code = rental
+                .location
+                .as_ref()
+                .and_then(|loc| extract_country_code(loc))
+                .unwrap_or("--")
+                .to_string();
+
             unified_items.push(UnifiedRentalItem {
                 rental_id: rental.rental_id.clone(),
                 compute_type: ComputeCategory::CommunityCloud,
                 provider_or_node: rental.node_id.clone(),
+                location: location_code,
                 gpu_info,
                 status: format!("{:?}", rental.state),
                 created_at: rental.created_at.clone(),
@@ -241,10 +251,19 @@ pub async fn resolve_target_rental_unified(
                 rental.gpu_type.to_uppercase()
             };
 
+            // Extract country code from location_code
+            let location_code = rental
+                .location_code
+                .as_ref()
+                .and_then(|loc| extract_country_code(loc))
+                .unwrap_or("--")
+                .to_string();
+
             unified_items.push(UnifiedRentalItem {
                 rental_id: rental.rental_id.clone(),
                 compute_type: ComputeCategory::SecureCloud,
                 provider_or_node: rental.provider.clone(),
+                location: location_code,
                 gpu_info,
                 status: rental.status.clone(),
                 created_at: rental.created_at.to_rfc3339(),
@@ -277,10 +296,19 @@ pub async fn resolve_target_rental_unified(
                 (None, None) => "CPU-only".to_string(),
             };
 
+            // Extract country code from location_code
+            let location_code = rental
+                .location_code
+                .as_ref()
+                .and_then(|loc| extract_country_code(loc))
+                .unwrap_or("--")
+                .to_string();
+
             unified_items.push(UnifiedRentalItem {
                 rental_id: rental.rental_id.clone(),
                 compute_type: ComputeCategory::SecureCloud,
                 provider_or_node: rental.provider.clone(),
+                location: location_code,
                 gpu_info: cpu_info,
                 status: rental.status.clone(),
                 created_at: rental.created_at.to_rfc3339(),
@@ -290,6 +318,17 @@ pub async fn resolve_target_rental_unified(
 
     if unified_items.is_empty() {
         return Err(eyre!("No active rentals found"));
+    }
+
+    // Helper to truncate strings for column width
+    fn truncate(s: &str, max_len: usize) -> String {
+        let char_count = s.chars().count();
+        if char_count <= max_len {
+            s.to_string()
+        } else {
+            let truncated: String = s.chars().take(max_len - 1).collect();
+            format!("{}…", truncated)
+        }
     }
 
     // Format items for selection
@@ -302,15 +341,22 @@ pub async fn resolve_target_rental_unified(
             };
 
             format!(
-                "{} | {:<20} | {:<25} | {:<12} | {}",
+                "{} | {:<15} | {:<4} | {:<25} | {:<12} | {}",
                 style(type_label).cyan(),
-                item.provider_or_node,
-                item.gpu_info,
+                truncate(&item.provider_or_node, 15),
+                item.location,
+                truncate(&item.gpu_info, 25),
                 item.status,
-                item.created_at
+                truncate(&item.created_at, 19)
             )
         })
         .collect();
+
+    // Show header hint
+    println!(
+        "{}",
+        style("  Type      | Provider        | Loc  | GPU                       | Status       | Created").dim()
+    );
 
     // Use dialoguer to select
     let theme = dialoguer::theme::ColorfulTheme::default();
@@ -326,9 +372,9 @@ pub async fn resolve_target_rental_unified(
         None => return Err(eyre!("Selection cancelled")),
     };
 
-    // Clear the selection prompt line
+    // Clear the header and selection prompt lines
     let term = Term::stdout();
-    let _ = term.clear_last_lines(1);
+    let _ = term.clear_last_lines(2);
 
     let selected = &unified_items[selection];
     Ok((selected.rental_id.clone(), selected.compute_type))
@@ -358,6 +404,7 @@ struct UnifiedOfferingItem {
     offering_type: OfferingType,
     display_gpu: String,
     display_provider: String,
+    display_country: String,
     display_memory: String,
     display_price: String,
     // Original data for creating the offering
@@ -507,6 +554,9 @@ pub async fn resolve_offering_unified(
                     )
                 },
                 display_provider: format!("{}", offering.provider),
+                display_country: extract_country_code(&offering.region)
+                    .unwrap_or("--")
+                    .to_string(),
                 display_memory: memory_str,
                 display_price: format!("${:.2}/hr", total_price),
                 secure_offering: Some(offering),
@@ -550,6 +600,9 @@ pub async fn resolve_offering_unified(
                     offering_type: OfferingType::SecureCpu,
                     display_gpu: format!("{} vCPU", offering.vcpu_count),
                     display_provider: offering.provider.to_string(),
+                    display_country: extract_country_code(&offering.region)
+                        .unwrap_or("--")
+                        .to_string(),
                     display_memory: format!("{}GB RAM", offering.system_memory_gb),
                     display_price: format!("${:.2}/hr", hourly_rate),
                     secure_offering: None,
@@ -606,10 +659,14 @@ pub async fn resolve_offering_unified(
                 .clone()
                 .unwrap_or_else(|| "Unknown".to_string());
 
+            // Extract country code from location
+            let country_code = extract_country_code(&location).unwrap_or("--").to_string();
+
             unified_items.push(UnifiedOfferingItem {
                 offering_type: OfferingType::Community,
                 display_gpu: gpu_info,
                 display_provider: location,
+                display_country: country_code,
                 display_memory: memory_str,
                 display_price: price_str,
                 secure_offering: None,
@@ -647,10 +704,11 @@ pub async fn resolve_offering_unified(
             };
 
             format!(
-                "{} │ {:<20} │ {:<20} │ {:<8} │ {}",
+                "{} │ {:<20} │ {:<15} │ {:<4} │ {:<8} │ {}",
                 style(type_label).cyan(),
                 truncate(&item.display_gpu, 20),
-                truncate(&item.display_provider, 20),
+                truncate(&item.display_provider, 15),
+                item.display_country,
                 item.display_memory,
                 style(&item.display_price).green()
             )
@@ -660,7 +718,8 @@ pub async fn resolve_offering_unified(
     // Show header hint
     println!(
         "{}",
-        style("  Type      │ GPU/CPU              │ Provider/Location    │ Memory   │ Price").dim()
+        style("  Type      │ GPU/CPU              │ Provider        │ Loc  │ Memory   │ Price")
+            .dim()
     );
 
     // Use dialoguer to select
