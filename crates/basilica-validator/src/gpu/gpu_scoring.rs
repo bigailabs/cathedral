@@ -208,7 +208,7 @@ impl GpuScoringEngine {
 
     /// Calculate uptime-based multiplication factor for a specific node
     /// Uses 14-day linear ramp-up based on actual uptime from verification logs
-    /// 
+    ///
     /// Note: No longer used for weight calculation (miners get full weight immediately).
     /// Kept for future gRPC endpoint that exposes uptime data to the payout service.
     #[allow(dead_code)]

@@ -31,7 +31,10 @@ pub struct AuctionEngine {
 
 impl AuctionEngine {
     pub fn new(price_client: Arc<PriceClient>, config: AuctionConfig) -> Self {
-        Self { price_client, config }
+        Self {
+            price_client,
+            config,
+        }
     }
 
     pub async fn clear_auction(
@@ -48,8 +51,8 @@ impl AuctionEngine {
         let floor = baseline * self.config.min_bid_floor_fraction;
         let mut valid_bids: Vec<ValidatedBid> = bids
             .iter()
+            .filter(|&b| b.bid_per_hour >= floor)
             .cloned()
-            .filter(|b| b.bid_per_hour >= floor)
             .collect();
 
         valid_bids.sort_by(|a, b| {
@@ -77,7 +80,7 @@ impl AuctionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::{PriceFetcher, PriceClient};
+    use crate::pricing::client::{PriceClient, PriceFetcher};
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -153,6 +156,4 @@ mod tests {
         }];
         assert!(engine.clear_auction("H100", &bids).await.is_err());
     }
-
 }
-

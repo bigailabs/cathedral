@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 /// Simulates a miner's bid
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MinerBid {
     miner_hotkey: String,
     miner_uid: u16,

@@ -233,7 +233,8 @@ impl ValidatorService {
         let bid_persistence = persistence_arc.clone();
         let bid_auction_config = self.config.auction.clone();
         let bid_server_handle = tokio::spawn(async move {
-            if let Err(e) = start_bid_server(bid_grpc_config, bid_persistence, bid_auction_config).await
+            if let Err(e) =
+                start_bid_server(bid_grpc_config, bid_persistence, bid_auction_config).await
             {
                 error!("Bid gRPC server failed: {}", e);
             }

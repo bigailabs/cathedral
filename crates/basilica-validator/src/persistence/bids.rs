@@ -538,4 +538,3 @@ mod tests {
         repo.insert_clearing_result(&clearing).await.unwrap();
     }
 }
-

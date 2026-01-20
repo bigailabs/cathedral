@@ -50,7 +50,10 @@ impl BidService {
         Ok(epoch)
     }
 
-    fn validate_bid_fields(&self, bid: &basilica_protocol::miner_discovery::MinerBid) -> Result<()> {
+    fn validate_bid_fields(
+        &self,
+        bid: &basilica_protocol::miner_discovery::MinerBid,
+    ) -> Result<()> {
         if bid.miner_hotkey.trim().is_empty() {
             anyhow::bail!("miner_hotkey is required");
         }
@@ -85,7 +88,10 @@ impl BidService {
         )
     }
 
-    fn verify_bid_signature(&self, bid: &basilica_protocol::miner_discovery::MinerBid) -> Result<()> {
+    fn verify_bid_signature(
+        &self,
+        bid: &basilica_protocol::miner_discovery::MinerBid,
+    ) -> Result<()> {
         let hotkey = Hotkey::new(bid.miner_hotkey.clone())
             .map_err(|e| anyhow::anyhow!("invalid miner_hotkey: {e}"))?;
         let message = self.build_bid_message(bid);
@@ -127,7 +133,8 @@ impl BidService {
     }
 
     async fn expire_old_bids(&self, repo: &BidRepository) -> Result<()> {
-        let cutoff = Utc::now() - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
+        let cutoff =
+            Utc::now() - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
         repo.expire_old_bids(cutoff).await?;
         Ok(())
     }
@@ -183,7 +190,7 @@ impl MinerDiscovery for BidService {
             .get_available_nodes_for_miner(
                 &miner_id,
                 &bid.gpu_category,
-                bid.gpu_count as u32,
+                bid.gpu_count,
                 self.auction_config.bid_node_freshness_secs,
             )
             .await
@@ -204,7 +211,8 @@ impl MinerDiscovery for BidService {
         if repo
             .nonce_exists(&bid.miner_hotkey, &bid.nonce, replay_cutoff)
             .await
-            .map_err(|e| Status::internal(format!("failed to check nonce: {e}")))? {
+            .map_err(|e| Status::internal(format!("failed to check nonce: {e}")))?
+        {
             return Err(Status::already_exists("nonce already used"));
         }
 
@@ -285,4 +293,3 @@ pub async fn start_bid_server(
 
     Ok(())
 }
-

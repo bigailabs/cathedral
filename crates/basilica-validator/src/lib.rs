@@ -5,10 +5,10 @@
 
 pub mod agent_installer;
 pub mod api;
+pub mod auction;
 pub mod ban_system;
 pub mod billing;
 pub mod bittensor_core;
-pub mod auction;
 pub mod cli;
 pub mod collateral;
 pub mod config;
@@ -22,11 +22,11 @@ pub mod node_profile;
 pub mod os_process;
 pub mod persistence;
 pub mod pricing;
-pub mod taostats;
 pub mod rental;
 pub mod rental_adapter;
 pub mod service;
 pub mod ssh;
+pub mod taostats;
 
 // Main public API exports
 #[cfg(feature = "client")]

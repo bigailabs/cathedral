@@ -74,9 +74,7 @@ impl AuctionConfig {
             return Err(anyhow!("taostats_cache_ttl_secs must be greater than 0"));
         }
         if !(0.0..=1.0).contains(&self.miner_emission_share) {
-            return Err(anyhow!(
-                "miner_emission_share must be between 0.0 and 1.0"
-            ));
+            return Err(anyhow!("miner_emission_share must be between 0.0 and 1.0"));
         }
         Ok(())
     }
@@ -137,4 +135,3 @@ mod tests {
         assert!(config.validate().is_err());
     }
 }
-

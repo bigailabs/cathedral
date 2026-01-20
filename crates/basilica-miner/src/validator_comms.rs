@@ -147,6 +147,7 @@ impl ValidatorCommsServer {
         )
     }
 
+    #[allow(clippy::result_large_err)]
     fn sign_bid(&self, mut bid: MinerBid) -> Result<MinerBid, Status> {
         if bid.nonce.trim().is_empty() {
             bid.nonce = generate_nonce();
@@ -162,6 +163,7 @@ impl ValidatorCommsServer {
         Ok(bid)
     }
 
+    #[allow(clippy::result_large_err)]
     pub fn create_signed_bid(
         &self,
         gpu_category: String,
@@ -495,6 +497,7 @@ impl MinerDiscovery for MinerDiscoveryService {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_bid(bid: &MinerBid, expected_hotkey: &str) -> Result<(), Status> {
     if bid.miner_hotkey.trim().is_empty() {
         return Err(Status::invalid_argument("miner_hotkey is required"));
@@ -661,7 +664,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let service = MockValidatorBidService::default();
+        let service = MockValidatorBidService;
 
         tokio::spawn(async move {
             tonic::transport::Server::builder()

@@ -314,4 +314,3 @@ impl Default for EmissionConfig {
         }
     }
 }
-

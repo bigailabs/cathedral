@@ -15,6 +15,103 @@ pub struct BillingReadClient {
     channel: tokio::sync::Mutex<Option<Channel>>,
 }
 
+impl BillingReadClient {
+    pub fn new(config: BillingConfig) -> Self {
+        if !config.enabled {
+            info!("Billing read client disabled by configuration");
+            return Self {
+                config,
+                channel: tokio::sync::Mutex::new(None),
+            };
+        }
+
+        Self {
+            config,
+            channel: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    pub async fn get_miner_delivery(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+        miner_hotkeys: Vec<String>,
+    ) -> Result<Vec<MinerDelivery>> {
+        if !self.config.enabled {
+            return Ok(Vec::new());
+        }
+
+        let channel = self.get_or_connect().await?;
+        let mut client = BillingServiceClient::new(channel);
+
+        let request = GetMinerDeliveryRequest {
+            since_epoch_seconds: since.timestamp(),
+            until_epoch_seconds: until.timestamp(),
+            miner_hotkeys,
+        };
+
+        let response = client
+            .get_miner_delivery(request)
+            .await
+            .context("Failed to request miner delivery")?
+            .into_inner();
+
+        Ok(response.deliveries)
+    }
+
+    async fn connect(config: &BillingConfig) -> Result<Channel> {
+        info!(
+            "Initializing billing read client for endpoint: {} (TLS: {})",
+            config.billing_endpoint, config.use_tls
+        );
+
+        let mut endpoint = Endpoint::from_shared(config.billing_endpoint.clone())
+            .with_context(|| format!("Invalid billing endpoint: {}", config.billing_endpoint))?
+            .connect_timeout(Duration::from_secs(config.timeout_secs))
+            .timeout(Duration::from_secs(config.timeout_secs));
+
+        if config.use_tls {
+            let host = config
+                .billing_endpoint
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split([':', '/'].as_ref())
+                .next()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint)
+                })?;
+
+            info!(
+                "Configuring TLS with system root certificates for host: {}",
+                host
+            );
+
+            let tls_config = ClientTlsConfig::new().domain_name(host);
+            endpoint = endpoint
+                .tls_config(tls_config)
+                .with_context(|| "Failed to configure TLS for billing endpoint")?;
+        }
+
+        endpoint.connect().await.with_context(|| {
+            format!(
+                "Failed to connect to billing service at {}",
+                config.billing_endpoint
+            )
+        })
+    }
+
+    async fn get_or_connect(&self) -> Result<Channel> {
+        let mut guard = self.channel.lock().await;
+        if let Some(channel) = guard.as_ref() {
+            return Ok(channel.clone());
+        }
+
+        let channel = Self::connect(&self.config).await?;
+        *guard = Some(channel.clone());
+        Ok(channel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,102 +310,5 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_empty());
-    }
-}
-
-impl BillingReadClient {
-    pub fn new(config: BillingConfig) -> Self {
-        if !config.enabled {
-            info!("Billing read client disabled by configuration");
-            return Self {
-                config,
-                channel: tokio::sync::Mutex::new(None),
-            };
-        }
-
-        Self {
-            config,
-            channel: tokio::sync::Mutex::new(None),
-        }
-    }
-
-    pub async fn get_miner_delivery(
-        &self,
-        since: DateTime<Utc>,
-        until: DateTime<Utc>,
-        miner_hotkeys: Vec<String>,
-    ) -> Result<Vec<MinerDelivery>> {
-        if !self.config.enabled {
-            return Ok(Vec::new());
-        }
-
-        let channel = self.get_or_connect().await?;
-        let mut client = BillingServiceClient::new(channel);
-
-        let request = GetMinerDeliveryRequest {
-            since_epoch_seconds: since.timestamp(),
-            until_epoch_seconds: until.timestamp(),
-            miner_hotkeys,
-        };
-
-        let response = client
-            .get_miner_delivery(request)
-            .await
-            .context("Failed to request miner delivery")?
-            .into_inner();
-
-        Ok(response.deliveries)
-    }
-
-    async fn connect(config: &BillingConfig) -> Result<Channel> {
-        info!(
-            "Initializing billing read client for endpoint: {} (TLS: {})",
-            config.billing_endpoint, config.use_tls
-        );
-
-        let mut endpoint = Endpoint::from_shared(config.billing_endpoint.clone())
-            .with_context(|| format!("Invalid billing endpoint: {}", config.billing_endpoint))?
-            .connect_timeout(Duration::from_secs(config.timeout_secs))
-            .timeout(Duration::from_secs(config.timeout_secs));
-
-        if config.use_tls {
-            let host = config
-                .billing_endpoint
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .split([':', '/'].as_ref())
-                .next()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Invalid TLS endpoint: {}", config.billing_endpoint)
-                })?;
-
-            info!(
-                "Configuring TLS with system root certificates for host: {}",
-                host
-            );
-
-            let tls_config = ClientTlsConfig::new().domain_name(host);
-            endpoint = endpoint
-                .tls_config(tls_config)
-                .with_context(|| "Failed to configure TLS for billing endpoint")?;
-        }
-
-        endpoint.connect().await.with_context(|| {
-            format!(
-                "Failed to connect to billing service at {}",
-                config.billing_endpoint
-            )
-        })
-    }
-
-    async fn get_or_connect(&self) -> Result<Channel> {
-        let mut guard = self.channel.lock().await;
-        if let Some(channel) = guard.as_ref() {
-            return Ok(channel.clone());
-        }
-
-        let channel = Self::connect(&self.config).await?;
-        *guard = Some(channel.clone());
-        Ok(channel)
     }
 }

@@ -25,6 +25,12 @@ pub struct HttpTaoPriceFetcher {
     client: reqwest::Client,
 }
 
+impl Default for HttpTaoPriceFetcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpTaoPriceFetcher {
     pub fn new() -> Self {
         Self {
@@ -37,12 +43,7 @@ impl HttpTaoPriceFetcher {
 impl TaoPriceFetcher for HttpTaoPriceFetcher {
     async fn fetch(&self, base_url: &str) -> Result<f64> {
         let url = format!("{}/price", base_url.trim_end_matches('/'));
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self.client.get(url).send().await?.error_for_status()?;
         let payload: TaoPriceResponse = response.json().await?;
         // TODO: Add alpha price and subnet emissions endpoints as they stabilize.
         Ok(payload.price)
@@ -58,11 +59,7 @@ pub struct TaoStatsClient {
 
 impl TaoStatsClient {
     pub fn new(base_url: String, cache_ttl: Duration) -> Self {
-        Self::new_with_fetcher(
-            base_url,
-            cache_ttl,
-            Arc::new(HttpTaoPriceFetcher::new()),
-        )
+        Self::new_with_fetcher(base_url, cache_ttl, Arc::new(HttpTaoPriceFetcher::new()))
     }
 
     pub fn new_with_fetcher(
@@ -188,4 +185,3 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
-

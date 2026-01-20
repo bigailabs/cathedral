@@ -10,9 +10,7 @@ pub struct PriceCache {
 impl PriceCache {
     pub fn get_if_valid(&self, ttl: Duration) -> Option<HashMap<String, f64>> {
         match (self.prices.as_ref(), self.fetched_at) {
-            (Some(prices), Some(fetched_at)) if fetched_at.elapsed() <= ttl => {
-                Some(prices.clone())
-            }
+            (Some(prices), Some(fetched_at)) if fetched_at.elapsed() <= ttl => Some(prices.clone()),
             _ => None,
         }
     }
@@ -62,4 +60,3 @@ mod tests {
         assert_eq!(cache.get_any().unwrap(), prices);
     }
 }
-
