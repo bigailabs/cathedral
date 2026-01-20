@@ -35,7 +35,7 @@ Using `@basilica.deployment` decorator:
 | `05_decorator_fastapi.py` | FastAPI + uvicorn | `python3 05_decorator_fastapi.py` |
 | `05_decorator_gpu.py` | GPU decorator | `python3 05_decorator_gpu.py` |
 
-## Advanced Examples (06-18)
+## Advanced Examples (06-23)
 
 | Example | Description | Run |
 |---------|-------------|-----|
@@ -52,6 +52,12 @@ Using `@basilica.deployment` decorator:
 | `16_progress_callback.py` | Custom deployment progress monitoring | `python3 16_progress_callback.py` |
 | `17_agentgym_custom/` | Custom AgentGym environment | See directory README |
 | `18_torchrun_ddp/` | PyTorch DDP training with torchrun | See directory README |
+| `19_deploy_vllm_template.py` | vLLM using deploy_vllm() template | `python3 19_deploy_vllm_template.py` |
+| `20_deploy_sglang_template.py` | SGLang using deploy_sglang() template | `python3 20_deploy_sglang_template.py` |
+| `21_async_concurrent.py` | Async concurrent deployments | `python3 21_async_concurrent.py` |
+| `22_vllm_embeddings.py` | vLLM Embeddings API (E5-Mistral) | `python3 22_vllm_embeddings.py` |
+| `22_vllm_embeddings_llama.py` | vLLM Embeddings with Llama-3.1-8B | `python3 22_vllm_embeddings_llama.py` |
+| `23_vllm_llama_with_embeddings.py` | Llama-3.1-8B + E5 Embeddings (RAG stack) | `python3 23_vllm_llama_with_embeddings.py` |
 
 ## Deployment Options
 
