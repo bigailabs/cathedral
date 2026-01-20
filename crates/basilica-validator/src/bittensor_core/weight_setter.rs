@@ -3,14 +3,18 @@
 //! Manages Bittensor weight setting operations for the Validator.
 //! Sets weights every N blocks based on miner scores from node validations.
 
+use crate::billing::BillingReadClient;
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
+use crate::config::auction::AuctionConfig;
 use crate::config::emission::EmissionConfig;
+use crate::config::BillingConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::SimplePersistence;
+use crate::taostats::TaoStatsClient;
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{MinerUid, NodeId};
@@ -18,7 +22,7 @@ use basilica_common::{KeyValueStorage, MemoryStorage};
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -57,6 +61,9 @@ pub struct WeightSetter {
     gpu_scoring_engine: Arc<GpuScoringEngine>,
     weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
+    auction_config: AuctionConfig,
+    billing_read_client: Arc<BillingReadClient>,
+    taostats_client: Arc<TaoStatsClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
 }
@@ -72,7 +79,9 @@ impl WeightSetter {
         min_score_threshold: f64,
         blocks_per_weight_set: u64,
         gpu_scoring_engine: Arc<GpuScoringEngine>,
+        billing_config: BillingConfig,
         emission_config: EmissionConfig,
+        auction_config: AuctionConfig,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
     ) -> Result<Self> {
@@ -80,6 +89,10 @@ impl WeightSetter {
         let weight_allocation_engine = Arc::new(WeightAllocationEngine::new(
             emission_config.clone(),
             min_score_threshold,
+        ));
+        let taostats_client = Arc::new(TaoStatsClient::new(
+            auction_config.taostats_api_url.clone(),
+            Duration::from_secs(auction_config.taostats_cache_ttl_secs),
         ));
 
         Ok(Self {
@@ -93,6 +106,9 @@ impl WeightSetter {
             gpu_scoring_engine,
             weight_allocation_engine,
             emission_config,
+            auction_config,
+            billing_read_client: Arc::new(BillingReadClient::new(billing_config)),
+            taostats_client,
             gpu_profile_repo,
             metrics,
         })
@@ -231,22 +247,58 @@ impl WeightSetter {
             metagraph.hotkeys.len()
         );
 
-        // 2. Get last weight set timestamp for epoch filtering
+        // 2. Get last weight set timestamp for delivery filtering
         let last_weight_timestamp = self.get_last_weight_set_timestamp().await?;
         info!(
-            "Fetching miners by GPU category from scoring engine, cutoff at {GPU_CATEGORY_CUTOFF_HOURS} hours, epoch: {:?}",
+            "Fetching miner delivery from billing, epoch: {:?}",
             last_weight_timestamp
         );
 
-        // 3. Get miners by GPU category from the scoring engine with axon validation and epoch filtering
-        let miners_by_category = self
-            .gpu_scoring_engine
-            .get_miners_by_gpu_category_since_epoch(
-                last_weight_timestamp,
-                GPU_CATEGORY_CUTOFF_HOURS,
-                &metagraph,
-            )
+        let now = Utc::now();
+        let since = last_weight_timestamp.unwrap_or(now - chrono::Duration::hours(24));
+
+        // 3. Get payment-based weights from billing summaries
+        let deliveries = self
+            .billing_read_client
+            .get_miner_delivery(since, now, Vec::new())
             .await?;
+
+        let active_uids: HashSet<u16> = (0..metagraph.hotkeys.len())
+            .filter_map(|uid| u16::try_from(uid).ok())
+            .collect();
+
+        let mut miners_by_category: HashMap<String, Vec<(MinerUid, f64)>> = HashMap::new();
+        for delivery in deliveries {
+            let uid = match u16::try_from(delivery.miner_uid) {
+                Ok(value) => value,
+                Err(_) => {
+                    warn!(
+                        miner_uid = delivery.miner_uid,
+                        "Skipping delivery with invalid miner_uid"
+                    );
+                    continue;
+                }
+            };
+            if !active_uids.contains(&uid) {
+                continue;
+            }
+
+            let category = if delivery.gpu_category.trim().is_empty() {
+                "UNKNOWN".to_string()
+            } else {
+                delivery.gpu_category
+            };
+            let miner_payment_usd = delivery.miner_payment_usd;
+            if miner_payment_usd <= 0.0 {
+                // TODO: Decide if zero-payment deliveries should be excluded or flagged.
+                continue;
+            }
+
+            miners_by_category
+                .entry(category)
+                .or_default()
+                .push((MinerUid::new(uid), miner_payment_usd));
+        }
 
         if miners_by_category.is_empty() {
             warn!("No miners found in any GPU category - proceeding with burn allocation");
@@ -258,7 +310,22 @@ impl WeightSetter {
             miners_by_category.keys().collect::<Vec<_>>()
         );
 
-        // 4. Calculate weight distribution using the allocation engine
+        // 4. Fetch TAO price for economic context
+        match self.taostats_client.get_tao_price().await {
+            Ok(tao_price) => {
+                info!(
+                    tao_price_usd = tao_price,
+                    miner_emission_share = self.auction_config.miner_emission_share,
+                    burn_percentage = self.emission_config.burn_percentage,
+                    "Fetched TAO price for weight context"
+                );
+            }
+            Err(err) => {
+                warn!("Failed to fetch TAO price: {}", err);
+            }
+        }
+
+        // 5. Calculate weight distribution (delivered hours only)
         let weight_distribution = self
             .weight_allocation_engine
             .calculate_weight_distribution(miners_by_category)?;

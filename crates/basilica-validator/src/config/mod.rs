@@ -1,3 +1,4 @@
+pub mod auction;
 pub mod emission;
 
 #[cfg(test)]

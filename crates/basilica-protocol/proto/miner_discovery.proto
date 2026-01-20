@@ -12,6 +12,9 @@ service MinerDiscovery {
 
   // Discover available nodes from miner
   rpc DiscoverNodes(DiscoverNodesRequest) returns (ListNodeConnectionDetailsResponse);
+
+  // Submit a bid for auction-based incentives
+  rpc SubmitBid(SubmitBidRequest) returns (SubmitBidResponse);
 }
 
 message ValidatorAuthRequest {
@@ -59,4 +62,25 @@ message NodeConnectionDetails {
 // Response containing list of available nodes
 message ListNodeConnectionDetailsResponse {
   repeated NodeConnectionDetails nodes = 1; // list of nodes
+}
+
+message MinerBid {
+  string miner_hotkey = 1;
+  string gpu_category = 2;        // "H100", "A100", "B200"
+  double bid_per_hour = 3;        // $/hr per GPU
+  uint32 gpu_count = 4;           // Capacity being bid
+  bytes attestation = 5;          // Hardware attestation
+  int64 timestamp = 6;
+  bytes signature = 7;            // Signed by miner hotkey
+  string nonce = 8;               // Replay protection nonce
+}
+
+message SubmitBidRequest {
+  MinerBid bid = 1;
+}
+
+message SubmitBidResponse {
+  bool accepted = 1;
+  string error_message = 2;
+  string epoch_id = 3;
 }

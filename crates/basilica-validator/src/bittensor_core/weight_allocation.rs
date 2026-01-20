@@ -41,14 +41,14 @@ impl WeightAllocationEngine {
         let remaining_weight = total_weight - burn_weight;
 
         // Filter miners by minimum score threshold
-        let filtered_miners = self.filter_miners_by_score(miners_by_category)?;
+        let adjusted_miners = self.filter_miners_by_score(miners_by_category)?;
 
         // Calculate category weight pools for ALL configured categories
         let all_category_pools = self.calculate_all_category_pools(remaining_weight)?;
 
         // Track which categories have miners
         let mut active_categories = std::collections::HashSet::new();
-        for category in filtered_miners.keys() {
+        for category in adjusted_miners.keys() {
             active_categories.insert(category.clone());
         }
 
@@ -70,7 +70,7 @@ impl WeightAllocationEngine {
         let mut category_allocations = HashMap::new();
         let mut aggregated_count = 0;
 
-        for (category, miners) in filtered_miners {
+        for (category, miners) in adjusted_miners {
             let category_weight_pool = all_category_pools.get(&category).copied().unwrap_or(0);
 
             if category_weight_pool == 0 || miners.is_empty() {

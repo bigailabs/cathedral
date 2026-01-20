@@ -84,6 +84,48 @@ pub struct ListNodeConnectionDetailsResponse {
     #[prost(message, repeated, tag = "1")]
     pub nodes: ::prost::alloc::vec::Vec<NodeConnectionDetails>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MinerBid {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    /// "H100", "A100", "B200"
+    #[prost(string, tag = "2")]
+    pub gpu_category: ::prost::alloc::string::String,
+    /// $/hr per GPU
+    #[prost(double, tag = "3")]
+    pub bid_per_hour: f64,
+    /// Capacity being bid
+    #[prost(uint32, tag = "4")]
+    pub gpu_count: u32,
+    /// Hardware attestation
+    #[prost(bytes = "vec", tag = "5")]
+    pub attestation: ::prost::alloc::vec::Vec<u8>,
+    #[prost(int64, tag = "6")]
+    pub timestamp: i64,
+    /// Signed by miner hotkey
+    #[prost(bytes = "vec", tag = "7")]
+    pub signature: ::prost::alloc::vec::Vec<u8>,
+    /// Replay protection nonce
+    #[prost(string, tag = "8")]
+    pub nonce: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubmitBidRequest {
+    #[prost(message, optional, tag = "1")]
+    pub bid: ::core::option::Option<MinerBid>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SubmitBidResponse {
+    #[prost(bool, tag = "1")]
+    pub accepted: bool,
+    #[prost(string, tag = "2")]
+    pub error_message: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub epoch_id: ::prost::alloc::string::String,
+}
 /// Generated client implementations.
 pub mod miner_discovery_client {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
@@ -229,6 +271,32 @@ pub mod miner_discovery_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Submit a bid for auction-based incentives
+        pub async fn submit_bid(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SubmitBidRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SubmitBidResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilca.miner.v1.MinerDiscovery/SubmitBid",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("basilca.miner.v1.MinerDiscovery", "SubmitBid"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -252,6 +320,14 @@ pub mod miner_discovery_server {
             request: tonic::Request<super::DiscoverNodesRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ListNodeConnectionDetailsResponse>,
+            tonic::Status,
+        >;
+        /// Submit a bid for auction-based incentives
+        async fn submit_bid(
+            &self,
+            request: tonic::Request<super::SubmitBidRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SubmitBidResponse>,
             tonic::Status,
         >;
     }
@@ -416,6 +492,52 @@ pub mod miner_discovery_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = DiscoverNodesSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilca.miner.v1.MinerDiscovery/SubmitBid" => {
+                    #[allow(non_camel_case_types)]
+                    struct SubmitBidSvc<T: MinerDiscovery>(pub Arc<T>);
+                    impl<
+                        T: MinerDiscovery,
+                    > tonic::server::UnaryService<super::SubmitBidRequest>
+                    for SubmitBidSvc<T> {
+                        type Response = super::SubmitBidResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SubmitBidRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as MinerDiscovery>::submit_bid(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = SubmitBidSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

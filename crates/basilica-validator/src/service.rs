@@ -3,6 +3,7 @@ use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::collateral::collateral_scan::Collateral;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
+use crate::grpc::start_bid_server;
 use crate::metrics::ValidatorMetrics;
 use crate::miner_prover::MinerProver;
 use crate::persistence::cleanup_task::CleanupTask;
@@ -131,7 +132,9 @@ impl ValidatorService {
             self.config.verification.min_score_threshold,
             blocks_per_weight_set,
             gpu_scoring_engine,
+            self.config.billing.clone(),
             self.config.emission.clone(),
+            self.config.auction.clone(),
             gpu_profile_repo.clone(),
             validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
         )?;
@@ -226,6 +229,16 @@ impl ValidatorService {
             }
         });
 
+        let bid_grpc_config = self.config.bid_grpc.clone();
+        let bid_persistence = persistence_arc.clone();
+        let bid_auction_config = self.config.auction.clone();
+        let bid_server_handle = tokio::spawn(async move {
+            if let Err(e) = start_bid_server(bid_grpc_config, bid_persistence, bid_auction_config).await
+            {
+                error!("Bid gRPC server failed: {}", e);
+            }
+        });
+
         // Start cleanup task if enabled
         let cleanup_task_handle = if self.config.cleanup.enabled {
             let cleanup_config = self.config.cleanup.clone();
@@ -263,6 +276,7 @@ impl ValidatorService {
             handle.abort();
         }
         api_handler_handle.abort();
+        bid_server_handle.abort();
 
         collateral_scan_handle.abort();
 

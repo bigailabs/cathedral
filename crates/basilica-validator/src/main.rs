@@ -9,6 +9,7 @@ use clap::Parser;
 
 mod agent_installer;
 mod api;
+mod auction;
 mod ban_system;
 mod billing;
 mod bittensor_core;
@@ -16,6 +17,7 @@ mod cli;
 mod collateral;
 mod config;
 mod gpu;
+mod grpc;
 mod journal;
 mod k8s_profile_publisher;
 mod metrics;
@@ -23,9 +25,11 @@ mod miner_prover;
 mod node_profile;
 mod os_process;
 mod persistence;
+mod pricing;
 mod rental;
 mod service;
 mod ssh;
+mod taostats;
 
 use cli::Args;
 

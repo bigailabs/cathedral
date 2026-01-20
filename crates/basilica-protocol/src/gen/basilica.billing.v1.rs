@@ -612,6 +612,38 @@ pub struct MinerRevenueSummary {
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetMinerDeliveryRequest {
+    #[prost(int64, tag = "1")]
+    pub since_epoch_seconds: i64,
+    #[prost(int64, tag = "2")]
+    pub until_epoch_seconds: i64,
+    #[prost(string, repeated, tag = "3")]
+    pub miner_hotkeys: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MinerDelivery {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(uint32, tag = "2")]
+    pub miner_uid: u32,
+    #[prost(double, tag = "3")]
+    pub total_hours: f64,
+    #[prost(double, tag = "4")]
+    pub user_revenue_usd: f64,
+    #[prost(string, tag = "5")]
+    pub gpu_category: ::prost::alloc::string::String,
+    #[prost(double, tag = "6")]
+    pub miner_payment_usd: f64,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetMinerDeliveryResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub deliveries: ::prost::alloc::vec::Vec<MinerDelivery>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetUnpaidMinerRevenueSummaryRequest {
     /// Start date in YYYY-MM-DD format (inclusive)
     #[prost(string, tag = "1")]
@@ -1105,6 +1137,36 @@ pub mod billing_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_miner_delivery(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetMinerDeliveryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetMinerDeliveryResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/GetMinerDelivery",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "GetMinerDelivery",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Miner payment operations
         pub async fn get_unpaid_miner_revenue_summary(
             &mut self,
@@ -1275,6 +1337,13 @@ pub mod billing_service_server {
             request: tonic::Request<super::GetMinerRevenueSummaryRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetMinerRevenueSummaryResponse>,
+            tonic::Status,
+        >;
+        async fn get_miner_delivery(
+            &self,
+            request: tonic::Request<super::GetMinerDeliveryRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetMinerDeliveryResponse>,
             tonic::Status,
         >;
         /// Miner payment operations
@@ -1844,6 +1913,53 @@ pub mod billing_service_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = GetMinerRevenueSummarySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/GetMinerDelivery" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetMinerDeliverySvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::GetMinerDeliveryRequest>
+                    for GetMinerDeliverySvc<T> {
+                        type Response = super::GetMinerDeliveryResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetMinerDeliveryRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::get_miner_delivery(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = GetMinerDeliverySvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

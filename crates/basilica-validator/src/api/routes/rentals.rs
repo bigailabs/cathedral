@@ -392,6 +392,10 @@ pub async fn get_rental_status(
         node,
         miner_uid,
         miner_hotkey,
+        miner_bid_rate: rental_info
+            .metadata
+            .get("miner_bid_rate")
+            .and_then(|value| value.parse::<f64>().ok()),
         created_at: status.created_at,
         updated_at: status.created_at, // Use created_at for now
     };

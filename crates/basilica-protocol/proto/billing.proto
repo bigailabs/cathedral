@@ -24,6 +24,7 @@ service BillingService {
     // Miner revenue reconciliation
     rpc RefreshMinerRevenueSummary(RefreshMinerRevenueSummaryRequest) returns (RefreshMinerRevenueSummaryResponse);
     rpc GetMinerRevenueSummary(GetMinerRevenueSummaryRequest) returns (GetMinerRevenueSummaryResponse);
+    rpc GetMinerDelivery(GetMinerDeliveryRequest) returns (GetMinerDeliveryResponse);
 
     // Miner payment operations
     rpc GetUnpaidMinerRevenueSummary(GetUnpaidMinerRevenueSummaryRequest) returns (GetUnpaidMinerRevenueSummaryResponse);
@@ -373,6 +374,25 @@ message MinerRevenueSummary {
     // Payment tracking
     bool paid = 18;
     string tx_hash = 19; // Blockchain transaction hash (nullable)
+}
+
+message GetMinerDeliveryRequest {
+    int64 since_epoch_seconds = 1;
+    int64 until_epoch_seconds = 2;
+    repeated string miner_hotkeys = 3;
+}
+
+message MinerDelivery {
+    string miner_hotkey = 1;
+    uint32 miner_uid = 2;
+    double total_hours = 3;
+    double user_revenue_usd = 4;
+    string gpu_category = 5;
+    double miner_payment_usd = 6;
+}
+
+message GetMinerDeliveryResponse {
+    repeated MinerDelivery deliveries = 1;
 }
 
 // Miner Payment Messages

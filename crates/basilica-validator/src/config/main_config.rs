@@ -64,12 +64,20 @@ pub struct ValidatorConfig {
     /// API-specific configuration
     pub api: ApiConfig,
 
+    /// gRPC server for bid submission
+    #[serde(default)]
+    pub bid_grpc: basilica_common::config::GrpcServerConfig,
+
     /// SSH session configuration
     pub ssh_session: SshSessionConfig,
 
     /// Emission allocation configuration
     #[serde(default)]
     pub emission: super::emission::EmissionConfig,
+
+    /// Auction configuration (dynamic baseline pricing)
+    #[serde(default)]
+    pub auction: super::auction::AuctionConfig,
 
     /// Database cleanup configuration
     #[serde(default)]
@@ -835,8 +843,13 @@ impl Default for ValidatorConfig {
                 bind_address: "0.0.0.0:8080".to_string(),
                 miner_port: default_miner_port(),
             },
+            bid_grpc: basilica_common::config::GrpcServerConfig {
+                listen_address: "0.0.0.0:50052".to_string(),
+                ..Default::default()
+            },
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
+            auction: super::auction::AuctionConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             billing: BillingConfig::default(),
         }
@@ -909,6 +922,24 @@ impl ConfigValidation for ValidatorConfig {
             return Err(ConfigurationError::InvalidValue {
                 key: "emission".to_string(),
                 value: "emission_config".to_string(),
+                reason: e.to_string(),
+            });
+        }
+
+        // Validate auction configuration
+        if let Err(e) = self.auction.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "auction".to_string(),
+                value: "auction_config".to_string(),
+                reason: e.to_string(),
+            });
+        }
+
+        // Validate bid gRPC configuration
+        if let Err(e) = self.bid_grpc.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "bid_grpc".to_string(),
+                value: "bid_grpc".to_string(),
                 reason: e.to_string(),
             });
         }

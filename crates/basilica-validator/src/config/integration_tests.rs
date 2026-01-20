@@ -42,6 +42,7 @@ mod tests {
             .insert("H100".to_string(), GpuAllocation::new(50.0));
         // Disable binary validation since we don't have the binaries in test
         config.verification.binary_validation.enabled = false;
+        config.auction.price_api_endpoint = "http://localhost:50071".to_string();
         assert!(config.validate().is_ok());
     }
 
@@ -50,6 +51,7 @@ mod tests {
         let mut config = ValidatorConfig::default();
         // Disable binary validation since we don't have the binaries in test
         config.verification.binary_validation.enabled = false;
+        config.auction.price_api_endpoint = "http://localhost:50071".to_string();
 
         // Add valid GPU allocations for testing
         config.emission.burn_percentage = 10.0;

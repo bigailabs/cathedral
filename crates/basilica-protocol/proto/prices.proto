@@ -1,0 +1,29 @@
+// Pricing Protocol - Baseline price service
+syntax = "proto3";
+
+package basilca.pricing.v1;
+
+// PriceService provides dynamic baseline prices for GPU categories.
+service PriceService {
+  // Get baseline prices for GPU categories.
+  rpc GetBaselinePrices(GetBaselinePricesRequest) returns (GetBaselinePricesResponse);
+}
+
+message GetBaselinePricesRequest {
+  // Empty = return all categories
+  repeated string gpu_categories = 1;
+}
+
+message GetBaselinePricesResponse {
+  repeated GpuBaselinePrice prices = 1;
+  int64 fetched_at = 2; // Unix timestamp
+}
+
+message GpuBaselinePrice {
+  string gpu_category = 1;      // "H100", "A100", "B200"
+  double price_per_hour = 2;    // $/hr per GPU (median across providers)
+  double min_price = 3;         // Lowest provider price
+  double max_price = 4;         // Highest provider price
+  int32 provider_count = 5;     // Number of providers with this GPU
+}
+

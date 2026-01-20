@@ -144,12 +144,13 @@ impl MinerState {
         ));
 
         // Initialize validator communications server
+        let bittensor_service = chain_registration.get_bittensor_service();
         let validator_comms = ValidatorCommsServer::new(
             config.validator_comms.clone(),
             config.security.clone(),
             node_manager.clone(),
             validator_discovery.clone(),
-            chain_registration.get_bittensor_service(),
+            bittensor_service,
         )
         .await?;
 

@@ -675,11 +675,14 @@ impl SimplePersistence {
             LEFT JOIN rentals r ON me.node_id = r.node_id
                 AND r.miner_id = me.miner_id
                 AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
+            LEFT JOIN node_reservations nr ON me.node_id = nr.node_id
+                AND datetime(nr.expires_at) > datetime('now')
             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
             LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
             WHERE r.id IS NULL
+                AND nr.id IS NULL
                 AND (me.status IS NULL OR me.status != 'offline')",
         );
 
@@ -787,6 +790,114 @@ impl SimplePersistence {
         }
 
         Ok(nodes)
+    }
+
+    /// Get available nodes for a specific miner, filtered by GPU type/count and freshness.
+    pub async fn get_available_nodes_for_miner(
+        &self,
+        miner_id: &str,
+        gpu_category: &str,
+        min_gpu_count: u32,
+        freshness_secs: u64,
+    ) -> Result<Vec<String>, anyhow::Error> {
+        let query = format!(
+            r#"
+            SELECT
+                me.node_id,
+                GROUP_CONCAT(gua.gpu_name) as gpu_names
+            FROM miner_nodes me
+            LEFT JOIN rentals r ON me.node_id = r.node_id
+                AND r.miner_id = me.miner_id
+                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
+            LEFT JOIN node_reservations nr ON me.node_id = nr.node_id
+                AND datetime(nr.expires_at) > datetime('now')
+            LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+            WHERE r.id IS NULL
+                AND nr.id IS NULL
+                AND me.miner_id = ?
+                AND (me.status IS NULL OR me.status != 'offline')
+                AND me.last_health_check IS NOT NULL
+                AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
+            GROUP BY me.node_id
+            HAVING COUNT(gua.gpu_uuid) >= ?
+            "#
+        );
+
+        let rows = sqlx::query(&query)
+            .bind(miner_id)
+            .bind(min_gpu_count as i64)
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut nodes = Vec::new();
+        for row in rows {
+            let gpu_names: Option<String> = row.get("gpu_names");
+            if let Some(names) = gpu_names {
+                if !names.is_empty() {
+                    let matches_type = names
+                        .split(',')
+                        .any(|name| name.to_lowercase().contains(&gpu_category.to_lowercase()));
+                    if !matches_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            let node_id: String = row.get("node_id");
+            nodes.push(node_id);
+        }
+
+        Ok(nodes)
+    }
+
+    /// Reserve a node for a short window to avoid race conditions during rental creation.
+    pub async fn reserve_node(
+        &self,
+        reservation_id: &str,
+        node_id: &str,
+        miner_id: &str,
+        rental_id: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, anyhow::Error> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO node_reservations (id, node_id, miner_id, rental_id, reserved_at, expires_at)
+            SELECT ?, ?, ?, ?, datetime('now'), ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM rentals r
+                WHERE r.node_id = ? AND r.miner_id = ?
+                  AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM node_reservations nr
+                WHERE nr.node_id = ? AND datetime(nr.expires_at) > datetime('now')
+            )
+            "#,
+        )
+        .bind(reservation_id)
+        .bind(node_id)
+        .bind(miner_id)
+        .bind(rental_id)
+        .bind(expires_at.to_rfc3339())
+        .bind(node_id)
+        .bind(miner_id)
+        .bind(node_id)
+        .execute(self.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn release_reservation(&self, reservation_id: &str) -> Result<(), anyhow::Error> {
+        sqlx::query("DELETE FROM node_reservations WHERE id = ?")
+            .bind(reservation_id)
+            .execute(self.pool())
+            .await?;
+        Ok(())
     }
 
     /// Get miner nodes

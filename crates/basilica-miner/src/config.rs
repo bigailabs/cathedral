@@ -79,6 +79,9 @@ pub struct ValidatorCommsConfig {
     /// Port to bind the gRPC server to
     pub port: u16,
 
+    /// Validator gRPC endpoint for bid submission (e.g. http://host:50052)
+    pub validator_bid_endpoint: Option<String>,
+
     /// Request timeout for validator calls
     #[serde_as(as = "DurationSeconds<u64>")]
     pub request_timeout: Duration,
@@ -229,6 +232,7 @@ impl Default for ValidatorCommsConfig {
         Self {
             host: "0.0.0.0".to_string(),
             port: 50051,
+            validator_bid_endpoint: None,
             request_timeout: Duration::from_secs(30),
         }
     }
