@@ -186,7 +186,16 @@ impl ValidatorCommsServer {
         self.sign_bid(bid)
     }
 
-    async fn forward_bid_to_validator(&self, bid: MinerBid) -> Result<SubmitBidResponse, Status> {
+    /// Check if validator bid endpoint is configured
+    pub fn has_validator_bid_endpoint(&self) -> bool {
+        self.config.validator_bid_endpoint.is_some()
+    }
+
+    /// Forward a bid to the validator's SubmitBid endpoint
+    pub async fn forward_bid_to_validator(
+        &self,
+        bid: MinerBid,
+    ) -> Result<SubmitBidResponse, Status> {
         let bid = if bid.signature.is_empty() {
             self.sign_bid(bid)?
         } else {

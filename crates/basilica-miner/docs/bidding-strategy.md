@@ -6,12 +6,30 @@ Miners submit bids to validators specifying the price per GPU-hour they're willi
 
 ## Current State
 
-The miner has infrastructure for bid submission:
-- `create_signed_bid()` creates a cryptographically signed bid
-- `forward_bid_to_validator()` sends the bid to the validator's gRPC endpoint
-- Bids include: `gpu_category`, `bid_per_hour`, `gpu_count`, `nonce`, `signature`
+### ✅ Implemented
 
-**Missing**: Automated bidding logic that decides WHEN to bid and at WHAT price.
+1. **Core bid infrastructure** (`validator_comms.rs`):
+   - `create_signed_bid()` creates a cryptographically signed bid
+   - `forward_bid_to_validator()` sends the bid to the validator's gRPC endpoint
+   - Bids include: `gpu_category`, `bid_per_hour`, `gpu_count`, `nonce`, `signature`
+
+2. **Auto-bidder** (`bidding.rs`):
+   - `AutoBidder` background task submits bids periodically
+   - Reads available GPU capacity from `NodeManager`
+   - Uses static prices configured per GPU category
+   - Supports floor prices (never bid below a minimum)
+
+3. **Configuration** (`config.rs`):
+   - `BiddingConfig` with `enabled`, `static_prices`, `bid_interval`, `floor_prices`
+   - `NodeConfig` includes `gpu_category` and `gpu_count` for each node
+
+### ❌ Not Yet Implemented
+
+- Cost-plus pricing (calculate from costs)
+- Utilization-based dynamic pricing
+- Time-of-day pricing
+- Market intelligence (watch competitor bids)
+- Hybrid strategy with weighted factors
 
 ## Bid Lifecycle
 
@@ -289,66 +307,59 @@ fn calculate_hybrid_bid(
 
 ## Implementation Roadmap
 
-### Phase 1: Static Config (MVP)
+### Phase 1: Static Config (MVP) ✅ IMPLEMENTED
 
 Add bidding configuration to `MinerConfig`:
 
 ```rust
-// config.rs
+// config.rs - IMPLEMENTED
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiddingConfig {
     /// Enable automatic bidding
     pub enabled: bool,
     
-    /// Bidding strategy: "static", "cost_plus", "utilization", "hybrid"
-    pub strategy: String,
-    
     /// Static prices by GPU category ($/GPU-hour)
     pub static_prices: HashMap<String, f64>,
     
-    /// How often to submit bids (seconds)
-    pub bid_interval_secs: u64,
+    /// How often to submit bids
+    pub bid_interval: Duration,
     
-    /// Validator endpoint to submit bids to
-    pub validator_endpoint: Option<String>,
+    /// Floor prices - never bid below this
+    pub floor_prices: HashMap<String, f64>,
 }
 ```
 
-### Phase 2: Automated Bid Submission
+### Phase 2: Automated Bid Submission ✅ IMPLEMENTED
 
-Create a background task that periodically submits bids:
+The `AutoBidder` background task periodically submits bids:
 
 ```rust
-// bidding/auto_bidder.rs
+// bidding.rs - IMPLEMENTED
 pub struct AutoBidder {
     config: BiddingConfig,
     node_manager: Arc<NodeManager>,
-    validator_comms: Arc<ValidatorCommsServer>,
+    validator_comms: Arc<RwLock<Option<ValidatorCommsServer>>>,
 }
 
 impl AutoBidder {
-    pub async fn run(&self) {
-        let mut interval = tokio::time::interval(
-            Duration::from_secs(self.config.bid_interval_secs)
-        );
+    pub async fn run(&self) -> Result<()> {
+        let mut interval = tokio::time::interval(self.config.bid_interval);
         
         loop {
             interval.tick().await;
             
-            if !self.config.enabled {
-                continue;
-            }
-            
-            // Get available capacity by category
-            let capacity = self.node_manager.get_available_capacity().await;
+            // Get available capacity by category from registered nodes
+            let capacity = self.get_available_capacity().await?;
             
             for (category, gpu_count) in capacity {
-                let price = self.calculate_bid(&category).await;
+                let price = match self.get_bid_price(&category) {
+                    Some(p) => p,
+                    None => continue, // No price configured
+                };
                 
-                match self.submit_bid(&category, price, gpu_count).await {
-                    Ok(_) => info!("Submitted bid: {} @ ${}/hr x{}", category, price, gpu_count),
-                    Err(e) => warn!("Failed to submit bid: {}", e),
-                }
+                // Create and submit signed bid
+                let bid = validator_comms.create_signed_bid(category, price, gpu_count, ...)?;
+                validator_comms.forward_bid_to_validator(bid).await?;
             }
         }
     }
@@ -462,7 +473,50 @@ New miners face a cold-start problem: no track record → validators may prefer 
 
 ## Configuration Examples
 
-### Conservative Miner (Profitability Focus)
+### Basic Static Bidding (Currently Supported)
+
+```toml
+# config.toml - Add this section to enable auto-bidding
+
+[bidding]
+enabled = true
+bid_interval_secs = 300  # Submit bids every 5 minutes
+
+# Set your prices per GPU-hour for each category
+[bidding.static_prices]
+H100 = 2.50
+A100 = 1.20
+RTX4090 = 0.80
+
+# Optional: Set floor prices (never bid below these)
+[bidding.floor_prices]
+H100 = 1.00
+A100 = 0.50
+```
+
+### Node Configuration with GPU Info
+
+```toml
+# Each node needs gpu_category and gpu_count
+
+[[node_management.nodes]]
+host = "192.168.1.100"
+port = 22
+username = "basilica"
+hourly_rate_per_gpu = 2.50  # Fallback rate
+gpu_category = "H100"        # Must match bidding.static_prices key
+gpu_count = 8
+
+[[node_management.nodes]]
+host = "192.168.1.101"
+port = 22
+username = "basilica"
+hourly_rate_per_gpu = 1.20
+gpu_category = "A100"
+gpu_count = 4
+```
+
+### Future: Cost-Plus Strategy (Not Yet Implemented)
 
 ```toml
 [bidding]
@@ -478,22 +532,7 @@ overhead_per_hour = 0.15
 target_margin_pct = 25
 ```
 
-### Aggressive Miner (Utilization Focus)
-
-```toml
-[bidding]
-enabled = true
-strategy = "utilization"
-bid_interval_secs = 300
-
-[bidding.utilization]
-idle_price = { H100 = 1.20 }
-busy_price = { H100 = 3.50 }
-low_utilization_threshold = 0.2
-high_utilization_threshold = 0.7
-```
-
-### Balanced Miner (Hybrid)
+### Future: Hybrid Strategy (Not Yet Implemented)
 
 ```toml
 [bidding]
@@ -508,9 +547,6 @@ ceiling_price = { H100 = 4.00 }
 utilization_weight = 0.5
 time_of_day_weight = 0.2
 cost_basis_weight = 0.3
-utilization_scaling = 0.4
-peak_multiplier = 1.10
-offpeak_multiplier = 0.92
 ```
 
 ---

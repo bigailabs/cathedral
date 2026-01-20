@@ -37,8 +37,22 @@ pub struct NodeConfig {
     pub username: String,
     /// Hourly rental rate in dollars per GPU (e.g., 2.50 for $2.50/hour/GPU)
     pub hourly_rate_per_gpu: f64,
+    /// GPU category for this node (e.g., "H100", "A100", "RTX4090")
+    #[serde(default = "default_gpu_category")]
+    pub gpu_category: String,
+    /// Number of GPUs on this node
+    #[serde(default = "default_gpu_count")]
+    pub gpu_count: u32,
     /// Additional SSH options
     pub additional_opts: Option<String>,
+}
+
+fn default_gpu_category() -> String {
+    "UNKNOWN".to_string()
+}
+
+fn default_gpu_count() -> u32 {
+    1
 }
 
 impl NodeConfig {
@@ -399,6 +413,8 @@ mod tests {
             port: 22,
             username: "basilica".to_string(),
             hourly_rate_per_gpu: 2.5,
+            gpu_category: "H100".to_string(),
+            gpu_count: 8,
             additional_opts: None,
         };
 

@@ -47,6 +47,10 @@ pub struct MinerConfig {
     /// Validator assignment configuration
     #[serde(default)]
     pub validator_assignment: ValidatorAssignmentConfig,
+
+    /// Automatic bidding configuration
+    #[serde(default)]
+    pub bidding: BiddingConfig,
 }
 
 /// Miner-specific Bittensor configuration
@@ -162,6 +166,45 @@ pub struct MinerAdvertisedAddresses {
     pub metrics_endpoint: Option<String>,
 }
 
+/// Automatic bidding configuration
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BiddingConfig {
+    /// Enable automatic bidding
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Static prices by GPU category ($/GPU-hour)
+    /// Example: { "H100" = 2.50, "A100" = 1.20 }
+    #[serde(default)]
+    pub static_prices: std::collections::HashMap<String, f64>,
+
+    /// How often to submit bids (seconds)
+    #[serde(default = "default_bid_interval")]
+    #[serde_as(as = "DurationSeconds<u64>")]
+    pub bid_interval: Duration,
+
+    /// Floor price - never bid below this ($/GPU-hour)
+    /// If not set for a category, uses static_price as floor
+    #[serde(default)]
+    pub floor_prices: std::collections::HashMap<String, f64>,
+}
+
+fn default_bid_interval() -> Duration {
+    Duration::from_secs(300) // 5 minutes
+}
+
+impl Default for BiddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            static_prices: std::collections::HashMap::new(),
+            bid_interval: default_bid_interval(),
+            floor_prices: std::collections::HashMap::new(),
+        }
+    }
+}
+
 impl Default for MinerConfig {
     fn default() -> Self {
         Self {
@@ -177,6 +220,7 @@ impl Default for MinerConfig {
             ssh_session: NodeSshConfig::default(),
             advertised_addresses: MinerAdvertisedAddresses::default(),
             validator_assignment: ValidatorAssignmentConfig::default(),
+            bidding: BiddingConfig::default(),
         }
     }
 }

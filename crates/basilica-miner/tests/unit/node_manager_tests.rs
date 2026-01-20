@@ -12,6 +12,8 @@ async fn test_node_registration() {
         port: 22,
         username: "basilica".to_string(),
         hourly_rate_per_gpu: 2.5,
+        gpu_category: "H100".to_string(),
+        gpu_count: 8,
         additional_opts: None,
     };
 
@@ -42,6 +44,8 @@ async fn test_list_nodes() {
                 port: 22,
                 username: "basilica".to_string(),
                 hourly_rate_per_gpu: 2.5,
+                gpu_category: "H100".to_string(),
+                gpu_count: 8,
                 additional_opts: None,
             },
         )
@@ -56,6 +60,8 @@ async fn test_list_nodes() {
                 port: 22,
                 username: "basilica".to_string(),
                 hourly_rate_per_gpu: 2.5,
+                gpu_category: "A100".to_string(),
+                gpu_count: 4,
                 additional_opts: None,
             },
         )
@@ -70,6 +76,8 @@ async fn test_list_nodes() {
                 port: 22,
                 username: "basilica".to_string(),
                 hourly_rate_per_gpu: 2.5,
+                gpu_category: "RTX4090".to_string(),
+                gpu_count: 2,
                 additional_opts: None,
             },
         )
@@ -99,6 +107,8 @@ async fn test_unregister_node() {
                 port: 22,
                 username: "basilica".to_string(),
                 hourly_rate_per_gpu: 2.5,
+                gpu_category: "H100".to_string(),
+                gpu_count: 8,
                 additional_opts: None,
             },
         )

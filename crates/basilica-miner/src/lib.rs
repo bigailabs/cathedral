@@ -2,6 +2,7 @@
 //!
 //! This module exposes the miner's functionality for testing and external use.
 
+pub mod bidding;
 pub mod bittensor_core;
 pub mod cli;
 pub mod config;
@@ -12,5 +13,6 @@ pub mod validator_comms;
 pub mod validator_discovery;
 
 // Re-export commonly used types
-pub use config::{MinerConfig, SecurityConfig};
+pub use bidding::AutoBidder;
+pub use config::{BiddingConfig, MinerConfig, SecurityConfig};
 pub use node_manager::NodeManager;

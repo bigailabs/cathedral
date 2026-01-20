@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info, warn};
 
+mod bidding;
 mod bittensor_core;
 mod cli;
 mod config;
@@ -21,6 +22,7 @@ mod persistence;
 mod validator_comms;
 mod validator_discovery;
 
+use bidding::AutoBidder;
 use bittensor_core::ChainRegistration;
 use config::MinerConfig;
 use node_manager::NodeManager;
@@ -38,6 +40,7 @@ pub struct MinerState {
     pub registration_db: RegistrationDb,
     pub metrics: Option<metrics::MinerMetrics>,
     pub validator_discovery: Arc<validator_discovery::ValidatorDiscovery>,
+    pub auto_bidder: Arc<AutoBidder>,
 }
 
 impl MinerState {
@@ -154,6 +157,12 @@ impl MinerState {
         )
         .await?;
 
+        // Initialize auto-bidder
+        let auto_bidder = Arc::new(AutoBidder::new(
+            config.bidding.clone(),
+            node_manager.clone(),
+        ));
+
         // Use a placeholder UID that will be updated after chain registration
         let miner_uid = MinerUid::from(0);
 
@@ -165,6 +174,7 @@ impl MinerState {
             registration_db,
             metrics,
             validator_discovery,
+            auto_bidder,
         })
     }
 
@@ -222,6 +232,18 @@ impl MinerState {
             }
         });
 
+        // Start auto-bidder if enabled
+        let bidder = self.auto_bidder.clone();
+        let validator_comms_for_bidder = self.validator_comms.clone();
+        let bidder_handle = tokio::spawn(async move {
+            // Give the validator comms a chance to initialize first
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            bidder.set_validator_comms(validator_comms_for_bidder).await;
+            if let Err(e) = bidder.run().await {
+                error!("Auto-bidder error: {}", e);
+            }
+        });
+
         info!("All miner services started successfully");
 
         // Wait for shutdown signal
@@ -231,6 +253,9 @@ impl MinerState {
             }
             _ = validator_handle => {
                 error!("Validator comms server stopped unexpectedly");
+            }
+            _ = bidder_handle => {
+                error!("Auto-bidder stopped unexpectedly");
             }
             _ = discovery_handle => {
                 error!("Validator discovery service stopped unexpectedly");
