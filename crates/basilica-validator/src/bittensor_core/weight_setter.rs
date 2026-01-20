@@ -17,12 +17,12 @@ use crate::persistence::SimplePersistence;
 use crate::taostats::TaoStatsClient;
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
-use basilica_common::identity::{MinerUid, NodeId};
+use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use basilica_common::{KeyValueStorage, MemoryStorage};
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -285,24 +285,49 @@ impl WeightSetter {
             .get_miner_delivery(since, now, Vec::new())
             .await?;
 
-        let active_uids: HashSet<u16> = (0..metagraph.hotkeys.len())
-            .filter_map(|uid| u16::try_from(uid).ok())
+        // Build hotkey -> current UID mapping from metagraph
+        // This ensures we pay the correct miner even if UIDs have changed
+        let hotkey_to_uid: HashMap<String, u16> = metagraph
+            .hotkeys
+            .iter()
+            .enumerate()
+            .filter_map(|(uid, account)| {
+                u16::try_from(uid)
+                    .ok()
+                    .map(|u| (Hotkey::from_account_id(account).to_string(), u))
+            })
             .collect();
 
         let mut miners_by_category: HashMap<String, Vec<(MinerUid, f64)>> = HashMap::new();
         for delivery in deliveries {
-            let uid = match u16::try_from(delivery.miner_uid) {
-                Ok(value) => value,
-                Err(_) => {
+            // CRITICAL: Resolve UID from hotkey using CURRENT metagraph
+            // This prevents paying the wrong miner if:
+            // - Miner deregistered (hotkey not in metagraph) -> skip, revenue cleared
+            // - Miner re-registered at different UID -> use new UID
+            let current_uid = match hotkey_to_uid.get(&delivery.miner_hotkey) {
+                Some(&uid) => uid,
+                None => {
+                    // Miner deregistered - their pending revenue is cleared
                     warn!(
-                        miner_uid = delivery.miner_uid,
-                        "Skipping delivery with invalid miner_uid"
+                        miner_hotkey = %delivery.miner_hotkey,
+                        stored_uid = delivery.miner_uid,
+                        miner_payment_usd = delivery.miner_payment_usd,
+                        gpu_category = %delivery.gpu_category,
+                        "Miner deregistered - clearing pending revenue (hotkey not in metagraph)"
                     );
                     continue;
                 }
             };
-            if !active_uids.contains(&uid) {
-                continue;
+
+            // Log if UID changed (miner re-registered at different position)
+            if current_uid != delivery.miner_uid as u16 {
+                warn!(
+                    miner_hotkey = %delivery.miner_hotkey,
+                    stored_uid = delivery.miner_uid,
+                    current_uid = current_uid,
+                    miner_payment_usd = delivery.miner_payment_usd,
+                    "Miner UID changed - using current UID from metagraph"
+                );
             }
 
             let category = if delivery.gpu_category.trim().is_empty() {
@@ -319,7 +344,7 @@ impl WeightSetter {
             miners_by_category
                 .entry(category)
                 .or_default()
-                .push((MinerUid::new(uid), miner_payment_usd));
+                .push((MinerUid::new(current_uid), miner_payment_usd));
         }
 
         if miners_by_category.is_empty() {
