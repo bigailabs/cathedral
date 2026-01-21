@@ -11,7 +11,7 @@ use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
 use crate::output::{
-    compress_path, json_output, print_error, print_info, print_success, table_output,
+    compress_path, format_usd, json_output, print_error, print_info, print_success, table_output,
 };
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use crate::ssh::{find_private_key_for_public_key, parse_ssh_credentials, SshClient};
@@ -1178,7 +1178,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", total_cost)).green().bold()
+                        style(format_usd(&total_cost.to_string())).green().bold()
                     );
                     println!("\nTotal: {} historical rentals", community_history.len());
 
@@ -1279,7 +1279,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_gpu_total_cost))
+                        style(format_usd(&secure_gpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
@@ -1302,7 +1302,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_cpu_total_cost))
+                        style(format_usd(&secure_cpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
@@ -1471,7 +1471,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", community_total_cost))
+                        style(format_usd(&community_total_cost.to_string()))
                             .green()
                             .bold()
                     );
@@ -1495,7 +1495,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_gpu_total_cost))
+                        style(format_usd(&secure_gpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
@@ -1519,7 +1519,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_cpu_total_cost))
+                        style(format_usd(&secure_cpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );

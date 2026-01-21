@@ -75,6 +75,7 @@ message TrackRentalRequest {
         CommunityCloudData community = 20;
         SecureCloudData secure = 21;
         OrchestratorCloudData orchestrator = 22;
+        StorageCloudData storage = 23;
     }
 }
 
@@ -121,6 +122,18 @@ message OrchestratorCloudData {
     uint32 ram_gb = 12;               // Amount of RAM in GB
     double base_price_per_storage = 13; // Price per GB storage per hour
     uint32 storage_gb = 14;             // Amount of storage in GB
+}
+
+// Storage cloud rental data (block storage volumes)
+// Uses additive pricing: total_cost = hours × (storage_cost)
+message StorageCloudData {
+    string provider = 1;                // Provider name (e.g., "hyperstack")
+    string provider_volume_id = 2;      // Provider's volume ID
+    string volume_type = 3;             // Volume type (e.g., "Cloud-SSD")
+    string region = 4;                  // Region where volume exists
+    uint32 size_gb = 5;                 // Volume size in GB
+    double base_price_per_storage = 6;  // Price per GB per hour (already includes markup)
+    string attached_rental_id = 7;      // Optional: rental ID when attached
 }
 
 message ResourceSpec {
@@ -204,6 +217,7 @@ message ActiveRental {
         CommunityCloudData community = 20;
         SecureCloudData secure = 21;
         OrchestratorCloudData orchestrator = 22;
+        StorageCloudData storage = 23;
     }
 }
 

@@ -1,12 +1,13 @@
 //! Table formatting for CLI output
 
+use super::format_usd;
 use crate::error::Result;
 use basilica_common::types::GpuOffering;
 use basilica_common::{types::GpuCategory, LocationProfile};
 use basilica_sdk::{
     types::{
         ApiKeyInfo, ApiRentalListItem, GpuSpec, HistoricalRentalItem, ListDepositsResponse,
-        RentalUsageResponse, UsageHistoryResponse,
+        RentalUsageResponse, UsageHistoryResponse, VolumeResponse,
     },
     AvailableNode,
 };
@@ -53,9 +54,8 @@ pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
 
         let cost = rental
             .accumulated_cost
-            .as_ref()
-            .and_then(|c| c.parse::<f64>().ok())
-            .map(|c| format!("${:.2}", c))
+            .as_deref()
+            .map(format_usd)
             .unwrap_or_else(|| "-".to_string());
 
         (rate, cost)
@@ -625,12 +625,7 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
                 .map(|rate| format!("${:.2}/hr", rate))
                 .unwrap_or_else(|| rental.hourly_rate.clone());
 
-            let current_cost = rental
-                .current_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|cost| format!("${:.2}", cost))
-                .unwrap_or_else(|| rental.current_cost.clone());
+            let current_cost = format_usd(&rental.current_cost);
 
             UsageHistoryRow {
                 rental_id: rental.rental_id.clone(),
@@ -666,7 +661,7 @@ pub fn display_usage_history(history: &UsageHistoryResponse) -> Result<()> {
     println!(
         "{}: {}",
         style("Total Cost (All Rentals)").cyan(),
-        style(format!("${:.2}", total_cost)).green().bold()
+        style(format_usd(&total_cost.to_string())).green().bold()
     );
     println!();
     println!("{}", style("Quick Commands:").cyan().bold());
@@ -707,12 +702,7 @@ pub fn display_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<()> {
     let mut rows: Vec<HistoryRow> = rentals
         .iter()
         .map(|rental| {
-            let total_cost = rental
-                .total_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|c| format!("${:.2}", c))
-                .unwrap_or_else(|| rental.total_cost.clone());
+            let total_cost = format_usd(&rental.total_cost);
 
             HistoryRow {
                 rental_id: rental.rental_id.clone(),
@@ -775,12 +765,7 @@ pub fn display_cpu_rental_history(rentals: &[&HistoricalRentalItem]) -> Result<(
     let mut rows: Vec<CpuHistoryRow> = rentals
         .iter()
         .map(|rental| {
-            let total_cost = rental
-                .total_cost
-                .parse::<Decimal>()
-                .ok()
-                .map(|c| format!("${:.2}", c))
-                .unwrap_or_else(|| rental.total_cost.clone());
+            let total_cost = format_usd(&rental.total_cost);
 
             let rate = rental
                 .hourly_rate
@@ -893,9 +878,8 @@ pub fn display_secure_cloud_rentals(
             // Use accumulated cost from billing service - no fallback
             let total_cost = rental
                 .accumulated_cost
-                .as_ref()
-                .and_then(|c| c.parse::<f64>().ok())
-                .map(|cost| format!("${:.2}", cost))
+                .as_deref()
+                .map(format_usd)
                 .unwrap_or_else(|| "-".to_string());
 
             SecureCloudRentalRow {
@@ -1034,9 +1018,8 @@ pub fn display_cpu_rentals(
             // Use accumulated cost from billing service
             let total_cost = rental
                 .accumulated_cost
-                .as_ref()
-                .and_then(|c| c.parse::<f64>().ok())
-                .map(|cost| format!("${:.2}", cost))
+                .as_deref()
+                .map(format_usd)
                 .unwrap_or_else(|| "-".to_string());
 
             CpuRentalRow {
@@ -1053,6 +1036,78 @@ pub fn display_cpu_rentals(
                 hourly_cost: format!("${:.2}/hr", rental.hourly_cost),
                 total_cost,
                 created: format_timestamp(&rental.created_at.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    let mut table = Table::new(&rows);
+    table.with(Style::modern());
+    println!("{}", table);
+
+    Ok(())
+}
+
+/// Display volumes in table format
+pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
+    if volumes.is_empty() {
+        println!("{}", style("No volumes found").yellow());
+        return Ok(());
+    }
+
+    #[derive(Tabled)]
+    struct VolumeRow {
+        #[tabled(rename = "Name")]
+        name: String,
+        #[tabled(rename = "Size")]
+        size: String,
+        #[tabled(rename = "Status")]
+        status: String,
+        #[tabled(rename = "Provider")]
+        provider: String,
+        #[tabled(rename = "Region")]
+        region: String,
+        #[tabled(rename = "Rental")]
+        rental: String,
+        #[tabled(rename = "Rate/hr")]
+        hourly_cost: String,
+        #[tabled(rename = "Total Cost")]
+        total_cost: String,
+        #[tabled(rename = "Created")]
+        created: String,
+    }
+
+    let rows: Vec<VolumeRow> = volumes
+        .iter()
+        .map(|volume| {
+            // Format status
+            let status = match volume.status {
+                basilica_sdk::types::VolumeStatus::Available => "Available".to_string(),
+                basilica_sdk::types::VolumeStatus::Attached => "Attached".to_string(),
+                basilica_sdk::types::VolumeStatus::Pending => "Pending".to_string(),
+                basilica_sdk::types::VolumeStatus::Deleting => "Deleting".to_string(),
+                basilica_sdk::types::VolumeStatus::Error => "Error".to_string(),
+            };
+
+            // Use accumulated cost from billing service
+            let total_cost = volume
+                .accumulated_cost
+                .as_deref()
+                .map(format_usd)
+                .unwrap_or_else(|| "-".to_string());
+
+            VolumeRow {
+                name: volume.name.clone(),
+                size: format!("{}GB", volume.size_gb),
+                status,
+                provider: volume.provider.clone(),
+                region: volume.region.clone(),
+                rental: volume.rental_id.clone().unwrap_or_else(|| "-".to_string()),
+                hourly_cost: volume
+                    .estimated_hourly_cost
+                    .map(|c| format!("${:.2}/hr", c))
+                    .unwrap_or_else(|| "-".to_string()),
+                total_cost,
+                created: format_timestamp(&volume.created_at.to_rfc3339()),
             }
         })
         .collect();

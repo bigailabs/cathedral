@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Volume management commands for persistent storage across rentals
+  - `volumes create` - Create new volumes with configurable size and region
+  - `volumes list` - List all volumes with status and attachment info
+  - `volumes delete` - Delete volumes that are not attached
+  - `volumes attach` - Attach a volume to an active rental
+  - `volumes detach` - Detach a volume from a rental
+
 ## [0.11.0]
 
 ### Added
