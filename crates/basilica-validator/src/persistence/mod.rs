@@ -20,7 +20,7 @@ pub mod validator_persistence;
 pub mod verification;
 pub mod verification_logs;
 
-pub use simple_persistence::*;
 pub use miner_delivery::MinerDeliveryRepository;
+pub use simple_persistence::*;
 pub use types::*;
 pub use validator_persistence::ValidatorPersistence;

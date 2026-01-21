@@ -21,10 +21,7 @@ pub struct AutoBidder {
 
 impl AutoBidder {
     /// Create a new auto-bidder
-    pub fn new(
-        config: BiddingConfig,
-        node_manager: Arc<NodeManager>,
-    ) -> Self {
+    pub fn new(config: BiddingConfig, node_manager: Arc<NodeManager>) -> Self {
         Self {
             config,
             node_manager,
@@ -125,7 +122,9 @@ impl AutoBidder {
 
                     // Forward to validator if endpoint is configured
                     if !validator_comms.has_validator_bid_endpoint() {
-                        debug!("validator_bid_endpoint not configured, bid created but not submitted");
+                        debug!(
+                            "validator_bid_endpoint not configured, bid created but not submitted"
+                        );
                         continue;
                     }
 
@@ -137,10 +136,7 @@ impl AutoBidder {
                                     category, response.epoch_id
                                 );
                             } else {
-                                warn!(
-                                    "Bid rejected for {}: {}",
-                                    category, response.error_message
-                                );
+                                warn!("Bid rejected for {}: {}", category, response.error_message);
                             }
                         }
                         Err(e) => {
@@ -203,7 +199,6 @@ impl AutoBidder {
         Ok(capacity)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -271,4 +266,3 @@ mod tests {
         assert!(bidder.is_enabled());
     }
 }
-

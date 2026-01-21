@@ -29,9 +29,8 @@ impl DeliverySyncTask {
     }
 
     pub async fn run(&self) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            self.sync_interval_secs,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(self.sync_interval_secs));
 
         loop {
             interval.tick().await;
@@ -64,4 +63,3 @@ impl DeliverySyncTask {
 }
 
 // TODO: Add backoff and per-endpoint failure metrics.
-

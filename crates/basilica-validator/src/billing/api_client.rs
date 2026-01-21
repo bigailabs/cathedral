@@ -84,10 +84,7 @@ impl BillingApiClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "API returned status {}",
-                response.status()
-            ));
+            return Err(anyhow::anyhow!("API returned status {}", response.status()));
         }
 
         let body: MinerDeliveryResponse = response.json().await?;
@@ -105,5 +102,3 @@ impl BillingApiClient {
             .collect())
     }
 }
-
-

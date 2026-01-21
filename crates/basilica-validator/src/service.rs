@@ -1,8 +1,8 @@
 use crate::api::ApiHandler;
+use crate::billing::{BillingApiClient, DeliverySyncTask};
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::collateral::collateral_scan::Collateral;
 use crate::config::ValidatorConfig;
-use crate::billing::{BillingApiClient, DeliverySyncTask};
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_bid_server;
 use crate::metrics::ValidatorMetrics;
@@ -233,13 +233,11 @@ impl ValidatorService {
             }
         });
 
-        let delivery_sync_handle = if let Some(delivery_sync_task) = delivery_sync_task {
-            Some(tokio::spawn(async move {
+        let delivery_sync_handle = delivery_sync_task.map(|delivery_sync_task| {
+            tokio::spawn(async move {
                 delivery_sync_task.run().await;
-            }))
-        } else {
-            None
-        };
+            })
+        });
 
         let miner_prover_handle = tokio::spawn(async move {
             if let Err(e) = miner_prover.start().await {
