@@ -45,7 +45,7 @@ model_cache = basilica.Volume.from_name("vllm-llama-cache", create_if_missing=Tr
 
 @basilica.deployment(
     name="vllm-llama-embeddings",
-    image="vllm/vllm-openai:latest",
+    image="vllm/vllm-openai:v0.8.5.post1",
     port=8000,
     gpu_count=1,
     min_gpu_memory_gb=24,

@@ -31,7 +31,7 @@ model_cache = basilica.Volume.from_name("vllm-embeddings-cache", create_if_missi
 
 @basilica.deployment(
     name="vllm-embeddings",
-    image="vllm/vllm-openai:latest",
+    image="vllm/vllm-openai:v0.8.5.post1",
     port=8000,
     gpu_count=1,
     min_gpu_memory_gb=24,
@@ -45,12 +45,12 @@ def serve_embeddings():
 
     E5-Mistral-7B-Instruct is trained specifically for embeddings and provides
     high-quality sentence embeddings suitable for semantic search and RAG.
+    vLLM auto-detects the model's pooling configuration.
     """
     import subprocess
 
     cmd = [
         "vllm", "serve", "intfloat/e5-mistral-7b-instruct",
-        "--task", "embed",
         "--host", "0.0.0.0",
         "--port", "8000",
         "--max-model-len", "4096",

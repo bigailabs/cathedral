@@ -1,56 +1,53 @@
 #!/usr/bin/env python3
 """
-Deploy Llama-3.1-8B-Instruct with a dedicated Embeddings service.
+Deploy an LLM with a dedicated Embeddings service.
 
 This example deploys a complete LLM + Embeddings stack:
-  1. Llama-3.1-8B-Instruct for chat/completions (vLLM)
-  2. E5-Mistral-7B-Instruct for embeddings (vLLM with --task embed)
+  1. Qwen2.5-7B-Instruct for chat/completions (vLLM)
+  2. E5-Mistral-7B-Instruct for embeddings (vLLM auto-detects embedding mode)
 
 This is the standard architecture for RAG applications:
   - Use the embedding model to vectorize documents and queries
   - Use the LLM to generate responses based on retrieved context
 
 Requirements:
-    - HuggingFace account with access to meta-llama/Llama-3.1-8B-Instruct
-    - Set HF_TOKEN environment variable for gated model access
-    - 2x GPUs with 24GB+ VRAM each (or 1x GPU with 48GB+ if running sequentially)
+    - 2x GPUs with 24GB+ VRAM each (or autoscaling cluster)
 
 Usage:
     export BASILICA_API_TOKEN="your-token"
-    export HF_TOKEN="your-huggingface-token"
     python3 23_vllm_llama_with_embeddings.py
 
 Endpoints:
     LLM:        /v1/chat/completions, /v1/completions
-    Embeddings: /v1/embeddings
+    Embeddings: /v1/embeddings (OpenAI-compatible)
 """
-import os
-
 import basilica
 
 
 def deploy_embeddings(client: basilica.BasilicaClient) -> basilica.Deployment:
-    """Deploy E5-Mistral-7B as embedding model."""
-    print("Deploying E5-Mistral-7B embedding service...")
-
-    cache = basilica.Volume.from_name("e5-mistral-cache", create_if_missing=True)
+    """Deploy E5-Mistral-7B embedding model using vLLM."""
+    print("Deploying intfloat/e5-mistral-7b-instruct embedding service (vLLM)...")
 
     @basilica.deployment(
-        name="embeddings-e5",
-        image="vllm/vllm-openai:latest",
+        name="embed-7b",
+        image="vllm/vllm-openai:v0.8.5.post1",
         port=8000,
         gpu_count=1,
         min_gpu_memory_gb=24,
         memory="32Gi",
-        volumes={"/root/.cache/huggingface": cache},
+        env={
+            "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+            "HF_HUB_DISABLE_XET": "1",
+        },
         ttl_seconds=3600,
-        timeout=900,
+        timeout=1800,
     )
     def serve():
         import subprocess
+        # e5-mistral is a dedicated embedding model with pooling config
+        # vLLM auto-detects and serves /v1/embeddings endpoint
         cmd = [
             "vllm", "serve", "intfloat/e5-mistral-7b-instruct",
-            "--task", "embed",
             "--host", "0.0.0.0",
             "--port", "8000",
             "--max-model-len", "4096",
@@ -61,35 +58,31 @@ def deploy_embeddings(client: basilica.BasilicaClient) -> basilica.Deployment:
     return serve()
 
 
-def deploy_llama(client: basilica.BasilicaClient, hf_token: str) -> basilica.Deployment:
-    """Deploy Llama-3.1-8B-Instruct for chat/completions."""
-    print("Deploying Llama-3.1-8B-Instruct inference service...")
-
-    cache = basilica.Volume.from_name("llama-31-cache", create_if_missing=True)
+def deploy_llm(client: basilica.BasilicaClient) -> basilica.Deployment:
+    """Deploy Qwen2.5-7B-Instruct for chat/completions."""
+    print("Deploying Qwen/Qwen2.5-7B-Instruct inference service...")
 
     @basilica.deployment(
-        name="llama-31-8b",
-        image="vllm/vllm-openai:latest",
+        name="llm-7b",
+        image="vllm/vllm-openai:v0.8.5.post1",
         port=8000,
         gpu_count=1,
         min_gpu_memory_gb=24,
         memory="32Gi",
         env={
-            "HF_TOKEN": hf_token,
-            "HF_HUB_ENABLE_HF_TRANSFER": "1",
+            "HF_HUB_DISABLE_SYMLINKS_WARNING": "1",
+            "HF_HUB_DISABLE_XET": "1",
         },
-        volumes={"/root/.cache/huggingface": cache},
         ttl_seconds=3600,
-        timeout=900,
+        timeout=1800,
     )
     def serve():
         import subprocess
         cmd = [
-            "vllm", "serve", "meta-llama/Llama-3.1-8B-Instruct",
+            "vllm", "serve", "Qwen/Qwen2.5-7B-Instruct",
             "--host", "0.0.0.0",
             "--port", "8000",
             "--max-model-len", "4096",
-            "--dtype", "bfloat16",
         ]
         subprocess.Popen(cmd).wait()
 
@@ -97,21 +90,15 @@ def deploy_llama(client: basilica.BasilicaClient, hf_token: str) -> basilica.Dep
 
 
 def main():
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        print("ERROR: HF_TOKEN environment variable not set.")
-        print("Llama models require HuggingFace authentication.")
-        print("Set it with: export HF_TOKEN='your-huggingface-token'")
-        return
-
     client = basilica.BasilicaClient()
 
-    # Deploy both services
+    # Deploy LLM first
+    llm = deploy_llm(client)
+    print(f"  LLM API: {llm.url}/v1/chat/completions")
+
+    # Deploy embeddings
     embeddings = deploy_embeddings(client)
     print(f"  Embeddings API: {embeddings.url}/v1/embeddings")
-
-    llama = deploy_llama(client, hf_token)
-    print(f"  Llama API: {llama.url}/v1/chat/completions")
 
     # Print summary
     print()
@@ -121,16 +108,16 @@ def main():
     print()
     print("Endpoints:")
     print(f"  Embeddings:  {embeddings.url}/v1/embeddings")
-    print(f"  Chat:        {llama.url}/v1/chat/completions")
-    print(f"  Completions: {llama.url}/v1/completions")
+    print(f"  Chat:        {llm.url}/v1/chat/completions")
+    print(f"  Completions: {llm.url}/v1/completions")
     print()
     print("Models:")
-    print(f"  Embeddings: intfloat/e5-mistral-7b-instruct")
-    print(f"  LLM:        meta-llama/Llama-3.1-8B-Instruct")
+    print(f"  Embeddings: intfloat/e5-mistral-7b-instruct (vLLM)")
+    print(f"  LLM:        Qwen/Qwen2.5-7B-Instruct (vLLM)")
     print()
     print("To delete deployments:")
     print("  embeddings.delete()")
-    print("  llama.delete()")
+    print("  llm.delete()")
 
 
 if __name__ == "__main__":
