@@ -3,17 +3,15 @@
 //! Manages Bittensor weight setting operations for the Validator.
 //! Sets weights every N blocks based on miner scores from node validations.
 
-use crate::billing::BillingReadClient;
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::auction::AuctionConfig;
 use crate::config::emission::EmissionConfig;
-use crate::config::BillingConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::persistence::SimplePersistence;
+use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
 use crate::taostats::TaoStatsClient;
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
@@ -62,7 +60,7 @@ pub struct WeightSetter {
     weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
     auction_config: AuctionConfig,
-    billing_read_client: Arc<BillingReadClient>,
+    delivery_repository: Arc<MinerDeliveryRepository>,
     taostats_client: Arc<TaoStatsClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
@@ -79,7 +77,6 @@ impl WeightSetter {
         min_score_threshold: f64,
         blocks_per_weight_set: u64,
         gpu_scoring_engine: Arc<GpuScoringEngine>,
-        billing_config: BillingConfig,
         emission_config: EmissionConfig,
         auction_config: AuctionConfig,
         gpu_profile_repo: Arc<GpuProfileRepository>,
@@ -95,6 +92,8 @@ impl WeightSetter {
             Duration::from_secs(auction_config.taostats_cache_ttl_secs),
         ));
 
+        let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
+
         Ok(Self {
             config,
             bittensor_service,
@@ -107,7 +106,7 @@ impl WeightSetter {
             weight_allocation_engine,
             emission_config,
             auction_config,
-            billing_read_client: Arc::new(BillingReadClient::new(billing_config)),
+            delivery_repository,
             taostats_client,
             gpu_profile_repo,
             metrics,
@@ -281,8 +280,8 @@ impl WeightSetter {
 
         // 3. Get payment-based weights from billing summaries
         let deliveries = self
-            .billing_read_client
-            .get_miner_delivery(since, now, Vec::new())
+            .delivery_repository
+            .get_deliveries(since, now, None)
             .await?;
 
         // Build hotkey -> current UID mapping from metagraph

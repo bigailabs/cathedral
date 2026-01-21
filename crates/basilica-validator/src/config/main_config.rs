@@ -559,6 +559,18 @@ pub struct BillingConfig {
     #[serde(default = "default_billing_endpoint")]
     pub billing_endpoint: String,
 
+    /// API endpoint for miner delivery reads
+    #[serde(default = "default_billing_api_endpoint")]
+    pub api_endpoint: String,
+
+    /// Sync interval for miner delivery cache (seconds)
+    #[serde(default = "default_billing_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+
+    /// Lookback window for miner delivery reads (hours)
+    #[serde(default = "default_billing_lookback_hours")]
+    pub lookback_hours: u64,
+
     /// Request timeout in seconds
     #[serde(default = "default_billing_timeout_secs")]
     pub timeout_secs: u64,
@@ -604,6 +616,18 @@ fn default_billing_endpoint() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 
+fn default_billing_api_endpoint() -> String {
+    "http://127.0.0.1:8080".to_string()
+}
+
+fn default_billing_sync_interval_secs() -> u64 {
+    300
+}
+
+fn default_billing_lookback_hours() -> u64 {
+    24
+}
+
 fn default_billing_timeout_secs() -> u64 {
     30
 }
@@ -645,6 +669,9 @@ impl Default for BillingConfig {
         Self {
             enabled: default_billing_enabled(),
             billing_endpoint: default_billing_endpoint(),
+            api_endpoint: default_billing_api_endpoint(),
+            sync_interval_secs: default_billing_sync_interval_secs(),
+            lookback_hours: default_billing_lookback_hours(),
             timeout_secs: default_billing_timeout_secs(),
             use_tls: default_billing_use_tls(),
             batch_size: default_billing_batch_size(),
@@ -878,6 +905,14 @@ impl ConfigValidation for ValidatorConfig {
                 key: "bittensor.axon_port".to_string(),
                 value: self.bittensor.axon_port.to_string(),
                 reason: "Axon port must be greater than 0".to_string(),
+            });
+        }
+
+        if self.billing.enabled && self.billing.api_endpoint.trim().is_empty() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "billing.api_endpoint".to_string(),
+                value: self.billing.api_endpoint.clone(),
+                reason: "API endpoint must be set for delivery sync".to_string(),
             });
         }
 

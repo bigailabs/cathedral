@@ -2,13 +2,14 @@ use crate::api::ApiHandler;
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::collateral::collateral_scan::Collateral;
 use crate::config::ValidatorConfig;
+use crate::billing::{BillingApiClient, DeliverySyncTask};
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_bid_server;
 use crate::metrics::ValidatorMetrics;
 use crate::miner_prover::MinerProver;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::persistence::SimplePersistence;
+use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
 
 use anyhow::{Context, Result};
 use basilica_common::MemoryStorage;
@@ -132,13 +133,28 @@ impl ValidatorService {
             self.config.verification.min_score_threshold,
             blocks_per_weight_set,
             gpu_scoring_engine,
-            self.config.billing.clone(),
             self.config.emission.clone(),
             self.config.auction.clone(),
             gpu_profile_repo.clone(),
             validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
         )?;
         let weight_setter = Arc::new(weight_setter);
+
+        let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
+        let delivery_sync_task = if self.config.billing.enabled {
+            let api_client = Arc::new(BillingApiClient::new(
+                self.config.billing.api_endpoint.clone(),
+                bittensor_service.clone(),
+            ));
+            Some(DeliverySyncTask::new(
+                api_client,
+                delivery_repo.clone(),
+                self.config.billing.sync_interval_secs,
+                self.config.billing.lookback_hours,
+            ))
+        } else {
+            None
+        };
 
         // Create validator hotkey for API handler
         // Get the account ID from bittensor service and convert to SS58 string
@@ -217,6 +233,14 @@ impl ValidatorService {
             }
         });
 
+        let delivery_sync_handle = if let Some(delivery_sync_task) = delivery_sync_task {
+            Some(tokio::spawn(async move {
+                delivery_sync_task.run().await;
+            }))
+        } else {
+            None
+        };
+
         let miner_prover_handle = tokio::spawn(async move {
             if let Err(e) = miner_prover.start().await {
                 error!("Miner prover task failed: {}", e);
@@ -272,6 +296,9 @@ impl ValidatorService {
 
         scoring_task_handle.abort();
         weight_setter_handle.abort();
+        if let Some(handle) = delivery_sync_handle {
+            handle.abort();
+        }
         miner_prover_handle.abort();
         if let Some(handle) = cleanup_task_handle {
             handle.abort();

@@ -165,4 +165,5 @@ impl ApiHandler {
             .layer(CorsLayer::permissive())
             .with_state(self.state.clone())
     }
+
 }
