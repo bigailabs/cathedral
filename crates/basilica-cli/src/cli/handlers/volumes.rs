@@ -20,27 +20,27 @@ fn calculate_volume_cost(size_gb: u32) -> (f64, f64) {
     (hourly, monthly)
 }
 
-/// Validate volume name according to the same rules as interactive prompt
-fn validate_volume_name(name: &str) -> Result<String, CliError> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err(CliError::Internal(color_eyre::eyre::eyre!(
-            "Volume name cannot be empty"
-        )));
+/// Core validation for volume name characters
+fn validate_name_chars(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("Volume name cannot be empty");
     }
-    if trimmed.len() > 100 {
-        return Err(CliError::Internal(color_eyre::eyre::eyre!(
-            "Volume name too long (max 100 characters)"
-        )));
+    if name.len() > 100 {
+        return Err("Volume name too long (max 100 characters)");
     }
-    if !trimmed
+    if !name
         .chars()
         .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(CliError::Internal(color_eyre::eyre::eyre!(
-            "Only alphanumeric characters, hyphens, and underscores are allowed"
-        )));
+        return Err("Only alphanumeric characters, hyphens, and underscores are allowed");
     }
+    Ok(())
+}
+
+/// Validate volume name according to the same rules as interactive prompt
+fn validate_volume_name(name: &str) -> Result<String, CliError> {
+    let trimmed = name.trim();
+    validate_name_chars(trimmed).map_err(|e| CliError::Internal(color_eyre::eyre::eyre!(e)))?;
     Ok(trimmed.to_string())
 }
 
@@ -49,21 +49,7 @@ fn prompt_volume_name() -> Result<String, CliError> {
     let theme = ColorfulTheme::default();
     let name: String = Input::with_theme(&theme)
         .with_prompt("Volume name")
-        .validate_with(|input: &String| {
-            let trimmed = input.trim();
-            if trimmed.is_empty() {
-                Err("Volume name cannot be empty")
-            } else if trimmed.len() > 100 {
-                Err("Volume name too long (max 100 characters)")
-            } else if !trimmed
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-            {
-                Err("Only alphanumeric characters, hyphens, and underscores are allowed")
-            } else {
-                Ok(())
-            }
-        })
+        .validate_with(|input: &String| validate_name_chars(input.trim()))
         .interact_text()
         .map_err(|e| CliError::Internal(e.into()))?;
 
@@ -408,6 +394,7 @@ pub async fn handle_create_volume(
     provider: Option<String>,
     region: Option<String>,
     description: Option<String>,
+    json: bool,
 ) -> Result<(), CliError> {
     // Get provider first (needed for region selection)
     let provider = match provider {
@@ -487,6 +474,11 @@ pub async fn handle_create_volume(
 
     let volume = client.create_volume(request).await.map_err(CliError::Api)?;
 
+    if json {
+        json_output(&volume)?;
+        return Ok(());
+    }
+
     println!();
     print_success(&format!("Volume \"{}\" created successfully!", volume.name));
     println!();
@@ -533,6 +525,7 @@ pub async fn handle_delete_volume(
     client: &BasilicaClient,
     volume_identifier: Option<String>,
     skip_confirm: bool,
+    json: bool,
 ) -> Result<(), CliError> {
     // Get volume - either from argument or interactive selection
     let volume = match volume_identifier {
@@ -621,6 +614,16 @@ pub async fn handle_delete_volume(
         .await
         .map_err(CliError::Api)?;
 
+    if json {
+        json_output(&serde_json::json!({
+            "success": true,
+            "volume_id": volume.volume_id,
+            "name": volume.name,
+            "message": format!("Volume \"{}\" deleted successfully.", volume.name)
+        }))?;
+        return Ok(());
+    }
+
     println!();
     print_success(&format!("Volume \"{}\" deleted successfully.", volume.name));
 
@@ -632,6 +635,7 @@ pub async fn handle_attach_volume(
     client: &BasilicaClient,
     volume_identifier: Option<String>,
     rental_id: Option<String>,
+    json: bool,
 ) -> Result<(), CliError> {
     // Get volume - either from argument or interactive selection
     let volume = match volume_identifier {
@@ -690,6 +694,11 @@ pub async fn handle_attach_volume(
         .await
         .map_err(CliError::Api)?;
 
+    if json {
+        json_output(&response)?;
+        return Ok(());
+    }
+
     println!();
     print_success(&format!(
         "Volume \"{}\" attached successfully!",
@@ -711,6 +720,7 @@ pub async fn handle_detach_volume(
     client: &BasilicaClient,
     volume_identifier: Option<String>,
     skip_confirm: bool,
+    json: bool,
 ) -> Result<(), CliError> {
     // Get volume - either from argument or interactive selection
     let volume = match volume_identifier {
@@ -788,6 +798,11 @@ pub async fn handle_detach_volume(
         .detach_volume(&volume.volume_id)
         .await
         .map_err(CliError::Api)?;
+
+    if json {
+        json_output(&response)?;
+        return Ok(());
+    }
 
     println!();
     print_success(&format!(

@@ -299,6 +299,7 @@ impl Args {
                             provider.clone(),
                             region.clone(),
                             description.clone(),
+                            self.json,
                         )
                         .await?;
                     }
@@ -306,20 +307,31 @@ impl Args {
                         handlers::volumes::handle_list_volumes(&client, self.json).await?;
                     }
                     VolumeAction::Delete { volume, yes } => {
-                        handlers::volumes::handle_delete_volume(&client, volume.clone(), *yes)
-                            .await?;
+                        handlers::volumes::handle_delete_volume(
+                            &client,
+                            volume.clone(),
+                            *yes,
+                            self.json,
+                        )
+                        .await?;
                     }
                     VolumeAction::Attach { volume, rental } => {
                         handlers::volumes::handle_attach_volume(
                             &client,
                             volume.clone(),
                             rental.clone(),
+                            self.json,
                         )
                         .await?;
                     }
                     VolumeAction::Detach { volume, yes } => {
-                        handlers::volumes::handle_detach_volume(&client, volume.clone(), *yes)
-                            .await?;
+                        handlers::volumes::handle_detach_volume(
+                            &client,
+                            volume.clone(),
+                            *yes,
+                            self.json,
+                        )
+                        .await?;
                     }
                 }
             }

@@ -1101,18 +1101,7 @@ pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
                 status,
                 provider: volume.provider.clone(),
                 region: volume.region.clone(),
-                rental: volume
-                    .rental_id
-                    .as_ref()
-                    .map(|id| {
-                        // Truncate rental ID for display
-                        if id.len() > 12 {
-                            format!("{}...", &id[..12])
-                        } else {
-                            id.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| "-".to_string()),
+                rental: volume.rental_id.clone().unwrap_or_else(|| "-".to_string()),
                 hourly_cost: format!("${:.2}/hr", volume.estimated_hourly_cost),
                 total_cost,
                 created: format_timestamp(&volume.created_at.to_rfc3339()),
