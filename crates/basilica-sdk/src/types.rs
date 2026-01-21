@@ -1,7 +1,6 @@
 //! Type definitions for the Basilica SDK
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Re-export types from basilica-validator that are used by the client
 pub use basilica_validator::api::types::{
@@ -330,17 +329,6 @@ pub struct StartSecureCloudRentalRequest {
     /// User's registered SSH key ID (NOT the public key string)
     /// Must be a key owned by the authenticated user
     pub ssh_public_key_id: String,
-
-    /// Docker container image (optional)
-    pub container_image: Option<String>,
-
-    /// Environment variables for the container
-    #[serde(default)]
-    pub environment: HashMap<String, String>,
-
-    /// Port mappings
-    #[serde(default)]
-    pub ports: Vec<PortMappingRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -63,15 +63,7 @@ def main():
     print(f"  - Storage: {offering.storage_gb}GB")
     print(f"  - Hourly rate: ${offering.hourly_rate}")
 
-    rental = client.start_secure_cloud_rental(
-        offering_id=offering.id,
-        # Optional: container configuration
-        environment={"EXAMPLE_VAR": "hello_from_basilica"},
-        # Optional: port mappings
-        ports=[
-            {"container_port": 22, "host_port": 22, "protocol": "tcp"},
-        ],
-    )
+    rental = client.start_secure_cloud_rental(offering_id=offering.id)
 
     print("\nRental request submitted!")
     print(f"  Rental ID: {rental.rental_id}")

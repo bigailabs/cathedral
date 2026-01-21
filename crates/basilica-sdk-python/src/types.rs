@@ -1297,32 +1297,16 @@ pub struct StartCpuRentalRequest {
     pub offering_id: String,
     #[pyo3(get, set)]
     pub ssh_public_key_id: String,
-    #[pyo3(get, set)]
-    pub container_image: Option<String>,
-    #[pyo3(get, set)]
-    pub environment: HashMap<String, String>,
-    #[pyo3(get, set)]
-    pub ports: Vec<PortMappingRequest>,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl StartCpuRentalRequest {
     #[new]
-    #[pyo3(signature = (offering_id, ssh_public_key_id, container_image=None, environment=None, ports=None))]
-    fn new(
-        offering_id: String,
-        ssh_public_key_id: String,
-        container_image: Option<String>,
-        environment: Option<HashMap<String, String>>,
-        ports: Option<Vec<PortMappingRequest>>,
-    ) -> Self {
+    fn new(offering_id: String, ssh_public_key_id: String) -> Self {
         Self {
             offering_id,
             ssh_public_key_id,
-            container_image,
-            environment: environment.unwrap_or_default(),
-            ports: ports.unwrap_or_default(),
         }
     }
 }
@@ -1332,9 +1316,6 @@ impl From<StartCpuRentalRequest> for SdkStartSecureCloudRentalRequest {
         Self {
             offering_id: req.offering_id,
             ssh_public_key_id: req.ssh_public_key_id,
-            container_image: req.container_image,
-            environment: req.environment,
-            ports: req.ports.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1545,32 +1526,16 @@ pub struct StartSecureCloudRentalRequest {
     pub offering_id: String,
     #[pyo3(get, set)]
     pub ssh_public_key_id: String,
-    #[pyo3(get, set)]
-    pub container_image: Option<String>,
-    #[pyo3(get, set)]
-    pub environment: HashMap<String, String>,
-    #[pyo3(get, set)]
-    pub ports: Vec<PortMappingRequest>,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl StartSecureCloudRentalRequest {
     #[new]
-    #[pyo3(signature = (offering_id, ssh_public_key_id, container_image=None, environment=None, ports=None))]
-    fn new(
-        offering_id: String,
-        ssh_public_key_id: String,
-        container_image: Option<String>,
-        environment: Option<HashMap<String, String>>,
-        ports: Option<Vec<PortMappingRequest>>,
-    ) -> Self {
+    fn new(offering_id: String, ssh_public_key_id: String) -> Self {
         Self {
             offering_id,
             ssh_public_key_id,
-            container_image,
-            environment: environment.unwrap_or_default(),
-            ports: ports.unwrap_or_default(),
         }
     }
 }
@@ -1580,9 +1545,6 @@ impl From<StartSecureCloudRentalRequest> for SdkStartSecureCloudRentalRequest {
         Self {
             offering_id: req.offering_id,
             ssh_public_key_id: req.ssh_public_key_id,
-            container_image: req.container_image,
-            environment: req.environment,
-            ports: req.ports.into_iter().map(Into::into).collect(),
         }
     }
 }

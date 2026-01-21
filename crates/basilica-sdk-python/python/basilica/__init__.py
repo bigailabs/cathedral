@@ -1304,9 +1304,6 @@ class BasilicaClient:
         self,
         offering_id: str,
         ssh_public_key_id: Optional[str] = None,
-        container_image: Optional[str] = None,
-        environment: Optional[Dict[str, str]] = None,
-        ports: Optional[List[Dict[str, Any]]] = None,
     ) -> CpuRentalResponse:
         """
         Start a CPU-only rental.
@@ -1314,9 +1311,6 @@ class BasilicaClient:
         Args:
             offering_id: The offering ID from list_cpu_offerings()
             ssh_public_key_id: SSH key ID (auto-detected if not provided)
-            container_image: Optional Docker container image
-            environment: Environment variables for the container
-            ports: Port mappings (list of dicts with container_port, host_port, protocol)
 
         Returns:
             CpuRentalResponse with rental details and SSH command
@@ -1335,24 +1329,9 @@ class BasilicaClient:
                 )
             ssh_public_key_id = key.id
 
-        # Build port mappings
-        port_mappings = []
-        if ports:
-            for port in ports:
-                port_mappings.append(
-                    PortMappingRequest(
-                        container_port=port.get("container_port", 0),
-                        host_port=port.get("host_port", 0),
-                        protocol=port.get("protocol", "tcp"),
-                    )
-                )
-
         request = StartCpuRentalRequest(
             offering_id=offering_id,
             ssh_public_key_id=ssh_public_key_id,
-            container_image=container_image,
-            environment=environment,
-            ports=port_mappings,
         )
 
         return self._client.start_cpu_rental(request)
@@ -1403,9 +1382,6 @@ class BasilicaClient:
         self,
         offering_id: str,
         ssh_public_key_id: Optional[str] = None,
-        container_image: Optional[str] = None,
-        environment: Optional[Dict[str, str]] = None,
-        ports: Optional[List[Dict[str, Any]]] = None,
     ) -> SecureCloudRentalResponse:
         """
         Start a secure cloud GPU rental from a datacenter provider.
@@ -1413,19 +1389,13 @@ class BasilicaClient:
         Args:
             offering_id: The offering ID from list_secure_cloud_gpus()
             ssh_public_key_id: SSH key ID (auto-detected if not provided)
-            container_image: Optional Docker container image
-            environment: Environment variables for the container
-            ports: Port mappings (list of dicts with container_port, host_port, protocol)
 
         Returns:
             SecureCloudRentalResponse with rental details and SSH command
 
         Example:
             >>> offerings = client.list_secure_cloud_gpus()
-            >>> rental = client.start_secure_cloud_rental(
-            ...     offering_id=offerings[0].id,
-            ...     container_image="pytorch/pytorch:latest"
-            ... )
+            >>> rental = client.start_secure_cloud_rental(offerings[0].id)
             >>> print(f"SSH: {rental.ssh_command}")
         """
         # Auto-detect SSH key ID if not provided
@@ -1437,24 +1407,9 @@ class BasilicaClient:
                 )
             ssh_public_key_id = key.id
 
-        # Build port mappings
-        port_mappings = []
-        if ports:
-            for port in ports:
-                port_mappings.append(
-                    PortMappingRequest(
-                        container_port=port.get("container_port", 0),
-                        host_port=port.get("host_port", 0),
-                        protocol=port.get("protocol", "tcp"),
-                    )
-                )
-
         request = StartSecureCloudRentalRequest(
             offering_id=offering_id,
             ssh_public_key_id=ssh_public_key_id,
-            container_image=container_image,
-            environment=environment,
-            ports=port_mappings,
         )
 
         return self._client.start_secure_cloud_rental(request)
