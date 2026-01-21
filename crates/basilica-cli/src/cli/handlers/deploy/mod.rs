@@ -70,10 +70,9 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
 /// List all deployments
 async fn handle_list(client: &basilica_sdk::BasilicaClient, json: bool) -> Result<(), CliError> {
     let spinner = create_spinner("Fetching deployments...");
-
-    let response = client.list_deployments().await.map_err(CliError::Api)?;
-
+    let result = client.list_deployments().await;
     complete_spinner_and_clear(spinner);
+    let response = result.map_err(CliError::Api)?;
 
     if json {
         json_output(&response)?;
@@ -92,8 +91,9 @@ async fn handle_status(
     verbose: bool,
 ) -> Result<(), CliError> {
     let spinner = create_spinner(&format!("Fetching deployment '{}'...", name));
-
-    let response = client.get_deployment(name).await.map_err(|e| {
+    let result = client.get_deployment(name).await;
+    complete_spinner_and_clear(spinner);
+    let response = result.map_err(|e| {
         if matches!(e, basilica_sdk::error::ApiError::NotFound { .. }) {
             CliError::Deploy(DeployError::NotFound {
                 name: name.to_string(),
@@ -102,8 +102,6 @@ async fn handle_status(
             CliError::Api(e)
         }
     })?;
-
-    complete_spinner_and_clear(spinner);
 
     if json {
         json_output(&response)?;
@@ -153,13 +151,9 @@ async fn handle_delete(
     }
 
     let spinner = create_spinner(&format!("Deleting deployment '{}'...", name));
-
-    client
-        .delete_deployment(name)
-        .await
-        .map_err(CliError::Api)?;
-
+    let result = client.delete_deployment(name).await;
     complete_spinner_and_clear(spinner);
+    result.map_err(CliError::Api)?;
 
     print_success(&format!("Deployment '{}' deletion initiated", name));
 
@@ -178,23 +172,24 @@ async fn handle_scale(
     ));
 
     // Verify deployment exists before scaling
-    client.get_deployment(name).await.map_err(|e| {
-        if matches!(e, basilica_sdk::error::ApiError::NotFound { .. }) {
-            CliError::Deploy(DeployError::NotFound {
-                name: name.to_string(),
-            })
-        } else {
-            CliError::Api(e)
-        }
-    })?;
+    let verify_result = client.get_deployment(name).await;
+    if let Err(e) = verify_result {
+        complete_spinner_and_clear(spinner);
+        return Err(
+            if matches!(e, basilica_sdk::error::ApiError::NotFound { .. }) {
+                CliError::Deploy(DeployError::NotFound {
+                    name: name.to_string(),
+                })
+            } else {
+                CliError::Api(e)
+            },
+        );
+    }
 
     // Scale via dedicated endpoint
-    client
-        .scale_deployment(name, replicas)
-        .await
-        .map_err(CliError::Api)?;
-
+    let scale_result = client.scale_deployment(name, replicas).await;
     complete_spinner_and_clear(spinner);
+    scale_result.map_err(CliError::Api)?;
 
     print_success(&format!(
         "Deployment '{}' scaled to {} replicas",

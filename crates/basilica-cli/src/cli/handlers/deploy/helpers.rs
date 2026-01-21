@@ -236,6 +236,9 @@ fn truncate_url(url: &str, max_len: usize) -> String {
 
 /// Truncate string for display (unicode-safe)
 fn truncate(s: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
     let char_count = s.chars().count();
     if char_count <= max_len {
         s.to_string()
