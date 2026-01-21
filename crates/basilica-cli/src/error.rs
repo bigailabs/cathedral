@@ -79,6 +79,10 @@ pub enum CliError {
     #[error(transparent)]
     Deploy(#[from] DeployError),
 
+    /// Invalid volume provider
+    #[error("Invalid provider: {0}")]
+    InvalidProvider(String),
+
     /// Everything else (using color-eyre's Report for rich errors)
     #[error(transparent)]
     Internal(#[from] Report),

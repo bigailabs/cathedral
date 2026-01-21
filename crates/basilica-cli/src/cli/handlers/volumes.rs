@@ -20,6 +20,30 @@ fn calculate_volume_cost(size_gb: u32) -> (f64, f64) {
     (hourly, monthly)
 }
 
+/// Validate volume name according to the same rules as interactive prompt
+fn validate_volume_name(name: &str) -> Result<String, CliError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "Volume name cannot be empty"
+        )));
+    }
+    if trimmed.len() > 100 {
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "Volume name too long (max 100 characters)"
+        )));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(
+            "Only alphanumeric characters, hyphens, and underscores are allowed"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
 /// Prompt for volume name interactively
 fn prompt_volume_name() -> Result<String, CliError> {
     let theme = ColorfulTheme::default();
@@ -43,7 +67,7 @@ fn prompt_volume_name() -> Result<String, CliError> {
         .interact_text()
         .map_err(|e| CliError::Internal(e.into()))?;
 
-    Ok(name.trim().to_string())
+    validate_volume_name(&name)
 }
 
 /// Prompt for volume size interactively
@@ -88,11 +112,14 @@ fn prompt_provider() -> Result<String, CliError> {
 /// Prompt for region selection based on provider
 fn prompt_region(provider: &str) -> Result<String, CliError> {
     // Find regions for this provider
-    let regions = VOLUME_PROVIDERS
+    let regions = match VOLUME_PROVIDERS
         .iter()
         .find(|(p, _)| *p == provider)
         .map(|(_, r)| *r)
-        .unwrap_or(&["US-1"] as &[&str]);
+    {
+        Some(r) => r,
+        None => return Err(CliError::InvalidProvider(provider.to_string())),
+    };
 
     // If only one region, auto-select it
     if regions.len() == 1 {
@@ -396,16 +423,7 @@ pub async fn handle_create_volume(
 
     // Get name
     let name = match name {
-        Some(n) => {
-            // Validate provided name
-            let trimmed = n.trim();
-            if trimmed.is_empty() {
-                return Err(CliError::Internal(color_eyre::eyre::eyre!(
-                    "Volume name cannot be empty"
-                )));
-            }
-            trimmed.to_string()
-        }
+        Some(n) => validate_volume_name(&n)?,
         None => prompt_volume_name()?,
     };
 
@@ -530,14 +548,38 @@ pub async fn handle_delete_volume(
         }
     };
 
-    // Check if volume is attached
-    if volume.status == VolumeStatus::Attached {
-        return Err(CliError::Internal(color_eyre::eyre::eyre!(
-            "Cannot delete volume '{}' because it is attached to rental '{}'.\nDetach it first with: basilica volumes detach {}",
-            volume.name,
-            volume.rental_id.as_deref().unwrap_or("unknown"),
-            volume.name
-        )));
+    // Check if volume is in available status
+    if volume.status != VolumeStatus::Available {
+        let message = match volume.status {
+            VolumeStatus::Attached => {
+                format!(
+                    "Cannot delete volume '{}' because it is attached to rental '{}'.\nDetach it first with: basilica volumes detach {}",
+                    volume.name,
+                    volume.rental_id.as_deref().unwrap_or("unknown"),
+                    volume.name
+                )
+            }
+            VolumeStatus::Pending => {
+                format!(
+                    "Cannot delete volume '{}' because it is still pending.\nPlease wait for the volume to become Available before deletion.",
+                    volume.name
+                )
+            }
+            VolumeStatus::Deleting => {
+                format!(
+                    "Cannot delete volume '{}' because it is already being deleted.\nPlease wait for the deletion to complete.",
+                    volume.name
+                )
+            }
+            VolumeStatus::Error => {
+                format!(
+                    "Cannot delete volume '{}' because it is in an error state.\nPlease inspect the volume status before attempting deletion.",
+                    volume.name
+                )
+            }
+            VolumeStatus::Available => unreachable!(),
+        };
+        return Err(CliError::Internal(color_eyre::eyre::eyre!(message)));
     }
 
     // Confirm deletion if not skipped
