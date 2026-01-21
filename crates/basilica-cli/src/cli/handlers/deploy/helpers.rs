@@ -1,8 +1,13 @@
 //! Helper functions for deploy command
 
-use crate::error::DeployError;
+use crate::error::{CliError, DeployError};
 use crate::output::{print_info, print_success};
+use crate::progress::{complete_spinner_and_clear, create_spinner};
 use basilica_sdk::types::{DeploymentResponse, DeploymentSummary};
+use basilica_sdk::BasilicaClient;
+use color_eyre::eyre::eyre;
+use console::{style, Term};
+use dialoguer::{theme::ColorfulTheme, Select};
 use std::collections::HashMap;
 
 /// Generate RFC 1123 compliant deployment name from source
@@ -227,6 +232,73 @@ fn truncate_url(url: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &url[..max_len - 3])
     }
+}
+
+/// Truncate string for display (unicode-safe)
+fn truncate(s: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
+    let char_count = s.chars().count();
+    if char_count <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len - 1).collect();
+        format!("{}…", truncated)
+    }
+}
+
+/// Resolve deployment name - if not provided, fetch deployments and prompt for selection
+pub async fn resolve_deployment_name(
+    name: Option<String>,
+    client: &BasilicaClient,
+) -> Result<String, CliError> {
+    if let Some(n) = name {
+        return Ok(n);
+    }
+
+    let spinner = create_spinner("Fetching deployments...");
+    let response = client.list_deployments().await.map_err(CliError::Api)?;
+    complete_spinner_and_clear(spinner);
+
+    if response.deployments.is_empty() {
+        return Err(CliError::Internal(eyre!(
+            "No deployments found. Create one with 'basilica deploy <source>'"
+        )));
+    }
+
+    // Format for selection display
+    let items: Vec<String> = response
+        .deployments
+        .iter()
+        .map(|d| {
+            format!(
+                "{:<30} │ {:<10} │ {}/{}",
+                truncate(&d.instance_name, 30),
+                d.state,
+                d.replicas.ready,
+                d.replicas.desired
+            )
+        })
+        .collect();
+
+    // Build prompt with header on next line
+    let header = style("  Name                           │ State      │ Replicas").dim();
+    let prompt = format!("Select deployment\n{}", header);
+
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(prompt)
+        .items(&items)
+        .default(0)
+        .interact_opt()
+        .map_err(|e| CliError::Internal(eyre!("Selection failed: {}", e)))?;
+
+    let selection = selection.ok_or_else(|| CliError::Internal(eyre!("Selection cancelled")))?;
+
+    // Clear prompt (includes header) and selection
+    let _ = Term::stdout().clear_last_lines(2);
+
+    Ok(response.deployments[selection].instance_name.clone())
 }
 
 #[cfg(test)]

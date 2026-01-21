@@ -754,15 +754,15 @@ pub enum DeployAction {
     /// Get deployment status
     #[command(name = "status", visible_alias = "get")]
     Status {
-        /// Deployment name
-        name: String,
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
     },
 
     /// Stream deployment logs
     #[command(name = "logs")]
     Logs {
-        /// Deployment name
-        name: String,
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
         /// Follow log output
         #[arg(short, long)]
         follow: bool,
@@ -774,8 +774,8 @@ pub enum DeployAction {
     /// Delete a deployment
     #[command(name = "delete", visible_alias = "rm")]
     Delete {
-        /// Deployment name
-        name: String,
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
         /// Skip confirmation
         #[arg(short, long)]
         yes: bool,
@@ -784,8 +784,8 @@ pub enum DeployAction {
     /// Scale deployment replicas
     #[command(name = "scale")]
     Scale {
-        /// Deployment name
-        name: String,
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
         /// Number of replicas
         #[arg(long)]
         replicas: u32,
