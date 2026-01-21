@@ -2,6 +2,7 @@
 
 use crate::error::CliError;
 use crate::output::{json_output, print_success, table_output};
+use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use basilica_sdk::types::{AttachVolumeRequest, CreateVolumeRequest, VolumeResponse, VolumeStatus};
 use basilica_sdk::BasilicaClient;
 use console::{style, Term};
@@ -431,18 +432,16 @@ pub async fn handle_create_volume(
     // Calculate and display pricing
     let (hourly, monthly) = calculate_volume_cost(size);
 
+    // Compact summary before confirmation
     println!();
     println!(
-        "{}",
-        style(format!("Creating volume \"{}\" ({}GB)", name, size)).bold()
+        "Volume: {} ({}GB) on {}/{}",
+        style(&name).cyan(),
+        size,
+        provider,
+        region
     );
-    println!();
-    println!("  Provider: {}", style(&provider).cyan());
-    println!("  Region:   {}", style(&region).cyan());
-    println!();
-    println!("{}", style("Estimated cost:").bold());
-    println!("  Hourly:  ${:.4}/hr", hourly);
-    println!("  Monthly: ~${:.2}/mo (estimated)", monthly);
+    println!("Cost: ~${:.2}/hr (${:.2}/mo estimated)", hourly, monthly);
     println!();
 
     // Confirm creation
@@ -472,23 +471,19 @@ pub async fn handle_create_volume(
         region,
     };
 
-    let volume = client.create_volume(request).await.map_err(CliError::Api)?;
+    let spinner = create_spinner(&format!("Creating volume \"{}\"...", name));
+    let volume = client.create_volume(request).await.map_err(|e| {
+        complete_spinner_error(spinner.clone(), "Failed to create volume");
+        CliError::Api(e)
+    })?;
+    complete_spinner_and_clear(spinner);
 
     if json {
         json_output(&volume)?;
         return Ok(());
     }
 
-    println!();
-    print_success(&format!("Volume \"{}\" created successfully!", volume.name));
-    println!();
-    println!("  Volume ID: {}", style(&volume.volume_id).cyan());
-    println!("  Status:    {}", style(volume.status.to_string()).green());
-    println!();
-    println!(
-        "{}",
-        style("Use 'basilica volumes attach' to attach this volume to a rental.").dim()
-    );
+    print_success(&format!("Volume \"{}\" created", volume.name));
 
     Ok(())
 }
@@ -580,7 +575,6 @@ pub async fn handle_delete_volume(
         let volume_name = volume.name.clone();
         let size_gb = volume.size_gb;
 
-        println!();
         println!(
             "{}",
             style(format!(
@@ -589,7 +583,6 @@ pub async fn handle_delete_volume(
             ))
             .yellow()
         );
-        println!();
 
         let confirmed = tokio::task::spawn_blocking(move || {
             let theme = ColorfulTheme::default();
@@ -609,23 +602,24 @@ pub async fn handle_delete_volume(
     }
 
     // Delete the volume
-    client
-        .delete_volume(&volume.volume_id)
-        .await
-        .map_err(CliError::Api)?;
+    let spinner = create_spinner(&format!("Deleting volume \"{}\"...", volume.name));
+    client.delete_volume(&volume.volume_id).await.map_err(|e| {
+        complete_spinner_error(spinner.clone(), "Failed to delete volume");
+        CliError::Api(e)
+    })?;
+    complete_spinner_and_clear(spinner);
 
     if json {
         json_output(&serde_json::json!({
             "success": true,
             "volume_id": volume.volume_id,
             "name": volume.name,
-            "message": format!("Volume \"{}\" deleted successfully.", volume.name)
+            "message": format!("Volume \"{}\" deleted", volume.name)
         }))?;
         return Ok(());
     }
 
-    println!();
-    print_success(&format!("Volume \"{}\" deleted successfully.", volume.name));
+    print_success(&format!("Volume \"{}\" deleted", volume.name));
 
     Ok(())
 }
@@ -676,41 +670,32 @@ pub async fn handle_attach_volume(
         None => select_rental_for_volume(client, &volume).await?,
     };
 
-    println!();
-    println!(
-        "Attaching volume \"{}\" ({}GB) to rental {}...",
-        style(&volume.name).cyan(),
-        volume.size_gb,
-        style(&rental_id).cyan()
-    );
-
-    // Attach the volume
+    // Attach the volume with spinner
     let request = AttachVolumeRequest {
         rental_id: rental_id.clone(),
     };
 
+    let rental_id_short = &rental_id[..8.min(rental_id.len())];
+    let spinner = create_spinner(&format!(
+        "Attaching volume \"{}\" to rental {}...",
+        volume.name, rental_id_short
+    ));
+
     let response = client
         .attach_volume(&volume.volume_id, request)
         .await
-        .map_err(CliError::Api)?;
+        .map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Failed to attach volume");
+            CliError::Api(e)
+        })?;
+    complete_spinner_and_clear(spinner);
 
     if json {
         json_output(&response)?;
         return Ok(());
     }
 
-    println!();
-    print_success(&format!(
-        "Volume \"{}\" attached successfully!",
-        volume.name
-    ));
-    println!();
-    println!("  {}", response.message);
-    println!();
-    println!(
-        "{}",
-        style("Note: The volume will be mounted at /mnt/<volume-name> in your instance.").dim()
-    );
+    print_success(&format!("Volume \"{}\" attached", volume.name));
 
     Ok(())
 }
@@ -745,18 +730,17 @@ pub async fn handle_detach_volume(
     }
 
     let rental_id = volume.rental_id.as_deref().unwrap_or("unknown");
+    let rental_id_short = &rental_id[..8.min(rental_id.len())];
 
     // Confirm detachment if not skipped
     if !skip_confirm {
         let volume_name = volume.name.clone();
-        let rental_id_clone = rental_id.to_string();
 
-        println!();
         println!(
             "{}",
             style(format!(
-                "Warning: Detaching volume \"{}\" from rental {}",
-                volume_name, rental_id_clone
+                "Warning: Detaching volume \"{}\" from rental {}...",
+                volume_name, rental_id_short
             ))
             .yellow()
         );
@@ -764,15 +748,11 @@ pub async fn handle_detach_volume(
             "{}",
             style("Make sure no processes are using the volume before detaching.").yellow()
         );
-        println!();
 
         let confirmed = tokio::task::spawn_blocking(move || {
             let theme = ColorfulTheme::default();
             Confirm::with_theme(&theme)
-                .with_prompt(format!(
-                    "Detach volume '{}' from rental {}?",
-                    volume_name, rental_id_clone
-                ))
+                .with_prompt(format!("Detach volume '{}'?", volume_name))
                 .default(false)
                 .interact()
         })
@@ -786,31 +766,20 @@ pub async fn handle_detach_volume(
         }
     }
 
-    println!();
-    println!(
-        "Detaching volume \"{}\" from rental {}...",
-        style(&volume.name).cyan(),
-        style(rental_id).cyan()
-    );
-
-    // Detach the volume
-    let response = client
-        .detach_volume(&volume.volume_id)
-        .await
-        .map_err(CliError::Api)?;
+    // Detach the volume with spinner
+    let spinner = create_spinner(&format!("Detaching volume \"{}\"...", volume.name));
+    let response = client.detach_volume(&volume.volume_id).await.map_err(|e| {
+        complete_spinner_error(spinner.clone(), "Failed to detach volume");
+        CliError::Api(e)
+    })?;
+    complete_spinner_and_clear(spinner);
 
     if json {
         json_output(&response)?;
         return Ok(());
     }
 
-    println!();
-    print_success(&format!(
-        "Volume \"{}\" detached successfully!",
-        volume.name
-    ));
-    println!();
-    println!("  {}", response.message);
+    print_success(&format!("Volume \"{}\" detached", volume.name));
 
     Ok(())
 }
