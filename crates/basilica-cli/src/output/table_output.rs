@@ -1102,7 +1102,10 @@ pub fn display_volumes(volumes: &[VolumeResponse]) -> Result<()> {
                 provider: volume.provider.clone(),
                 region: volume.region.clone(),
                 rental: volume.rental_id.clone().unwrap_or_else(|| "-".to_string()),
-                hourly_cost: format!("${:.2}/hr", volume.estimated_hourly_cost),
+                hourly_cost: volume
+                    .estimated_hourly_cost
+                    .map(|c| format!("${:.2}/hr", c))
+                    .unwrap_or_else(|| "-".to_string()),
                 total_cost,
                 created: format_timestamp(&volume.created_at.to_rfc3339()),
             }

@@ -1003,7 +1003,7 @@ pub struct VolumeResponse {
     pub rental_id: Option<String>,
 
     /// Estimated hourly cost in USD
-    pub estimated_hourly_cost: f64,
+    pub estimated_hourly_cost: Option<f64>,
 
     /// Accumulated cost from billing service (actual tracked cost)
     /// None if billing service is unavailable
