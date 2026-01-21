@@ -462,6 +462,82 @@ impl BasilicaClient {
 
         Ok(response.into())
     }
+
+    // ===== GPU Rental Methods =====
+
+    /// List available GPU offerings from secure cloud providers
+    fn list_secure_cloud_gpus(&self, py: Python) -> PyResult<Vec<types::GpuOffering>> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.list_secure_cloud_gpus().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into_iter().map(Into::into).collect())
+    }
+
+    /// Start a secure cloud GPU rental
+    ///
+    /// Args:
+    ///     request: GPU rental request parameters
+    fn start_secure_cloud_rental(
+        &self,
+        py: Python,
+        request: types::StartSecureCloudRentalRequest,
+    ) -> PyResult<types::SecureCloudRentalResponse> {
+        let client = Arc::clone(&self.inner);
+        let request = request.into();
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.start_secure_cloud_rental(request).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Stop a secure cloud GPU rental
+    ///
+    /// Args:
+    ///     rental_id: The rental ID to stop
+    fn stop_secure_cloud_rental(
+        &self,
+        py: Python,
+        rental_id: String,
+    ) -> PyResult<types::StopSecureCloudRentalResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.stop_secure_cloud_rental(&rental_id).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// List secure cloud GPU rentals for the authenticated user
+    fn list_secure_cloud_rentals(
+        &self,
+        py: Python,
+    ) -> PyResult<types::ListSecureCloudRentalsResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.list_secure_cloud_rentals().await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
 }
 
 impl BasilicaClient {
@@ -570,6 +646,14 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::StopCpuRentalResponse>()?;
     m.add_class::<types::CpuRentalListItem>()?;
     m.add_class::<types::ListCpuRentalsResponse>()?;
+
+    // GPU Rental types (secure cloud)
+    m.add_class::<types::GpuOffering>()?;
+    m.add_class::<types::StartSecureCloudRentalRequest>()?;
+    m.add_class::<types::SecureCloudRentalResponse>()?;
+    m.add_class::<types::StopSecureCloudRentalResponse>()?;
+    m.add_class::<types::SecureCloudRentalListItem>()?;
+    m.add_class::<types::ListSecureCloudRentalsResponse>()?;
 
     // Helper functions
     m.add_function(wrap_pyfunction!(node_by_id, m)?)?;

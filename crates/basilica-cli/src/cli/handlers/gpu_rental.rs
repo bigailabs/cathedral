@@ -662,42 +662,11 @@ async fn handle_rental_with_offering(
     // Start rental
     let spinner = create_spinner(&format!("Starting {}...", rental_type));
 
-    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
-
-    // Parse port mappings if provided
-    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
-        basilica_common::utils::parse_port_mappings(&options.ports)
-            .map_err(|e| {
-                complete_spinner_error(spinner.clone(), "Invalid port mapping");
-                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
-            })?
-            .into_iter()
-            .map(|pm| PortMappingRequest {
-                container_port: pm.container_port,
-                host_port: pm.host_port,
-                protocol: pm.protocol,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Parse environment variables if provided
-    let environment = if !options.env.is_empty() {
-        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Invalid environment variables");
-            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
-        })?
-    } else {
-        HashMap::new()
-    };
+    use basilica_sdk::types::StartSecureCloudRentalRequest;
 
     let request = StartSecureCloudRentalRequest {
         offering_id: offering.id().to_string(),
         ssh_public_key_id: ssh_key_id,
-        container_image: options.image.clone(),
-        environment,
-        ports,
     };
 
     // Start the rental using the appropriate API method

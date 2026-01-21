@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Start CPU Rental Example for Basilica SDK
+Start Secure Cloud GPU Rental Example for Basilica SDK
 
-Demonstrates how to start and stop CPU-only rentals (no GPU) with secure cloud providers.
+Demonstrates how to start and stop GPU rentals from secure cloud providers.
 This script is interactive - it waits for the rental to be ready and lets you terminate it.
 """
 
@@ -17,7 +17,7 @@ from rental_utils import format_ssh_command, find_private_key_for_public_key, wa
 
 def main():
     print("=" * 60)
-    print("  Basilica CPU Rental - Interactive Example")
+    print("  Basilica Secure Cloud GPU Rental - Interactive Example")
     print("=" * 60)
 
     print("\nInitializing client...")
@@ -36,30 +36,34 @@ def main():
     else:
         print(f"Using existing SSH key: {ssh_key.name} (ID: {ssh_key.id})")
 
-    # Step 2: List available CPU offerings
-    print("\n[Step 2] Fetching available CPU offerings...")
-    offerings = client.list_cpu_offerings()
+    # Step 2: List available GPU offerings
+    print("\n[Step 2] Fetching available GPU offerings...")
+    offerings = client.list_secure_cloud_gpus()
 
     if not offerings:
-        print("No CPU offerings available at this time.")
+        print("No GPU offerings available at this time.")
         return
 
-    print(f"\nFound {len(offerings)} CPU offerings:")
-    for i, o in enumerate(offerings):
+    # Sort by hourly rate to find cheapest option
+    offerings_sorted = sorted(offerings, key=lambda o: float(o.hourly_rate))
+
+    print(f"\nFound {len(offerings)} GPU offerings:")
+    for i, o in enumerate(offerings_sorted[:5]):  # Show top 5 cheapest
         print(
-            f"  [{i}] {o.id}: {o.vcpu_count} vCPUs, {o.system_memory_gb}GB RAM, "
-            f"{o.storage_gb}GB storage @ ${o.hourly_rate}/hr ({o.region})"
+            f"  [{i}] {o.id}: {o.gpu_count}x {o.gpu_type}, {o.vcpu_count} vCPUs, "
+            f"{o.system_memory_gb}GB RAM, {o.storage_gb}GB storage @ ${o.hourly_rate}/hr ({o.region})"
         )
 
-    # Step 3: Start a rental with the first available offering
-    offering = offerings[0]
-    print(f"\n[Step 3] Starting CPU rental with offering: {offering.id}")
+    # Step 3: Start a rental with the cheapest available offering
+    offering = offerings_sorted[0]
+    print(f"\n[Step 3] Starting GPU rental with offering: {offering.id}")
+    print(f"  - GPU: {offering.gpu_count}x {offering.gpu_type}")
     print(f"  - vCPUs: {offering.vcpu_count}")
     print(f"  - RAM: {offering.system_memory_gb}GB")
     print(f"  - Storage: {offering.storage_gb}GB")
     print(f"  - Hourly rate: ${offering.hourly_rate}")
 
-    rental = client.start_cpu_rental(offering_id=offering.id)
+    rental = client.start_secure_cloud_rental(offering_id=offering.id)
 
     print("\nRental request submitted!")
     print(f"  Rental ID: {rental.rental_id}")
@@ -69,12 +73,12 @@ def main():
     # Step 4: Wait for rental to be ready
     print("\n[Step 4] Waiting for rental to be ready...")
     try:
-        ready_rental = wait_for_rental_ready(client, rental.rental_id, rental_type="cpu")
+        ready_rental = wait_for_rental_ready(client, rental.rental_id, rental_type="secure_cloud")
     except (TimeoutError, RuntimeError) as e:
         print(f"\nError: {e}")
         print("Attempting to stop the rental...")
         try:
-            client.stop_cpu_rental(rental.rental_id)
+            client.stop_secure_cloud_rental(rental.rental_id)
             print("Rental stopped.")
         except Exception as stop_error:
             print(f"Failed to stop rental: {stop_error}")
@@ -90,6 +94,8 @@ def main():
     print(f"  Status: {ready_rental.status}")
     print(f"  Provider: {ready_rental.provider}")
 
+    if ready_rental.gpu_type:
+        print(f"  GPU: {ready_rental.gpu_count}x {ready_rental.gpu_type}")
     if ready_rental.vcpu_count:
         print(f"  vCPUs: {ready_rental.vcpu_count}")
     if ready_rental.system_memory_gb:
@@ -125,20 +131,20 @@ def main():
     print("\n" + "-" * 60)
 
     # Step 6: Interactive - wait for user to terminate
-    print("\nThe rental is now running. You can SSH into the machine using the command above.")
+    print("\nThe GPU rental is now running. You can SSH into the machine using the command above.")
     print("Press Enter to terminate the rental (or Ctrl+C to exit without terminating)...")
 
     try:
         input()
     except KeyboardInterrupt:
         print("\n\nExiting without terminating the rental.")
-        print(f"To manually stop later, run: client.stop_cpu_rental('{rental.rental_id}')")
+        print(f"To manually stop later, run: client.stop_secure_cloud_rental('{rental.rental_id}')")
         return
 
     # Step 7: Stop the rental
     print("\n[Step 7] Stopping rental...")
     try:
-        result = client.stop_cpu_rental(rental.rental_id)
+        result = client.stop_secure_cloud_rental(rental.rental_id)
         print("\n" + "=" * 60)
         print("  RENTAL STOPPED")
         print("=" * 60)
