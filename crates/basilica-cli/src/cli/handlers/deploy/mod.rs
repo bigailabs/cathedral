@@ -29,13 +29,19 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
     match cmd.action {
         Some(DeployAction::List) => handle_list(&client, json).await,
         Some(DeployAction::Status { name }) => {
+            let name = helpers::resolve_deployment_name(name, &client).await?;
             handle_status(&client, &name, json, show_phases).await
         }
         Some(DeployAction::Logs { name, follow, tail }) => {
+            let name = helpers::resolve_deployment_name(name, &client).await?;
             handle_logs(&client, &name, follow, tail).await
         }
-        Some(DeployAction::Delete { name, yes }) => handle_delete(&client, &name, yes).await,
+        Some(DeployAction::Delete { name, yes }) => {
+            let name = helpers::resolve_deployment_name(name, &client).await?;
+            handle_delete(&client, &name, yes).await
+        }
         Some(DeployAction::Scale { name, replicas }) => {
+            let name = helpers::resolve_deployment_name(name, &client).await?;
             handle_scale(&client, &name, replicas).await
         }
         Some(DeployAction::Vllm {
@@ -130,7 +136,9 @@ async fn handle_delete(
     skip_confirm: bool,
 ) -> Result<(), CliError> {
     if !skip_confirm {
-        let confirm = dialoguer::Confirm::new()
+        use dialoguer::{theme::ColorfulTheme, Confirm};
+
+        let confirm = Confirm::with_theme(&ColorfulTheme::default())
             .with_prompt(format!("Delete deployment '{}'?", name))
             .default(false)
             .interact()
