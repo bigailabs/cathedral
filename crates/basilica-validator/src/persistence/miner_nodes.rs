@@ -651,7 +651,7 @@ impl SimplePersistence {
         min_gpu_count: Option<u32>,
         location: Option<basilica_common::LocationProfile>,
     ) -> Result<Vec<AvailableNodeData>, anyhow::Error> {
-        let mut query_str = String::from(
+        let mut query_builder = sqlx::QueryBuilder::new(
             "SELECT
                 me.node_id,
                 me.miner_id,
@@ -688,23 +688,35 @@ impl SimplePersistence {
 
         if let Some(ref loc) = location {
             if let Some(ref country) = loc.country {
-                query_str.push_str(&format!(" AND LOWER(enp.country) = LOWER('{}')", country));
+                query_builder
+                    .push(" AND LOWER(enp.country) = LOWER(")
+                    .push_bind(country)
+                    .push(")");
             }
             if let Some(ref region) = loc.region {
-                query_str.push_str(&format!(" AND LOWER(enp.region) = LOWER('{}')", region));
+                query_builder
+                    .push(" AND LOWER(enp.region) = LOWER(")
+                    .push_bind(region)
+                    .push(")");
             }
             if let Some(ref city) = loc.city {
-                query_str.push_str(&format!(" AND LOWER(enp.city) = LOWER('{}')", city));
+                query_builder
+                    .push(" AND LOWER(enp.city) = LOWER(")
+                    .push_bind(city)
+                    .push(")");
             }
         }
 
-        query_str.push_str(" GROUP BY me.node_id");
+        query_builder.push(" GROUP BY me.node_id");
 
         if let Some(min_count) = min_gpu_count {
-            query_str.push_str(&format!(" HAVING COUNT(gua.gpu_uuid) >= {}", min_count));
+            query_builder
+                .push(" HAVING COUNT(gua.gpu_uuid) >= ")
+                .push_bind(min_count);
         }
 
-        let rows = sqlx::query(&query_str).fetch_all(self.pool()).await?;
+        // TODO: Consider adding a functional index for LOWER(enp.country/region/city) if this query becomes hot.
+        let rows = query_builder.build().fetch_all(self.pool()).await?;
 
         let mut nodes = Vec::new();
         for row in rows {

@@ -24,3 +24,4 @@ CREATE TABLE IF NOT EXISTS node_reservations (
 CREATE INDEX IF NOT EXISTS idx_node_reservations_node ON node_reservations(node_id);
 CREATE INDEX IF NOT EXISTS idx_node_reservations_expires ON node_reservations(expires_at);
 
+

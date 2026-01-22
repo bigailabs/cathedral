@@ -27,3 +27,4 @@ message GpuBaselinePrice {
   int32 provider_count = 5;     // Number of providers with this GPU
 }
 
+

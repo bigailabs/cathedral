@@ -17,6 +17,7 @@ use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use basilica_common::{KeyValueStorage, MemoryStorage};
+use basilica_protocol::billing::MinerDelivery;
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -239,14 +240,40 @@ impl WeightSetter {
             self.config.netuid
         );
 
-        // 1. Get current metagraph
+        let metagraph = self.fetch_metagraph_with_logging().await?;
+        let (since, now) = self.determine_delivery_window().await?;
+        let deliveries = self.fetch_deliveries(since, now).await?;
+        let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
+        let miners_by_category = self.group_deliveries_by_category(deliveries, &hotkey_to_uid);
+
+        self.log_tao_price().await;
+
+        let weight_distribution = self
+            .weight_allocation_engine
+            .calculate_weight_distribution(miners_by_category)?;
+        self.log_weight_distribution(&weight_distribution);
+
+        let normalized_weights = self.build_normalized_weights(&weight_distribution)?;
+        let version_key = self.get_version_key().await?;
+        self.ensure_unique_uids(&normalized_weights)?;
+
+        self.submit_weights_to_chain_with_retry(normalized_weights, version_key)
+            .await?;
+        self.store_weight_results(&weight_distribution).await?;
+
+        Ok(())
+    }
+
+    async fn fetch_metagraph_with_logging(&self) -> Result<Metagraph> {
         let metagraph = self.get_metagraph().await?;
         debug!(
             "Retrieved metagraph with {} neurons",
             metagraph.hotkeys.len()
         );
+        Ok(metagraph)
+    }
 
-        // 2. Get last weight set timestamp for delivery filtering
+    async fn determine_delivery_window(&self) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
         let last_weight_timestamp = self.get_last_weight_set_timestamp().await?;
         info!(
             "Fetching miner delivery from billing, epoch: {:?}",
@@ -254,8 +281,6 @@ impl WeightSetter {
         );
 
         let now = Utc::now();
-        // Cold start: look back 7 days to capture historical data
-        // Normal operation: use stored timestamp from last successful weight set
         let since = last_weight_timestamp.unwrap_or_else(|| {
             warn!(
                 "No last_weight_set_timestamp found - using 7-day lookback for cold start. \
@@ -264,7 +289,6 @@ impl WeightSetter {
             now - chrono::Duration::days(7)
         });
 
-        // Alert if last weight set was too long ago (stale epoch detection)
         if let Some(last_ts) = last_weight_timestamp {
             let hours_since_last = (now - last_ts).num_hours();
             if hours_since_last > 48 {
@@ -278,15 +302,21 @@ impl WeightSetter {
             }
         }
 
-        // 3. Get payment-based weights from billing summaries
-        let deliveries = self
-            .delivery_repository
-            .get_deliveries(since, now, None)
-            .await?;
+        Ok((since, now))
+    }
 
-        // Build hotkey -> current UID mapping from metagraph
-        // This ensures we pay the correct miner even if UIDs have changed
-        let hotkey_to_uid: HashMap<String, u16> = metagraph
+    async fn fetch_deliveries(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<MinerDelivery>> {
+        self.delivery_repository
+            .get_deliveries(since, until, None)
+            .await
+    }
+
+    fn build_hotkey_to_uid_map(&self, metagraph: &Metagraph) -> HashMap<String, u16> {
+        metagraph
             .hotkeys
             .iter()
             .enumerate()
@@ -295,18 +325,19 @@ impl WeightSetter {
                     .ok()
                     .map(|u| (Hotkey::from_account_id(account).to_string(), u))
             })
-            .collect();
+            .collect()
+    }
 
+    fn group_deliveries_by_category(
+        &self,
+        deliveries: Vec<MinerDelivery>,
+        hotkey_to_uid: &HashMap<String, u16>,
+    ) -> HashMap<String, Vec<(MinerUid, f64)>> {
         let mut miners_by_category: HashMap<String, Vec<(MinerUid, f64)>> = HashMap::new();
         for delivery in deliveries {
-            // CRITICAL: Resolve UID from hotkey using CURRENT metagraph
-            // This prevents paying the wrong miner if:
-            // - Miner deregistered (hotkey not in metagraph) -> skip, revenue cleared
-            // - Miner re-registered at different UID -> use new UID
             let current_uid = match hotkey_to_uid.get(&delivery.miner_hotkey) {
                 Some(&uid) => uid,
                 None => {
-                    // Miner deregistered - their pending revenue is cleared
                     warn!(
                         miner_hotkey = %delivery.miner_hotkey,
                         stored_uid = delivery.miner_uid,
@@ -318,7 +349,6 @@ impl WeightSetter {
                 }
             };
 
-            // Log if UID changed (miner re-registered at different position)
             if current_uid != delivery.miner_uid as u16 {
                 warn!(
                     miner_hotkey = %delivery.miner_hotkey,
@@ -356,7 +386,10 @@ impl WeightSetter {
             miners_by_category.keys().collect::<Vec<_>>()
         );
 
-        // 4. Fetch TAO price for economic context
+        miners_by_category
+    }
+
+    async fn log_tao_price(&self) {
         match self.taostats_client.get_tao_price().await {
             Ok(tao_price) => {
                 info!(
@@ -370,12 +403,12 @@ impl WeightSetter {
                 warn!("Failed to fetch TAO price: {}", err);
             }
         }
+    }
 
-        // 5. Calculate weight distribution (delivered hours only)
-        let weight_distribution = self
-            .weight_allocation_engine
-            .calculate_weight_distribution(miners_by_category)?;
-
+    fn log_weight_distribution(
+        &self,
+        weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+    ) {
         if weight_distribution.miners_served == 0 {
             warn!("No miners served by weight allocation - proceeding with burn-only weights");
         }
@@ -386,7 +419,6 @@ impl WeightSetter {
             weight_distribution.category_allocations.len()
         );
 
-        // 5. Log category allocations for transparency
         for (category, allocation) in &weight_distribution.category_allocations {
             info!(
                 gpu_category = %category,
@@ -397,7 +429,6 @@ impl WeightSetter {
             );
         }
 
-        // 6. Log burn allocation if present
         if let Some(burn_alloc) = &weight_distribution.burn_allocation {
             info!(
                 miner_uid = burn_alloc.uid,
@@ -406,25 +437,16 @@ impl WeightSetter {
                 "[WEIGHT_FLOW] Burn allocation"
             );
         }
+    }
 
-        // 7. Convert to normalized weights for chain submission including burn allocation
-        let normalized_weights = self.build_normalized_weights(&weight_distribution)?;
-
-        // 8. Get version key and submit weights
-        let version_key = self.get_version_key().await?;
-
-        info!(
-            netuid = self.config.netuid,
-            weight_count = normalized_weights.len(),
-            version_key = version_key,
-            "Preparing to submit weights to chain"
-        );
-
-        // Additional validation - check for duplicates before submission
+    fn ensure_unique_uids(&self, normalized_weights: &[NormalizedWeight]) -> Result<()> {
         let mut uid_check = std::collections::HashSet::new();
-        for weight in &normalized_weights {
+        for weight in normalized_weights {
             if !uid_check.insert(weight.uid) {
-                error!("CRITICAL: Duplicate UID {} found in normalized weights before chain submission", weight.uid);
+                error!(
+                    "CRITICAL: Duplicate UID {} found in normalized weights before chain submission",
+                    weight.uid
+                );
                 error!("Full weights vector: {:?}", normalized_weights);
                 return Err(anyhow::anyhow!(
                     "Duplicate UID {} detected in final weights",
@@ -432,25 +454,22 @@ impl WeightSetter {
                 ));
             }
         }
+        Ok(())
+    }
 
-        // Submit weights to chain with enhanced error handling and retry logic
-        self.submit_weights_to_chain_with_retry(normalized_weights.clone(), version_key)
-            .await?;
-
-        // 9. Store emission metrics to database
+    async fn store_weight_results(
+        &self,
+        weight_distribution: &crate::bittensor_core::weight_allocation::WeightDistribution,
+    ) -> Result<()> {
         let current_block = self.get_current_block().await.unwrap_or(0);
         let emission_metrics_id = self
-            .store_emission_metrics(&weight_distribution, current_block)
+            .store_emission_metrics(weight_distribution, current_block)
             .await?;
 
-        // 10. Store weight allocation history for each miner
-        self.store_weight_allocations(&weight_distribution, emission_metrics_id, current_block)
+        self.store_weight_allocations(weight_distribution, emission_metrics_id, current_block)
             .await?;
-
-        // 11. Store submission metadata
-        self.store_weight_submission_metadata(&weight_distribution)
+        self.store_weight_submission_metadata(weight_distribution)
             .await?;
-
         Ok(())
     }
 

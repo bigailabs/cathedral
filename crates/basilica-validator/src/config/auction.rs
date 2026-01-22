@@ -28,7 +28,7 @@ pub struct AuctionConfig {
 impl Default for AuctionConfig {
     fn default() -> Self {
         Self {
-            price_api_endpoint: String::new(),
+            price_api_endpoint: "http://basilica-api:8080/v1/prices/baseline".to_string(),
             price_cache_ttl_secs: 60,
             min_bid_floor_fraction: 0.1,
             bid_validity_secs: 300,
@@ -85,9 +85,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_invalid_endpoint() {
+    fn test_default_valid_endpoint() {
         let config = AuctionConfig::default();
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

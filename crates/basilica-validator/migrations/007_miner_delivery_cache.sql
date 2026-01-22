@@ -17,3 +17,4 @@ CREATE INDEX IF NOT EXISTS idx_delivery_cache_period
 CREATE INDEX IF NOT EXISTS idx_delivery_cache_hotkey
     ON miner_delivery_cache(miner_hotkey);
 
+

@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use reqwest::Client;
+use serde::Deserialize;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-
-use basilica_protocol::pricing::price_service_client::PriceServiceClient;
-use basilica_protocol::pricing::GetBaselinePricesRequest;
 
 use super::cache::PriceCache;
 
@@ -17,17 +18,29 @@ pub trait PriceFetcher: Send + Sync {
     async fn fetch(&self, endpoint: &str) -> Result<HashMap<String, f64>>;
 }
 
-pub struct GrpcPriceFetcher;
+pub struct HttpPriceFetcher {
+    http_client: Client,
+}
+
+impl Default for HttpPriceFetcher {
+    fn default() -> Self {
+        Self {
+            http_client: Client::new(),
+        }
+    }
+}
 
 #[async_trait]
-impl PriceFetcher for GrpcPriceFetcher {
+impl PriceFetcher for HttpPriceFetcher {
     async fn fetch(&self, endpoint: &str) -> Result<HashMap<String, f64>> {
-        let mut client = PriceServiceClient::connect(endpoint.to_string()).await?;
-        let request = GetBaselinePricesRequest {
-            gpu_categories: vec![],
-        };
-        let response = client.get_baseline_prices(request).await?.into_inner();
-
+        let response: BaselinePricesResponse = self
+            .http_client
+            .get(endpoint)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
         let mut prices = HashMap::new();
         for price in response.prices {
             // TODO: Decide how to handle duplicates (e.g., prefer newest or max provider_count).
@@ -38,16 +51,76 @@ impl PriceFetcher for GrpcPriceFetcher {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct BaselinePricesResponse {
+    prices: Vec<BaselinePrice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BaselinePrice {
+    gpu_category: String,
+    price_per_hour: f64,
+}
+
+#[derive(Debug)]
+struct CircuitBreaker {
+    failures: AtomicU32,
+    threshold: u32,
+    reset_timeout: std::time::Duration,
+    last_failure: RwLock<Option<Instant>>,
+}
+
+impl CircuitBreaker {
+    fn new(threshold: u32, reset_timeout: std::time::Duration) -> Self {
+        Self {
+            failures: AtomicU32::new(0),
+            threshold,
+            reset_timeout,
+            last_failure: RwLock::new(None),
+        }
+    }
+
+    async fn is_open(&self) -> bool {
+        let failures = self.failures.load(Ordering::SeqCst);
+        if failures < self.threshold {
+            return false;
+        }
+
+        let mut last_failure = self.last_failure.write().await;
+        if let Some(ts) = *last_failure {
+            if ts.elapsed() > self.reset_timeout {
+                self.failures.store(0, Ordering::SeqCst);
+                *last_failure = None;
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn record_success(&self) {
+        self.failures.store(0, Ordering::SeqCst);
+        *self.last_failure.write().await = None;
+    }
+
+    async fn record_failure(&self) {
+        let failures = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
+        if failures >= self.threshold {
+            *self.last_failure.write().await = Some(Instant::now());
+        }
+    }
+}
+
 pub struct PriceClient {
     endpoint: String,
     cache: Arc<RwLock<PriceCache>>,
     cache_ttl: Duration,
     fetcher: Arc<dyn PriceFetcher>,
+    circuit_breaker: CircuitBreaker,
 }
 
 impl PriceClient {
     pub fn new(endpoint: String, cache_ttl: Duration) -> Self {
-        Self::new_with_fetcher(endpoint, cache_ttl, Arc::new(GrpcPriceFetcher))
+        Self::new_with_fetcher(endpoint, cache_ttl, Arc::new(HttpPriceFetcher::default()))
     }
 
     pub fn new_with_fetcher(
@@ -60,6 +133,7 @@ impl PriceClient {
             cache: Arc::new(RwLock::new(PriceCache::default())),
             cache_ttl,
             fetcher,
+            circuit_breaker: CircuitBreaker::new(3, Duration::from_secs(30)),
         }
     }
 
@@ -70,12 +144,24 @@ impl PriceClient {
         }
 
         let stale = self.cache.read().await.get_any();
+        if self.circuit_breaker.is_open().await {
+            if let Some(stale_prices) = stale {
+                warn!("Price circuit open; using stale cache");
+                return Ok(stale_prices);
+            }
+            return Err(anyhow::anyhow!(
+                "Price circuit open and no cached baseline prices available"
+            ));
+        }
+
         match self.fetcher.fetch(&self.endpoint).await {
             Ok(prices) => {
                 self.cache.write().await.update(prices.clone());
+                self.circuit_breaker.record_success().await;
                 Ok(prices)
             }
             Err(err) => {
+                self.circuit_breaker.record_failure().await;
                 if let Some(stale_prices) = stale {
                     warn!("Price fetch failed; using stale cache: {}", err);
                     Ok(stale_prices)

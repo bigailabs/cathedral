@@ -28,6 +28,7 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 sqlx = { workspace = true }
 tonic = { workspace = true }
+tonic-health = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }

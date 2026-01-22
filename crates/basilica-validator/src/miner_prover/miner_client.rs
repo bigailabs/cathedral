@@ -4,9 +4,12 @@
 //! Handles authentication, node discovery, and SSH session initialization.
 
 use anyhow::{Context, Result};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
+use tonic::Request;
 use tracing::{debug, error, info, warn};
 
 use basilica_common::identity::Hotkey;
@@ -332,7 +335,7 @@ impl MinerClient {
 
         Ok(AuthenticatedMinerConnection {
             client: MinerDiscoveryClient::new(channel),
-            _session_token: session_token,
+            session_token,
             validator_hotkey: self.validator_hotkey.clone(),
             signer: self.signer.clone(),
             validator_ssh_public_key: self.validator_ssh_public_key.clone(),
@@ -378,7 +381,7 @@ impl MinerClient {
 /// Authenticated connection to a miner
 pub struct AuthenticatedMinerConnection {
     client: MinerDiscoveryClient<Channel>,
-    _session_token: String,
+    session_token: String,
     /// Validator's actual hotkey
     validator_hotkey: Hotkey,
     /// Optional signer for creating signatures
@@ -449,9 +452,16 @@ impl AuthenticatedMinerConnection {
             target_miner_hotkey: self.target_miner_hotkey.to_string(),
         };
 
+        let mut grpc_request = Request::new(request);
+        let metadata_value = MetadataValue::from_str(&self.session_token)
+            .map_err(|e| anyhow::anyhow!("Invalid session token metadata: {e}"))?;
+        grpc_request
+            .metadata_mut()
+            .insert("x-session-token", metadata_value);
+
         let response = self
             .client
-            .discover_nodes(request)
+            .discover_nodes(grpc_request)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to discover nodes: {}", e))?;
 

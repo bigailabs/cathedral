@@ -10,6 +10,7 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 
 use tonic::{transport::Server, Request, Response, Status};
@@ -62,7 +63,7 @@ pub struct ValidatorCommsServer {
     security_config: SecurityConfig,
     node_manager: Arc<NodeManager>,
     validator_discovery: Arc<dyn ValidatorDiscoveryApi>,
-    authenticated_validators: Arc<RwLock<HashMap<String, String>>>,
+    authenticated_validators: Arc<RwLock<HashMap<String, ValidatorSession>>>,
     bittensor_service: Arc<dyn BittensorServiceApi>,
     miner_hotkey: String,
 }
@@ -100,6 +101,13 @@ impl ValidatorCommsServer {
             .set_serving::<MinerDiscoveryServer<MinerDiscoveryService>>()
             .await;
 
+        // Start cleanup task for expired validator sessions.
+        // TODO: Make session TTL configurable via SecurityConfig.
+        let session_cleanup = self.clone();
+        tokio::spawn(async move {
+            session_cleanup.run_session_cleanup().await;
+        });
+
         // Create the discovery service
         let discovery_service = MinerDiscoveryService {
             server: self.clone(),
@@ -134,12 +142,28 @@ impl ValidatorCommsServer {
         }
     }
 
+    async fn run_session_cleanup(&self) {
+        const CLEANUP_INTERVAL_SECS: u64 = 300;
+        let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            let now = Instant::now();
+            let mut validators = self.authenticated_validators.write().await;
+            let before = validators.len();
+            validators.retain(|_, session| session.expires_at > now);
+            let removed = before.saturating_sub(validators.len());
+            if removed > 0 {
+                debug!("Removed {} expired validator sessions", removed);
+            }
+        }
+    }
+
     fn build_bid_message(&self, bid: &MinerBid) -> String {
-        // TODO: Canonicalize GPU category casing across miner/validator implementations.
+        let gpu_category = canonicalize_gpu_category(&bid.gpu_category);
         format!(
             "{}|{}|{:.8}|{}|{}|{}",
             bid.miner_hotkey.trim(),
-            bid.gpu_category.trim(),
+            gpu_category,
             bid.bid_per_hour,
             bid.gpu_count,
             bid.timestamp,
@@ -223,12 +247,27 @@ impl ValidatorCommsServer {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ValidatorSession {
+    token: String,
+    expires_at: Instant,
+}
+
 /// Generate a secure session token
 fn generate_session_token() -> String {
     const TOKEN_LENGTH: usize = 32;
     let mut rng = rand::thread_rng();
     let token: Vec<u8> = (0..TOKEN_LENGTH).map(|_| rng.gen()).collect();
     hex::encode(token)
+}
+
+fn session_ttl() -> Duration {
+    // TODO: Make session TTL configurable via SecurityConfig.
+    Duration::from_secs(3600)
+}
+
+fn canonicalize_gpu_category(category: &str) -> String {
+    category.trim().to_uppercase()
 }
 
 /// gRPC service implementation for MinerDiscovery
@@ -337,20 +376,23 @@ impl MinerDiscovery for MinerDiscoveryService {
             return Err(Status::permission_denied("Validator not authorized"));
         }
 
-        // Store authenticated validator
+        // Generate session token for validator
+        let session_token = generate_session_token();
+        let expires_at = Instant::now() + session_ttl();
+
         let mut validators = self.server.authenticated_validators.write().await;
         validators.insert(
             auth_request.validator_hotkey.clone(),
-            auth_request.nonce.clone(),
+            ValidatorSession {
+                token: session_token.clone(),
+                expires_at,
+            },
         );
 
         info!(
             "Successfully authenticated validator: {}",
             auth_request.validator_hotkey
         );
-
-        // Generate session token for validator
-        let session_token = generate_session_token();
 
         // Sign the response with miner's hotkey
         // Generate a fresh nonce for the response (security best practice)
@@ -375,16 +417,17 @@ impl MinerDiscovery for MinerDiscoveryService {
             }
         };
 
+        let expires_at_secs = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() + session_ttl().as_secs())
+            .unwrap_or_default() as i64;
+
         Ok(Response::new(MinerAuthResponse {
             authenticated: true,
             session_token,
             expires_at: Some(basilica_protocol::basilca::common::v1::Timestamp {
                 value: Some(prost_types::Timestamp {
-                    seconds: (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        + 3600) as i64,
+                    seconds: expires_at_secs,
                     nanos: 0,
                 }),
             }),
@@ -400,14 +443,38 @@ impl MinerDiscovery for MinerDiscoveryService {
         &self,
         request: Request<DiscoverNodesRequest>,
     ) -> Result<Response<ListNodeConnectionDetailsResponse>, Status> {
+        const SESSION_TOKEN_HEADER: &str = "x-session-token";
+        let metadata = request.metadata().clone();
         let discover_request = request.into_inner();
 
-        // Verify the validator is authenticated
-        let validators = self.server.authenticated_validators.read().await;
-        if !validators.contains_key(&discover_request.validator_hotkey) {
-            return Err(Status::unauthenticated(
-                "Validator must authenticate before discovering nodes",
-            ));
+        let session_token = metadata
+            .get(SESSION_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .ok_or_else(|| Status::unauthenticated("Missing session token"))?;
+
+        let session = {
+            let validators = self.server.authenticated_validators.read().await;
+            validators.get(&discover_request.validator_hotkey).cloned()
+        };
+
+        let session = match session {
+            Some(session) => session,
+            None => {
+                return Err(Status::unauthenticated(
+                    "Validator must authenticate before discovering nodes",
+                ))
+            }
+        };
+
+        if session.expires_at <= Instant::now() {
+            let mut validators = self.server.authenticated_validators.write().await;
+            validators.remove(&discover_request.validator_hotkey);
+            return Err(Status::unauthenticated("Session token expired"));
+        }
+
+        if session.token != session_token {
+            return Err(Status::unauthenticated("Invalid session token"));
         }
 
         // Verify the validator is providing an SSH public key

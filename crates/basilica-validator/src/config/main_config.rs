@@ -617,7 +617,7 @@ fn default_billing_endpoint() -> String {
 }
 
 fn default_billing_api_endpoint() -> String {
-    "http://127.0.0.1:8080".to_string()
+    "http://basilica-api:8080".to_string()
 }
 
 fn default_billing_sync_interval_secs() -> u64 {
@@ -913,6 +913,13 @@ impl ConfigValidation for ValidatorConfig {
                 key: "billing.api_endpoint".to_string(),
                 value: self.billing.api_endpoint.clone(),
                 reason: "API endpoint must be set for delivery sync".to_string(),
+            });
+        }
+        if self.billing.enabled && self.billing.api_endpoint == self.billing.billing_endpoint {
+            return Err(ConfigurationError::InvalidValue {
+                key: "billing.api_endpoint".to_string(),
+                value: self.billing.api_endpoint.clone(),
+                reason: "API endpoint must route through API Gateway, not billing gRPC".to_string(),
             });
         }
 

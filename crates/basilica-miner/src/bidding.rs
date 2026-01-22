@@ -5,7 +5,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::config::BiddingConfig;
@@ -48,7 +48,7 @@ impl AutoBidder {
     }
 
     /// Run the auto-bidder loop
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
         if !self.is_enabled() {
             info!("Auto-bidding disabled, skipping bid submission loop");
             return Ok(());
@@ -63,12 +63,21 @@ impl AutoBidder {
         let mut interval = tokio::time::interval(self.config.bid_interval);
 
         loop {
-            interval.tick().await;
-
-            if let Err(e) = self.submit_all_bids().await {
-                error!("Failed to submit bids: {}", e);
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = self.submit_all_bids().await {
+                        error!("Failed to submit bids: {}", e);
+                    }
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        info!("Auto-bidder shutdown requested");
+                        break;
+                    }
+                }
             }
         }
+        Ok(())
     }
 
     /// Submit bids for all available capacity

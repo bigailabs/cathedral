@@ -10,6 +10,7 @@ use clap::Parser;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::watch;
 use tracing::{error, info, warn};
 
 mod bidding;
@@ -219,6 +220,8 @@ impl MinerState {
             })
         };
 
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
         // Start validator discovery service
         let discovery = self.validator_discovery.clone();
         let discovery_interval = tokio::time::Duration::from_secs(600); // 10 minutes
@@ -235,11 +238,12 @@ impl MinerState {
         // Start auto-bidder if enabled
         let bidder = self.auto_bidder.clone();
         let validator_comms_for_bidder = self.validator_comms.clone();
+        let bidder_shutdown_rx = shutdown_rx.clone();
         let bidder_handle = tokio::spawn(async move {
             // Give the validator comms a chance to initialize first
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             bidder.set_validator_comms(validator_comms_for_bidder).await;
-            if let Err(e) = bidder.run().await {
+            if let Err(e) = bidder.run(bidder_shutdown_rx.clone()).await {
                 error!("Auto-bidder error: {}", e);
             }
         });
@@ -261,6 +265,8 @@ impl MinerState {
                 error!("Validator discovery service stopped unexpectedly");
             }
         }
+
+        let _ = shutdown_tx.send(true);
 
         Ok(())
     }

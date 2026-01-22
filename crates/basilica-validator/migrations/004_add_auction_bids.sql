@@ -41,3 +41,4 @@ CREATE INDEX IF NOT EXISTS idx_miner_bids_epoch ON miner_bids(epoch_id);
 CREATE INDEX IF NOT EXISTS idx_miner_bids_category ON miner_bids(gpu_category);
 CREATE INDEX IF NOT EXISTS idx_clearing_results_epoch ON auction_clearing_results(epoch_id);
 
+

@@ -7,6 +7,7 @@ use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_bid_server;
 use crate::metrics::ValidatorMetrics;
 use crate::miner_prover::MinerProver;
+use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
@@ -266,9 +267,10 @@ impl ValidatorService {
         let cleanup_task_handle = if self.config.cleanup.enabled {
             let cleanup_config = self.config.cleanup.clone();
             let gpu_repo = gpu_profile_repo.clone();
+            let bid_repo = Arc::new(BidRepository::new(persistence_arc.pool().clone()));
 
             Some(tokio::spawn(async move {
-                let cleanup_task = CleanupTask::new(cleanup_config, gpu_repo);
+                let cleanup_task = CleanupTask::new(cleanup_config, gpu_repo, bid_repo);
                 if let Err(e) = cleanup_task.start().await {
                     error!("Database cleanup task failed: {}", e);
                 }

@@ -11,12 +11,17 @@ use basilica_protocol::miner_discovery::{
 };
 use chrono::{DateTime, TimeZone, Utc};
 use tonic::{transport::Server, Request, Response, Status};
+use tonic_health::server::health_reporter;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::auction::AuctionConfig;
 use crate::persistence::bids::{AuctionEpoch, BidRepository, MinerBidRecord};
 use crate::persistence::SimplePersistence;
+
+fn canonicalize_gpu_category(category: &str) -> String {
+    category.trim().to_uppercase()
+}
 
 #[derive(Clone)]
 pub struct BidService {
@@ -54,11 +59,23 @@ impl BidService {
         &self,
         bid: &basilica_protocol::miner_discovery::MinerBid,
     ) -> Result<()> {
+        const MAX_HOTKEY_LEN: usize = 64;
+        const MAX_CATEGORY_LEN: usize = 32;
+        const MAX_NONCE_LEN: usize = 128;
+        const MAX_SIGNATURE_LEN: usize = 512;
+        const MAX_ATTESTATION_LEN: usize = 10_000;
+
         if bid.miner_hotkey.trim().is_empty() {
             anyhow::bail!("miner_hotkey is required");
         }
+        if bid.miner_hotkey.len() > MAX_HOTKEY_LEN {
+            anyhow::bail!("miner_hotkey too long");
+        }
         if bid.gpu_category.trim().is_empty() {
             anyhow::bail!("gpu_category is required");
+        }
+        if bid.gpu_category.len() > MAX_CATEGORY_LEN {
+            anyhow::bail!("gpu_category too long");
         }
         if bid.bid_per_hour <= 0.0 {
             anyhow::bail!("bid_per_hour must be greater than 0");
@@ -69,18 +86,27 @@ impl BidService {
         if bid.signature.is_empty() {
             anyhow::bail!("signature is required");
         }
+        if bid.signature.len() > MAX_SIGNATURE_LEN {
+            anyhow::bail!("signature too long");
+        }
         if bid.nonce.trim().is_empty() {
             anyhow::bail!("nonce is required");
+        }
+        if bid.nonce.len() > MAX_NONCE_LEN {
+            anyhow::bail!("nonce too long");
+        }
+        if bid.attestation.len() > MAX_ATTESTATION_LEN {
+            anyhow::bail!("attestation too long");
         }
         Ok(())
     }
 
     fn build_bid_message(&self, bid: &basilica_protocol::miner_discovery::MinerBid) -> String {
-        // TODO: Canonicalize GPU category casing across miner/validator implementations.
+        let gpu_category = canonicalize_gpu_category(&bid.gpu_category);
         format!(
             "{}|{}|{:.8}|{}|{}|{}",
             bid.miner_hotkey.trim(),
-            bid.gpu_category.trim(),
+            gpu_category,
             bid.bid_per_hour,
             bid.gpu_count,
             bid.timestamp,
@@ -184,12 +210,13 @@ impl MinerDiscovery for BidService {
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
         let miner_id = format!("miner_{}", miner_uid);
+        let canonical_category = canonicalize_gpu_category(&bid.gpu_category);
 
         let available_nodes = self
             .persistence
             .get_available_nodes_for_miner(
                 &miner_id,
-                &bid.gpu_category,
+                &canonical_category,
                 bid.gpu_count,
                 self.auction_config.bid_node_freshness_secs,
             )
@@ -207,15 +234,11 @@ impl MinerDiscovery for BidService {
             warn!("Failed to expire old bids: {}", err);
         }
 
-        let replay_cutoff = now - chrono::Duration::seconds(max_skew_secs);
-        if repo
-            .nonce_exists(&bid.miner_hotkey, &bid.nonce, replay_cutoff)
-            .await
-            .map_err(|e| Status::internal(format!("failed to check nonce: {e}")))?
-        {
-            return Err(Status::already_exists("nonce already used"));
+        let nonce_retention_secs = self.auction_config.bid_validity_secs.saturating_mul(2) as i64;
+        let replay_cutoff = now - chrono::Duration::seconds(nonce_retention_secs);
+        if let Err(err) = repo.delete_bids_before(replay_cutoff).await {
+            warn!("Failed to prune old bids: {}", err);
         }
-
         let epoch = self
             .get_or_create_active_epoch(&repo)
             .await
@@ -225,7 +248,7 @@ impl MinerDiscovery for BidService {
             id: format!("bid-{}", Uuid::new_v4()),
             miner_hotkey: bid.miner_hotkey.clone(),
             miner_uid,
-            gpu_category: bid.gpu_category.clone(),
+            gpu_category: canonical_category.clone(),
             bid_per_hour: bid.bid_per_hour,
             gpu_count: bid.gpu_count as i64,
             attestation: if bid.attestation.is_empty() {
@@ -240,10 +263,25 @@ impl MinerDiscovery for BidService {
             is_valid: true,
         };
 
-        repo.insert_bid(&record)
+        let mut tx = repo
+            .pool()
+            .begin()
+            .await
+            .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
+
+        if repo
+            .nonce_exists_tx(&mut tx, &bid.miner_hotkey, &bid.nonce, replay_cutoff)
+            .await
+            .map_err(|e| Status::internal(format!("failed to check nonce: {e}")))?
+        {
+            return Err(Status::already_exists("nonce already used"));
+        }
+
+        repo.insert_bid_tx(&mut tx, &record)
             .await
             .map_err(|e| Status::internal(format!("failed to insert bid: {e}")))?;
-        repo.insert_bid_nodes(
+        repo.insert_bid_nodes_tx(
+            &mut tx,
             &record.id,
             &miner_id,
             &record.gpu_category,
@@ -254,12 +292,16 @@ impl MinerDiscovery for BidService {
         .await
         .map_err(|e| Status::internal(format!("failed to insert bid nodes: {e}")))?;
 
+        tx.commit()
+            .await
+            .map_err(|e| Status::internal(format!("failed to commit transaction: {e}")))?;
+
         // TODO: Add replay protection with persistent nonce eviction policy.
         // TODO: Consider sharding bids per node for multi-node rentals.
         info!(
             miner_hotkey = %bid.miner_hotkey,
             miner_uid = miner_uid,
-            gpu_category = %bid.gpu_category,
+            gpu_category = %canonical_category,
             bid_per_hour = bid.bid_per_hour,
             "Accepted miner bid"
         );
@@ -283,9 +325,15 @@ pub async fn start_bid_server(
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid gRPC listen address: {}", e))?;
 
+    let (mut health_reporter, health_service) = health_reporter();
+    health_reporter
+        .set_serving::<MinerDiscoveryServer<BidService>>()
+        .await;
+
     info!(address = %config.listen_address, "Starting bid gRPC server");
 
     Server::builder()
+        .add_service(health_service)
         .add_service(MinerDiscoveryServer::new(service))
         .serve(addr)
         .await

@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::Row;
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, Row, Sqlite, SqlitePool, Transaction};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MinerBidRecord {
@@ -50,6 +49,10 @@ impl BidRepository {
         Self { pool }
     }
 
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub async fn create_epoch(&self, epoch: &AuctionEpoch) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
@@ -81,16 +84,23 @@ impl BidRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| AuctionEpoch {
-            id: r.get("id"),
-            start_block: r.get("start_block"),
-            end_block: r.get("end_block"),
-            baseline_prices_json: r.get("baseline_prices_json"),
-            status: r.get("status"),
-            created_at: DateTime::parse_from_rfc3339(&r.get::<String, _>("created_at"))
-                .unwrap()
-                .with_timezone(&Utc),
-        }))
+        let epoch = match row {
+            Some(r) => {
+                let created_at = DateTime::parse_from_rfc3339(&r.get::<String, _>("created_at"))
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                    .with_timezone(&Utc);
+                Some(AuctionEpoch {
+                    id: r.get("id"),
+                    start_block: r.get("start_block"),
+                    end_block: r.get("end_block"),
+                    baseline_prices_json: r.get("baseline_prices_json"),
+                    status: r.get("status"),
+                    created_at,
+                })
+            }
+            None => None,
+        };
+        Ok(epoch)
     }
 
     pub async fn update_epoch_status(
@@ -139,6 +149,35 @@ impl BidRepository {
         Ok(())
     }
 
+    pub async fn insert_bid_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        bid: &MinerBidRecord,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO miner_bids
+            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&bid.id)
+        .bind(&bid.miner_hotkey)
+        .bind(bid.miner_uid)
+        .bind(&bid.gpu_category)
+        .bind(bid.bid_per_hour)
+        .bind(bid.gpu_count)
+        .bind(&bid.attestation)
+        .bind(&bid.signature)
+        .bind(&bid.nonce)
+        .bind(bid.submitted_at.to_rfc3339())
+        .bind(&bid.epoch_id)
+        .bind(bid.is_valid as i32)
+        .execute(tx.as_mut())
+        .await?;
+        Ok(())
+    }
+
     pub async fn insert_bid_nodes(
         &self,
         bid_id: &str,
@@ -148,23 +187,56 @@ impl BidRepository {
         node_ids: &[String],
         snapshot_at: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
-        for node_id in node_ids {
-            sqlx::query(
-                r#"
-                INSERT INTO miner_bid_nodes
-                (bid_id, node_id, miner_id, gpu_category, gpu_count, snapshot_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                "#,
-            )
-            .bind(bid_id)
-            .bind(node_id)
-            .bind(miner_id)
-            .bind(gpu_category)
-            .bind(gpu_count)
-            .bind(snapshot_at.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
+        if node_ids.is_empty() {
+            return Ok(());
         }
+
+        let snapshot_at = snapshot_at.to_rfc3339();
+        let mut query_builder = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO miner_bid_nodes (bid_id, node_id, miner_id, gpu_category, gpu_count, snapshot_at) ",
+        );
+        query_builder.push_values(node_ids, |mut row, node_id| {
+            row.push_bind(bid_id)
+                .push_bind(node_id)
+                .push_bind(miner_id)
+                .push_bind(gpu_category)
+                .push_bind(gpu_count)
+                .push_bind(&snapshot_at);
+        });
+
+        query_builder.build().execute(&self.pool).await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_bid_nodes_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        bid_id: &str,
+        miner_id: &str,
+        gpu_category: &str,
+        gpu_count: i64,
+        node_ids: &[String],
+        snapshot_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        if node_ids.is_empty() {
+            return Ok(());
+        }
+
+        let snapshot_at = snapshot_at.to_rfc3339();
+        let mut query_builder = QueryBuilder::<Sqlite>::new(
+            "INSERT INTO miner_bid_nodes (bid_id, node_id, miner_id, gpu_category, gpu_count, snapshot_at) ",
+        );
+        query_builder.push_values(node_ids, |mut row, node_id| {
+            row.push_bind(bid_id)
+                .push_bind(node_id)
+                .push_bind(miner_id)
+                .push_bind(gpu_category)
+                .push_bind(gpu_count)
+                .push_bind(&snapshot_at);
+        });
+
+        query_builder.build().execute(tx.as_mut()).await?;
         Ok(())
     }
 
@@ -186,25 +258,30 @@ impl BidRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
+        let bids = rows
             .into_iter()
-            .map(|r| MinerBidRecord {
-                id: r.get("id"),
-                miner_hotkey: r.get("miner_hotkey"),
-                miner_uid: r.get("miner_uid"),
-                gpu_category: r.get("gpu_category"),
-                bid_per_hour: r.get("bid_per_hour"),
-                gpu_count: r.get("gpu_count"),
-                attestation: r.get("attestation"),
-                signature: r.get("signature"),
-                nonce: r.get("nonce"),
-                submitted_at: DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
-                    .unwrap()
-                    .with_timezone(&Utc),
-                epoch_id: r.get("epoch_id"),
-                is_valid: r.get::<i32, _>("is_valid") != 0,
+            .map(|r| {
+                let submitted_at =
+                    DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
+                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                        .with_timezone(&Utc);
+                Ok(MinerBidRecord {
+                    id: r.get("id"),
+                    miner_hotkey: r.get("miner_hotkey"),
+                    miner_uid: r.get("miner_uid"),
+                    gpu_category: r.get("gpu_category"),
+                    bid_per_hour: r.get("bid_per_hour"),
+                    gpu_count: r.get("gpu_count"),
+                    attestation: r.get("attestation"),
+                    signature: r.get("signature"),
+                    nonce: r.get("nonce"),
+                    submitted_at,
+                    epoch_id: r.get("epoch_id"),
+                    is_valid: r.get::<i32, _>("is_valid") != 0,
+                })
             })
-            .collect())
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+        Ok(bids)
     }
 
     pub async fn insert_clearing_result(
@@ -256,22 +333,30 @@ impl BidRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| MinerBidRecord {
-            id: r.get("id"),
-            miner_hotkey: r.get("miner_hotkey"),
-            miner_uid: r.get("miner_uid"),
-            gpu_category: r.get("gpu_category"),
-            bid_per_hour: r.get("bid_per_hour"),
-            gpu_count: r.get("gpu_count"),
-            attestation: r.get("attestation"),
-            signature: r.get("signature"),
-            nonce: r.get("nonce"),
-            submitted_at: DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
-                .unwrap()
-                .with_timezone(&Utc),
-            epoch_id: r.get("epoch_id"),
-            is_valid: r.get::<i32, _>("is_valid") != 0,
-        }))
+        let record = match row {
+            Some(r) => {
+                let submitted_at =
+                    DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
+                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                        .with_timezone(&Utc);
+                Some(MinerBidRecord {
+                    id: r.get("id"),
+                    miner_hotkey: r.get("miner_hotkey"),
+                    miner_uid: r.get("miner_uid"),
+                    gpu_category: r.get("gpu_category"),
+                    bid_per_hour: r.get("bid_per_hour"),
+                    gpu_count: r.get("gpu_count"),
+                    attestation: r.get("attestation"),
+                    signature: r.get("signature"),
+                    nonce: r.get("nonce"),
+                    submitted_at,
+                    epoch_id: r.get("epoch_id"),
+                    is_valid: r.get::<i32, _>("is_valid") != 0,
+                })
+            }
+            None => None,
+        };
+        Ok(record)
     }
 
     pub async fn get_lowest_bid_with_available_node(
@@ -315,26 +400,32 @@ impl BidRepository {
             .fetch_optional(&self.pool)
             .await?;
 
-        Ok(row.map(|r| {
-            let record = MinerBidRecord {
-                id: r.get("id"),
-                miner_hotkey: r.get("miner_hotkey"),
-                miner_uid: r.get("miner_uid"),
-                gpu_category: r.get("gpu_category"),
-                bid_per_hour: r.get("bid_per_hour"),
-                gpu_count: r.get("gpu_count"),
-                attestation: r.get("attestation"),
-                signature: r.get("signature"),
-                nonce: r.get("nonce"),
-                submitted_at: DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
-                    .unwrap()
-                    .with_timezone(&Utc),
-                epoch_id: r.get("epoch_id"),
-                is_valid: r.get::<i32, _>("is_valid") != 0,
-            };
-            let node_id: String = r.get("node_id");
-            (record, node_id)
-        }))
+        let record = match row {
+            Some(r) => {
+                let submitted_at =
+                    DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
+                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                        .with_timezone(&Utc);
+                let record = MinerBidRecord {
+                    id: r.get("id"),
+                    miner_hotkey: r.get("miner_hotkey"),
+                    miner_uid: r.get("miner_uid"),
+                    gpu_category: r.get("gpu_category"),
+                    bid_per_hour: r.get("bid_per_hour"),
+                    gpu_count: r.get("gpu_count"),
+                    attestation: r.get("attestation"),
+                    signature: r.get("signature"),
+                    nonce: r.get("nonce"),
+                    submitted_at,
+                    epoch_id: r.get("epoch_id"),
+                    is_valid: r.get::<i32, _>("is_valid") != 0,
+                };
+                let node_id: String = r.get("node_id");
+                Some((record, node_id))
+            }
+            None => None,
+        };
+        Ok(record)
     }
 
     pub async fn expire_old_bids(&self, before: DateTime<Utc>) -> Result<(), sqlx::Error> {
@@ -349,6 +440,60 @@ impl BidRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn delete_bids_before(&self, before: DateTime<Utc>) -> Result<u64, sqlx::Error> {
+        let nodes_result = sqlx::query(
+            r#"
+            DELETE FROM miner_bid_nodes
+            WHERE bid_id IN (
+                SELECT id FROM miner_bids WHERE submitted_at < ?
+            )
+            "#,
+        )
+        .bind(before.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        let bids_result = sqlx::query(
+            r#"
+            DELETE FROM miner_bids
+            WHERE submitted_at < ?
+            "#,
+        )
+        .bind(before.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(nodes_result.rows_affected() + bids_result.rows_affected())
+    }
+
+    pub async fn delete_clearing_results_before(
+        &self,
+        before: DateTime<Utc>,
+    ) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM auction_clearing_results
+            WHERE cleared_at < ?
+            "#,
+        )
+        .bind(before.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn delete_epochs_before(&self, before: DateTime<Utc>) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            DELETE FROM auction_epochs
+            WHERE status != 'active' AND created_at < ?
+            "#,
+        )
+        .bind(before.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn nonce_exists(
@@ -369,6 +514,30 @@ impl BidRepository {
         .bind(nonce)
         .bind(submitted_after.to_rfc3339())
         .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.is_some())
+    }
+
+    pub async fn nonce_exists_tx(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        miner_hotkey: &str,
+        nonce: &str,
+        submitted_after: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let row = sqlx::query(
+            r#"
+            SELECT 1
+            FROM miner_bids
+            WHERE miner_hotkey = ? AND nonce = ? AND submitted_at >= ?
+            LIMIT 1
+            "#,
+        )
+        .bind(miner_hotkey)
+        .bind(nonce)
+        .bind(submitted_after.to_rfc3339())
+        .fetch_optional(tx.as_mut())
         .await?;
 
         Ok(row.is_some())
@@ -399,22 +568,30 @@ impl BidRepository {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| MinerBidRecord {
-            id: r.get("id"),
-            miner_hotkey: r.get("miner_hotkey"),
-            miner_uid: r.get("miner_uid"),
-            gpu_category: r.get("gpu_category"),
-            bid_per_hour: r.get("bid_per_hour"),
-            gpu_count: r.get("gpu_count"),
-            attestation: r.get("attestation"),
-            signature: r.get("signature"),
-            nonce: r.get("nonce"),
-            submitted_at: DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
-                .unwrap()
-                .with_timezone(&Utc),
-            epoch_id: r.get("epoch_id"),
-            is_valid: r.get::<i32, _>("is_valid") != 0,
-        }))
+        let record = match row {
+            Some(r) => {
+                let submitted_at =
+                    DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
+                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                        .with_timezone(&Utc);
+                Some(MinerBidRecord {
+                    id: r.get("id"),
+                    miner_hotkey: r.get("miner_hotkey"),
+                    miner_uid: r.get("miner_uid"),
+                    gpu_category: r.get("gpu_category"),
+                    bid_per_hour: r.get("bid_per_hour"),
+                    gpu_count: r.get("gpu_count"),
+                    attestation: r.get("attestation"),
+                    signature: r.get("signature"),
+                    nonce: r.get("nonce"),
+                    submitted_at,
+                    epoch_id: r.get("epoch_id"),
+                    is_valid: r.get::<i32, _>("is_valid") != 0,
+                })
+            }
+            None => None,
+        };
+        Ok(record)
     }
 }
 
