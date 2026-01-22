@@ -121,6 +121,7 @@ struct UnifiedRentalItem {
     gpu_info: String,
     status: String,
     created_at: String,
+    ip_address: Option<String>,
 }
 
 /// Resolve target rental ID with unified selection across compute types
@@ -228,6 +229,7 @@ pub async fn resolve_target_rental_unified(
                 gpu_info,
                 status: format!("{:?}", rental.state),
                 created_at: rental.created_at.clone(),
+                ip_address: None, // IP not available in community cloud list response
             });
         }
     }
@@ -267,6 +269,7 @@ pub async fn resolve_target_rental_unified(
                 gpu_info,
                 status: rental.status.clone(),
                 created_at: rental.created_at.to_rfc3339(),
+                ip_address: rental.ip_address.clone(),
             });
         }
     }
@@ -312,6 +315,7 @@ pub async fn resolve_target_rental_unified(
                 gpu_info: cpu_info,
                 status: rental.status.clone(),
                 created_at: rental.created_at.to_rfc3339(),
+                ip_address: rental.ip_address.clone(),
             });
         }
     }
@@ -340,10 +344,17 @@ pub async fn resolve_target_rental_unified(
                 ComputeCategory::SecureCloud => "Secure   ",
             };
 
+            let ip_display = item
+                .ip_address
+                .as_ref()
+                .map(|ip| truncate(ip, 15))
+                .unwrap_or_else(|| "--".to_string());
+
             format!(
-                "{} | {:<15} | {:<4} | {:<25} | {:<12} | {}",
+                "{} | {:<15} | {:<15} | {:<4} | {:<25} | {:<12} | {}",
                 style(type_label).cyan(),
                 truncate(&item.provider_or_node, 15),
+                ip_display,
                 item.location,
                 truncate(&item.gpu_info, 25),
                 item.status,
@@ -355,7 +366,7 @@ pub async fn resolve_target_rental_unified(
     // Show header hint
     println!(
         "{}",
-        style("  Type      | Provider        | Loc  | GPU                       | Status       | Created").dim()
+        style("  Type      | Provider        | IP              | Loc  | GPU                       | Status       | Created").dim()
     );
 
     // Use dialoguer to select
