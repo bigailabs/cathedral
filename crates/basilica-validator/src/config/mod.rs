@@ -1,4 +1,5 @@
 pub mod auction;
+pub mod collateral;
 pub mod emission;
 
 #[cfg(test)]

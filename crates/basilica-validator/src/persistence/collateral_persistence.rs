@@ -57,6 +57,27 @@ impl SimplePersistence {
         }
     }
 
+    pub async fn get_collateral_amount(
+        &self,
+        hotkey: &str,
+        node_id: &str,
+    ) -> Result<Option<U256>, anyhow::Error> {
+        let row = sqlx::query("SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?")
+            .bind(hotkey)
+            .bind(node_id)
+            .fetch_optional(self.pool())
+            .await?;
+
+        if let Some(row) = row {
+            let collateral_str: String = row.get(0);
+            let collateral = U256::from_str_radix(&collateral_str, 10)
+                .map_err(|_| anyhow::anyhow!("Invalid collateral"))?;
+            Ok(Some(collateral))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn handle_deposit(&self, deposit: &Deposit) -> Result<(), anyhow::Error> {
         match self
             .get_collateral_status_id(
@@ -336,6 +357,24 @@ mod tests {
             .unwrap();
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_collateral_amount_roundtrip() {
+        let persistence = SimplePersistence::for_testing().await.unwrap();
+        let hk = make_hotkey(40);
+        let ex = make_node_id(41);
+        let d = ev_deposit(hk, ex, 321);
+        persistence.handle_deposit(&d).await.unwrap();
+
+        let amount = persistence
+            .get_collateral_amount(
+                &d.hotkey.encode_hex::<String>(),
+                &d.nodeId.encode_hex::<String>(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(amount, Some(U256::from(321u64)));
     }
 
     #[tokio::test]

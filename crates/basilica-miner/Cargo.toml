@@ -39,6 +39,7 @@ alloy-provider = { workspace = true }
 alloy-sol-types = { workspace = true }
 collateral-contract = { path = "../collateral-contract" }
 hex = { workspace = true }
+reqwest = { workspace = true }
 
 # Internal dependencies
 basilica-common = { path = "../basilica-common", features = ["sqlite"] }

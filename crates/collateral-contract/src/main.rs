@@ -121,6 +121,27 @@ enum TxCommands {
         #[arg(long)]
         url_content_md5_checksum: String,
     },
+    /// Slash a specific amount of collateral for a node
+    SlashCollateralAmount {
+        /// Private key for signing the transaction (hex string)
+        #[arg(long, env = "PRIVATE_KEY")]
+        private_key: String,
+        /// Hotkey as hex string (32 bytes)
+        #[arg(long)]
+        hotkey: String,
+        /// Node ID as string
+        #[arg(long)]
+        node_id: String,
+        /// Amount to slash in wei
+        #[arg(long)]
+        amount: String,
+        /// URL for proof of slashing
+        #[arg(long)]
+        url: String,
+        /// MD5 checksum of URL content as hex string (16 bytes)
+        #[arg(long)]
+        url_content_md5_checksum: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -301,6 +322,35 @@ async fn handle_tx_command(
                 &private_key,
                 hotkey_bytes,
                 node_uuid.into_bytes(),
+                &url,
+                checksum,
+                network_config,
+            )
+            .await?;
+            println!("Slash collateral transaction completed successfully!");
+        }
+        TxCommands::SlashCollateralAmount {
+            private_key,
+            hotkey,
+            node_id,
+            amount,
+            url,
+            url_content_md5_checksum,
+        } => {
+            let hotkey_bytes = parse_hotkey(&hotkey)?;
+            let checksum = parse_md5_checksum(&url_content_md5_checksum)?;
+            let node_uuid = Uuid::parse_str(&node_id)?;
+            let slash_amount = parse_u256(&amount)?;
+
+            println!(
+                "Slashing {} wei collateral for node {} with hotkey {}",
+                amount, node_id, hotkey
+            );
+            collateral_contract::slash_collateral_amount(
+                &private_key,
+                hotkey_bytes,
+                node_uuid.into_bytes(),
+                slash_amount,
                 &url,
                 checksum,
                 network_config,

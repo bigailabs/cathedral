@@ -367,6 +367,28 @@ impl BidRepository {
         submitted_after: DateTime<Utc>,
         freshness_secs: u64,
     ) -> Result<Option<(MinerBidRecord, String)>, sqlx::Error> {
+        let candidates = self
+            .get_bid_candidates_with_available_nodes(
+                epoch_id,
+                gpu_category,
+                min_gpu_count,
+                submitted_after,
+                freshness_secs,
+                1,
+            )
+            .await?;
+        Ok(candidates.into_iter().next())
+    }
+
+    pub async fn get_bid_candidates_with_available_nodes(
+        &self,
+        epoch_id: &str,
+        gpu_category: &str,
+        min_gpu_count: u32,
+        submitted_after: DateTime<Utc>,
+        freshness_secs: u64,
+        limit: u32,
+    ) -> Result<Vec<(MinerBidRecord, String)>, sqlx::Error> {
         let query = format!(
             r#"
             SELECT b.id, b.miner_hotkey, b.miner_uid, b.gpu_category, b.bid_per_hour, b.gpu_count,
@@ -388,44 +410,44 @@ impl BidRepository {
               AND me.last_health_check IS NOT NULL
               AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
             ORDER BY b.bid_per_hour ASC, b.submitted_at ASC
-            LIMIT 1
+            LIMIT ?
             "#
         );
 
-        let row = sqlx::query(&query)
+        let rows = sqlx::query(&query)
             .bind(epoch_id)
             .bind(gpu_category)
             .bind(min_gpu_count as i64)
             .bind(submitted_after.to_rfc3339())
-            .fetch_optional(&self.pool)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
             .await?;
 
-        let record = match row {
-            Some(r) => {
-                let submitted_at =
-                    DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
-                        .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
-                        .with_timezone(&Utc);
-                let record = MinerBidRecord {
-                    id: r.get("id"),
-                    miner_hotkey: r.get("miner_hotkey"),
-                    miner_uid: r.get("miner_uid"),
-                    gpu_category: r.get("gpu_category"),
-                    bid_per_hour: r.get("bid_per_hour"),
-                    gpu_count: r.get("gpu_count"),
-                    attestation: r.get("attestation"),
-                    signature: r.get("signature"),
-                    nonce: r.get("nonce"),
-                    submitted_at,
-                    epoch_id: r.get("epoch_id"),
-                    is_valid: r.get::<i32, _>("is_valid") != 0,
-                };
-                let node_id: String = r.get("node_id");
-                Some((record, node_id))
-            }
-            None => None,
-        };
-        Ok(record)
+        let mut candidates = Vec::new();
+        for r in rows {
+            let submitted_at =
+                DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
+                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                    .with_timezone(&Utc);
+            let record = MinerBidRecord {
+                id: r.get("id"),
+                miner_hotkey: r.get("miner_hotkey"),
+                miner_uid: r.get("miner_uid"),
+                gpu_category: r.get("gpu_category"),
+                bid_per_hour: r.get("bid_per_hour"),
+                gpu_count: r.get("gpu_count"),
+                attestation: r.get("attestation"),
+                signature: r.get("signature"),
+                nonce: r.get("nonce"),
+                submitted_at,
+                epoch_id: r.get("epoch_id"),
+                is_valid: r.get::<i32, _>("is_valid") != 0,
+            };
+            let node_id: String = r.get("node_id");
+            candidates.push((record, node_id));
+        }
+
+        Ok(candidates)
     }
 
     pub async fn expire_old_bids(&self, before: DateTime<Utc>) -> Result<(), sqlx::Error> {

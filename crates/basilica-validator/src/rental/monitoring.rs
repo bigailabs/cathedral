@@ -181,6 +181,30 @@ impl DatabaseHealthMonitor {
                     "Health check timeout for rental {} in state {:?}",
                     rental.rental_id, rental.state
                 );
+                if matches!(
+                    rental.state,
+                    RentalState::Active | RentalState::Provisioning
+                ) {
+                    if let Some(miner_uid) = super::extract_miner_uid(&rental.miner_id) {
+                        let details = BanManager::create_health_check_failure_details(
+                            &rental.container_id,
+                            &format!("{:?}", rental.state),
+                            "Health check timeout",
+                        );
+                        if let Err(log_err) = self
+                            .ban_manager
+                            .log_misbehaviour(
+                                miner_uid,
+                                &rental.node_id,
+                                crate::persistence::entities::misbehaviour::MisbehaviourType::InterruptedRental,
+                                &details,
+                            )
+                            .await
+                        {
+                            warn!("Failed to log interrupted rental misbehaviour: {}", log_err);
+                        }
+                    }
+                }
                 Some(RentalState::Failed)
             }
             // Health check returned an error
@@ -202,12 +226,16 @@ impl DatabaseHealthMonitor {
                             &e.to_string(),
                         );
 
-                        if let Err(log_err) = self.ban_manager.log_misbehaviour(
-                            miner_uid,
-                            &rental.node_id,
-                            crate::persistence::entities::misbehaviour::MisbehaviourType::HaltedRental,
-                            &details,
-                        ).await {
+                        if let Err(log_err) = self
+                            .ban_manager
+                            .log_misbehaviour(
+                                miner_uid,
+                                &rental.node_id,
+                                crate::persistence::entities::misbehaviour::MisbehaviourType::InterruptedRental,
+                                &details,
+                            )
+                            .await
+                        {
                             warn!("Failed to log health check misbehaviour: {}", log_err);
                         }
                     }
@@ -243,12 +271,16 @@ impl DatabaseHealthMonitor {
                                 "Container unhealthy",
                             );
 
-                            if let Err(log_err) = self.ban_manager.log_misbehaviour(
-                                miner_uid,
-                                &rental.node_id,
-                                crate::persistence::entities::misbehaviour::MisbehaviourType::HaltedRental,
-                                &details,
-                            ).await {
+                            if let Err(log_err) = self
+                                .ban_manager
+                                .log_misbehaviour(
+                                    miner_uid,
+                                    &rental.node_id,
+                                    crate::persistence::entities::misbehaviour::MisbehaviourType::HaltedRental,
+                                    &details,
+                                )
+                                .await
+                            {
                                 warn!("Failed to log unhealthy container misbehaviour: {}", log_err);
                             }
                         }

@@ -248,6 +248,23 @@
   },
   {
     "type": "function",
+    "name": "slashCollateralAmount",
+    "inputs": [
+      { "name": "hotkey", "type": "bytes32", "internalType": "bytes32" },
+      { "name": "nodeId", "type": "bytes16", "internalType": "bytes16" },
+      { "name": "amount", "type": "uint256", "internalType": "uint256" },
+      { "name": "url", "type": "string", "internalType": "string" },
+      {
+        "name": "urlContentMd5Checksum",
+        "type": "bytes16",
+        "internalType": "bytes16"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "supportsInterface",
     "inputs": [
       { "name": "interfaceId", "type": "bytes4", "internalType": "bytes4" }

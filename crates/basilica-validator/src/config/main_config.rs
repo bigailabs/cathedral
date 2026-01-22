@@ -86,6 +86,9 @@ pub struct ValidatorConfig {
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
+    /// Collateral enforcement configuration
+    #[serde(default)]
+    pub collateral: super::collateral::CollateralConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -879,6 +882,7 @@ impl Default for ValidatorConfig {
             auction: super::auction::AuctionConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             billing: BillingConfig::default(),
+            collateral: super::collateral::CollateralConfig::default(),
         }
     }
 }
@@ -1048,6 +1052,15 @@ impl ConfigValidation for ValidatorConfig {
                     reason: "Executor binary path does not exist".to_string(),
                 });
             }
+        }
+
+        // Validate collateral configuration
+        if let Err(e) = self.collateral.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "collateral".to_string(),
+                value: "collateral_config".to_string(),
+                reason: e.to_string(),
+            });
         }
 
         Ok(())

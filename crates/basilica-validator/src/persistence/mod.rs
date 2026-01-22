@@ -1,6 +1,7 @@
 pub mod bids;
 pub mod cleanup_task;
 pub mod collateral_persistence;
+pub mod collateral_grace;
 pub mod docker_profile;
 pub mod entities;
 pub mod gpu_assignments;

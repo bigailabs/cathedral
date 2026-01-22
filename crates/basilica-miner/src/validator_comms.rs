@@ -242,8 +242,45 @@ impl ValidatorCommsServer {
             .submit_bid(Request::new(SubmitBidRequest { bid: Some(bid) }))
             .await
             .map_err(|e| Status::internal(format!("Failed to submit bid: {e}")))?;
+        let response = response.into_inner();
+        if let Some(status) = response.collateral_status.as_ref() {
+            log_collateral_status(status);
+        }
+        Ok(response)
+    }
+}
 
-        Ok(response.into_inner())
+fn log_collateral_status(status: &basilica_protocol::miner_discovery::CollateralStatus) {
+    let message = match status.status.as_str() {
+        "warning" => format!(
+            "Collateral warning: ${:.2} (min ${:.2}). {}",
+            status.current_usd_value,
+            status.minimum_usd_required,
+            status.action_required
+        ),
+        "undercollateralized" => format!(
+            "Collateral under minimum: ${:.2} (min ${:.2}). Grace remaining: {}. {}",
+            status.current_usd_value,
+            status.minimum_usd_required,
+            status.grace_period_remaining,
+            status.action_required
+        ),
+        "excluded" => format!(
+            "Collateral excluded: ${:.2} (min ${:.2}). {}",
+            status.current_usd_value,
+            status.minimum_usd_required,
+            status.action_required
+        ),
+        _ => format!(
+            "Collateral status: ${:.2} (min ${:.2}).",
+            status.current_usd_value,
+            status.minimum_usd_required
+        ),
+    };
+    if status.status == "warning" || status.status == "undercollateralized" || status.status == "excluded" {
+        tracing::warn!("{}", message);
+    } else {
+        tracing::info!("{}", message);
     }
 }
 
@@ -732,6 +769,7 @@ mod tests {
                 accepted: true,
                 error_message: String::new(),
                 epoch_id: "test-epoch".to_string(),
+                collateral_status: None,
             }))
         }
     }

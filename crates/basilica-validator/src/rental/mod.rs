@@ -20,6 +20,7 @@ pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
 use crate::ban_system::BanManager;
+use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::billing::BillingClient;
 use crate::config::auction::AuctionConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
@@ -45,6 +46,8 @@ pub struct RentalManager {
     metrics: Arc<ValidatorPrometheusMetrics>,
     /// Ban manager for logging misbehaviours
     ban_manager: Arc<BanManager>,
+    /// Collateral manager for bid selection and eligibility
+    collateral_manager: Option<Arc<CollateralManager>>,
     /// Auction configuration for bid-based selection
     auction_config: AuctionConfig,
 }
@@ -151,7 +154,12 @@ impl RentalManager {
         let log_streamer = Arc::new(LogStreamer::new());
 
         // Create ban manager
-        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
+        let ban_manager = Arc::new(BanManager::new(
+            persistence.clone(),
+            Some(metrics.clone()),
+            None,
+            None,
+        ));
 
         // Create health monitor with SSH key manager, metrics, and ban manager
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
@@ -170,6 +178,7 @@ impl RentalManager {
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
             ban_manager,
+            collateral_manager: None,
             auction_config: AuctionConfig::default(),
         }
     }
@@ -180,6 +189,9 @@ impl RentalManager {
         config: &crate::config::ValidatorConfig,
         persistence: Arc<SimplePersistence>,
         metrics: Arc<ValidatorPrometheusMetrics>,
+        collateral_manager: Option<Arc<CollateralManager>>,
+        slash_executor: Option<Arc<crate::collateral::SlashExecutor>>,
+        validator_hotkey: Option<String>,
     ) -> Result<Self> {
         // Create SSH key manager
         let ssh_key_dir = config.ssh_session.ssh_key_directory.clone();
@@ -190,7 +202,12 @@ impl RentalManager {
         let ssh_key_manager = Arc::new(ssh_key_manager);
 
         // Create ban manager
-        let ban_manager = Arc::new(BanManager::new(persistence.clone(), Some(metrics.clone())));
+        let ban_manager = Arc::new(BanManager::new(
+            persistence.clone(),
+            Some(metrics.clone()),
+            slash_executor,
+            validator_hotkey,
+        ));
 
         // Create health monitor
         let health_monitor = Arc::new(DatabaseHealthMonitor::new(
@@ -227,6 +244,7 @@ impl RentalManager {
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
             ban_manager,
+            collateral_manager,
             auction_config: config.auction.clone(),
         })
     }
@@ -359,41 +377,76 @@ impl RentalManager {
             if let Some(epoch) = bid_repo.get_active_epoch().await? {
                 let cutoff = chrono::Utc::now()
                     - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
-                for _ in 0..3 {
-                    if let Some((lowest, candidate_node_id)) = bid_repo
-                        .get_lowest_bid_with_available_node(
-                            &epoch.id,
-                            &gpu_category,
-                            request.container_spec.resources.gpu_count,
-                            cutoff,
-                            self.auction_config.bid_node_freshness_secs,
-                        )
-                        .await?
-                    {
-                        let winning_miner_id = format!("miner_{}", lowest.miner_uid);
-                        let expires_at = chrono::Utc::now()
-                            + chrono::Duration::seconds(
-                                self.auction_config.bid_reservation_secs as i64,
-                            );
-                        let candidate_reservation_id = format!("reserve-{}", Uuid::new_v4());
-                        let reserved = self
-                            .persistence
-                            .reserve_node(
-                                &candidate_reservation_id,
-                                &candidate_node_id,
-                                &winning_miner_id,
-                                &rental_id,
-                                expires_at,
-                            )
-                            .await?;
-                        if reserved {
-                            miner_bid_rate = Some(lowest.bid_per_hour);
-                            node_id = candidate_node_id;
-                            miner_id = winning_miner_id;
-                            reservation_id = Some(candidate_reservation_id);
-                            break;
+                let candidates = bid_repo
+                    .get_bid_candidates_with_available_nodes(
+                        &epoch.id,
+                        &gpu_category,
+                        request.container_spec.resources.gpu_count,
+                        cutoff,
+                        self.auction_config.bid_node_freshness_secs,
+                        50,
+                    )
+                    .await?;
+                let mut preferred = Vec::new();
+                let mut fallback = Vec::new();
+                for (candidate, candidate_node_id) in candidates {
+                    let preference = match &self.collateral_manager {
+                        Some(collateral) => {
+                            collateral
+                                .get_preference(
+                                    &candidate.miner_hotkey,
+                                    &candidate_node_id,
+                                    &gpu_category,
+                                    request.container_spec.resources.gpu_count,
+                                )
+                                .await
                         }
-                    } else {
+                        None => CollateralPreference::Fallback,
+                    };
+                    match preference {
+                        CollateralPreference::Preferred => {
+                            preferred.push((candidate, candidate_node_id))
+                        }
+                        CollateralPreference::Fallback => {
+                            fallback.push((candidate, candidate_node_id))
+                        }
+                        CollateralPreference::Excluded => {
+                            tracing::info!(
+                                node_id = %candidate_node_id,
+                                miner_uid = candidate.miner_uid,
+                                "Skipping excluded node due to insufficient collateral"
+                            );
+                        }
+                    }
+                }
+
+                let mut ordered = preferred;
+                ordered.extend(fallback);
+                let mut attempts = 0;
+                for (candidate, candidate_node_id) in ordered {
+                    if attempts >= 3 {
+                        break;
+                    }
+                    attempts += 1;
+                    let winning_miner_id = format!("miner_{}", candidate.miner_uid);
+                    let expires_at = chrono::Utc::now()
+                        + chrono::Duration::seconds(self.auction_config.bid_reservation_secs as i64);
+                    let candidate_reservation_id = format!("reserve-{}", Uuid::new_v4());
+                    let reserved = self
+                        .persistence
+                        .reserve_node(
+                            &candidate_reservation_id,
+                            &candidate_node_id,
+                            &winning_miner_id,
+                            &rental_id,
+                            expires_at,
+                        )
+                        .await?;
+                    if reserved {
+                        miner_bid_rate = Some(candidate.bid_per_hour);
+                        node_id = candidate_node_id;
+                        miner_id = winning_miner_id;
+                        reservation_id = Some(candidate_reservation_id);
                         break;
                     }
                 }
@@ -404,11 +457,8 @@ impl RentalManager {
                 //       to provision on secure cloud (AWS/GCP/Lambda). The API layer should
                 //       handle this fallback since it has access to both validator and aggregator.
                 //       See: basilica-backend/crates/basilica-api/src/api/routes/secure_cloud.rs
-                // TODO: Integrate collateral-contract for stake slashing on bid failures.
-                //       Miners should deposit collateral when registering nodes. On repeated
-                //       deployment failures after winning bids, slash their stake proportionally.
-                //       This prevents bid-and-bail attacks where miners submit low bids they
-                //       don't intend to fulfill. See: basilica/crates/collateral-contract/
+                // TODO: If all candidates are excluded for collateral, consider fallback to
+                //       secure cloud rather than failing the rental.
             }
         }
 
@@ -550,7 +600,11 @@ impl RentalManager {
                                 .log_misbehaviour(
                                     miner_uid,
                                     &node_id,
-                                    MisbehaviourType::BadRental,
+                                    if miner_bid_rate.is_some() {
+                                        MisbehaviourType::BidWonDeploymentFailed
+                                    } else {
+                                        MisbehaviourType::BadRental
+                                    },
                                     &details,
                                 )
                                 .await

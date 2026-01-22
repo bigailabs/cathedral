@@ -54,6 +54,12 @@ impl SimplePersistence {
         Ok(result.map(|row| row.get("hotkey")))
     }
 
+    /// Get the hotkey for a miner by UID
+    pub async fn get_miner_hotkey_by_uid(&self, miner_uid: u16) -> Result<Option<String>> {
+        let miner_id = format!("miner_{}", miner_uid);
+        self.get_miner_hotkey_by_id(&miner_id).await
+    }
+
     /// Create a new miner record
     pub async fn create_new_miner(
         &self,
@@ -1006,5 +1012,34 @@ impl SimplePersistence {
         );
 
         Ok((total_uptime_minutes, multiplier))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::miner_prover::types::MinerInfo;
+    use basilica_common::identity::{Hotkey, MinerUid};
+
+    #[tokio::test]
+    async fn test_get_miner_hotkey_by_uid() {
+        let persistence = SimplePersistence::for_testing().await.unwrap();
+        let hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+        let miner_info = MinerInfo {
+            uid: MinerUid::from(1),
+            hotkey: Hotkey::new(hotkey.to_string()).unwrap(),
+            endpoint: "http://miner.local".to_string(),
+            is_validator: false,
+            stake_tao: 0.0,
+            last_verified: None,
+            verification_score: 0.5,
+        };
+        persistence
+            .create_new_miner("miner_1", hotkey, &miner_info)
+            .await
+            .unwrap();
+
+        let fetched = persistence.get_miner_hotkey_by_uid(1).await.unwrap();
+        assert_eq!(fetched, Some(hotkey.to_string()));
     }
 }

@@ -297,6 +297,29 @@ pub async fn slash_collateral(
     Ok(())
 }
 
+pub async fn slash_collateral_amount(
+    private_key: &str,
+    hotkey: [u8; 32],
+    node_id: [u8; 16],
+    amount: U256,
+    url: &str,
+    url_content_md5_checksum: u128,
+    network_config: &CollateralNetworkConfig,
+) -> Result<(), anyhow::Error> {
+    let contract = get_collateral(private_key, network_config).await?;
+
+    let tx = contract.slashCollateralAmount(
+        FixedBytes::from_slice(&hotkey),
+        FixedBytes::from_slice(&node_id),
+        amount,
+        url.to_string(),
+        FixedBytes::from_slice(&url_content_md5_checksum.to_be_bytes()),
+    );
+    let tx = tx.send().await?;
+    tx.get_receipt().await?;
+    Ok(())
+}
+
 // Get methods
 
 pub async fn netuid(network_config: &CollateralNetworkConfig) -> Result<u16, anyhow::Error> {

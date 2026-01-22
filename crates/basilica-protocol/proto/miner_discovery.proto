@@ -83,4 +83,16 @@ message SubmitBidResponse {
   bool accepted = 1;
   string error_message = 2;
   string epoch_id = 3;
+  CollateralStatus collateral_status = 4;
+}
+
+message CollateralStatus {
+  double current_alpha = 1;           // Raw Alpha amount deposited
+  double current_usd_value = 2;       // USD value at current price
+  double minimum_usd_required = 3;    // Minimum for this GPU category
+  string status = 4;                  // "sufficient", "warning", "undercollateralized", "excluded"
+  string grace_period_remaining = 5;  // "23h 45m" or empty
+  string action_required = 6;         // "Deposit 25 Alpha (~$50) to maintain eligibility"
+  double alpha_usd_price = 7;         // Current Alpha/USD price used
+  bool price_stale = 8;               // True if price > 1hr old
 }
