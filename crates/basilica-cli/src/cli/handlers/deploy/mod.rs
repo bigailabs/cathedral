@@ -59,7 +59,7 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
                 create::handle_create(&client, &source, cmd).await
             } else {
                 print_error(
-                    "No source specified. Use 'basilica summons <source>' or 'basilica summons ls'",
+                    "No source specified. Use 'basilica summon <source>' or 'basilica summon ls'",
                 );
                 Ok(())
             }

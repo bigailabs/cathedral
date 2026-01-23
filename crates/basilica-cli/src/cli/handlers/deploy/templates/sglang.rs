@@ -143,7 +143,7 @@ pub async fn handle_sglang_deploy(
             "SGLang summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica summons status {}", actual_name);
+        println!("  Check status: basilica summon status {}", actual_name);
     }
 
     Ok(())
@@ -320,15 +320,15 @@ fn print_sglang_success(deployment: &DeploymentResponse, model: &str) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica summons status {}",
+        "  View status:  basilica summon status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica summons logs {}",
+        "  View logs:    basilica summon logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica summons delete {}",
+        "  Delete:       basilica summon delete {}",
         deployment.instance_name
     );
 }

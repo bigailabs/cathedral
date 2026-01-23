@@ -195,7 +195,7 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Deploy applications to Basilica (Summons)
+    /// Deploy applications to Basilica
     #[command(name = "deploy", visible_alias = "summon", alias = "d")]
     Deploy(Box<DeployCommand>),
 

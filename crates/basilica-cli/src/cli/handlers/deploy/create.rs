@@ -142,7 +142,7 @@ pub async fn handle_create(
             "Summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica summons status {}", actual_name);
+        println!("  Check status: basilica summon status {}", actual_name);
     }
 
     Ok(())

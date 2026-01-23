@@ -108,15 +108,15 @@ pub fn print_deployment_success(deployment: &DeploymentResponse) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica summons status {}",
+        "  View status:  basilica summon status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica summons logs {}",
+        "  View logs:    basilica summon logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica summons delete {}",
+        "  Delete:       basilica summon delete {}",
         deployment.instance_name
     );
 }
@@ -263,7 +263,7 @@ pub async fn resolve_deployment_name(
 
     if response.deployments.is_empty() {
         return Err(CliError::Internal(eyre!(
-            "No summons found. Create one with 'basilica summons <source>'"
+            "No summons found. Create one with 'basilica summon <source>'"
         )));
     }
 
