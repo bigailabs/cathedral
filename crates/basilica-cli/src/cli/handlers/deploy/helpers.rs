@@ -87,10 +87,10 @@ pub fn parse_primary_port(ports: &[String]) -> Result<u16, DeployError> {
         })
 }
 
-/// Print deployment success message
+/// Print summons success message
 pub fn print_deployment_success(deployment: &DeploymentResponse) {
     print_success(&format!(
-        "Deployment '{}' created successfully!",
+        "Summons '{}' created successfully!",
         deployment.instance_name
     ));
     println!();
@@ -108,23 +108,23 @@ pub fn print_deployment_success(deployment: &DeploymentResponse) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica deploy status {}",
+        "  View status:  basilica summon status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica deploy logs {}",
+        "  View logs:    basilica summon logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica deploy delete {}",
+        "  Delete:       basilica summon delete {}",
         deployment.instance_name
     );
 }
 
-/// Print deployments table
+/// Print summons table
 pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
     if deployments.is_empty() {
-        print_info("No deployments found");
+        print_info("No summons found");
         return;
     }
 
@@ -154,9 +154,9 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
     println!("{}", table);
 }
 
-/// Print deployment details
+/// Print summons details
 pub fn print_deployment_details(deployment: &DeploymentResponse, verbose: bool) {
-    println!("Deployment: {}", deployment.instance_name);
+    println!("Summons: {}", deployment.instance_name);
     println!();
     println!("  Namespace:  {}", deployment.namespace);
     println!("  State:      {}", deployment.state);
@@ -338,7 +338,7 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Resolve deployment name - if not provided, fetch deployments and prompt for selection
+/// Resolve summons name - if not provided, fetch summons and prompt for selection
 pub async fn resolve_deployment_name(
     name: Option<String>,
     client: &BasilicaClient,
@@ -347,13 +347,13 @@ pub async fn resolve_deployment_name(
         return Ok(n);
     }
 
-    let spinner = create_spinner("Fetching deployments...");
+    let spinner = create_spinner("Fetching summons...");
     let response = client.list_deployments().await.map_err(CliError::Api)?;
     complete_spinner_and_clear(spinner);
 
     if response.deployments.is_empty() {
         return Err(CliError::Internal(eyre!(
-            "No deployments found. Create one with 'basilica deploy <source>'"
+            "No summons found. Create one with 'basilica summon <source>'"
         )));
     }
 
@@ -374,7 +374,7 @@ pub async fn resolve_deployment_name(
 
     // Build prompt with header on next line
     let header = style("  Name                           │ State      │ Replicas").dim();
-    let prompt = format!("Select deployment\n{}", header);
+    let prompt = format!("Select summons\n{}", header);
 
     let selection = Select::with_theme(&ColorfulTheme::default())
         .with_prompt(prompt)

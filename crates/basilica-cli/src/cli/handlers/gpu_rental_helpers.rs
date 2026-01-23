@@ -340,8 +340,8 @@ pub async fn resolve_target_rental_unified(
         .iter()
         .map(|item| {
             let type_label = match item.compute_type {
-                ComputeCategory::CommunityCloud => "Community",
-                ComputeCategory::SecureCloud => "Secure   ",
+                ComputeCategory::CommunityCloud => "Bourse   ",
+                ComputeCategory::SecureCloud => "Citadel  ",
             };
 
             let ip_display = item
@@ -448,9 +448,9 @@ pub async fn resolve_offering_unified(
     cloud_filter: Option<ComputeCategory>,
 ) -> Result<SelectedOffering> {
     let spinner_msg = match cloud_filter {
-        Some(ComputeCategory::SecureCloud) => "Fetching available GPUs from secure cloud...",
-        Some(ComputeCategory::CommunityCloud) => "Fetching available GPUs from community cloud...",
-        None => "Fetching available GPUs from all clouds...",
+        Some(ComputeCategory::SecureCloud) => "Fetching available GPUs from The Citadel...",
+        Some(ComputeCategory::CommunityCloud) => "Fetching available GPUs from The Bourse...",
+        None => "Fetching available GPUs...",
     };
     let spinner = create_spinner(spinner_msg);
 
@@ -709,9 +709,9 @@ pub async fn resolve_offering_unified(
         .iter()
         .map(|item| {
             let type_label = match item.offering_type {
-                OfferingType::Community => "Community",
-                OfferingType::SecureGpu => "Secure   ",
-                OfferingType::SecureCpu => "Secure   ",
+                OfferingType::Community => "Bourse   ",
+                OfferingType::SecureGpu => "Citadel  ",
+                OfferingType::SecureCpu => "Citadel  ",
             };
 
             format!(

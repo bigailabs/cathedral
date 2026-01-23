@@ -116,7 +116,7 @@ pub async fn wait_for_ready(
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs as u64);
     let mut last_phase: Option<String> = None;
-    let mut spinner = create_spinner(&format!("Waiting for {} deployment...", service_name));
+    let mut spinner = create_spinner(&format!("Waiting for {} summons...", service_name));
 
     loop {
         if start.elapsed() > timeout {
@@ -158,7 +158,7 @@ pub async fn wait_for_ready(
         if status.state == "Terminating" || status.phase.as_deref() == Some("terminating") {
             complete_spinner_and_clear(spinner);
             return Ok(WaitResult::Failed(
-                "Deployment is being terminated".to_string(),
+                "Summons is being terminated".to_string(),
             ));
         }
 
@@ -175,7 +175,7 @@ pub async fn wait_for_ready(
 /// Format human-readable phase message for a specific service
 pub fn format_phase_message(phase: &str, service_name: &str) -> String {
     match phase {
-        "pending" => "Deployment created, waiting for scheduler...".to_string(),
+        "pending" => "Summons created, waiting for scheduler...".to_string(),
         "scheduling" => "Finding suitable GPU node...".to_string(),
         "pulling" => format!("Pulling {} container image...", service_name),
         "initializing" => "Running init containers...".to_string(),
