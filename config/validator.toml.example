@@ -106,7 +106,7 @@ ssh_retry_delay = { secs = 2, nanos = 0 }
 
 [emission]
 # Percentage of total emissions to burn (0.0-100.0)
-burn_percentage = 80.0
+burn_percentage = 95.0
 
 # UID to receive burn allocation
 burn_uid = 204
@@ -129,6 +129,6 @@ weight_version_key = 0
 # are distributed across GPU categories
 # Must sum to exactly 100.0
 [emission.gpu_allocations]
-A100 = { weight = 8.0, min_gpu_count = 1, min_gpu_vram = 1 }
-H100 = { weight = 12.0, min_gpu_count = 1, min_gpu_vram = 1 }
-B200 = { weight = 80.0, min_gpu_count = 8, min_gpu_vram = 1 }
+A100 = { weight = 100.0, min_gpu_count = 1, min_gpu_vram = 1 }
+# H100 = { weight = 12.0, min_gpu_count = 1, min_gpu_vram = 1 }
+# B200 = { weight = 80.0, min_gpu_count = 8, min_gpu_vram = 1 }
