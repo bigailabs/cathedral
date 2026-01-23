@@ -1,6 +1,7 @@
 //! GPU rental command handlers
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
+use crate::cli::handlers::deploy::helpers::stream_logs_to_stdout;
 use crate::cli::handlers::gpu_rental_helpers::{
     active_rentals_query, get_ssh_private_key_path, print_cloud_section_header,
     resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
@@ -1893,57 +1894,14 @@ pub async fn handle_logs(
         }
     }
 
-    // Parse and display SSE stream
-    use eventsource_stream::Eventsource;
-    use futures_util::StreamExt;
-    use serde::Deserialize;
-
-    #[derive(Debug, Deserialize)]
-    struct LogEntry {
-        timestamp: chrono::DateTime<chrono::Utc>,
-        stream: String,
-        message: String,
-    }
-
     complete_spinner_and_clear(spinner);
-
-    let stream = response.bytes_stream().eventsource();
 
     println!("Streaming logs for rental {}...", target);
     if options.follow {
         println!("Following log output - press Ctrl+C to stop");
     }
 
-    futures_util::pin_mut!(stream);
-
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(sse_event) => {
-                // Parse the data field as JSON
-                match serde_json::from_str::<LogEntry>(&sse_event.data) {
-                    Ok(entry) => {
-                        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S%.3f");
-                        let stream_indicator = match entry.stream.as_str() {
-                            "stdout" => "OUT",
-                            "stderr" => "ERR",
-                            "error" => "ERR",
-                            _ => &entry.stream,
-                        };
-                        println!("[{} {}] {}", timestamp, stream_indicator, entry.message);
-                    }
-                    Err(e) => {
-                        debug!("Failed to parse log event: {}, data: {}", e, sse_event.data);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Error reading log stream: {}", e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
+    stream_logs_to_stdout(response).await
 }
 
 /// Handle the `down` command - terminate rental
