@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0]
+
 ### Changed
 - Renamed product offerings in user-facing text (API and SDK unchanged):
   - "Secure Cloud" → "The Citadel"
@@ -18,7 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Display of logs in `deploy logs`
-
 
 ## [0.12.0]
 
