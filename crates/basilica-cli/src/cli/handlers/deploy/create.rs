@@ -90,7 +90,7 @@ pub async fn handle_create(
     };
 
     // 10. Show progress spinner
-    let spinner = create_spinner(&format!("Creating deployment '{}'...", name));
+    let spinner = create_spinner(&format!("Creating summons '{}'...", name));
 
     // 11. Create deployment with retry
     let response = create_with_retry(client, request.clone()).await?;
@@ -139,10 +139,10 @@ pub async fn handle_create(
         crate::output::json_output(&response)?;
     } else {
         print_success(&format!(
-            "Deployment '{}' created (detached mode)",
+            "Summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica deploy status {}", actual_name);
+        println!("  Check status: basilica summons status {}", actual_name);
     }
 
     Ok(())
@@ -225,7 +225,7 @@ async fn wait_for_ready_with_phases(
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs as u64);
     let mut last_phase: Option<String> = None;
-    let mut spinner = create_spinner("Waiting for deployment...");
+    let mut spinner = create_spinner("Waiting for summons...");
 
     loop {
         if start.elapsed() > timeout {
@@ -276,11 +276,11 @@ async fn wait_for_ready_with_phases(
             return Ok(WaitResult::Failed(reason));
         }
 
-        // Handle Terminating phase - deployment is being deleted while we wait
+        // Handle Terminating phase - summons is being deleted while we wait
         if status.state == "Terminating" || status.phase.as_deref() == Some("terminating") {
             complete_spinner_and_clear(spinner);
             return Ok(WaitResult::Failed(
-                "Deployment is being terminated - it may have been deleted externally".to_string(),
+                "Summons is being terminated - it may have been deleted externally".to_string(),
             ));
         }
 
@@ -298,32 +298,32 @@ async fn wait_for_ready_with_phases(
 /// Format human-readable phase message
 fn format_phase_message(phase: &str, status: &DeploymentResponse) -> String {
     match phase {
-        "pending" => "Deployment created, waiting for scheduler...".to_string(),
-        "scheduling" => "Finding suitable node for deployment...".to_string(),
+        "pending" => "Summons created, waiting for scheduler...".to_string(),
+        "scheduling" => "Finding suitable node for summons...".to_string(),
         "pulling" => "Pulling container image...".to_string(),
         "initializing" => "Running init containers...".to_string(),
         "storage_sync" => "Syncing storage volume...".to_string(),
         "starting" => "Starting application container...".to_string(),
         "health_check" => "Running health checks...".to_string(),
         "ready" => format!(
-            "Deployment ready! {}/{} replicas running",
+            "Summons ready! {}/{} replicas running",
             status.replicas.ready, status.replicas.desired
         ),
         "degraded" => format!(
-            "Deployment degraded: {}/{} replicas ready",
+            "Summons degraded: {}/{} replicas ready",
             status.replicas.ready, status.replicas.desired
         ),
-        "failed" => "Deployment failed".to_string(),
-        "terminating" => "Deployment is being terminated...".to_string(),
+        "failed" => "Summons failed".to_string(),
+        "terminating" => "Summons is being terminated...".to_string(),
         _ => format!("Phase: {}", phase),
     }
 }
 
-/// Fetch and print deployment events for debugging failures
+/// Fetch and print summons events for debugging failures
 async fn fetch_and_print_events(client: &BasilicaClient, name: &str) {
     match client.get_deployment_events(name, Some(10)).await {
         Ok(response) if !response.events.is_empty() => {
-            eprintln!("\nRecent events for deployment '{}':", name);
+            eprintln!("\nRecent events for summons '{}':", name);
             for event in response.events.iter() {
                 let event_type = match event.event_type.as_str() {
                     "Warning" => "\x1b[33mWarning\x1b[0m",

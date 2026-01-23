@@ -41,7 +41,7 @@ fn format_duration(seconds: i64) -> String {
 /// Display rental items in table format
 pub fn display_rental_items(rentals: &[ApiRentalListItem]) -> Result<()> {
     if rentals.is_empty() {
-        println!("{}", style("No community cloud rentals found").yellow());
+        println!("{}", style("No Bourse rentals found").yellow());
         return Ok(());
     }
 
@@ -818,7 +818,7 @@ pub fn display_secure_cloud_rentals(
     rentals: &[&basilica_sdk::types::SecureCloudRentalListItem],
 ) -> Result<()> {
     if rentals.is_empty() {
-        println!("{}", style("No secure cloud rentals found").yellow());
+        println!("{}", style("No Citadel rentals found").yellow());
         return Ok(());
     }
 
@@ -956,7 +956,7 @@ pub fn display_cpu_offerings_detailed(
     table.with(Style::modern());
     println!("{}", table);
 
-    println!("\nTotal Secure Cloud (CPU) offerings: {}", offerings.len());
+    println!("\nTotal Citadel (CPU) offerings: {}", offerings.len());
 
     Ok(())
 }

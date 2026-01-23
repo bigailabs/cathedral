@@ -1,10 +1,10 @@
-//! Region-to-country mapping utilities for secure cloud providers
+//! Region-to-country mapping utilities for Citadel providers
 //!
-//! Secure cloud providers use region codes (e.g., "EU-WEST-1", "US-EAST") while
-//! community cloud uses country names. This module provides utilities to map
+//! Citadel (datacenter) providers use region codes (e.g., "EU-WEST-1", "US-EAST") while
+//! The Bourse uses country names. This module provides utilities to map
 //! between region codes and country codes for filtering purposes.
 
-/// Map secure cloud provider region codes to ISO country codes
+/// Map Citadel provider region codes to ISO country codes
 ///
 /// Returns the two-letter ISO country code for known region patterns.
 /// Returns `None` for unrecognized regions.
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_extract_country_code_location_profiles() {
-        // City/Region/Country format (community cloud)
+        // City/Region/Country format (The Bourse)
         assert_eq!(
             extract_country_code("San Francisco/California/US"),
             Some("US")

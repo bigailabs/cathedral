@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Renamed product offerings in user-facing text (API and SDK unchanged):
+  - "Secure Cloud" → "The Citadel"
+  - "Community Cloud" → "The Bourse"
+  - "VIP" → "The Priory"
+  - "Deployments" → "Summons"
+- Added `summon` as visible alias for `deploy` command
+- CLI `--compute` option now uses `citadel` and `bourse` as primary values (old names remain as aliases for backward compatibility)
+
+### Fixed
+- Display of logs in `deploy logs`
+
+
 ## [0.12.0]
 
 ### Added

@@ -8,10 +8,18 @@ use crate::handlers::gpu_rental::GpuTarget;
 /// CLI wrapper for ComputeCategory to implement ValueEnum
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ComputeCategoryArg {
-    #[value(name = "secure-cloud", alias = "secure", alias = "secure_cloud")]
-    SecureCloud,
+    /// The Citadel - Datacenter providers
     #[value(
-        name = "community-cloud",
+        name = "citadel",
+        alias = "secure-cloud",
+        alias = "secure",
+        alias = "secure_cloud"
+    )]
+    SecureCloud,
+    /// The Bourse - Miner-provided GPUs
+    #[value(
+        name = "bourse",
+        alias = "community-cloud",
         alias = "community",
         alias = "community_cloud"
     )]
@@ -38,7 +46,7 @@ pub enum Commands {
         /// Filter by GPU category (e.g., 'h100', 'h200', 'b200') (optional)
         gpu_type: Option<GpuCategory>,
 
-        /// Compute source: 'secure-cloud' or 'community-cloud'
+        /// Compute source: 'citadel' (The Citadel) or 'bourse' (The Bourse)
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -52,7 +60,7 @@ pub enum Commands {
         /// GPU category to filter by (e.g., 'h100', 'a100', 'b200') (optional)
         target: Option<GpuTarget>,
 
-        /// Compute source: 'secure-cloud' or 'community-cloud'
+        /// Compute source: 'citadel' (The Citadel) or 'bourse' (The Bourse)
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -62,7 +70,7 @@ pub enum Commands {
 
     /// List active rentals and their status
     Ps {
-        /// Compute source: 'secure-cloud' or 'community-cloud'
+        /// Compute source: 'citadel' (The Citadel) or 'bourse' (The Bourse)
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -91,7 +99,7 @@ pub enum Commands {
         /// Rental UUID to terminate (optional)
         target: Option<String>,
 
-        /// Compute source: 'secure-cloud' or 'community-cloud'
+        /// Compute source: 'citadel' (The Citadel) or 'bourse' (The Bourse)
         #[arg(long, value_name = "TYPE")]
         compute: Option<ComputeCategoryArg>,
 
@@ -187,8 +195,8 @@ pub enum Commands {
         dry_run: bool,
     },
 
-    /// Deploy applications to Basilica
-    #[command(name = "deploy", visible_alias = "d")]
+    /// Deploy applications to Basilica (Summons)
+    #[command(name = "deploy", visible_alias = "summon", alias = "d")]
     Deploy(Box<DeployCommand>),
 
     /// Volume management commands
@@ -386,11 +394,11 @@ pub struct UpOptions {
     #[arg(long)]
     pub gpu_count: Option<u32>,
 
-    /// Docker image to run (community cloud only)
+    /// Docker image to run (Bourse only)
     #[arg(long)]
     pub image: Option<String>,
 
-    /// Environment variables (KEY=VALUE) (community cloud only)
+    /// Environment variables (KEY=VALUE) (Bourse only)
     #[arg(long)]
     pub env: Vec<String>,
 
@@ -402,23 +410,23 @@ pub struct UpOptions {
     #[arg(long, value_hint = ValueHint::FilePath)]
     pub ssh_key: Option<PathBuf>,
 
-    /// Port mappings (host:container) (community cloud only)
+    /// Port mappings (host:container) (Bourse only)
     #[arg(long)]
     pub ports: Vec<String>,
 
-    /// CPU cores (community cloud only)
+    /// CPU cores (Bourse only)
     #[arg(long)]
     pub cpu_cores: Option<f64>,
 
-    /// Memory in MB (community cloud only)
+    /// Memory in MB (Bourse only)
     #[arg(long)]
     pub memory_mb: Option<i64>,
 
-    /// Storage in MB (community cloud only)
+    /// Storage in MB (Bourse only)
     #[arg(long)]
     pub storage_mb: Option<i64>,
 
-    /// Command to run (community cloud only)
+    /// Command to run (Bourse only)
     #[arg(long)]
     pub command: Vec<String>,
 

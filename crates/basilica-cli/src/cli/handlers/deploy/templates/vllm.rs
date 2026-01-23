@@ -100,7 +100,7 @@ pub async fn handle_vllm_deploy(
 
     // Show spinner
     let spinner = create_spinner(&format!(
-        "Creating vLLM deployment '{}' with model '{}'...",
+        "Creating vLLM summons '{}' with model '{}'...",
         name, model
     ));
 
@@ -140,10 +140,10 @@ pub async fn handle_vllm_deploy(
         crate::output::json_output(&response)?;
     } else {
         print_success(&format!(
-            "vLLM deployment '{}' created (detached mode)",
+            "vLLM summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica deploy status {}", actual_name);
+        println!("  Check status: basilica summons status {}", actual_name);
     }
 
     Ok(())
@@ -304,10 +304,10 @@ fn build_vllm_health_check() -> HealthCheckConfig {
     }
 }
 
-/// Print vLLM deployment success message
+/// Print vLLM summons success message
 fn print_vllm_success(deployment: &DeploymentResponse, model: &str) {
     print_success(&format!(
-        "vLLM deployment '{}' is ready!",
+        "vLLM summons '{}' is ready!",
         deployment.instance_name
     ));
     println!();
@@ -332,15 +332,15 @@ fn print_vllm_success(deployment: &DeploymentResponse, model: &str) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica deploy status {}",
+        "  View status:  basilica summons status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica deploy logs {}",
+        "  View logs:    basilica summons logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica deploy delete {}",
+        "  Delete:       basilica summons delete {}",
         deployment.instance_name
     );
 }

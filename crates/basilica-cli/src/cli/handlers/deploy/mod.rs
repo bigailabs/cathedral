@@ -59,7 +59,7 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
                 create::handle_create(&client, &source, cmd).await
             } else {
                 print_error(
-                    "No source specified. Use 'basilica deploy <source>' or 'basilica deploy ls'",
+                    "No source specified. Use 'basilica summons <source>' or 'basilica summons ls'",
                 );
                 Ok(())
             }
@@ -69,7 +69,7 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
 
 /// List all deployments
 async fn handle_list(client: &basilica_sdk::BasilicaClient, json: bool) -> Result<(), CliError> {
-    let spinner = create_spinner("Fetching deployments...");
+    let spinner = create_spinner("Fetching summons...");
     let result = client.list_deployments().await;
     complete_spinner_and_clear(spinner);
     let response = result.map_err(CliError::Api)?;
@@ -90,7 +90,7 @@ async fn handle_status(
     json: bool,
     verbose: bool,
 ) -> Result<(), CliError> {
-    let spinner = create_spinner(&format!("Fetching deployment '{}'...", name));
+    let spinner = create_spinner(&format!("Fetching summons '{}'...", name));
     let result = client.get_deployment(name).await;
     complete_spinner_and_clear(spinner);
     let response = result.map_err(|e| {
@@ -137,7 +137,7 @@ async fn handle_delete(
         use dialoguer::{theme::ColorfulTheme, Confirm};
 
         let confirm = Confirm::with_theme(&ColorfulTheme::default())
-            .with_prompt(format!("Delete deployment '{}'?", name))
+            .with_prompt(format!("Delete summons '{}'?", name))
             .default(false)
             .interact()
             .map_err(|e| {
@@ -150,12 +150,12 @@ async fn handle_delete(
         }
     }
 
-    let spinner = create_spinner(&format!("Deleting deployment '{}'...", name));
+    let spinner = create_spinner(&format!("Deleting summons '{}'...", name));
     let result = client.delete_deployment(name).await;
     complete_spinner_and_clear(spinner);
     result.map_err(CliError::Api)?;
 
-    print_success(&format!("Deployment '{}' deletion initiated", name));
+    print_success(&format!("Summons '{}' deletion initiated", name));
 
     Ok(())
 }
@@ -167,7 +167,7 @@ async fn handle_scale(
     replicas: u32,
 ) -> Result<(), CliError> {
     let spinner = create_spinner(&format!(
-        "Scaling deployment '{}' to {} replicas...",
+        "Scaling summons '{}' to {} replicas...",
         name, replicas
     ));
 
@@ -192,7 +192,7 @@ async fn handle_scale(
     scale_result.map_err(CliError::Api)?;
 
     print_success(&format!(
-        "Deployment '{}' scaled to {} replicas",
+        "Summons '{}' scaled to {} replicas",
         name, replicas
     ));
 
