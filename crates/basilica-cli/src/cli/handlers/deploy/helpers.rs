@@ -199,27 +199,117 @@ pub fn print_deployment_details(deployment: &DeploymentResponse, verbose: bool) 
     }
 }
 
-/// Stream logs to stdout with backpressure handling
+/// Sanitize ANSI escape sequences, allowing only SGR (color/style) codes.
+///
+/// SGR codes have the form `ESC [ <params> m` where params are semicolon-separated numbers.
+/// All other escape sequences (OSC, CSI cursor movement, etc.) are stripped for security.
+fn sanitize_ansi(input: &str) -> String {
+    use std::fmt::Write;
+
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Start of escape sequence
+            match chars.peek() {
+                Some('[') => {
+                    chars.next(); // consume '['
+
+                    // CSI sequence: collect parameter bytes and final byte
+                    let mut seq_params = String::new();
+                    let mut final_byte = None;
+
+                    for ch in chars.by_ref() {
+                        if ch.is_ascii_digit() || ch == ';' {
+                            seq_params.push(ch);
+                        } else if (0x40..=0x7e).contains(&(ch as u32)) {
+                            // Final byte of CSI sequence
+                            final_byte = Some(ch);
+                            break;
+                        } else {
+                            // Intermediate byte or invalid - stop parsing
+                            break;
+                        }
+                    }
+
+                    // Only allow SGR sequences (final byte 'm')
+                    if final_byte == Some('m') {
+                        let _ = write!(result, "\x1b[{}m", seq_params);
+                    }
+                    // All other CSI sequences are dropped
+                }
+                Some(']') => {
+                    chars.next(); // consume ']'
+
+                    // OSC sequence: consume until BEL (\x07) or ST (ESC \)
+                    loop {
+                        match chars.next() {
+                            Some('\x07') => break, // BEL terminates OSC
+                            Some('\x1b') => {
+                                // Check for ST (ESC \)
+                                if chars.peek() == Some(&'\\') {
+                                    chars.next();
+                                }
+                                break;
+                            }
+                            None => break, // End of input
+                            _ => continue, // Consume OSC content
+                        }
+                    }
+                    // OSC sequences are completely dropped
+                }
+                _ => {
+                    // Other escape sequences (SS2, SS3, etc.) - drop the ESC
+                    // but don't consume the next char as it might be regular text
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+
+    result
+}
+
+/// Stream logs to stdout with proper SSE parsing
 pub async fn stream_logs_to_stdout(
     response: reqwest::Response,
 ) -> Result<(), crate::error::CliError> {
-    use futures::StreamExt;
-    use std::io::Write;
+    use eventsource_stream::Eventsource;
+    use futures_util::StreamExt;
+    use serde::Deserialize;
 
-    let mut stream = response.bytes_stream();
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
+    #[derive(Debug, Deserialize)]
+    struct LogEntry {
+        message: String,
+    }
 
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| {
-            crate::error::CliError::Internal(color_eyre::eyre::eyre!("Stream error: {}", e))
-        })?;
-        handle.write_all(&bytes).map_err(|e| {
-            crate::error::CliError::Internal(color_eyre::eyre::eyre!("Write error: {}", e))
-        })?;
-        handle.flush().map_err(|e| {
-            crate::error::CliError::Internal(color_eyre::eyre::eyre!("Flush error: {}", e))
-        })?;
+    let stream = response.bytes_stream().eventsource();
+    futures_util::pin_mut!(stream);
+
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(sse_event) => {
+                match serde_json::from_str::<LogEntry>(&sse_event.data) {
+                    Ok(entry) => {
+                        println!("{}", sanitize_ansi(&entry.message));
+                    }
+                    Err(_) => {
+                        // Fall back to raw data if JSON parsing fails
+                        if !sse_event.data.is_empty() {
+                            println!("{}", sanitize_ansi(&sse_event.data));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(crate::error::CliError::Internal(color_eyre::eyre::eyre!(
+                    "Log stream error: {}",
+                    e
+                )));
+            }
+        }
     }
 
     Ok(())
@@ -363,5 +453,60 @@ mod tests {
     fn test_parse_primary_port_empty() {
         let ports: Vec<String> = vec![];
         assert!(parse_primary_port(&ports).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_ansi_allows_sgr_colors() {
+        // SGR color codes should be preserved
+        let input = "\x1b[1;36mHello\x1b[0m World";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, "\x1b[1;36mHello\x1b[0m World");
+    }
+
+    #[test]
+    fn test_sanitize_ansi_allows_reset() {
+        let input = "\x1b[0mReset\x1b[m";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, "\x1b[0mReset\x1b[m");
+    }
+
+    #[test]
+    fn test_sanitize_ansi_strips_cursor_movement() {
+        // CSI cursor movement (H, A, B, C, D, etc.) should be stripped
+        let input = "\x1b[2;5HMoved cursor";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, "Moved cursor");
+    }
+
+    #[test]
+    fn test_sanitize_ansi_strips_clear_screen() {
+        // CSI erase display (J) should be stripped
+        let input = "\x1b[2JCleared screen";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, "Cleared screen");
+    }
+
+    #[test]
+    fn test_sanitize_ansi_strips_osc_sequences() {
+        // OSC sequences (title change, hyperlinks, clipboard) should be stripped
+        // OSC starts with ESC ] and ends with BEL or ST
+        let input = "\x1b]0;Malicious Title\x07Normal text";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, "Normal text");
+    }
+
+    #[test]
+    fn test_sanitize_ansi_plain_text_unchanged() {
+        let input = "Just plain text with no escape codes";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_sanitize_ansi_mixed_content() {
+        // Mix of allowed SGR and disallowed CSI
+        let input = "\x1b[31mRed\x1b[0m \x1b[2JCleared \x1b[32mGreen\x1b[0m";
+        let output = sanitize_ansi(input);
+        assert_eq!(output, "\x1b[31mRed\x1b[0m Cleared \x1b[32mGreen\x1b[0m");
     }
 }

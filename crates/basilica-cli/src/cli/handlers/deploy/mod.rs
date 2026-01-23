@@ -8,7 +8,7 @@ use crate::output::{json_output, print_error, print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
 
 mod create;
-mod helpers;
+pub mod helpers;
 pub mod templates;
 mod validation;
 
