@@ -239,5 +239,5 @@ Choose your role and dive deeper:
 
 - Check the individual component guides for detailed troubleshooting
 - [GitHub](https://github.com/one-covenant/basilica)
-- [Discord](https://discord.gg/jYcGzwed)
+- [Discord](https://discord.gg/Cy7c9vPsNK)
 - [Website](https://www.basilica.ai/)

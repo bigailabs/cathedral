@@ -139,5 +139,5 @@ See `config/README.md` for detailed configuration instructions.
 - **Configuration Examples**: Production-ready config templates in `config/`
 - **Deployment Scripts**: Automated deployment tools in `scripts/`
 - **GitHub Repository**: https://github.com/one-covenant/basilica
-- **Discord**: https://discord.gg/jYcGzwed
+- **Discord**: https://discord.gg/Cy7c9vPsNK
 - **Website**: https://www.basilica.ai/

@@ -32,7 +32,7 @@ weight_interval_secs = 300
 # external_ip = "YOUR_PUBLIC_IP_HERE"
 
 # Axon port for Bittensor network
-axon_port = 8091
+axon_port = 50051
 
 # Maximum UIDs for weight setting
 max_weight_uids = 256
@@ -104,7 +104,7 @@ default_node_username = "node"
 [advertised_addresses]
 # Override auto-detected addresses when behind NAT or proxy
 # grpc_endpoint = "http://YOUR_PUBLIC_IP:50051"
-# axon_endpoint = "http://YOUR_PUBLIC_IP:8091"
+# axon_endpoint = "http://YOUR_PUBLIC_IP:50051"
 # metrics_endpoint = "http://YOUR_PUBLIC_IP:9090"
 
 # =============================================================================

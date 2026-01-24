@@ -15,8 +15,6 @@ Each component has configuration files following this pattern:
 |-----------|---------------|-------------|
 | Validator | `validator.toml.example` | Bittensor neuron for verification and scoring |
 | Miner | `miner.toml.example` | Bittensor neuron for GPU node orchestration |
-| API | `api.toml.example` | Public HTTP API gateway |
-| Billing | `billing.toml.example` | Billing service configuration |
 | CLI | `cli.toml.example` | CLI tool configuration |
 | GPU Attestor | `gpu-attestor.toml.example` | GPU verification tool |
 
@@ -31,7 +29,6 @@ Bittensor neuron for verification and scoring. Key configuration sections:
 - `[ssh_validation]` - SSH-based validation settings
 - `[ssh_session]` - SSH session management and audit logging
 - `[emission]` - GPU category emission allocation settings
-- `[billing]` - Billing telemetry streaming configuration
 
 **Requirements**: CUDA Toolkit 12.8 for GPU verification kernels
 
@@ -45,25 +42,6 @@ Bittensor neuron that orchestrates GPU node access. Key configuration sections:
 - `[ssh_session]` - SSH session orchestration for validator access
 - `[advertised_addresses]` - Service endpoint advertising
 - `[validator_assignment]` - Validator assignment strategy
-
-### API (`api.toml`)
-
-External HTTP API gateway. Key configuration sections:
-
-- `[server]` - HTTP server settings
-- `[bittensor]` - Validator discovery configuration
-- `[database]` - PostgreSQL connection settings
-- `[billing]` - Billing service integration
-- `[payments]` - Payments service integration
-
-### Billing (`billing.toml`)
-
-Billing service for usage tracking. Key configuration sections:
-
-- `[service]` - Service identification and environment
-- `[database]` - PostgreSQL connection settings
-- `[grpc]` - gRPC server configuration
-- `[telemetry]` - Telemetry ingestion settings
 
 ### CLI (`cli.toml`)
 
@@ -90,8 +68,6 @@ cp config/validator.toml.example config/validator.toml
 cp config/miner.toml.example config/miner.toml
 
 # For other components
-cp config/api.toml.example config/api.toml
-cp config/billing.toml.example config/billing.toml
 cp config/cli.toml.example config/cli.toml
 ```
 
