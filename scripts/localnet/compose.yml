@@ -140,41 +140,6 @@ services:
       file: ../../docker/docker-compose.dev-sqlite.yml
       service: grpcui
 
-  basilica-api:
-    extends:
-      file: ../basilica-api/compose.dev.yml
-      service: basilica-api
-    container_name: basilica-api-localnet
-    build:
-      context: ../..
-      args:
-        BITTENSOR_NETWORK: "local"
-      dockerfile: scripts/basilica-api/Dockerfile
-    networks:
-      - basilica_network_dev
-      - default
-    volumes:
-      - ../../config/basilica-api-localnet.toml:/app/basilica-api.toml:ro
-      - basilica-api-data:/app/data
-      - ./wallets:/home/basilica/.bittensor/wallets:ro
-    depends_on:
-      - redis
-      - validator
-    command: ["--config", "/app/basilica-api.toml"]
-    ports: !override
-      - "8000:8000"
-      - "8089:8080"
-    environment:
-      - RUST_LOG=debug
-      - RUST_BACKTRACE=1
-    restart: unless-stopped
-
-  redis:
-    extends:
-      file: ../basilica-api/compose.dev.yml
-      service: redis
-    container_name: basilica-redis-localnet
-
 networks:
   basilica_network_dev:
     driver: bridge
@@ -191,6 +156,3 @@ volumes:
   validator-data-dev:
   prometheus-data:
   grafana-data:
-  basilica-api-data:
-  basilica-api-data-dev:
-  redis-data-dev:
