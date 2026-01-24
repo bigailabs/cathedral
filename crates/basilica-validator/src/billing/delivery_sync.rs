@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::billing::api_client::BillingApiClient;
-use crate::persistence::MinerDeliveryRepository;
 use crate::payouts::CliffManager;
+use crate::persistence::MinerDeliveryRepository;
 
 pub struct DeliverySyncTask {
     api_client: Arc<BillingApiClient>,

@@ -566,10 +566,7 @@ fn print_events_pretty(events: &HashMap<u64, Vec<CollateralEvent>>) {
                     println!("    Hotkey: {}", hex::encode(slashed.hotkey.as_slice()));
                     println!("    Node ID: {}", hex::encode(slashed.nodeId.as_slice()));
                     println!("    Miner: {}", slashed.miner);
-                    println!(
-                        "    Alpha Amount: {} wei",
-                        slashed.slashAlphaAmount
-                    );
+                    println!("    Alpha Amount: {} wei", slashed.slashAlphaAmount);
                     println!("    URL: {}", slashed.url);
                     println!(
                         "    URL Content MD5: {}",

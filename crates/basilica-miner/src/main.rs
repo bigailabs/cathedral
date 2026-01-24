@@ -379,9 +379,7 @@ async fn log_collateral_status(miner_hotkey: &str, nodes: &[RegisteredNode]) -> 
         }
     }
 
-    let price_label = price
-        .map(|alpha_price| format_usd(alpha_price))
-        .unwrap_or_else(|| "N/A".to_string());
+    let price_label = price.map(format_usd).unwrap_or_else(|| "N/A".to_string());
     let table = build_table(&["Node", "GPU", "Alpha", "USD Value", "Status"], &rows);
     info!(
         "COLLATERAL STATUS (Alpha price: ${})\n{}",

@@ -161,4 +161,3 @@ fn default_evidence_base_url() -> String {
 fn default_evidence_storage_path() -> PathBuf {
     PathBuf::from("./evidence")
 }
-

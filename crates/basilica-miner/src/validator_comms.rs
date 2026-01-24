@@ -254,9 +254,7 @@ fn log_collateral_status(status: &basilica_protocol::miner_discovery::Collateral
     let message = match status.status.as_str() {
         "warning" => format!(
             "Collateral warning: ${:.2} (min ${:.2}). {}",
-            status.current_usd_value,
-            status.minimum_usd_required,
-            status.action_required
+            status.current_usd_value, status.minimum_usd_required, status.action_required
         ),
         "undercollateralized" => format!(
             "Collateral under minimum: ${:.2} (min ${:.2}). Grace remaining: {}. {}",
@@ -267,17 +265,17 @@ fn log_collateral_status(status: &basilica_protocol::miner_discovery::Collateral
         ),
         "excluded" => format!(
             "Collateral excluded: ${:.2} (min ${:.2}). {}",
-            status.current_usd_value,
-            status.minimum_usd_required,
-            status.action_required
+            status.current_usd_value, status.minimum_usd_required, status.action_required
         ),
         _ => format!(
             "Collateral status: ${:.2} (min ${:.2}).",
-            status.current_usd_value,
-            status.minimum_usd_required
+            status.current_usd_value, status.minimum_usd_required
         ),
     };
-    if status.status == "warning" || status.status == "undercollateralized" || status.status == "excluded" {
+    if status.status == "warning"
+        || status.status == "undercollateralized"
+        || status.status == "excluded"
+    {
         tracing::warn!("{}", message);
     } else {
         tracing::info!("{}", message);

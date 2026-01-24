@@ -36,9 +36,27 @@ pub struct Reclaim {
     pub deny_timeout: u64,
 }
 
-impl From<(FixedBytes<32>, FixedBytes<16>, Address, U256, FixedBytes<32>, U256, u64)> for Reclaim {
+impl
+    From<(
+        FixedBytes<32>,
+        FixedBytes<16>,
+        Address,
+        U256,
+        FixedBytes<32>,
+        U256,
+        u64,
+    )> for Reclaim
+{
     fn from(
-        tuple: (FixedBytes<32>, FixedBytes<16>, Address, U256, FixedBytes<32>, U256, u64),
+        tuple: (
+            FixedBytes<32>,
+            FixedBytes<16>,
+            Address,
+            U256,
+            FixedBytes<32>,
+            U256,
+            u64,
+        ),
     ) -> Self {
         Self {
             hotkey: {

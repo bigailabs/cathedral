@@ -220,4 +220,3 @@ mod tests {
         assert!(!snapshot.is_stale);
     }
 }
-

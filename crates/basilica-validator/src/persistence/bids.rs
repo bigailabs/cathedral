@@ -425,10 +425,9 @@ impl BidRepository {
 
         let mut candidates = Vec::new();
         for r in rows {
-            let submitted_at =
-                DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
-                    .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
-                    .with_timezone(&Utc);
+            let submitted_at = DateTime::parse_from_rfc3339(&r.get::<String, _>("submitted_at"))
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?
+                .with_timezone(&Utc);
             let record = MinerBidRecord {
                 id: r.get("id"),
                 miner_hotkey: r.get("miner_hotkey"),

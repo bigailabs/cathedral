@@ -25,7 +25,9 @@ impl GracePeriodTracker {
     }
 
     pub async fn clear_undercollateralized(&self, hotkey: &str, node_id: &str) -> Result<()> {
-        self.persistence.clear_undercollateralized(hotkey, node_id).await
+        self.persistence
+            .clear_undercollateralized(hotkey, node_id)
+            .await
     }
 
     pub async fn get_grace_remaining(
@@ -62,11 +64,7 @@ impl GracePeriodTracker {
             .await
     }
 
-    pub async fn get_since(
-        &self,
-        hotkey: &str,
-        node_id: &str,
-    ) -> Result<Option<DateTime<Utc>>> {
+    pub async fn get_since(&self, hotkey: &str, node_id: &str) -> Result<Option<DateTime<Utc>>> {
         self.persistence
             .get_undercollateralized_since(hotkey, node_id)
             .await
@@ -84,7 +82,10 @@ mod tests {
         let hotkey = "hk";
         let node_id = "node";
 
-        tracker.mark_undercollateralized(hotkey, node_id).await.unwrap();
+        tracker
+            .mark_undercollateralized(hotkey, node_id)
+            .await
+            .unwrap();
         let remaining = tracker.get_grace_remaining(hotkey, node_id).await.unwrap();
         assert!(remaining.is_some());
         assert!(remaining.unwrap() <= Duration::hours(24));
@@ -102,4 +103,3 @@ mod tests {
         assert!(expired);
     }
 }
-

@@ -20,8 +20,8 @@ pub use monitoring::{DatabaseHealthMonitor, LogStreamer};
 pub use types::*;
 
 use crate::ban_system::BanManager;
-use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::billing::BillingClient;
+use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::config::auction::AuctionConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::entities::MisbehaviourType;
@@ -430,7 +430,9 @@ impl RentalManager {
                     attempts += 1;
                     let winning_miner_id = format!("miner_{}", candidate.miner_uid);
                     let expires_at = chrono::Utc::now()
-                        + chrono::Duration::seconds(self.auction_config.bid_reservation_secs as i64);
+                        + chrono::Duration::seconds(
+                            self.auction_config.bid_reservation_secs as i64,
+                        );
                     let candidate_reservation_id = format!("reserve-{}", Uuid::new_v4());
                     let reserved = self
                         .persistence

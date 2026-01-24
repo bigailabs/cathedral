@@ -62,11 +62,13 @@ impl SimplePersistence {
         hotkey: &str,
         node_id: &str,
     ) -> Result<Option<U256>, anyhow::Error> {
-        let row = sqlx::query("SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?")
-            .bind(hotkey)
-            .bind(node_id)
-            .fetch_optional(self.pool())
-            .await?;
+        let row = sqlx::query(
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
+        )
+        .bind(hotkey)
+        .bind(node_id)
+        .fetch_optional(self.pool())
+        .await?;
 
         if let Some(row) = row {
             let collateral_str: String = row.get(0);

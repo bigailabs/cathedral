@@ -7,15 +7,27 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CollateralState {
-    Sufficient { current_usd: f64, minimum_usd: f64 },
-    Warning { current_usd: f64, minimum_usd: f64 },
+    Sufficient {
+        current_usd: f64,
+        minimum_usd: f64,
+    },
+    Warning {
+        current_usd: f64,
+        minimum_usd: f64,
+    },
     Undercollateralized {
         current_usd: f64,
         minimum_usd: f64,
         grace_remaining: Duration,
     },
-    Excluded { current_usd: f64, minimum_usd: f64, reason: String },
-    Unknown { reason: String },
+    Excluded {
+        current_usd: f64,
+        minimum_usd: f64,
+        reason: String,
+    },
+    Unknown {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -154,7 +166,7 @@ impl CollateralEvaluator {
                     minimum_usd_required: minimum_usd,
                     status: "warning".to_string(),
                     grace_period_remaining: None,
-                    action_required: action_required,
+                    action_required,
                     alpha_usd_price,
                     price_stale,
                 },
@@ -191,9 +203,7 @@ impl CollateralEvaluator {
                     minimum_usd_required: minimum_usd,
                     status: "excluded".to_string(),
                     grace_period_remaining: Some(Duration::zero()),
-                    action_required: Some(
-                        "Deposit collateral to restore eligibility".to_string(),
-                    ),
+                    action_required: Some("Deposit collateral to restore eligibility".to_string()),
                     alpha_usd_price,
                     price_stale,
                 },
@@ -214,7 +224,7 @@ impl CollateralEvaluator {
                 minimum_usd_required: minimum_usd,
                 status: "undercollateralized".to_string(),
                 grace_period_remaining: Some(grace_remaining),
-                action_required: action_required,
+                action_required,
                 alpha_usd_price,
                 price_stale,
             },
@@ -278,10 +288,7 @@ mod tests {
     #[tokio::test]
     async fn test_evaluator_sufficient() {
         let persistence = Arc::new(SimplePersistence::for_testing().await.unwrap());
-        let tracker = Arc::new(GracePeriodTracker::new(
-            persistence,
-            Duration::hours(24),
-        ));
+        let tracker = Arc::new(GracePeriodTracker::new(persistence, Duration::hours(24)));
         let evaluator = CollateralEvaluator::new(CollateralConfig::default(), tracker);
         let (state, status) = evaluator
             .evaluate("hk", "node", "H100", 2, 200.0, Some(make_snapshot(1.0)))
@@ -295,10 +302,7 @@ mod tests {
     #[tokio::test]
     async fn test_evaluator_undercollateralized() {
         let persistence = Arc::new(SimplePersistence::for_testing().await.unwrap());
-        let tracker = Arc::new(GracePeriodTracker::new(
-            persistence,
-            Duration::hours(24),
-        ));
+        let tracker = Arc::new(GracePeriodTracker::new(persistence, Duration::hours(24)));
         let evaluator = CollateralEvaluator::new(CollateralConfig::default(), tracker);
         let (_state, status) = evaluator
             .evaluate("hk", "node", "H100", 1, 1.0, Some(make_snapshot(1.0)))
@@ -307,4 +311,3 @@ mod tests {
         assert_eq!(status.status, "undercollateralized");
     }
 }
-

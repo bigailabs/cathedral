@@ -53,13 +53,11 @@ impl SimplePersistence {
     }
 
     pub async fn clear_undercollateralized(&self, hotkey: &str, node_id: &str) -> Result<()> {
-        sqlx::query(
-            "DELETE FROM collateral_grace_periods WHERE hotkey = ? AND node_id = ?",
-        )
-        .bind(hotkey)
-        .bind(node_id)
-        .execute(self.pool())
-        .await?;
+        sqlx::query("DELETE FROM collateral_grace_periods WHERE hotkey = ? AND node_id = ?")
+            .bind(hotkey)
+            .bind(node_id)
+            .execute(self.pool())
+            .await?;
         Ok(())
     }
 }
@@ -100,4 +98,3 @@ mod tests {
         assert!(cleared.is_none());
     }
 }
-

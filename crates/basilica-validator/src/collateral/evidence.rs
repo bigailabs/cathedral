@@ -45,7 +45,6 @@ impl EvidenceStore {
         let base = self.base_url.trim_end_matches('/');
         format!("{}/{}", base, file_name)
     }
-
 }
 
 #[cfg(test)]
@@ -75,4 +74,3 @@ mod tests {
         assert!(!json.is_empty());
     }
 }
-

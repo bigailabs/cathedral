@@ -203,8 +203,8 @@ impl CollateralManager {
 }
 
 pub fn hotkey_ss58_to_hex(hotkey: &str) -> Result<String> {
-    let hotkey = Hotkey::new(hotkey.to_string())
-        .map_err(|e| anyhow::anyhow!("invalid hotkey: {e}"))?;
+    let hotkey =
+        Hotkey::new(hotkey.to_string()).map_err(|e| anyhow::anyhow!("invalid hotkey: {e}"))?;
     let account_id = hotkey
         .to_account_id()
         .map_err(|e| anyhow::anyhow!("hotkey conversion failed: {e}"))?;
@@ -246,7 +246,10 @@ mod tests {
             persistence.clone(),
             Duration::hours(24),
         ));
-        let evaluator = Arc::new(CollateralEvaluator::new(config.clone(), grace_tracker.clone()));
+        let evaluator = Arc::new(CollateralEvaluator::new(
+            config.clone(),
+            grace_tracker.clone(),
+        ));
         let price_oracle = Arc::new(PriceOracle::new(
             config.taostats_base_url.clone(),
             config.alpha_price_path.clone(),
@@ -271,4 +274,3 @@ mod tests {
         assert_eq!(alpha, 0.0);
     }
 }
-

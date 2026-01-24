@@ -103,7 +103,7 @@ impl SlashExecutor {
             .config
             .trustee_private_key_file
             .as_ref()
-            .map(|path| fs::read_to_string(path))
+            .map(fs::read_to_string)
             .transpose()?
             .unwrap_or_default()
             .trim()

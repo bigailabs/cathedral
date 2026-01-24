@@ -59,7 +59,9 @@ fn status_rank_from_status(status: &str) -> u8 {
     }
 }
 
-fn status_to_proto(status: CollateralStatus) -> basilica_protocol::miner_discovery::CollateralStatus {
+fn status_to_proto(
+    status: CollateralStatus,
+) -> basilica_protocol::miner_discovery::CollateralStatus {
     basilica_protocol::miner_discovery::CollateralStatus {
         current_alpha: status.current_alpha,
         current_usd_value: status.current_usd_value,
@@ -440,7 +442,7 @@ impl MinerDiscovery for BidService {
                         .map_err(|e| Status::internal(format!("collateral status error: {e}")))?;
                     worst_status = Some(select_worst_status(worst_status, state, status));
                 }
-                worst_status.map(|status| status_to_proto(status))
+                worst_status.map(status_to_proto)
             }
             None => None,
         };

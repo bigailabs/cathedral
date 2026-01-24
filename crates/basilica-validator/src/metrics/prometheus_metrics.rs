@@ -792,8 +792,7 @@ impl ValidatorPrometheusMetrics {
     }
 
     pub fn record_collateral_price_staleness_seconds(&self, seconds: f64) {
-        gauge!("basilica_validator_collateral_price_staleness_seconds")
-            .set(seconds.max(0.0));
+        gauge!("basilica_validator_collateral_price_staleness_seconds").set(seconds.max(0.0));
     }
 
     pub fn record_collateral_node_status(
