@@ -690,12 +690,16 @@ mod tests {
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
         let oracle = build_price_oracle().await?;
 
-        let mut billing_config = BillingConfig::default();
-        billing_config.enabled = true;
-        billing_config.billing_endpoint = format!("http://{}", addr);
+        let billing_config = BillingConfig {
+            enabled: true,
+            billing_endpoint: format!("http://{}", addr),
+            ..Default::default()
+        };
 
-        let mut cliff_config = CliffConfig::default();
-        cliff_config.enabled = true;
+        let cliff_config = CliffConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let cliff_manager =
             CliffManager::new(&billing_config, cliff_config, None, oracle, gpu_repo).await?;
 
@@ -721,12 +725,16 @@ mod tests {
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
         let oracle = build_price_oracle().await?;
 
-        let mut billing_config = BillingConfig::default();
-        billing_config.enabled = true;
-        billing_config.billing_endpoint = format!("http://{}", addr);
+        let billing_config = BillingConfig {
+            enabled: true,
+            billing_endpoint: format!("http://{}", addr),
+            ..Default::default()
+        };
 
-        let mut cliff_config = CliffConfig::default();
-        cliff_config.enabled = true;
+        let cliff_config = CliffConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let cliff_manager =
             CliffManager::new(&billing_config, cliff_config, None, oracle, gpu_repo).await?;
 
@@ -747,8 +755,10 @@ mod tests {
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
         let oracle = build_price_oracle().await?;
 
-        let mut collateral_config = CollateralConfig::default();
-        collateral_config.enabled = true;
+        let collateral_config = CollateralConfig {
+            enabled: true,
+            ..Default::default()
+        };
         let grace_tracker = Arc::new(GracePeriodTracker::new(
             Arc::new(persistence.clone()),
             collateral_config.grace_period(),
@@ -782,9 +792,11 @@ mod tests {
         .execute(persistence.pool())
         .await?;
 
-        let mut billing_config = BillingConfig::default();
-        billing_config.enabled = true;
-        billing_config.billing_endpoint = format!("http://{}", addr);
+        let billing_config = BillingConfig {
+            enabled: true,
+            billing_endpoint: format!("http://{}", addr),
+            ..Default::default()
+        };
 
         let cliff_manager = CliffManager::new(
             &billing_config,

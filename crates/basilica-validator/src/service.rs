@@ -12,7 +12,7 @@ use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_bid_server;
 use crate::metrics::ValidatorMetrics;
-use crate::miner_prover::MinerProver;
+use crate::miner_prover::{MinerProver, MinerProverParams};
 use crate::payouts::CliffManager;
 use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
@@ -234,16 +234,16 @@ impl ValidatorService {
             None
         };
 
-        let miner_prover = MinerProver::new(
-            self.config.verification.clone(),
-            self.config.automatic_verification.clone(),
-            self.config.ssh_session.clone(),
-            bittensor_service.clone(),
-            persistence_arc.clone(),
-            validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
-            self.config.bittensor.common.netuid,
-            cliff_manager.clone(),
-        )?;
+        let miner_prover = MinerProver::new(MinerProverParams {
+            config: self.config.verification.clone(),
+            automatic_config: self.config.automatic_verification.clone(),
+            ssh_session_config: self.config.ssh_session.clone(),
+            bittensor_service: bittensor_service.clone(),
+            persistence: persistence_arc.clone(),
+            metrics: validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
+            netuid: self.config.bittensor.common.netuid,
+            cliff_manager: cliff_manager.clone(),
+        })?;
 
         let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
         let delivery_sync_task = if self.config.billing.enabled {

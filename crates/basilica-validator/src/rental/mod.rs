@@ -422,12 +422,8 @@ impl RentalManager {
 
                 let mut ordered = preferred;
                 ordered.extend(fallback);
-                let mut attempts = 0;
-                for (candidate, candidate_node_id) in ordered {
-                    if attempts >= 3 {
-                        break;
-                    }
-                    attempts += 1;
+                // TODO: Make max reservation attempts configurable.
+                for (candidate, candidate_node_id) in ordered.into_iter().take(3) {
                     let winning_miner_id = format!("miner_{}", candidate.miner_uid);
                     let expires_at = chrono::Utc::now()
                         + chrono::Duration::seconds(
