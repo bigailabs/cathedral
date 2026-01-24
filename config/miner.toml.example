@@ -32,7 +32,7 @@ weight_interval_secs = 300
 # external_ip = "YOUR_PUBLIC_IP_HERE"
 
 # Axon port for Bittensor network
-axon_port = 8091
+axon_port = 50051
 
 # Maximum UIDs for weight setting
 max_weight_uids = 256

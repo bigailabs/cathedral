@@ -36,7 +36,7 @@ cat > miner.toml <<EOF
 wallet_name = "your_wallet"
 hotkey_name = "your_hotkey"
 external_ip = "your_public_ip"
-axon_port = 8091
+axon_port = 50051
 network = "finney"
 netuid = 39
 chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
@@ -638,7 +638,7 @@ weight_interval_secs = 300           # Weight setting interval (5 minutes)
 
 # Axon configuration (for Bittensor network registration)
 external_ip = "<your public ip>"     # YOUR SERVER'S PUBLIC IP
-axon_port = 8091
+axon_port = 50051
 
 # Advanced settings (usually don't need to change)
 max_weight_uids = 256
@@ -775,7 +775,7 @@ Override auto-detected addresses for NAT/proxy scenarios:
 [advertised_addresses]
 # Only needed if miner is behind NAT/proxy
 # grpc_endpoint = "http://203.0.113.45:50051"
-# axon_endpoint = "http://203.0.113.45:8091"
+# axon_endpoint = "http://203.0.113.45:50051"
 # metrics_endpoint = "http://203.0.113.45:9090"
 ```
 
@@ -963,7 +963,6 @@ docker run -d \
   -v /opt/basilica/data:/opt/basilica/data \
   -v ~/.ssh:/root/.ssh:ro \
   -p 50051:50051 \
-  -p 8091:8091 \
   -p 9090:9090 \
   basilica-miner:latest --config /opt/basilica/config/miner.toml
 ```
@@ -1026,7 +1025,6 @@ services:
       - /var/log/basilica:/var/log/basilica
     ports:
       - "50051:50051"
-      - "8091:8091"
       - "9090:9090"
     command: ["--config", "/opt/basilica/config/miner.toml"]
     healthcheck:
@@ -1088,7 +1086,7 @@ validators_list = bittensor_service.get_neurons(netuid=39, filter="miners")
 # Extract miner endpoints
 for miner in validators_list:
     miner_endpoint = miner.axon.ip + ":" + miner.axon.port
-    # miner_endpoint = "203.0.113.45:8091"
+    # miner_endpoint = "203.0.113.45:50051"
 ```
 
 #### 2. gRPC Connection
@@ -1313,8 +1311,7 @@ sudo systemctl restart sshd
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp         # SSH (restrict to known IPs in production)
-sudo ufw allow 50051/tcp      # gRPC (for validators)
-sudo ufw allow 8091/tcp       # Axon (for Bittensor network)
+sudo ufw allow 50051/tcp      # gRPC/Axon (for validators and Bittensor network)
 sudo ufw allow 9090/tcp       # Metrics (optional, can be localhost-only)
 sudo ufw enable
 ```

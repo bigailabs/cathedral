@@ -217,7 +217,7 @@ impl Default for MinerBittensorConfig {
                 ..Default::default()
             },
             coldkey_name: "default".to_string(),
-            axon_port: 8091,
+            axon_port: 50051,
             external_ip: None,
             max_weight_uids: 256,
         }
