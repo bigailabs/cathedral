@@ -33,6 +33,16 @@ struct MinerDeliveryItem {
     user_revenue_usd: f64,
     gpu_category: String,
     miner_payment_usd: f64,
+    #[serde(default)]
+    has_collateral: bool,
+    #[serde(default)]
+    payout_type: String,
+    #[serde(default)]
+    cliff_days_remaining: i32,
+    #[serde(default)]
+    pending_alpha: f64,
+    #[serde(default)]
+    node_id: String,
 }
 
 impl BillingApiClient {
@@ -98,6 +108,11 @@ impl BillingApiClient {
                 user_revenue_usd: delivery.user_revenue_usd,
                 gpu_category: delivery.gpu_category,
                 miner_payment_usd: delivery.miner_payment_usd,
+                has_collateral: delivery.has_collateral,
+                payout_type: delivery.payout_type,
+                cliff_days_remaining: delivery.cliff_days_remaining,
+                pending_alpha: delivery.pending_alpha,
+                node_id: delivery.node_id,
             })
             .collect())
     }

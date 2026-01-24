@@ -195,7 +195,7 @@ impl CollateralManager {
 
         let amount = self
             .persistence
-            .get_collateral_amount(&hotkey_hex, &node_hex)
+            .get_alpha_collateral_amount(&hotkey_hex, &node_hex)
             .await?;
         let amount = amount.unwrap_or_default();
         Ok(u256_to_alpha(amount))

@@ -78,6 +78,29 @@ impl SimplePersistence {
         }
     }
 
+    pub async fn get_alpha_collateral_amount(
+        &self,
+        hotkey: &str,
+        node_id: &str,
+    ) -> Result<Option<U256>, anyhow::Error> {
+        let row = sqlx::query(
+            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
+        )
+        .bind(hotkey)
+        .bind(node_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(row) = row {
+            let collateral_str: String = row.get(0);
+            let collateral = U256::from_str_radix(&collateral_str, 10)
+                .map_err(|_| anyhow::anyhow!("Invalid collateral"))?;
+            Ok(Some(collateral))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn handle_deposit(&self, deposit: &Deposit) -> Result<(), anyhow::Error> {
         match self
             .get_collateral_status_id(
@@ -90,7 +113,7 @@ impl SimplePersistence {
                 let now = Utc::now().to_rfc3339();
                 let query =
                     "UPDATE collateral_status SET collateral = ?, updated_at = ? WHERE id = ?";
-                let new_collateral = collateral.saturating_add(deposit.amount);
+                let new_collateral = collateral.saturating_add(deposit.alphaAmount);
                 sqlx::query(query)
                     .bind(new_collateral.to_string())
                     .bind(now)
@@ -107,7 +130,7 @@ impl SimplePersistence {
                         "0x{}",
                         deposit.miner.as_slice().encode_hex::<String>()
                     ))
-                    .bind(deposit.amount.to_string())
+                    .bind(deposit.alphaAmount.to_string())
                     .bind(Utc::now().to_rfc3339())
                     .execute(self.pool())
                     .await?;
@@ -129,7 +152,7 @@ impl SimplePersistence {
                 let now = Utc::now().to_rfc3339();
                 let query =
                     "UPDATE collateral_status SET collateral = ?, updated_at = ? WHERE id = ?";
-                let new_collateral = collateral.saturating_sub(reclaimed.amount);
+                let new_collateral = collateral.saturating_sub(reclaimed.alphaAmount);
                 sqlx::query(query)
                     .bind(new_collateral.to_string())
                     .bind(now)
@@ -153,15 +176,16 @@ impl SimplePersistence {
             Some((id, collateral)) => {
                 let now = Utc::now().to_rfc3339();
                 let query = "UPDATE collateral_status SET collateral = ?, miner = ? , url = ? , url_content_md5_checksum = ?, updated_at = ? WHERE id = ?";
-                if slashed.amount != collateral {
+                if slashed.slashAlphaAmount != collateral {
                     warn!(
                         "Slashed amount {} does not match collateral {} in database",
-                        slashed.amount, collateral
+                        slashed.slashAlphaAmount, collateral
                     );
                 }
+                let new_collateral = collateral.saturating_sub(slashed.slashAlphaAmount);
 
                 sqlx::query(query)
-                    .bind("0".to_string())
+                    .bind(new_collateral.to_string())
                     .bind(format!(
                         "0x{}",
                         Address::ZERO.as_slice().encode_hex::<String>()
@@ -197,7 +221,9 @@ mod tests {
             hotkey: FixedBytes::from_slice(&hk),
             nodeId: FixedBytes::from_slice(&ex),
             miner: Address::from_slice(&[0u8; 20]),
-            amount: U256::from(amount),
+            amount: U256::ZERO,
+            alphaHotkey: FixedBytes::from_slice(&[0u8; 32]),
+            alphaAmount: U256::from(amount),
         }
     }
     fn ev_reclaimed(hk: [u8; 32], ex: [u8; 16], amount: u64) -> Reclaimed {
@@ -206,7 +232,9 @@ mod tests {
             hotkey: FixedBytes::from_slice(&hk),
             nodeId: FixedBytes::from_slice(&ex),
             miner: Address::from_slice(&[0u8; 20]),
-            amount: U256::from(amount),
+            amount: U256::ZERO,
+            alphaColdkey: FixedBytes::from_slice(&[0u8; 32]),
+            alphaAmount: U256::from(amount),
         }
     }
     fn ev_slashed(hk: [u8; 32], ex: [u8; 16], amount: u64) -> Slashed {
@@ -214,7 +242,8 @@ mod tests {
             hotkey: FixedBytes::from_slice(&hk),
             nodeId: FixedBytes::from_slice(&ex),
             miner: Address::from_slice(&[0u8; 20]),
-            amount: U256::from(amount),
+            slashAmount: U256::ZERO,
+            slashAlphaAmount: U256::from(amount),
             url: String::new(),
             urlContentMd5Checksum: FixedBytes::from_slice(&[0u8; 16]),
         }
@@ -321,7 +350,7 @@ mod tests {
         .fetch_one(persistence.pool())
         .await
         .unwrap();
-        assert_eq!(coll_after_slash, "0");
+        assert_eq!(coll_after_slash, "100");
     }
 
     #[tokio::test]
@@ -368,7 +397,7 @@ mod tests {
         persistence.handle_deposit(&d).await.unwrap();
 
         let amount = persistence
-            .get_collateral_amount(
+            .get_alpha_collateral_amount(
                 &d.hotkey.encode_hex::<String>(),
                 &d.nodeId.encode_hex::<String>(),
             )
@@ -493,12 +522,12 @@ mod tests {
 
         // Create a deposit with a very large amount
         let mut d1 = ev_deposit(hk, ex, 0);
-        d1.amount = U256::MAX - U256::from(1000u64);
+        d1.alphaAmount = U256::MAX - U256::from(1000u64);
         persistence.handle_deposit(&d1).await.unwrap();
 
         // Add another deposit that would overflow if not using saturating_add
         let mut d2 = ev_deposit(hk, ex, 0);
-        d2.amount = U256::from(2000u64);
+        d2.alphaAmount = U256::from(2000u64);
         persistence.handle_deposit(&d2).await.unwrap();
 
         // Verify the result is U256::MAX (saturating add)

@@ -44,8 +44,13 @@ impl MinerDeliveryRepository {
                     total_hours,
                     user_revenue_usd,
                     miner_payment_usd,
-                    received_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    received_at,
+                    node_id,
+                    has_collateral,
+                    payout_type,
+                    cliff_days_remaining,
+                    pending_alpha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(miner_hotkey, period_start, period_end)
                 DO UPDATE SET
                     miner_uid = excluded.miner_uid,
@@ -53,7 +58,12 @@ impl MinerDeliveryRepository {
                     total_hours = excluded.total_hours,
                     user_revenue_usd = excluded.user_revenue_usd,
                     miner_payment_usd = excluded.miner_payment_usd,
-                    received_at = excluded.received_at
+                    received_at = excluded.received_at,
+                    node_id = excluded.node_id,
+                    has_collateral = excluded.has_collateral,
+                    payout_type = excluded.payout_type,
+                    cliff_days_remaining = excluded.cliff_days_remaining,
+                    pending_alpha = excluded.pending_alpha
                 "#,
             )
             .bind(&delivery.miner_hotkey)
@@ -65,6 +75,11 @@ impl MinerDeliveryRepository {
             .bind(delivery.user_revenue_usd)
             .bind(delivery.miner_payment_usd)
             .bind(received_at)
+            .bind(&delivery.node_id)
+            .bind(if delivery.has_collateral { 1 } else { 0 })
+            .bind(&delivery.payout_type)
+            .bind(delivery.cliff_days_remaining)
+            .bind(delivery.pending_alpha)
             .execute(&mut *tx)
             .await?;
         }
@@ -90,7 +105,12 @@ impl MinerDeliveryRepository {
                 total_hours,
                 user_revenue_usd,
                 gpu_category,
-                miner_payment_usd
+                miner_payment_usd,
+                node_id,
+                has_collateral,
+                payout_type,
+                cliff_days_remaining,
+                pending_alpha
             FROM miner_delivery_cache
             WHERE period_end >=
             "#,
@@ -121,6 +141,11 @@ impl MinerDeliveryRepository {
                 user_revenue_usd: row.get("user_revenue_usd"),
                 gpu_category: row.get("gpu_category"),
                 miner_payment_usd: row.get("miner_payment_usd"),
+                has_collateral: row.get::<i64, _>("has_collateral") != 0,
+                payout_type: row.get("payout_type"),
+                cliff_days_remaining: row.get("cliff_days_remaining"),
+                pending_alpha: row.get("pending_alpha"),
+                node_id: row.get("node_id"),
             })
             .collect())
     }

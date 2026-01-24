@@ -48,6 +48,7 @@ num_cpus = { workspace = true }
 lru = { workspace = true }
 eventsource-stream = { workspace = true }
 regex = { workspace = true }
+rust_decimal = { workspace = true }
 
 # Internal dependencies
 basilica-common = { path = "../basilica-common" }

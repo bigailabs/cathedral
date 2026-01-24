@@ -14,32 +14,6 @@
   },
   {
     "type": "function",
-    "name": "CONTRACT_COLDKEY",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "CONTRACT_HOTKEY",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "DECISION_TIMEOUT",
     "inputs": [],
     "outputs": [
@@ -60,32 +34,6 @@
         "name": "",
         "type": "bytes32",
         "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "INEURON_ADDRESS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "ISTAKING_V2_ADDRESS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -157,37 +105,6 @@
   },
   {
     "type": "function",
-    "name": "alphaCollaterals",
-    "inputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "",
-        "type": "bytes16",
-        "internalType": "bytes16"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "burnRegister",
-    "inputs": [],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "collaterals",
     "inputs": [
       {
@@ -246,16 +163,6 @@
         "name": "nodeId",
         "type": "bytes16",
         "internalType": "bytes16"
-      },
-      {
-        "name": "alphaHotkey",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "alphaAmount",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [],
@@ -273,25 +180,6 @@
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "getContractStake",
-    "inputs": [
-      {
-        "name": "hotkey",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -369,39 +257,8 @@
   },
   {
     "type": "function",
-    "name": "initialize",
-    "inputs": [
-      {
-        "name": "netuid",
-        "type": "uint16",
-        "internalType": "uint16"
-      },
-      {
-        "name": "trustee",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "minCollateralIncrease",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "decisionTimeout",
-        "type": "uint64",
-        "internalType": "uint64"
-      },
-      {
-        "name": "admin",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "alphaHotkey",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
+    "name": "initializeV2",
+    "inputs": [],
     "outputs": [],
     "stateMutability": "nonpayable"
   },
@@ -457,11 +314,6 @@
         "internalType": "bytes16"
       },
       {
-        "name": "alphaColdkey",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
         "name": "url",
         "type": "string",
         "internalType": "string"
@@ -503,16 +355,6 @@
       },
       {
         "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "alphaColdkey",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "alphaAmount",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -562,19 +404,6 @@
   },
   {
     "type": "function",
-    "name": "setContractColdkey",
-    "inputs": [
-      {
-        "name": "alphaColdkey",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "slashCollateral",
     "inputs": [
       {
@@ -588,12 +417,35 @@
         "internalType": "bytes16"
       },
       {
-        "name": "slashAmount",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "url",
+        "type": "string",
+        "internalType": "string"
       },
       {
-        "name": "slashAlphaAmount",
+        "name": "urlContentMd5Checksum",
+        "type": "bytes16",
+        "internalType": "bytes16"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "slashCollateralAmount",
+    "inputs": [
+      {
+        "name": "hotkey",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "nodeId",
+        "type": "bytes16",
+        "internalType": "bytes16"
+      },
+      {
+        "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
       },
@@ -689,25 +541,6 @@
   },
   {
     "type": "event",
-    "name": "AlphaColdkeyUpdated",
-    "inputs": [
-      {
-        "name": "oldAlphaColdkey",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "newAlphaColdkey",
-        "type": "bytes32",
-        "indexed": true,
-        "internalType": "bytes32"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
     "name": "ContractUpgraded",
     "inputs": [
       {
@@ -796,18 +629,6 @@
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
-      },
-      {
-        "name": "alphaHotkey",
-        "type": "bytes32",
-        "indexed": false,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "alphaAmount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
       }
     ],
     "anonymous": false
@@ -879,18 +700,6 @@
         "internalType": "uint256"
       },
       {
-        "name": "alphaColdkey",
-        "type": "bytes32",
-        "indexed": false,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "alphaAmount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
         "name": "expirationTime",
         "type": "uint64",
         "indexed": false,
@@ -941,18 +750,6 @@
       },
       {
         "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "alphaColdkey",
-        "type": "bytes32",
-        "indexed": false,
-        "internalType": "bytes32"
-      },
-      {
-        "name": "alphaAmount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1058,13 +855,7 @@
         "internalType": "address"
       },
       {
-        "name": "slashAmount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "slashAlphaAmount",
+        "name": "amount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -1187,16 +978,6 @@
   {
     "type": "error",
     "name": "InsufficientCollateralForReclaim",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InsufficientCollateralForSlash",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "InvalidAlphaColdkey",
     "inputs": []
   },
   {

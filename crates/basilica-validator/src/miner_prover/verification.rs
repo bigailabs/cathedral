@@ -15,6 +15,7 @@ use crate::gpu::MinerGpuProfile;
 use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
 use crate::node_profile::{labels_from_validation, to_node_profile_spec, NodeProfileInput};
+use crate::payouts::CliffManager;
 use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
@@ -56,6 +57,8 @@ pub struct VerificationEngine {
     worker_queue: Option<Arc<ValidationWorkerQueue>>,
     /// Optional NodeProfile publisher (DI)
     node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
+    /// Optional cliff manager for payout ramp logic
+    cliff_manager: Option<Arc<CliffManager>>,
 }
 
 impl VerificationEngine {
@@ -946,6 +949,58 @@ impl VerificationEngine {
             miner_uid, node_result.node_id, node_result.verification_score
         );
 
+        if let Some(cliff_manager) = &self.cliff_manager {
+            let miner_hotkey = miner_info.hotkey.to_string();
+            let node_id = node_result.node_id.to_string();
+            // TODO: Align cliff uptime updates with validation policy (full vs lightweight).
+            if success {
+                let miner_id = format!("miner_{}", miner_uid);
+                match self
+                    .persistence
+                    .calculate_node_uptime_multiplier(&miner_id, &node_id)
+                    .await
+                {
+                    Ok((uptime_minutes, _)) => {
+                        if let Err(err) = cliff_manager
+                            .update_miner_uptime(&miner_hotkey, &node_id, uptime_minutes as i32)
+                            .await
+                        {
+                            warn!(
+                                miner_uid = miner_uid,
+                                node_id = %node_id,
+                                error = %err,
+                                "Failed to update miner uptime for cliff tracking"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            miner_uid = miner_uid,
+                            node_id = %node_id,
+                            error = %err,
+                            "Failed to compute uptime minutes for cliff tracking"
+                        );
+                    }
+                }
+            } else {
+                let reason = verification_log
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "validation_failed".to_string());
+                if let Err(err) = cliff_manager
+                    .process_validation_failure(&miner_hotkey, &node_id, &reason, None)
+                    .await
+                {
+                    warn!(
+                        miner_uid = miner_uid,
+                        node_id = %node_id,
+                        error = %err,
+                        "Failed to process cliff validation failure"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1208,6 +1263,7 @@ impl VerificationEngine {
         bittensor_service: Option<Arc<bittensor::Service>>,
         metrics: Option<Arc<ValidatorMetrics>>,
         node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
+        cliff_manager: Option<Arc<CliffManager>>,
     ) -> Result<Self> {
         // Validate required components for dynamic discovery
         if use_dynamic_discovery && ssh_key_manager.is_none() {
@@ -1238,6 +1294,7 @@ impl VerificationEngine {
             ))),
             worker_queue: None, // Will be set separately if needed
             node_profile_publisher,
+            cliff_manager,
         })
     }
 

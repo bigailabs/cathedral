@@ -20,6 +20,7 @@ pub mod metrics;
 pub mod miner_prover;
 pub mod node_profile;
 pub mod os_process;
+pub mod payouts;
 pub mod persistence;
 pub mod pricing;
 pub mod rental;

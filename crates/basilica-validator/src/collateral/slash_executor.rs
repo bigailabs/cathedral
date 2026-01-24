@@ -8,7 +8,7 @@ use alloy_primitives::U256;
 use anyhow::Result;
 use chrono::Utc;
 use collateral_contract::config::{CollateralNetworkConfig, Network};
-use collateral_contract::{slash_collateral, slash_collateral_amount};
+use collateral_contract::{alpha_collaterals, slash_collateral};
 use std::fs;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -82,13 +82,13 @@ impl SlashExecutor {
             {
                 Ok(Some(amount)) => {
                     info!(
-                        "[SHADOW] Would slash {} wei for node {} (hotkey: {}). Evidence: {}",
+                        "[SHADOW] Would slash {} alpha (wei) for node {} (hotkey: {}). Evidence: {}",
                         amount, node_id, miner_hotkey, url
                     );
                 }
                 _ => {
                     info!(
-                        "[SHADOW] Would slash full collateral for node {} (hotkey: {}). Evidence: {}",
+                        "[SHADOW] Would slash full alpha collateral for node {} (hotkey: {}). Evidence: {}",
                         node_id, miner_hotkey, url
                     );
                 }
@@ -121,31 +121,33 @@ impl SlashExecutor {
             .resolve_partial_slash_amount(miner_hotkey, node_id)
             .await
             .unwrap_or_else(|err| {
-                warn!("Failed to compute partial slash amount: {}", err);
+                warn!("Failed to compute partial alpha slash amount: {}", err);
                 None
             });
-        if let Some(amount) = partial_amount {
-            slash_collateral_amount(
-                &private_key,
-                hotkey_bytes,
-                node_bytes,
-                amount,
-                &url,
-                checksum,
-                &network_config,
-            )
-            .await?;
+
+        let alpha_amount = if let Some(amount) = partial_amount {
+            amount
         } else {
-            slash_collateral(
-                &private_key,
-                hotkey_bytes,
-                node_bytes,
-                &url,
-                checksum,
+            self.resolve_full_alpha_amount(
+                miner_hotkey,
+                node_id,
                 &network_config,
+                &hotkey_bytes,
+                &node_bytes,
             )
-            .await?;
-        }
+            .await?
+        };
+
+        slash_collateral(
+            &private_key,
+            hotkey_bytes,
+            node_bytes,
+            alpha_amount,
+            &url,
+            checksum,
+            &network_config,
+        )
+        .await?;
 
         if let Some(metrics) = &self.metrics {
             metrics.record_collateral_slash_executed();
@@ -180,14 +182,10 @@ impl SlashExecutor {
         if self.config.slash_fraction >= 1.0 {
             return Ok(None);
         }
-        let hotkey_hex = hotkey_ss58_to_hex(miner_hotkey)?;
-        let node_hex = node_id_to_hex(node_id)?;
-        // TODO: Consider querying on-chain collateral if local cache is stale or missing.
-        let collateral = self
-            .persistence
-            .get_collateral_amount(&hotkey_hex, &node_hex)
-            .await?;
-        let collateral = match collateral {
+        let collateral = match self
+            .resolve_alpha_collateral_amount(miner_hotkey, node_id)
+            .await?
+        {
             Some(amount) => amount,
             None => return Ok(None),
         };
@@ -230,6 +228,48 @@ fn node_id_to_bytes(node_id: &str) -> Result<[u8; 16]> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("node_id bytes length mismatch"))?;
     Ok(bytes)
+}
+
+impl SlashExecutor {
+    async fn resolve_alpha_collateral_amount(
+        &self,
+        miner_hotkey: &str,
+        node_id: &str,
+    ) -> Result<Option<U256>> {
+        let hotkey_hex = hotkey_ss58_to_hex(miner_hotkey)?;
+        let node_hex = node_id_to_hex(node_id)?;
+        // TODO: Consider querying on-chain alpha collateral if local cache is stale or missing.
+        self.persistence
+            .get_alpha_collateral_amount(&hotkey_hex, &node_hex)
+            .await
+    }
+
+    async fn resolve_full_alpha_amount(
+        &self,
+        miner_hotkey: &str,
+        node_id: &str,
+        network_config: &CollateralNetworkConfig,
+        hotkey_bytes: &[u8; 32],
+        node_bytes: &[u8; 16],
+    ) -> Result<U256> {
+        if let Some(amount) = self
+            .resolve_alpha_collateral_amount(miner_hotkey, node_id)
+            .await?
+        {
+            return Ok(amount);
+        }
+
+        // TODO: Add rate limiting/backoff for on-chain alpha collateral queries.
+        let amount = alpha_collaterals(*hotkey_bytes, *node_bytes, network_config).await?;
+        if amount.is_zero() {
+            anyhow::bail!(
+                "alpha collateral is zero for node {} (hotkey: {})",
+                node_id,
+                miner_hotkey
+            );
+        }
+        Ok(amount)
+    }
 }
 
 #[cfg(test)]

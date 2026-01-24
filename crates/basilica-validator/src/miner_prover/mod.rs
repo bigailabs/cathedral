@@ -34,6 +34,7 @@ pub use verification::VerificationEngine;
 use crate::config::VerificationConfig;
 use crate::k8s_profile_publisher::K8sNodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
+use crate::payouts::CliffManager;
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
 use anyhow::Result;
@@ -58,6 +59,7 @@ impl MinerProver {
         persistence: Arc<SimplePersistence>,
         metrics: Option<Arc<ValidatorMetrics>>,
         netuid: u16,
+        cliff_manager: Option<Arc<CliffManager>>,
     ) -> Result<Self> {
         let mut discovery = MinerDiscovery::new(bittensor_service.clone(), netuid);
 
@@ -85,6 +87,11 @@ impl MinerProver {
             )
             .with_bittensor_service(bittensor_service.clone())
             .with_ssh_client(Arc::new(ValidatorSshClient::new()));
+        let verification_engine_builder = if let Some(cliff_manager) = cliff_manager {
+            verification_engine_builder.with_cliff_manager(cliff_manager)
+        } else {
+            verification_engine_builder
+        };
 
         // Build verification engine with proper SSH key manager
         let verification = tokio::task::block_in_place(|| {
