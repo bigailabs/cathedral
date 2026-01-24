@@ -2110,7 +2110,7 @@ ulimit -n 65536
 ### Additional Resources
 
 - **GitHub Repository**: <https://github.com/one-covenant/basilica>
-- **Discord**: <https://discord.gg/jYcGzwed>
+- **Discord**: <https://discord.gg/Cy7c9vPsNK>
 - **Website**: <https://www.basilica.ai/>
 - **Validator Guide**: [docs/validator.md](validator.md)
 - **Architecture Overview**: [docs/architecture.md](architecture.md)
