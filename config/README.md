@@ -4,11 +4,21 @@ This directory contains all configuration files for Basilica components.
 
 ## Configuration Files
 
-Each component has three types of configuration files:
+Each component has configuration files following this pattern:
 
-- `{component}.correct.toml` - Production-ready reference configuration (the canonical example)
 - `{component}.toml.example` - Template configuration with placeholders for easy setup
 - `{component}.toml` - Actual configuration file (gitignored, must be created from example)
+
+## Available Configuration Templates
+
+| Component | Template File | Description |
+|-----------|---------------|-------------|
+| Validator | `validator.toml.example` | Bittensor neuron for verification and scoring |
+| Miner | `miner.toml.example` | Bittensor neuron for GPU node orchestration |
+| API | `api.toml.example` | Public HTTP API gateway |
+| Billing | `billing.toml.example` | Billing service configuration |
+| CLI | `cli.toml.example` | CLI tool configuration |
+| GPU Attestor | `gpu-attestor.toml.example` | GPU verification tool |
 
 ## Components
 
@@ -21,6 +31,7 @@ Bittensor neuron for verification and scoring. Key configuration sections:
 - `[ssh_validation]` - SSH-based validation settings
 - `[ssh_session]` - SSH session management and audit logging
 - `[emission]` - GPU category emission allocation settings
+- `[billing]` - Billing telemetry streaming configuration
 
 **Requirements**: CUDA Toolkit 12.8 for GPU verification kernels
 
@@ -29,19 +40,39 @@ Bittensor neuron for verification and scoring. Key configuration sections:
 Bittensor neuron that orchestrates GPU node access. Key configuration sections:
 
 - `[bittensor]` - Wallet and network settings (auto-detects UID and chain endpoint)
-- `[gpu_nodes]` - GPU node SSH endpoint configuration
+- `[node_management]` - GPU node SSH endpoint configuration
 - `[validator_comms]` - Communication with validators including rate limiting
 - `[ssh_session]` - SSH session orchestration for validator access
 - `[advertised_addresses]` - Service endpoint advertising
+- `[validator_assignment]` - Validator assignment strategy
 
-### Basilica API (`basilica-api.toml`)
+### API (`api.toml`)
 
-External HTTP API service. Key configuration sections:
+External HTTP API gateway. Key configuration sections:
 
 - `[server]` - HTTP server settings
-- `[discovery]` - Validator discovery configuration
-- `[load_balancing]` - Load balancing strategies
-- `[caching]` - Response caching with Redis support
+- `[bittensor]` - Validator discovery configuration
+- `[database]` - PostgreSQL connection settings
+- `[billing]` - Billing service integration
+- `[payments]` - Payments service integration
+
+### Billing (`billing.toml`)
+
+Billing service for usage tracking. Key configuration sections:
+
+- `[service]` - Service identification and environment
+- `[database]` - PostgreSQL connection settings
+- `[grpc]` - gRPC server configuration
+- `[telemetry]` - Telemetry ingestion settings
+
+### CLI (`cli.toml`)
+
+CLI tool configuration. Key configuration sections:
+
+- `[api]` - API endpoint settings
+- `[ssh]` - SSH connection settings
+- `[image]` - Default Docker image
+- `[wallet]` - Bittensor wallet settings
 
 ### GPU Attestor (`gpu-attestor.toml`)
 
@@ -52,17 +83,24 @@ GPU verification tool configuration.
 ### 1. Copy the Template Configuration
 
 ```bash
-# For production (recommended)
-cp config/validator.correct.toml config/validator.toml
-
-# Or from example template
+# For validator
 cp config/validator.toml.example config/validator.toml
+
+# For miner
+cp config/miner.toml.example config/miner.toml
+
+# For other components
+cp config/api.toml.example config/api.toml
+cp config/billing.toml.example config/billing.toml
+cp config/cli.toml.example config/cli.toml
 ```
 
 ### 2. Edit Configuration
 
 ```bash
 vim config/validator.toml
+# or
+vim config/miner.toml
 ```
 
 ### 3. Replace Placeholder Values
@@ -72,8 +110,6 @@ vim config/validator.toml
 - `YOUR_WALLET_NAME` - Bittensor wallet name
 - `YOUR_HOTKEY_NAME` - Bittensor hotkey name
 - `YOUR_PUBLIC_IP_HERE` - Server's public IP address
-- `YOUR_SSH_USERNAME` - SSH username for GPU node access
-- `YOUR_SECURE_JWT_SECRET_HERE` - JWT secret for authentication
 
 **Network Configuration:**
 
@@ -120,20 +156,12 @@ vim config/validator.toml
 - Never commit actual `.toml` files to version control (they are gitignored)
 - Use secure JWT secrets for production deployments
 - Ensure proper file permissions (600) on production servers
-- The `.correct.toml` files contain working examples but should be customized
 
 ## Environment-Specific Configurations
 
 For different environments:
 
 1. **Development**: Use `.toml.example` templates with local IPs
-2. **Production**: Use `.correct.toml` as base with your specific values
+2. **Production**: Copy `.toml.example` and customize with your values
 3. **Multiple Environments**: Create separate config files (e.g., `validator.prod.toml`)
 4. **CLI Override**: Use `--config` flag to specify which config file to use
-
-## Monitoring Configuration
-
-The `monitoring/` subdirectory contains:
-
-- `prometheus.yml` - Prometheus configuration for metrics collection
-- `grafana-datasources.yml` - Grafana datasource configuration
