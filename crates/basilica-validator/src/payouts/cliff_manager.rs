@@ -2,18 +2,18 @@ use anyhow::{Context, Result};
 use basilica_common::identity::MinerUid;
 use basilica_common::types::GpuCategory;
 use basilica_protocol::billing::accumulate_rewards_response::AccumulationType;
-use basilica_protocol::billing::billing_service_client::BillingServiceClient;
-use basilica_protocol::billing::{
-    AccumulateRewardsRequest, GetPendingStatusRequest, MinerDelivery, ProcessThresholdRequest,
-    ProcessValidationFailureRequest, UpdateUptimeRequest,
-};
+use basilica_protocol::billing::MinerDelivery;
 use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, warn};
 
+use crate::billing::api_client::{
+    AccumulateRewardsRequestBody, PendingRewardsQuery, ProcessThresholdRequestBody,
+    ProcessValidationFailureRequestBody, UpdateUptimeRequestBody, ValidatorSigner,
+};
+use crate::billing::BillingApiClient;
 use crate::collateral::manager::CollateralManager;
 use crate::collateral::price_oracle::PriceOracle;
 use crate::collateral::CollateralState;
@@ -24,7 +24,7 @@ const MINUTES_PER_DAY: i32 = 24 * 60;
 
 #[derive(Clone)]
 pub struct CliffManager {
-    channel: Channel,
+    billing_api: BillingApiClient,
     collateral_manager: Option<Arc<CollateralManager>>,
     price_oracle: Arc<PriceOracle>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
@@ -32,45 +32,20 @@ pub struct CliffManager {
 }
 
 impl CliffManager {
-    pub async fn new(
+    pub fn new(
         billing_config: &BillingConfig,
         config: CliffConfig,
+        signer: Arc<dyn ValidatorSigner>,
         collateral_manager: Option<Arc<CollateralManager>>,
         price_oracle: Arc<PriceOracle>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
     ) -> Result<Self> {
-        let mut endpoint = Endpoint::from_shared(billing_config.billing_endpoint.clone())
-            .with_context(|| {
-                format!(
-                    "Invalid billing endpoint: {}",
-                    billing_config.billing_endpoint
-                )
-            })?
-            .connect_timeout(std::time::Duration::from_secs(billing_config.timeout_secs))
-            .timeout(std::time::Duration::from_secs(billing_config.timeout_secs));
-
-        if billing_config.use_tls {
-            let host = billing_config
-                .billing_endpoint
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .split([':', '/'].as_ref())
-                .next()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Invalid TLS endpoint: {}", billing_config.billing_endpoint)
-                })?;
-            endpoint = endpoint
-                .tls_config(ClientTlsConfig::new().domain_name(host))
-                .with_context(|| "Failed to configure TLS for billing endpoint")?;
-        }
-
-        let channel = endpoint
-            .connect()
-            .await
-            .with_context(|| "Failed to connect to billing service")?;
-
         Ok(Self {
-            channel,
+            billing_api: BillingApiClient::new_with_signer(
+                billing_config.api_endpoint.clone(),
+                signer,
+                billing_config.timeout_secs,
+            )?,
             collateral_manager,
             price_oracle,
             gpu_profile_repo,
@@ -125,15 +100,14 @@ impl CliffManager {
             )]);
         }
 
-        let mut client = self.client();
-        let pending = client
-            .get_pending_rewards_status(GetPendingStatusRequest {
+        let pending = self
+            .billing_api
+            .get_pending_rewards_status(PendingRewardsQuery {
                 miner_hotkey: delivery.miner_hotkey.clone(),
                 node_id: delivery.node_id.clone(),
             })
             .await
-            .context("Failed to get pending rewards status")?
-            .into_inner();
+            .context("Failed to get pending rewards status")?;
 
         let cliff_days_remaining = Self::cliff_days_remaining(
             self.config.duration_days,
@@ -148,14 +122,14 @@ impl CliffManager {
                 >= (self.config.duration_days as i32 * MINUTES_PER_DAY)
             && Self::parse_decimal(&pending.pending_alpha).unwrap_or(Decimal::ZERO) > Decimal::ZERO
         {
-            let backpay = client
-                .process_threshold_reached(ProcessThresholdRequest {
+            let backpay = self
+                .billing_api
+                .process_threshold_reached(ProcessThresholdRequestBody {
                     miner_hotkey: delivery.miner_hotkey.clone(),
                     node_id: delivery.node_id.clone(),
                 })
                 .await
-                .context("Failed to process cliff backpay")?
-                .into_inner();
+                .context("Failed to process cliff backpay")?;
 
             let backpay_usd = Self::parse_decimal(&backpay.backpay_usd)
                 .unwrap_or(Decimal::ZERO)
@@ -182,16 +156,16 @@ impl CliffManager {
         let epoch_earnings_usd = Decimal::from_f64(delivery.miner_payment_usd)
             .ok_or_else(|| anyhow::anyhow!("Invalid miner_payment_usd"))?;
 
-        let accumulate = client
-            .accumulate_miner_rewards(AccumulateRewardsRequest {
+        let accumulate = self
+            .billing_api
+            .accumulate_miner_rewards(AccumulateRewardsRequestBody {
                 miner_hotkey: delivery.miner_hotkey.clone(),
                 node_id: delivery.node_id.clone(),
                 epoch_earnings_usd: Self::format_decimal(epoch_earnings_usd),
                 alpha_price_usd: Self::format_decimal(alpha_price),
             })
             .await
-            .context("Failed to accumulate miner rewards")?
-            .into_inner();
+            .context("Failed to accumulate miner rewards")?;
 
         let accumulation_type =
             AccumulationType::try_from(accumulate.result).unwrap_or(AccumulationType::Accumulated);
@@ -242,16 +216,15 @@ impl CliffManager {
             return Ok(false);
         }
 
-        let mut client = self.client();
-        let response = client
-            .update_miner_uptime(UpdateUptimeRequest {
+        let response = self
+            .billing_api
+            .update_miner_uptime(UpdateUptimeRequestBody {
                 miner_hotkey: miner_hotkey.to_string(),
                 node_id: node_id.to_string(),
                 uptime_minutes,
             })
             .await
-            .context("Failed to update miner uptime")?
-            .into_inner();
+            .context("Failed to update miner uptime")?;
 
         Ok(response.threshold_reached)
     }
@@ -267,22 +240,17 @@ impl CliffManager {
             return Ok(());
         }
 
-        let mut client = self.client();
-        client
-            .process_validation_failure(ProcessValidationFailureRequest {
+        self.billing_api
+            .process_validation_failure(ProcessValidationFailureRequestBody {
                 miner_hotkey: miner_hotkey.to_string(),
                 node_id: node_id.to_string(),
                 failure_reason: reason.to_string(),
-                failure_type: failure_type.unwrap_or_default().to_string(),
+                failure_type: failure_type.map(|v| v.to_string()),
             })
             .await
             .context("Failed to process validation failure")?;
 
         Ok(())
-    }
-
-    fn client(&self) -> BillingServiceClient<Channel> {
-        BillingServiceClient::new(self.channel.clone())
     }
 
     async fn has_sufficient_collateral(
@@ -391,31 +359,20 @@ impl MinerDeliveryExt for MinerDelivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::billing::api_client::{
+        AccumulateRewardsRequestBody, PendingRewardsQuery, ProcessThresholdRequestBody,
+        ProcessValidationFailureRequestBody, UpdateUptimeRequestBody,
+    };
     use crate::collateral::evaluator::CollateralEvaluator;
     use crate::collateral::grace_tracker::GracePeriodTracker;
     use crate::collateral::manager::{hotkey_ss58_to_hex, node_id_to_hex, CollateralManager};
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
-    use basilica_protocol::billing::billing_service_server::{
-        BillingService, BillingServiceServer,
-    };
-    use basilica_protocol::billing::{
-        AccumulateRewardsResponse, ApplyCreditsRequest, ApplyCreditsResponse,
-        FinalizeRentalRequest, FinalizeRentalResponse, GetActiveRentalsRequest,
-        GetActiveRentalsResponse, GetBalanceRequest, GetBalanceResponse, GetMinerDeliveryRequest,
-        GetMinerDeliveryResponse, GetMinerRevenueSummaryRequest, GetMinerRevenueSummaryResponse,
-        GetPendingStatusResponse, GetRentalStatusRequest, GetRentalStatusResponse,
-        GetUnpaidMinerRevenueSummaryRequest, GetUnpaidMinerRevenueSummaryResponse, IngestResponse,
-        MarkMinerRevenuePaidRequest, MarkMinerRevenuePaidResponse, ProcessThresholdResponse,
-        ProcessValidationFailureResponse, RefreshMinerRevenueSummaryRequest,
-        RefreshMinerRevenueSummaryResponse, TelemetryData, TrackRentalRequest, TrackRentalResponse,
-        UpdateRentalStatusRequest, UpdateRentalStatusResponse, UpdateUptimeResponse,
-        UsageReportRequest, UsageReportResponse,
-    };
+    use axum::extract::{Query, State};
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::{Request, Response, Status};
     use uuid::Uuid;
     use wiremock::matchers::path;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -434,217 +391,135 @@ mod tests {
         pending: Arc<tokio::sync::Mutex<PendingState>>,
     }
 
-    #[tonic::async_trait]
-    impl BillingService for MockBillingService {
-        async fn apply_credits(
-            &self,
-            _request: Request<ApplyCreditsRequest>,
-        ) -> Result<Response<ApplyCreditsResponse>, Status> {
-            Err(Status::unimplemented("apply_credits"))
+    #[derive(Clone, Default)]
+    struct TestSigner;
+
+    impl ValidatorSigner for TestSigner {
+        fn hotkey(&self) -> String {
+            "validator_hotkey".to_string()
         }
 
-        async fn get_balance(
-            &self,
-            _request: Request<GetBalanceRequest>,
-        ) -> Result<Response<GetBalanceResponse>, Status> {
-            Err(Status::unimplemented("get_balance"))
-        }
-
-        async fn track_rental(
-            &self,
-            _request: Request<TrackRentalRequest>,
-        ) -> Result<Response<TrackRentalResponse>, Status> {
-            Err(Status::unimplemented("track_rental"))
-        }
-
-        async fn update_rental_status(
-            &self,
-            _request: Request<UpdateRentalStatusRequest>,
-        ) -> Result<Response<UpdateRentalStatusResponse>, Status> {
-            Err(Status::unimplemented("update_rental_status"))
-        }
-
-        async fn get_active_rentals(
-            &self,
-            _request: Request<GetActiveRentalsRequest>,
-        ) -> Result<Response<GetActiveRentalsResponse>, Status> {
-            Err(Status::unimplemented("get_active_rentals"))
-        }
-
-        async fn finalize_rental(
-            &self,
-            _request: Request<FinalizeRentalRequest>,
-        ) -> Result<Response<FinalizeRentalResponse>, Status> {
-            Err(Status::unimplemented("finalize_rental"))
-        }
-
-        async fn ingest_telemetry(
-            &self,
-            _request: Request<tonic::Streaming<TelemetryData>>,
-        ) -> Result<Response<IngestResponse>, Status> {
-            Err(Status::unimplemented("ingest_telemetry"))
-        }
-
-        async fn get_usage_report(
-            &self,
-            _request: Request<UsageReportRequest>,
-        ) -> Result<Response<UsageReportResponse>, Status> {
-            Err(Status::unimplemented("get_usage_report"))
-        }
-
-        async fn refresh_miner_revenue_summary(
-            &self,
-            _request: Request<RefreshMinerRevenueSummaryRequest>,
-        ) -> Result<Response<RefreshMinerRevenueSummaryResponse>, Status> {
-            Err(Status::unimplemented("refresh_miner_revenue_summary"))
-        }
-
-        async fn get_miner_revenue_summary(
-            &self,
-            _request: Request<GetMinerRevenueSummaryRequest>,
-        ) -> Result<Response<GetMinerRevenueSummaryResponse>, Status> {
-            Err(Status::unimplemented("get_miner_revenue_summary"))
-        }
-
-        async fn get_miner_delivery(
-            &self,
-            _request: Request<GetMinerDeliveryRequest>,
-        ) -> Result<Response<GetMinerDeliveryResponse>, Status> {
-            Ok(Response::new(GetMinerDeliveryResponse {
-                deliveries: Vec::new(),
-            }))
-        }
-
-        async fn accumulate_miner_rewards(
-            &self,
-            request: Request<AccumulateRewardsRequest>,
-        ) -> Result<Response<AccumulateRewardsResponse>, Status> {
-            let req = request.into_inner();
-            let epoch_usd = Decimal::from_str(&req.epoch_earnings_usd)
-                .map_err(|_| Status::invalid_argument("epoch_earnings_usd"))?;
-            let alpha_price = Decimal::from_str(&req.alpha_price_usd)
-                .map_err(|_| Status::invalid_argument("alpha_price_usd"))?;
-            let epoch_alpha = epoch_usd / alpha_price;
-
-            let mut pending = self.pending.lock().await;
-            if pending.threshold_reached {
-                return Ok(Response::new(AccumulateRewardsResponse {
-                    result: AccumulationType::ImmediatePayout as i32,
-                    pending_alpha: "0".to_string(),
-                    pending_usd: "0".to_string(),
-                    epochs_accumulated: 0,
-                    immediate_alpha: epoch_alpha.to_string(),
-                    immediate_usd: epoch_usd.to_string(),
-                }));
-            }
-
-            pending.pending_alpha += epoch_alpha;
-            pending.pending_usd += epoch_usd;
-            pending.epochs_accumulated += 1;
-            Ok(Response::new(AccumulateRewardsResponse {
-                result: AccumulationType::Accumulated as i32,
-                pending_alpha: pending.pending_alpha.to_string(),
-                pending_usd: pending.pending_usd.to_string(),
-                epochs_accumulated: pending.epochs_accumulated,
-                immediate_alpha: "0".to_string(),
-                immediate_usd: "0".to_string(),
-            }))
-        }
-
-        async fn get_pending_rewards_status(
-            &self,
-            _request: Request<GetPendingStatusRequest>,
-        ) -> Result<Response<GetPendingStatusResponse>, Status> {
-            let pending = self.pending.lock().await;
-            Ok(Response::new(GetPendingStatusResponse {
-                exists: true,
-                pending_alpha: pending.pending_alpha.to_string(),
-                pending_usd: pending.pending_usd.to_string(),
-                epochs_accumulated: pending.epochs_accumulated,
-                threshold_reached: pending.threshold_reached,
-                continuous_uptime_minutes: pending.continuous_uptime_minutes,
-                ramp_start_time: None,
-                threshold_reached_at: None,
-            }))
-        }
-
-        async fn process_threshold_reached(
-            &self,
-            _request: Request<ProcessThresholdRequest>,
-        ) -> Result<Response<ProcessThresholdResponse>, Status> {
-            let mut pending = self.pending.lock().await;
-            let response = ProcessThresholdResponse {
-                backpay_alpha: pending.pending_alpha.to_string(),
-                backpay_usd: pending.pending_usd.to_string(),
-                epochs_paid: pending.epochs_accumulated,
-            };
-            pending.pending_alpha = Decimal::ZERO;
-            pending.pending_usd = Decimal::ZERO;
-            pending.epochs_accumulated = 0;
-            pending.threshold_reached = true;
-            Ok(Response::new(response))
-        }
-
-        async fn update_miner_uptime(
-            &self,
-            request: Request<UpdateUptimeRequest>,
-        ) -> Result<Response<UpdateUptimeResponse>, Status> {
-            let req = request.into_inner();
-            let mut pending = self.pending.lock().await;
-            pending.continuous_uptime_minutes = req.uptime_minutes;
-            Ok(Response::new(UpdateUptimeResponse {
-                threshold_reached: false,
-            }))
-        }
-
-        async fn process_validation_failure(
-            &self,
-            _request: Request<ProcessValidationFailureRequest>,
-        ) -> Result<Response<ProcessValidationFailureResponse>, Status> {
-            let mut pending = self.pending.lock().await;
-            let response = ProcessValidationFailureResponse {
-                forfeited_alpha: pending.pending_alpha.to_string(),
-                forfeited_usd: pending.pending_usd.to_string(),
-                epochs_lost: pending.epochs_accumulated,
-            };
-            pending.pending_alpha = Decimal::ZERO;
-            pending.pending_usd = Decimal::ZERO;
-            pending.epochs_accumulated = 0;
-            Ok(Response::new(response))
-        }
-
-        async fn get_unpaid_miner_revenue_summary(
-            &self,
-            _request: Request<GetUnpaidMinerRevenueSummaryRequest>,
-        ) -> Result<Response<GetUnpaidMinerRevenueSummaryResponse>, Status> {
-            Err(Status::unimplemented("get_unpaid_miner_revenue_summary"))
-        }
-
-        async fn mark_miner_revenue_paid(
-            &self,
-            _request: Request<MarkMinerRevenuePaidRequest>,
-        ) -> Result<Response<MarkMinerRevenuePaidResponse>, Status> {
-            Err(Status::unimplemented("mark_miner_revenue_paid"))
-        }
-
-        async fn get_rental_status(
-            &self,
-            _request: Request<GetRentalStatusRequest>,
-        ) -> Result<Response<GetRentalStatusResponse>, Status> {
-            Err(Status::unimplemented("get_rental_status"))
+        fn sign(&self, _message: &[u8]) -> Result<String> {
+            Ok("test-signature".to_string())
         }
     }
 
+    async fn handle_pending_status(
+        State(state): State<MockBillingService>,
+        Query(_query): Query<PendingRewardsQuery>,
+    ) -> Json<crate::billing::api_client::PendingStatusResponseBody> {
+        let pending = state.pending.lock().await;
+        Json(crate::billing::api_client::PendingStatusResponseBody {
+            exists: true,
+            pending_alpha: pending.pending_alpha.to_string(),
+            pending_usd: pending.pending_usd.to_string(),
+            epochs_accumulated: pending.epochs_accumulated,
+            threshold_reached: pending.threshold_reached,
+            continuous_uptime_minutes: pending.continuous_uptime_minutes,
+            ramp_start_time: None,
+            threshold_reached_at: None,
+        })
+    }
+
+    async fn handle_accumulate(
+        State(state): State<MockBillingService>,
+        Json(body): Json<AccumulateRewardsRequestBody>,
+    ) -> Json<crate::billing::api_client::AccumulateRewardsResponseBody> {
+        let epoch_usd = Decimal::from_str(&body.epoch_earnings_usd).unwrap_or(Decimal::ZERO);
+        let alpha_price = Decimal::from_str(&body.alpha_price_usd).unwrap_or(Decimal::ONE);
+        let epoch_alpha = epoch_usd / alpha_price;
+
+        let mut pending = state.pending.lock().await;
+        if pending.threshold_reached {
+            return Json(crate::billing::api_client::AccumulateRewardsResponseBody {
+                result: AccumulationType::ImmediatePayout as i32,
+                pending_alpha: "0".to_string(),
+                pending_usd: "0".to_string(),
+                epochs_accumulated: 0,
+                immediate_alpha: epoch_alpha.to_string(),
+                immediate_usd: epoch_usd.to_string(),
+            });
+        }
+
+        pending.pending_alpha += epoch_alpha;
+        pending.pending_usd += epoch_usd;
+        pending.epochs_accumulated += 1;
+        Json(crate::billing::api_client::AccumulateRewardsResponseBody {
+            result: AccumulationType::Accumulated as i32,
+            pending_alpha: pending.pending_alpha.to_string(),
+            pending_usd: pending.pending_usd.to_string(),
+            epochs_accumulated: pending.epochs_accumulated,
+            immediate_alpha: "0".to_string(),
+            immediate_usd: "0".to_string(),
+        })
+    }
+
+    async fn handle_threshold(
+        State(state): State<MockBillingService>,
+        Json(_body): Json<ProcessThresholdRequestBody>,
+    ) -> Json<crate::billing::api_client::ProcessThresholdResponseBody> {
+        let mut pending = state.pending.lock().await;
+        let response = crate::billing::api_client::ProcessThresholdResponseBody {
+            backpay_alpha: pending.pending_alpha.to_string(),
+            backpay_usd: pending.pending_usd.to_string(),
+            epochs_paid: pending.epochs_accumulated,
+        };
+        pending.pending_alpha = Decimal::ZERO;
+        pending.pending_usd = Decimal::ZERO;
+        pending.epochs_accumulated = 0;
+        pending.threshold_reached = true;
+        Json(response)
+    }
+
+    async fn handle_uptime(
+        State(state): State<MockBillingService>,
+        Json(body): Json<UpdateUptimeRequestBody>,
+    ) -> Json<crate::billing::api_client::UpdateUptimeResponseBody> {
+        let mut pending = state.pending.lock().await;
+        pending.continuous_uptime_minutes = body.uptime_minutes;
+        Json(crate::billing::api_client::UpdateUptimeResponseBody {
+            threshold_reached: false,
+        })
+    }
+
+    async fn handle_failure(
+        State(state): State<MockBillingService>,
+        Json(_body): Json<ProcessValidationFailureRequestBody>,
+    ) -> Json<crate::billing::api_client::ProcessValidationFailureResponseBody> {
+        let mut pending = state.pending.lock().await;
+        let response = crate::billing::api_client::ProcessValidationFailureResponseBody {
+            forfeited_alpha: pending.pending_alpha.to_string(),
+            forfeited_usd: pending.pending_usd.to_string(),
+            epochs_lost: pending.epochs_accumulated,
+        };
+        pending.pending_alpha = Decimal::ZERO;
+        pending.pending_usd = Decimal::ZERO;
+        pending.epochs_accumulated = 0;
+        Json(response)
+    }
+
     async fn start_mock_server(state: MockBillingService) -> Result<SocketAddr> {
+        let app = Router::new()
+            .route(
+                "/v1/weights/pending-rewards/status",
+                get(handle_pending_status),
+            )
+            .route(
+                "/v1/weights/pending-rewards/accumulate",
+                post(handle_accumulate),
+            )
+            .route(
+                "/v1/weights/pending-rewards/threshold",
+                post(handle_threshold),
+            )
+            .route("/v1/weights/pending-rewards/uptime", post(handle_uptime))
+            .route("/v1/weights/pending-rewards/failure", post(handle_failure))
+            .with_state(state);
+
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let service = BillingServiceServer::new(state);
         tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(service)
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
-                .unwrap();
+            axum::serve(listener, app).await.unwrap();
         });
         Ok(addr)
     }
@@ -692,7 +567,7 @@ mod tests {
 
         let billing_config = BillingConfig {
             enabled: true,
-            billing_endpoint: format!("http://{}", addr),
+            api_endpoint: format!("http://{}", addr),
             ..Default::default()
         };
 
@@ -700,8 +575,15 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let cliff_manager =
-            CliffManager::new(&billing_config, cliff_config, None, oracle, gpu_repo).await?;
+        let signer = Arc::new(TestSigner);
+        let cliff_manager = CliffManager::new(
+            &billing_config,
+            cliff_config,
+            signer,
+            None,
+            oracle,
+            gpu_repo,
+        )?;
 
         let delivery = build_delivery("node-1");
         let outputs = cliff_manager.process_delivery(delivery).await?;
@@ -727,7 +609,7 @@ mod tests {
 
         let billing_config = BillingConfig {
             enabled: true,
-            billing_endpoint: format!("http://{}", addr),
+            api_endpoint: format!("http://{}", addr),
             ..Default::default()
         };
 
@@ -735,8 +617,15 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let cliff_manager =
-            CliffManager::new(&billing_config, cliff_config, None, oracle, gpu_repo).await?;
+        let signer = Arc::new(TestSigner);
+        let cliff_manager = CliffManager::new(
+            &billing_config,
+            cliff_config,
+            signer,
+            None,
+            oracle,
+            gpu_repo,
+        )?;
 
         let delivery = build_delivery("node-2");
         let outputs = cliff_manager.process_delivery(delivery).await?;
@@ -794,10 +683,11 @@ mod tests {
 
         let billing_config = BillingConfig {
             enabled: true,
-            billing_endpoint: format!("http://{}", addr),
+            api_endpoint: format!("http://{}", addr),
             ..Default::default()
         };
 
+        let signer = Arc::new(TestSigner);
         let cliff_manager = CliffManager::new(
             &billing_config,
             CliffConfig {
@@ -806,11 +696,11 @@ mod tests {
                 forfeit_on_failure: true,
                 collateral_bypasses_cliff: true,
             },
+            signer,
             Some(collateral_manager),
             oracle,
             gpu_repo,
-        )
-        .await?;
+        )?;
 
         let delivery = MinerDelivery {
             miner_hotkey: hotkey.to_string(),

@@ -221,14 +221,16 @@ impl ValidatorService {
                 self.config.collateral.price_refresh_interval(),
                 self.config.collateral.price_stale_after(),
             ));
+            let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> =
+                bittensor_service.clone();
             let cliff_manager = CliffManager::new(
                 &self.config.billing,
                 self.config.cliff.clone(),
+                signer,
                 collateral_manager.clone(),
                 price_oracle,
                 gpu_profile_repo.clone(),
-            )
-            .await?;
+            )?;
             Some(Arc::new(cliff_manager))
         } else {
             None
@@ -250,7 +252,8 @@ impl ValidatorService {
             let api_client = Arc::new(BillingApiClient::new(
                 self.config.billing.api_endpoint.clone(),
                 bittensor_service.clone(),
-            ));
+                self.config.billing.timeout_secs,
+            )?);
             Some(DeliverySyncTask::new(
                 api_client,
                 delivery_repo.clone(),
