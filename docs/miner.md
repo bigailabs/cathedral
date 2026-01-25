@@ -58,7 +58,8 @@ miner_node_key_path = "~/.ssh/miner_node_key"
 default_node_username = "basilica"
 
 [validator_assignment]
-strategy = "highest_stake"
+strategy = "fixed_assignment"
+validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 EOF
 
 # 4. Build and run (with docker compose)
@@ -375,31 +376,7 @@ Basilica uses **mutual authentication** between validators and miners:
 
 Miners can control which validators receive access to their nodes:
 
-#### 1. **Highest Stake** (Recommended)
-
-Assigns ALL nodes to the validator with highest stake.
-
-```toml
-[validator_assignment]
-strategy = "highest_stake"
-# Optional: Force assignment to specific validator
-# validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
-```
-
-**Use cases:**
-
-- Production deployment with single trusted validator
-- Maximize security by working with most invested validator
-- Simplify operations (single validator relationship)
-
-**Behavior:**
-
-- Fetches validators from Bittensor metagraph
-- If `validator_hotkey` specified: uses that specific validator
-- Otherwise: selects highest-staked validator with validator_permit
-- Only considers online validators (with axon endpoints)
-
-#### 2. **Fixed Assignment**
+#### 1. **Fixed Assignment** (Recommended)
 
 Assign nodes to a specific validator by hotkey.
 
@@ -412,7 +389,28 @@ validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 **Use cases:**
 
 - Production deployment with a specific trusted validator
+- Explicit control over which validator receives access
 - Testing with a known validator
+
+#### 2. **Highest Stake**
+
+Assigns ALL nodes to the validator with highest stake.
+
+```toml
+[validator_assignment]
+strategy = "highest_stake"
+```
+
+**Use cases:**
+
+- Automatic validator selection without manual configuration
+- Maximize security by working with most invested validator
+
+**Behavior:**
+
+- Fetches validators from Bittensor metagraph
+- Selects highest-staked validator with validator_permit
+- Only considers online validators (with axon endpoints)
 
 ### Discovery Process
 
@@ -755,17 +753,14 @@ curl http://localhost:9090/metrics
 
 ```toml
 [validator_assignment]
-strategy = "highest_stake"           # Options: highest_stake, fixed_assignment
-
-# Optional: Assign to specific validator (required for fixed_assignment)
-# validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+strategy = "fixed_assignment"        # Options: fixed_assignment, highest_stake
+validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 ```
 
 **Choosing a strategy:**
 
-- **Production**: Use `highest_stake` to assign all nodes to the top validator
-- **Fixed**: Use `fixed_assignment` with a specific `validator_hotkey` for known validators
-- **Development**: Use default `highest_stake` without specific hotkey
+- **Production**: Use `fixed_assignment` with a specific `validator_hotkey` for explicit control
+- **Automatic**: Use `highest_stake` to automatically assign to the top-staked validator
 
 #### 9. Advertised Addresses (Optional)
 
