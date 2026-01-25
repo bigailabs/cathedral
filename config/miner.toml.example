@@ -111,8 +111,6 @@ default_node_username = "node"
 # Validator Assignment Strategy
 # =============================================================================
 [validator_assignment]
-# Strategy: "highest_stake" or "fixed_assignment"
-enabled = true
-strategy = "highest_stake"
-min_stake_threshold = 6000.0
-validator_hotkey = "5Dvs1D21nUF9GLH67ZF3kMcGwLQEoD4LbMQ9hycGMGvviGCe"
+# Strategy: "fixed_assignment" or "highest_stake"
+strategy = "fixed_assignment"
+validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
