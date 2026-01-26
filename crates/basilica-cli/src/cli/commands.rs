@@ -510,6 +510,9 @@ pub struct DeployCommand {
     pub storage: StorageOptions,
 
     #[command(flatten)]
+    pub topology_spread: TopologySpreadOptions,
+
+    #[command(flatten)]
     pub health: HealthCheckOptions,
 
     #[command(flatten)]
@@ -637,6 +640,57 @@ impl Default for StorageOptions {
             storage_path: "/data".to_string(),
             storage_cache_mb: 2048,
             storage_sync_ms: 1000,
+        }
+    }
+}
+
+/// CLI argument for spread mode
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum SpreadModeArg {
+    /// Best-effort spreading (ScheduleAnyway)
+    #[default]
+    Preferred,
+    /// Strict spreading (DoNotSchedule)
+    Required,
+    /// One pod per node (pod anti-affinity)
+    #[value(name = "unique-nodes", alias = "unique_nodes")]
+    UniqueNodes,
+}
+
+/// Topology spread configuration options
+#[derive(clap::Args, Debug, Clone)]
+pub struct TopologySpreadOptions {
+    /// Pod spreading mode: preferred, required, or unique-nodes
+    /// - preferred: Best-effort spreading (default)
+    /// - required: Strict spreading, pods fail to schedule if constraints unsatisfied
+    /// - unique-nodes: One pod per node guaranteed (for unique IP requirements)
+    #[arg(long, value_name = "MODE")]
+    pub spread_mode: Option<SpreadModeArg>,
+
+    /// Shorthand for --spread-mode unique-nodes (one pod per node)
+    #[arg(long, conflicts_with = "spread_mode")]
+    pub unique_nodes: bool,
+
+    /// Maximum skew for pod spreading (1-10, default: 1)
+    /// Only applies to preferred and required modes
+    #[arg(long, default_value = "1")]
+    pub max_skew: i32,
+
+    /// Topology key for spreading
+    /// - kubernetes.io/hostname (default, node-level)
+    /// - topology.kubernetes.io/zone (zone-level)
+    /// - topology.kubernetes.io/region (region-level)
+    #[arg(long, default_value = "kubernetes.io/hostname")]
+    pub topology_key: String,
+}
+
+impl Default for TopologySpreadOptions {
+    fn default() -> Self {
+        Self {
+            spread_mode: None,
+            unique_nodes: false,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
         }
     }
 }
