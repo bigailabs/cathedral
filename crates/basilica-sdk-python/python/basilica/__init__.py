@@ -1527,6 +1527,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment asynchronously (low-level API).
@@ -1573,6 +1574,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()
