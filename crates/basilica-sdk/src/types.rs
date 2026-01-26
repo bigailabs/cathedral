@@ -654,6 +654,59 @@ fn default_public() -> bool {
     true
 }
 
+/// Pod spreading mode for controlling how pods are distributed across topology domains.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SpreadMode {
+    /// Best-effort spreading using TopologySpreadConstraints with ScheduleAnyway.
+    /// Pods prefer spreading but can be co-located if necessary.
+    #[default]
+    Preferred,
+    /// Strict spreading using TopologySpreadConstraints with DoNotSchedule.
+    /// Pods will not schedule if spreading constraints cannot be satisfied.
+    Required,
+    /// Hard one-pod-per-node using podAntiAffinity with requiredDuringScheduling.
+    /// Guarantees each pod runs on a unique node (for unique IP requirements).
+    UniqueNodes,
+}
+
+fn default_max_skew() -> i32 {
+    1
+}
+
+fn default_topology_key() -> String {
+    "kubernetes.io/hostname".to_string()
+}
+
+/// Configuration for pod topology spreading.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologySpreadConfig {
+    /// Spreading mode: preferred, required, or unique_nodes.
+    #[serde(default)]
+    pub mode: SpreadMode,
+
+    /// Maximum allowed difference in pod count between topology domains.
+    /// Only used for Preferred and Required modes (ignored for UniqueNodes).
+    /// Range: 1-10, default: 1.
+    #[serde(default = "default_max_skew")]
+    pub max_skew: i32,
+
+    /// Topology key for spreading (default: kubernetes.io/hostname).
+    #[serde(default = "default_topology_key")]
+    pub topology_key: String,
+}
+
+impl Default for TopologySpreadConfig {
+    fn default() -> Self {
+        Self {
+            mode: SpreadMode::default(),
+            max_skew: default_max_skew(),
+            topology_key: default_topology_key(),
+        }
+    }
+}
+
 /// Create deployment request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -686,6 +739,10 @@ pub struct CreateDeploymentRequest {
     pub suspended: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    /// Optional topology spreading configuration.
+    /// Controls how pod replicas are distributed across nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology_spread: Option<TopologySpreadConfig>,
 }
 
 fn default_enable_billing() -> bool {
@@ -1050,4 +1107,193 @@ pub struct VolumeOperationResponse {
 
     /// Human-readable message
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spread_mode_default() {
+        assert_eq!(SpreadMode::default(), SpreadMode::Preferred);
+    }
+
+    #[test]
+    fn test_spread_mode_serialization() {
+        assert_eq!(
+            serde_json::to_string(&SpreadMode::Preferred).unwrap(),
+            "\"preferred\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SpreadMode::Required).unwrap(),
+            "\"required\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SpreadMode::UniqueNodes).unwrap(),
+            "\"unique_nodes\""
+        );
+    }
+
+    #[test]
+    fn test_spread_mode_deserialization() {
+        assert_eq!(
+            serde_json::from_str::<SpreadMode>("\"preferred\"").unwrap(),
+            SpreadMode::Preferred
+        );
+        assert_eq!(
+            serde_json::from_str::<SpreadMode>("\"required\"").unwrap(),
+            SpreadMode::Required
+        );
+        assert_eq!(
+            serde_json::from_str::<SpreadMode>("\"unique_nodes\"").unwrap(),
+            SpreadMode::UniqueNodes
+        );
+    }
+
+    #[test]
+    fn test_topology_spread_config_default() {
+        let config = TopologySpreadConfig::default();
+        assert_eq!(config.mode, SpreadMode::Preferred);
+        assert_eq!(config.max_skew, 1);
+        assert_eq!(config.topology_key, "kubernetes.io/hostname");
+    }
+
+    #[test]
+    fn test_topology_spread_config_serialization() {
+        let config = TopologySpreadConfig {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 2,
+            topology_key: "topology.kubernetes.io/zone".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"mode\":\"unique_nodes\""));
+        assert!(json.contains("\"maxSkew\":2"));
+        assert!(json.contains("\"topologyKey\":\"topology.kubernetes.io/zone\""));
+    }
+
+    #[test]
+    fn test_topology_spread_config_deserialization() {
+        let json = r#"{"mode":"unique_nodes","maxSkew":3,"topologyKey":"kubernetes.io/hostname"}"#;
+        let config: TopologySpreadConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mode, SpreadMode::UniqueNodes);
+        assert_eq!(config.max_skew, 3);
+        assert_eq!(config.topology_key, "kubernetes.io/hostname");
+    }
+
+    #[test]
+    fn test_topology_spread_config_deserialization_with_defaults() {
+        let json = r#"{}"#;
+        let config: TopologySpreadConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mode, SpreadMode::Preferred);
+        assert_eq!(config.max_skew, 1);
+        assert_eq!(config.topology_key, "kubernetes.io/hostname");
+    }
+
+    #[test]
+    fn test_create_deployment_request_without_topology_spread() {
+        let request = CreateDeploymentRequest {
+            instance_name: "test".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 1,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("topologySpread"));
+    }
+
+    #[test]
+    fn test_create_deployment_request_with_topology_spread() {
+        let request = CreateDeploymentRequest {
+            instance_name: "test".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 3,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: Some(TopologySpreadConfig {
+                mode: SpreadMode::UniqueNodes,
+                max_skew: 1,
+                topology_key: "kubernetes.io/hostname".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topologySpread\""));
+        assert!(json.contains("\"mode\":\"unique_nodes\""));
+    }
+
+    #[test]
+    fn test_spread_mode_deserialization_invalid_value() {
+        let result = serde_json::from_str::<SpreadMode>("\"invalid_mode\"");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown variant"));
+    }
+
+    #[test]
+    fn test_spread_mode_deserialization_wrong_type() {
+        let result = serde_json::from_str::<SpreadMode>("123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_topology_spread_config_deserialization_invalid_mode() {
+        let json = r#"{"mode":"bad_mode","maxSkew":1,"topologyKey":"kubernetes.io/hostname"}"#;
+        let result = serde_json::from_str::<TopologySpreadConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_topology_spread_config_equality() {
+        let config1 = TopologySpreadConfig {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        };
+        let config2 = TopologySpreadConfig {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        };
+        let config3 = TopologySpreadConfig {
+            mode: SpreadMode::Required,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        };
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn test_spread_mode_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(SpreadMode::Preferred);
+        set.insert(SpreadMode::Required);
+        set.insert(SpreadMode::UniqueNodes);
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&SpreadMode::Preferred));
+    }
 }

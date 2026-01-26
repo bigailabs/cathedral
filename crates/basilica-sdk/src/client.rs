@@ -1639,6 +1639,7 @@ mod tests {
             queue_name: None,
             suspended: false,
             priority: None,
+            topology_spread: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1722,6 +1723,7 @@ mod tests {
             queue_name: None,
             suspended: false,
             priority: None,
+            topology_spread: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1770,6 +1772,7 @@ mod tests {
             queue_name: None,
             suspended: false,
             priority: None,
+            topology_spread: None,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1988,6 +1991,7 @@ mod tests {
             queue_name: None,
             suspended: false,
             priority: None,
+            topology_spread: None,
         };
 
         let result = client.create_deployment(request).await;
