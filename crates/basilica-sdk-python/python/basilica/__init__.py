@@ -159,7 +159,7 @@ DEFAULT_COMMAND = ["/bin/bash"]
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"
 __all__ = [
     # Main client
     "BasilicaClient",
