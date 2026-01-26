@@ -648,7 +648,8 @@ use basilica_sdk::types::{
     GpuRequirementsSpec as SdkGpuRequirementsSpec,
     PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
     ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
-    StorageBackend as SdkStorageBackend, StorageSpec as SdkStorageSpec,
+    SpreadMode as SdkSpreadMode, StorageBackend as SdkStorageBackend,
+    StorageSpec as SdkStorageSpec, TopologySpreadConfig as SdkTopologySpreadConfig,
 };
 
 /// Environment variable for container deployments
@@ -852,6 +853,97 @@ impl From<SdkPodInfo> for PodInfo {
     }
 }
 
+/// Pod spreading mode for controlling how pods are distributed across topology domains
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum SpreadMode {
+    /// Best-effort spreading (ScheduleAnyway)
+    #[default]
+    Preferred,
+    /// Strict spreading (DoNotSchedule)
+    Required,
+    /// One pod per node (pod anti-affinity)
+    UniqueNodes,
+}
+
+impl From<SpreadMode> for SdkSpreadMode {
+    fn from(mode: SpreadMode) -> Self {
+        match mode {
+            SpreadMode::Preferred => SdkSpreadMode::Preferred,
+            SpreadMode::Required => SdkSpreadMode::Required,
+            SpreadMode::UniqueNodes => SdkSpreadMode::UniqueNodes,
+        }
+    }
+}
+
+impl From<SdkSpreadMode> for SpreadMode {
+    fn from(mode: SdkSpreadMode) -> Self {
+        match mode {
+            SdkSpreadMode::Preferred => SpreadMode::Preferred,
+            SdkSpreadMode::Required => SpreadMode::Required,
+            SdkSpreadMode::UniqueNodes => SpreadMode::UniqueNodes,
+        }
+    }
+}
+
+/// Configuration for pod topology spreading
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct TopologySpreadConfig {
+    #[pyo3(get, set)]
+    pub mode: SpreadMode,
+    #[pyo3(get, set)]
+    pub max_skew: i32,
+    #[pyo3(get, set)]
+    pub topology_key: String,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl TopologySpreadConfig {
+    #[new]
+    #[pyo3(signature = (mode=SpreadMode::Preferred, max_skew=1, topology_key="kubernetes.io/hostname"))]
+    fn new(mode: SpreadMode, max_skew: i32, topology_key: &str) -> Self {
+        Self {
+            mode,
+            max_skew,
+            topology_key: topology_key.to_string(),
+        }
+    }
+
+    /// Create config for unique nodes (one pod per node)
+    #[staticmethod]
+    fn unique_nodes() -> Self {
+        Self {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        }
+    }
+}
+
+impl From<TopologySpreadConfig> for SdkTopologySpreadConfig {
+    fn from(config: TopologySpreadConfig) -> Self {
+        Self {
+            mode: config.mode.into(),
+            max_skew: config.max_skew,
+            topology_key: config.topology_key,
+        }
+    }
+}
+
+impl From<SdkTopologySpreadConfig> for TopologySpreadConfig {
+    fn from(config: SdkTopologySpreadConfig) -> Self {
+        Self {
+            mode: config.mode.into(),
+            max_skew: config.max_skew,
+            topology_key: config.topology_key,
+        }
+    }
+}
+
 /// Storage backend type
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
 #[pyclass(eq, eq_int)]
@@ -999,6 +1091,8 @@ pub struct CreateDeploymentRequest {
     pub public: bool,
     #[pyo3(get, set)]
     pub storage: Option<StorageSpec>,
+    #[pyo3(get, set)]
+    pub topology_spread: Option<TopologySpreadConfig>,
     // health_check: Not exposed to Python - use None
 }
 
@@ -1006,7 +1100,7 @@ pub struct CreateDeploymentRequest {
 #[pymethods]
 impl CreateDeploymentRequest {
     #[new]
-    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None))]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None, topology_spread=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         instance_name: String,
@@ -1020,6 +1114,7 @@ impl CreateDeploymentRequest {
         ttl_seconds: Option<u32>,
         public: bool,
         storage: Option<StorageSpec>,
+        topology_spread: Option<TopologySpreadConfig>,
     ) -> Self {
         Self {
             instance_name,
@@ -1033,6 +1128,7 @@ impl CreateDeploymentRequest {
             ttl_seconds,
             public,
             storage,
+            topology_spread,
         }
     }
 }
@@ -1056,6 +1152,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             queue_name: None,
             suspended: false,
             priority: None,
+            topology_spread: req.topology_spread.map(Into::into),
         }
     }
 }

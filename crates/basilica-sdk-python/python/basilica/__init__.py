@@ -83,6 +83,7 @@ from basilica._basilica import (
     ResourceRequirementsRequest,
     SecureCloudRentalListItem,
     SecureCloudRentalResponse,
+    SpreadMode,
     SshAccess,
     SshKeyResponse,
     StartCpuRentalRequest,
@@ -92,6 +93,7 @@ from basilica._basilica import (
     StopSecureCloudRentalResponse,
     StorageBackend,
     StorageSpec,
+    TopologySpreadConfig,
     VolumeMountRequest,
     node_by_gpu,
     node_by_id,
@@ -212,6 +214,8 @@ __all__ = [
     "ResourceRequirements",
     "ReplicaStatus",
     "PodInfo",
+    "SpreadMode",
+    "TopologySpreadConfig",
     "StorageBackend",
     "PersistentStorageSpec",
     "StorageSpec",
@@ -1039,6 +1043,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment (low-level API).
@@ -1062,6 +1067,7 @@ class BasilicaClient:
             ttl_seconds: Auto-delete timeout
             public: Create public URL
             storage: Storage path or StorageSpec
+            topology_spread: Topology spread configuration for pod distribution
 
         Returns:
             DeploymentResponse with deployment details
@@ -1108,6 +1114,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         return self._client.create_deployment(request)
@@ -1520,6 +1527,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment asynchronously (low-level API).
@@ -1566,6 +1574,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()
