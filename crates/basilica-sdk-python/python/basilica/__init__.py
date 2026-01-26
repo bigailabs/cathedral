@@ -330,6 +330,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int],
         public: bool,
         pip_packages: Optional[List[str]],
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> CreateDeploymentRequest:
         """Build CreateDeploymentRequest from deploy parameters."""
         command = None
@@ -378,6 +379,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
     def deploy(
@@ -399,6 +401,7 @@ class BasilicaClient:
         public: bool = True,
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> Deployment:
         """
         Deploy an application to Basilica.
@@ -501,6 +504,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             pip_packages=pip_packages,
+            topology_spread=topology_spread,
         )
 
         response = self._client.create_deployment(request)
@@ -1390,6 +1394,7 @@ class BasilicaClient:
         public: bool = True,
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> Deployment:
         """
         Deploy an application asynchronously.
@@ -1442,6 +1447,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             pip_packages=pip_packages,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()
