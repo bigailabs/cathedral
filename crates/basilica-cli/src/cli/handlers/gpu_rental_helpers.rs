@@ -351,12 +351,12 @@ pub async fn resolve_target_rental_unified(
                 .unwrap_or_else(|| "--".to_string());
 
             format!(
-                "{} | {:<15} | {:<15} | {:<4} | {:<25} | {:<12} | {}",
+                "{} | {:<15} | {:<15} | {:<4} | {:<30} | {:<12} | {}",
                 style(type_label).cyan(),
                 truncate(&item.provider_or_node, 15),
                 ip_display,
                 item.location,
-                truncate(&item.gpu_info, 25),
+                truncate(&item.gpu_info, 30),
                 item.status,
                 truncate(&item.created_at, 19)
             )
@@ -366,7 +366,7 @@ pub async fn resolve_target_rental_unified(
     // Show header hint
     println!(
         "{}",
-        style("  Type      | Provider        | IP              | Loc  | GPU                       | Status       | Created").dim()
+        style("  Type      | Provider        | IP              | Loc  | GPU                            | Status       | Created").dim()
     );
 
     // Use dialoguer to select
@@ -548,22 +548,30 @@ pub async fn resolve_offering_unified(
                 "N/A".to_string()
             };
 
+            let base_gpu = if let Some(ref interconnect) = offering.interconnect {
+                format!(
+                    "{}x {} ({})",
+                    offering.gpu_count,
+                    offering.gpu_type.as_str().to_uppercase(),
+                    interconnect
+                )
+            } else {
+                format!(
+                    "{}x {}",
+                    offering.gpu_count,
+                    offering.gpu_type.as_str().to_uppercase()
+                )
+            };
+
+            let display_gpu = if offering.is_spot {
+                format!("{} (Spot)", base_gpu)
+            } else {
+                base_gpu
+            };
+
             unified_items.push(UnifiedOfferingItem {
                 offering_type: OfferingType::SecureGpu,
-                display_gpu: if let Some(ref interconnect) = offering.interconnect {
-                    format!(
-                        "{}x {} ({})",
-                        offering.gpu_count,
-                        offering.gpu_type.as_str().to_uppercase(),
-                        interconnect
-                    )
-                } else {
-                    format!(
-                        "{}x {}",
-                        offering.gpu_count,
-                        offering.gpu_type.as_str().to_uppercase()
-                    )
-                },
+                display_gpu,
                 display_provider: format!("{}", offering.provider),
                 display_country: extract_country_code(&offering.region)
                     .unwrap_or("--")
@@ -715,9 +723,9 @@ pub async fn resolve_offering_unified(
             };
 
             format!(
-                "{} │ {:<20} │ {:<15} │ {:<4} │ {:<8} │ {}",
+                "{} │ {:<25} │ {:<15} │ {:<4} │ {:<8} │ {}",
                 style(type_label).cyan(),
-                truncate(&item.display_gpu, 20),
+                truncate(&item.display_gpu, 25),
                 truncate(&item.display_provider, 15),
                 item.display_country,
                 item.display_memory,
@@ -729,7 +737,7 @@ pub async fn resolve_offering_unified(
     // Show header hint
     println!(
         "{}",
-        style("  Type      │ GPU/CPU              │ Provider        │ Loc  │ Memory   │ Price")
+        style("  Type      │ GPU/CPU                   │ Provider        │ Loc  │ Memory   │ Price")
             .dim()
     );
 
