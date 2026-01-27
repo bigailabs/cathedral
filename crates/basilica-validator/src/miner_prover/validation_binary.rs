@@ -1474,14 +1474,6 @@ impl BinaryValidator {
         Ok(Some(node_result))
     }
 
-    /// Calculate binary validation score based on node result
-    pub fn calculate_binary_validation_score(
-        &self,
-        validation_result: &ValidatorBinaryOutput,
-    ) -> Result<f64> {
-        Ok(if validation_result.success { 1.0 } else { 0.0 })
-    }
-
     /// Execute binary validation using validator-binary
     pub async fn execute_binary_validation(
         &self,

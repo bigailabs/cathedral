@@ -813,6 +813,8 @@ impl ValidationNode {
         info!(
             miner_uid = miner_uid,
             node_id = %node_info.id,
+            binary_validation_enabled = binary_config.enabled,
+            binary_timeout_secs = binary_config.execution_timeout_secs,
             "[EVAL_FLOW] Executing full validation"
         );
 
@@ -1080,6 +1082,15 @@ impl ValidationNode {
                     failure_reasons = binary_result.failure_reasons.clone();
                     validation_details.binary_execution_duration =
                         Duration::from_millis(binary_result.execution_time_ms);
+                    info!(
+                        miner_uid = miner_uid,
+                        node_id = %node_info.id,
+                        binary_success = binary_result.success,
+                        failure_reasons_count = failure_reasons.len(),
+                        execution_ms = binary_result.execution_time_ms,
+                        gpu_count = binary_result.gpu_count,
+                        "[EVAL_FLOW] Binary validation completed"
+                    );
 
                     if let Some(ref metrics) = self.metrics {
                         metrics
@@ -1092,6 +1103,19 @@ impl ValidationNode {
                                 binary_validation_successful,
                             )
                             .await;
+                    }
+
+                    // Set failed state if binary validation reported failure
+                    if !binary_validation_successful {
+                        if let Some(ref metrics) = self.metrics {
+                            metrics.prometheus().set_node_validation_state(
+                                &node_id,
+                                miner_uid,
+                                ValidationType::Full,
+                                ValidationState::BinaryValidating,
+                                StateResult::Failed,
+                            );
+                        }
                     }
                 }
                 Err(e) => {

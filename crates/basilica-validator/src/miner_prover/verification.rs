@@ -237,6 +237,8 @@ impl VerificationEngine {
         let validation_results = join_all(validation_futures).await;
 
         // Process all validation results
+        let mut success_count = 0usize;
+        let mut failure_count = 0usize;
         for (node_info, result) in validation_results {
             match result {
                 Ok(result) => {
@@ -249,6 +251,7 @@ impl VerificationEngine {
                         "[EVAL_FLOW] SSH verification completed"
                     );
                     node_results.push(result);
+                    success_count += 1;
                     verification_steps.push(VerificationStep {
                         step_name: format!("ssh_verification_{}", node_info.id),
                         status: StepStatus::Completed,
@@ -280,6 +283,7 @@ impl VerificationEngine {
                         intended_strategy = ?task.intended_validation_strategy,
                         "[EVAL_FLOW] verification failed"
                     );
+                    failure_count += 1;
                     verification_steps.push(VerificationStep {
                         step_name: format!("ssh_verification_{}", node_info.id),
                         status: StepStatus::Failed,
@@ -289,6 +293,15 @@ impl VerificationEngine {
                 }
             }
         }
+        info!(
+            miner_uid = task.miner_uid,
+            intended_strategy = ?task.intended_validation_strategy,
+            total_nodes = total_nodes,
+            completed = success_count,
+            failed = failure_count,
+            skipped = nodes_skipped_for_strategy,
+            "[EVAL_FLOW] Node validation results collected"
+        );
 
         // Step 3: Calculate overall verification score
         let overall_score = if node_results.is_empty() {
@@ -1393,6 +1406,13 @@ impl VerificationEngine {
                 super::validation_strategy::ValidationStrategy::Full
             }
         };
+        debug!(
+            miner_uid = miner_uid,
+            node_id = %node_info.id,
+            determined_strategy = ?strategy,
+            intended_strategy = ?intended_strategy,
+            "[EVAL_FLOW] Validation strategy resolved"
+        );
 
         // Strategy filtering: skip if strategy doesn't match pipeline
         let strategy_matches = matches!(
