@@ -326,11 +326,7 @@ impl SimplePersistence {
         Ok(())
     }
 
-    pub async fn get_node_gpu_uuids(
-        &self,
-        miner_id: &str,
-        node_id: &str,
-    ) -> Result<Vec<String>> {
+    pub async fn get_node_gpu_uuids(&self, miner_id: &str, node_id: &str) -> Result<Vec<String>> {
         let query = r#"
             SELECT gpu_uuid
             FROM gpu_uuid_assignments

@@ -378,7 +378,11 @@ impl RentalManager {
                 });
 
             let is_stale = last_full_validation
-                .map(|ts| chrono::Utc::now() - ts > chrono::Duration::from_std(self.pre_rental_full_validation_max_age).unwrap_or(chrono::Duration::hours(12)))
+                .map(|ts| {
+                    chrono::Utc::now() - ts
+                        > chrono::Duration::from_std(self.pre_rental_full_validation_max_age)
+                            .unwrap_or(chrono::Duration::hours(12))
+                })
                 .unwrap_or(true);
 
             if is_stale {

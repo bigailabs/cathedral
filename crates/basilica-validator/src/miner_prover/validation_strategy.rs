@@ -567,7 +567,11 @@ impl ValidationNode {
             hasher.update(nonce.to_string().as_bytes());
             let expected = hex::encode(hasher.finalize());
             let nonce_cmd = format!("printf '{}' | sha256sum", nonce);
-            match self.ssh_client.execute_command(ssh_details, &nonce_cmd, true).await {
+            match self
+                .ssh_client
+                .execute_command(ssh_details, &nonce_cmd, true)
+                .await
+            {
                 Ok(output) => output
                     .split_whitespace()
                     .next()
