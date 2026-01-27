@@ -34,6 +34,7 @@ pub use verification::VerificationEngine;
 use crate::config::VerificationConfig;
 use crate::k8s_profile_publisher::K8sNodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
+use crate::payouts::CliffManager;
 use crate::persistence::SimplePersistence;
 use crate::ssh::ValidatorSshClient;
 use anyhow::Result;
@@ -48,17 +49,32 @@ pub struct MinerProver {
     verification: VerificationEngine,
 }
 
+/// Dependencies for building a MinerProver instance.
+// TODO: Consider a builder with defaults to keep new params non-breaking.
+pub struct MinerProverParams {
+    pub config: VerificationConfig,
+    pub automatic_config: crate::config::AutomaticVerificationConfig,
+    pub ssh_session_config: crate::config::SshSessionConfig,
+    pub bittensor_service: Arc<BittensorService>,
+    pub persistence: Arc<SimplePersistence>,
+    pub metrics: Option<Arc<ValidatorMetrics>>,
+    pub netuid: u16,
+    pub cliff_manager: Option<Arc<CliffManager>>,
+}
+
 impl MinerProver {
     /// Create a new MinerProver instance
-    pub fn new(
-        config: VerificationConfig,
-        automatic_config: crate::config::AutomaticVerificationConfig,
-        ssh_session_config: crate::config::SshSessionConfig,
-        bittensor_service: Arc<BittensorService>,
-        persistence: Arc<SimplePersistence>,
-        metrics: Option<Arc<ValidatorMetrics>>,
-        netuid: u16,
-    ) -> Result<Self> {
+    pub fn new(params: MinerProverParams) -> Result<Self> {
+        let MinerProverParams {
+            config,
+            automatic_config,
+            ssh_session_config,
+            bittensor_service,
+            persistence,
+            metrics,
+            netuid,
+            cliff_manager,
+        } = params;
         let mut discovery = MinerDiscovery::new(bittensor_service.clone(), netuid);
 
         // Add metrics if available
@@ -85,6 +101,11 @@ impl MinerProver {
             )
             .with_bittensor_service(bittensor_service.clone())
             .with_ssh_client(Arc::new(ValidatorSshClient::new()));
+        let verification_engine_builder = if let Some(cliff_manager) = cliff_manager {
+            verification_engine_builder.with_cliff_manager(cliff_manager)
+        } else {
+            verification_engine_builder
+        };
 
         // Build verification engine with proper SSH key manager
         let verification = tokio::task::block_in_place(|| {

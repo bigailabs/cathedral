@@ -2,11 +2,18 @@ use crate::api::ApiHandler;
 use crate::billing::{BillingApiClient, DeliverySyncTask};
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::collateral::collateral_scan::Collateral;
+use crate::collateral::evaluator::CollateralEvaluator;
+use crate::collateral::evidence::EvidenceStore;
+use crate::collateral::grace_tracker::GracePeriodTracker;
+use crate::collateral::manager::CollateralManager;
+use crate::collateral::price_oracle::PriceOracle;
+use crate::collateral::SlashExecutor;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_bid_server;
 use crate::metrics::ValidatorMetrics;
-use crate::miner_prover::MinerProver;
+use crate::miner_prover::{MinerProver, MinerProverParams};
+use crate::payouts::CliffManager;
 use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -18,7 +25,7 @@ use bittensor::Service as BittensorService;
 use reqwest::Client;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration as StdDuration, SystemTime};
 use sysinfo::{Pid, System};
 use tokio::signal;
 use tracing::{debug, error, info};
@@ -97,16 +104,6 @@ impl ValidatorService {
             info!("No UID discovered - validator may not be registered on chain");
         }
 
-        let miner_prover = MinerProver::new(
-            self.config.verification.clone(),
-            self.config.automatic_verification.clone(),
-            self.config.ssh_session.clone(),
-            bittensor_service.clone(),
-            persistence_arc.clone(),
-            validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
-            self.config.bittensor.common.netuid,
-        )?;
-
         // Initialize weight setter with block-based timing from emission config
         let blocks_per_weight_set = self.config.emission.weight_set_interval_blocks;
 
@@ -141,22 +138,6 @@ impl ValidatorService {
         )?;
         let weight_setter = Arc::new(weight_setter);
 
-        let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
-        let delivery_sync_task = if self.config.billing.enabled {
-            let api_client = Arc::new(BillingApiClient::new(
-                self.config.billing.api_endpoint.clone(),
-                bittensor_service.clone(),
-            ));
-            Some(DeliverySyncTask::new(
-                api_client,
-                delivery_repo.clone(),
-                self.config.billing.sync_interval_secs,
-                self.config.billing.lookback_hours,
-            ))
-        } else {
-            None
-        };
-
         // Create validator hotkey for API handler
         // Get the account ID from bittensor service and convert to SS58 string
         let account_id = bittensor_service.get_account_id();
@@ -173,11 +154,125 @@ impl ValidatorService {
             validator_hotkey.clone(),
         );
 
+        let collateral_metrics = validator_metrics.as_ref().map(|m| m.prometheus());
+        let (collateral_manager, slash_executor, collateral_refresh_interval) =
+            if self.config.collateral.enabled {
+                let collateral_config = self.config.collateral.clone();
+                let refresh_interval = collateral_config.price_refresh_interval();
+                let grace_tracker = Arc::new(GracePeriodTracker::new(
+                    persistence_arc.clone(),
+                    collateral_config.grace_period(),
+                ));
+                let evaluator = Arc::new(CollateralEvaluator::new(
+                    collateral_config.clone(),
+                    grace_tracker.clone(),
+                ));
+                let price_oracle = Arc::new(PriceOracle::new(
+                    collateral_config.taostats_base_url.clone(),
+                    collateral_config.alpha_price_path.clone(),
+                    collateral_config.price_refresh_interval(),
+                    collateral_config.price_stale_after(),
+                ));
+                let collateral_manager = Arc::new(CollateralManager::new(
+                    persistence_arc.clone(),
+                    price_oracle,
+                    evaluator,
+                    grace_tracker.clone(),
+                    collateral_config.clone(),
+                    collateral_metrics.clone(),
+                ));
+                let evidence_store = EvidenceStore::new(
+                    collateral_config.evidence_base_url.clone(),
+                    collateral_config.evidence_storage_path.clone(),
+                );
+                let slash_executor = Arc::new(SlashExecutor::new(
+                    collateral_config.clone(),
+                    evidence_store,
+                    grace_tracker,
+                    persistence_arc.clone(),
+                    collateral_metrics.clone(),
+                ));
+                (
+                    Some(collateral_manager),
+                    Some(slash_executor),
+                    Some(refresh_interval),
+                )
+            } else {
+                (None, None, None)
+            };
+
+        if let (Some(manager), Some(refresh_interval)) =
+            (collateral_manager.clone(), collateral_refresh_interval)
+        {
+            let refresh_secs = refresh_interval.num_seconds().max(1) as u64;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(StdDuration::from_secs(refresh_secs));
+                loop {
+                    interval.tick().await;
+                    manager.refresh_price_cache().await;
+                }
+            });
+        }
+
+        let cliff_manager = if self.config.billing.enabled && self.config.cliff.enabled {
+            let price_oracle = Arc::new(PriceOracle::new(
+                self.config.collateral.taostats_base_url.clone(),
+                self.config.collateral.alpha_price_path.clone(),
+                self.config.collateral.price_refresh_interval(),
+                self.config.collateral.price_stale_after(),
+            ));
+            let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> =
+                bittensor_service.clone();
+            let cliff_manager = CliffManager::new(
+                &self.config.billing,
+                self.config.cliff.clone(),
+                signer,
+                collateral_manager.clone(),
+                price_oracle,
+                gpu_profile_repo.clone(),
+            )?;
+            Some(Arc::new(cliff_manager))
+        } else {
+            None
+        };
+
+        let miner_prover = MinerProver::new(MinerProverParams {
+            config: self.config.verification.clone(),
+            automatic_config: self.config.automatic_verification.clone(),
+            ssh_session_config: self.config.ssh_session.clone(),
+            bittensor_service: bittensor_service.clone(),
+            persistence: persistence_arc.clone(),
+            metrics: validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
+            netuid: self.config.bittensor.common.netuid,
+            cliff_manager: cliff_manager.clone(),
+        })?;
+
+        let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
+        let delivery_sync_task = if self.config.billing.enabled {
+            let api_client = Arc::new(BillingApiClient::new(
+                self.config.billing.api_endpoint.clone(),
+                bittensor_service.clone(),
+                self.config.billing.timeout_secs,
+            )?);
+            Some(DeliverySyncTask::new(
+                api_client,
+                delivery_repo.clone(),
+                self.config.billing.sync_interval_secs,
+                self.config.billing.lookback_hours,
+                cliff_manager.clone(),
+            ))
+        } else {
+            None
+        };
+
         let rental_manager = if let Some(ref metrics) = validator_metrics {
             let manager = crate::rental::RentalManager::create(
                 &self.config,
                 persistence_arc.clone(),
                 metrics.prometheus(),
+                collateral_manager.clone(),
+                slash_executor.clone(),
+                Some(validator_hotkey.as_str().to_string()),
             )
             .await?;
 
@@ -218,7 +313,7 @@ impl ValidatorService {
         // Start scoring update task
         let weight_setter_clone = weight_setter.clone();
         let scoring_task_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // Update scores every 5 minutes
+            let mut interval = tokio::time::interval(StdDuration::from_secs(300)); // Update scores every 5 minutes
             loop {
                 interval.tick().await;
                 if let Err(e) = weight_setter_clone.update_all_miner_scores().await {
@@ -255,9 +350,15 @@ impl ValidatorService {
         let bid_grpc_config = self.config.bid_grpc.clone();
         let bid_persistence = persistence_arc.clone();
         let bid_auction_config = self.config.auction.clone();
+        let bid_collateral_manager = collateral_manager.clone();
         let bid_server_handle = tokio::spawn(async move {
-            if let Err(e) =
-                start_bid_server(bid_grpc_config, bid_persistence, bid_auction_config).await
+            if let Err(e) = start_bid_server(
+                bid_grpc_config,
+                bid_persistence,
+                bid_auction_config,
+                bid_collateral_manager,
+            )
+            .await
             {
                 error!("Bid gRPC server failed: {}", e);
             }
@@ -280,8 +381,11 @@ impl ValidatorService {
             None
         };
 
-        let mut collateral_scan =
-            Collateral::new(self.config.verification.clone(), persistence_arc.clone());
+        let mut collateral_scan = Collateral::new(
+            self.config.verification.clone(),
+            self.config.collateral.clone(),
+            persistence_arc.clone(),
+        );
 
         let collateral_scan_handle = tokio::spawn(async move {
             if let Err(e) = collateral_scan.start().await {
@@ -350,11 +454,11 @@ impl ValidatorService {
         );
         let response = client
             .get(&api_url)
-            .timeout(Duration::from_secs(10))
+            .timeout(StdDuration::from_secs(10))
             .send()
             .await?;
 
-        let elapsed = start_time.elapsed().unwrap_or(Duration::from_secs(0));
+        let elapsed = start_time.elapsed().unwrap_or(StdDuration::from_secs(0));
 
         if response.status().is_success() {
             Ok(elapsed.as_millis() as u64)
@@ -524,8 +628,6 @@ impl ProcessUtils {
 
     /// Stop all validator processes with graceful shutdown and force kill if needed
     async fn stop_all_processes() -> Result<()> {
-        use std::time::{Duration, SystemTime};
-
         let _start_time = SystemTime::now();
 
         let processes = Self::find_validator_processes()?;
@@ -540,15 +642,18 @@ impl ProcessUtils {
         }
 
         // Wait for clean shutdown with timeout
-        let shutdown_timeout = Duration::from_secs(30);
+        let shutdown_timeout = StdDuration::from_secs(30);
         let shutdown_start = SystemTime::now();
 
         let mut remaining_processes = processes.clone();
 
         while !remaining_processes.is_empty()
-            && shutdown_start.elapsed().unwrap_or(Duration::from_secs(0)) < shutdown_timeout
+            && shutdown_start
+                .elapsed()
+                .unwrap_or(StdDuration::from_secs(0))
+                < shutdown_timeout
         {
-            tokio::time::sleep(Duration::from_millis(1000)).await;
+            tokio::time::sleep(StdDuration::from_millis(1000)).await;
 
             remaining_processes.retain(|&pid| matches!(Self::is_process_running(pid), Ok(true)));
         }
@@ -557,7 +662,7 @@ impl ProcessUtils {
         if !remaining_processes.is_empty() {
             for &pid in &remaining_processes {
                 let _ = Self::send_signal_to_process(pid, Signal::Kill);
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(StdDuration::from_millis(500)).await;
             }
         }
 

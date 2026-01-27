@@ -635,12 +635,188 @@ pub struct MinerDelivery {
     pub gpu_category: ::prost::alloc::string::String,
     #[prost(double, tag = "6")]
     pub miner_payment_usd: f64,
+    #[prost(bool, tag = "7")]
+    pub has_collateral: bool,
+    #[prost(string, tag = "8")]
+    pub payout_type: ::prost::alloc::string::String,
+    #[prost(int32, tag = "9")]
+    pub cliff_days_remaining: i32,
+    #[prost(double, tag = "10")]
+    pub pending_alpha: f64,
+    #[prost(string, tag = "11")]
+    pub node_id: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetMinerDeliveryResponse {
     #[prost(message, repeated, tag = "1")]
     pub deliveries: ::prost::alloc::vec::Vec<MinerDelivery>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AccumulateRewardsRequest {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub node_id: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "3")]
+    pub epoch_earnings_usd: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "4")]
+    pub alpha_price_usd: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AccumulateRewardsResponse {
+    #[prost(enumeration = "accumulate_rewards_response::AccumulationType", tag = "1")]
+    pub result: i32,
+    /// Decimal string
+    #[prost(string, tag = "2")]
+    pub pending_alpha: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "3")]
+    pub pending_usd: ::prost::alloc::string::String,
+    #[prost(int32, tag = "4")]
+    pub epochs_accumulated: i32,
+    /// Decimal string
+    #[prost(string, tag = "5")]
+    pub immediate_alpha: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "6")]
+    pub immediate_usd: ::prost::alloc::string::String,
+}
+/// Nested message and enum types in `AccumulateRewardsResponse`.
+pub mod accumulate_rewards_response {
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        PartialEq,
+        Eq,
+        Hash,
+        PartialOrd,
+        Ord,
+        ::prost::Enumeration
+    )]
+    #[repr(i32)]
+    pub enum AccumulationType {
+        Unspecified = 0,
+        Accumulated = 1,
+        ImmediatePayout = 2,
+    }
+    impl AccumulationType {
+        /// String value of the enum field names used in the ProtoBuf definition.
+        ///
+        /// The values are not transformed in any way and thus are considered stable
+        /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+        pub fn as_str_name(&self) -> &'static str {
+            match self {
+                AccumulationType::Unspecified => "ACCUMULATION_TYPE_UNSPECIFIED",
+                AccumulationType::Accumulated => "ACCUMULATED",
+                AccumulationType::ImmediatePayout => "IMMEDIATE_PAYOUT",
+            }
+        }
+        /// Creates an enum from field names used in the ProtoBuf definition.
+        pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+            match value {
+                "ACCUMULATION_TYPE_UNSPECIFIED" => Some(Self::Unspecified),
+                "ACCUMULATED" => Some(Self::Accumulated),
+                "IMMEDIATE_PAYOUT" => Some(Self::ImmediatePayout),
+                _ => None,
+            }
+        }
+    }
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPendingStatusRequest {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub node_id: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetPendingStatusResponse {
+    #[prost(bool, tag = "1")]
+    pub exists: bool,
+    /// Decimal string
+    #[prost(string, tag = "2")]
+    pub pending_alpha: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "3")]
+    pub pending_usd: ::prost::alloc::string::String,
+    #[prost(int32, tag = "4")]
+    pub epochs_accumulated: i32,
+    #[prost(bool, tag = "5")]
+    pub threshold_reached: bool,
+    #[prost(int32, tag = "6")]
+    pub continuous_uptime_minutes: i32,
+    #[prost(message, optional, tag = "7")]
+    pub ramp_start_time: ::core::option::Option<::prost_types::Timestamp>,
+    #[prost(message, optional, tag = "8")]
+    pub threshold_reached_at: ::core::option::Option<::prost_types::Timestamp>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProcessThresholdRequest {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub node_id: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProcessThresholdResponse {
+    /// Decimal string
+    #[prost(string, tag = "1")]
+    pub backpay_alpha: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "2")]
+    pub backpay_usd: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub epochs_paid: i32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateUptimeRequest {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub node_id: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub uptime_minutes: i32,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct UpdateUptimeResponse {
+    #[prost(bool, tag = "1")]
+    pub threshold_reached: bool,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProcessValidationFailureRequest {
+    #[prost(string, tag = "1")]
+    pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub node_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub failure_reason: ::prost::alloc::string::String,
+    #[prost(string, tag = "4")]
+    pub failure_type: ::prost::alloc::string::String,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProcessValidationFailureResponse {
+    /// Decimal string
+    #[prost(string, tag = "1")]
+    pub forfeited_alpha: ::prost::alloc::string::String,
+    /// Decimal string
+    #[prost(string, tag = "2")]
+    pub forfeited_usd: ::prost::alloc::string::String,
+    #[prost(int32, tag = "3")]
+    pub epochs_lost: i32,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1167,6 +1343,157 @@ pub mod billing_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Cliff + backpay operations
+        pub async fn accumulate_miner_rewards(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AccumulateRewardsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AccumulateRewardsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/AccumulateMinerRewards",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "AccumulateMinerRewards",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_pending_rewards_status(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetPendingStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPendingStatusResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/GetPendingRewardsStatus",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "GetPendingRewardsStatus",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn process_threshold_reached(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ProcessThresholdRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProcessThresholdResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/ProcessThresholdReached",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "ProcessThresholdReached",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn update_miner_uptime(
+            &mut self,
+            request: impl tonic::IntoRequest<super::UpdateUptimeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateUptimeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/UpdateMinerUptime",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "UpdateMinerUptime",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn process_validation_failure(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ProcessValidationFailureRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProcessValidationFailureResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::new(
+                        tonic::Code::Unknown,
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/basilica.billing.v1.BillingService/ProcessValidationFailure",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "basilica.billing.v1.BillingService",
+                        "ProcessValidationFailure",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Miner payment operations
         pub async fn get_unpaid_miner_revenue_summary(
             &mut self,
@@ -1344,6 +1671,42 @@ pub mod billing_service_server {
             request: tonic::Request<super::GetMinerDeliveryRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetMinerDeliveryResponse>,
+            tonic::Status,
+        >;
+        /// Cliff + backpay operations
+        async fn accumulate_miner_rewards(
+            &self,
+            request: tonic::Request<super::AccumulateRewardsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AccumulateRewardsResponse>,
+            tonic::Status,
+        >;
+        async fn get_pending_rewards_status(
+            &self,
+            request: tonic::Request<super::GetPendingStatusRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetPendingStatusResponse>,
+            tonic::Status,
+        >;
+        async fn process_threshold_reached(
+            &self,
+            request: tonic::Request<super::ProcessThresholdRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProcessThresholdResponse>,
+            tonic::Status,
+        >;
+        async fn update_miner_uptime(
+            &self,
+            request: tonic::Request<super::UpdateUptimeRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateUptimeResponse>,
+            tonic::Status,
+        >;
+        async fn process_validation_failure(
+            &self,
+            request: tonic::Request<super::ProcessValidationFailureRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ProcessValidationFailureResponse>,
             tonic::Status,
         >;
         /// Miner payment operations
@@ -1960,6 +2323,255 @@ pub mod billing_service_server {
                     let fut = async move {
                         let inner = inner.0;
                         let method = GetMinerDeliverySvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/AccumulateMinerRewards" => {
+                    #[allow(non_camel_case_types)]
+                    struct AccumulateMinerRewardsSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::AccumulateRewardsRequest>
+                    for AccumulateMinerRewardsSvc<T> {
+                        type Response = super::AccumulateRewardsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AccumulateRewardsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::accumulate_miner_rewards(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = AccumulateMinerRewardsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/GetPendingRewardsStatus" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetPendingRewardsStatusSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::GetPendingStatusRequest>
+                    for GetPendingRewardsStatusSvc<T> {
+                        type Response = super::GetPendingStatusResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetPendingStatusRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::get_pending_rewards_status(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = GetPendingRewardsStatusSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/ProcessThresholdReached" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProcessThresholdReachedSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::ProcessThresholdRequest>
+                    for ProcessThresholdReachedSvc<T> {
+                        type Response = super::ProcessThresholdResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ProcessThresholdRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::process_threshold_reached(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = ProcessThresholdReachedSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/UpdateMinerUptime" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateMinerUptimeSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::UpdateUptimeRequest>
+                    for UpdateMinerUptimeSvc<T> {
+                        type Response = super::UpdateUptimeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::UpdateUptimeRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::update_miner_uptime(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = UpdateMinerUptimeSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/basilica.billing.v1.BillingService/ProcessValidationFailure" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProcessValidationFailureSvc<T: BillingService>(pub Arc<T>);
+                    impl<
+                        T: BillingService,
+                    > tonic::server::UnaryService<super::ProcessValidationFailureRequest>
+                    for ProcessValidationFailureSvc<T> {
+                        type Response = super::ProcessValidationFailureResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::ProcessValidationFailureRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BillingService>::process_validation_failure(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let inner = inner.0;
+                        let method = ProcessValidationFailureSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

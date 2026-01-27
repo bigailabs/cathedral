@@ -24,6 +24,7 @@ mod metrics;
 mod miner_prover;
 mod node_profile;
 mod os_process;
+mod payouts;
 mod persistence;
 mod pricing;
 mod rental;

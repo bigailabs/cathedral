@@ -12,6 +12,10 @@ pub enum MisbehaviourType {
     RejectedRental,
     /// Rental halted unexpectedly
     HaltedRental,
+    /// Bid won but deployment failed (bid-and-bail)
+    BidWonDeploymentFailed,
+    /// Rental interrupted (machine yanked / interruptible)
+    InterruptedRental,
     /// Provided malicious or incorrect results
     MaliciousResult,
 }
@@ -23,6 +27,8 @@ impl MisbehaviourType {
             Self::BadRental => "bad_rental",
             Self::RejectedRental => "rejected_rental",
             Self::HaltedRental => "halted_rental",
+            Self::BidWonDeploymentFailed => "bid_won_deployment_failed",
+            Self::InterruptedRental => "interrupted_rental",
             Self::MaliciousResult => "malicious_result",
         }
     }
@@ -36,6 +42,8 @@ impl FromStr for MisbehaviourType {
             "bad_rental" => Ok(Self::BadRental),
             "rejected_rental" => Ok(Self::RejectedRental),
             "halted_rental" => Ok(Self::HaltedRental),
+            "bid_won_deployment_failed" => Ok(Self::BidWonDeploymentFailed),
+            "interrupted_rental" => Ok(Self::InterruptedRental),
             "malicious_result" => Ok(Self::MaliciousResult),
             _ => Err(format!("Unknown misbehaviour type: {}", s)),
         }
@@ -45,6 +53,24 @@ impl FromStr for MisbehaviourType {
 impl fmt::Display for MisbehaviourType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new_misbehaviour_types_roundtrip() {
+        let types = vec![
+            MisbehaviourType::BidWonDeploymentFailed,
+            MisbehaviourType::InterruptedRental,
+        ];
+        for t in types {
+            let as_str = t.as_str();
+            let parsed = MisbehaviourType::from_str(as_str).unwrap();
+            assert_eq!(t, parsed);
+        }
     }
 }
 

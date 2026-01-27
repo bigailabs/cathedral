@@ -15,9 +15,124 @@ use tonic_health::server::health_reporter;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::collateral::{CollateralManager, CollateralState, CollateralStatus};
 use crate::config::auction::AuctionConfig;
 use crate::persistence::bids::{AuctionEpoch, BidRepository, MinerBidRecord};
 use crate::persistence::SimplePersistence;
+
+fn status_rank(state: &CollateralState) -> u8 {
+    match state {
+        CollateralState::Excluded { .. } => 4,
+        CollateralState::Undercollateralized { .. } => 3,
+        CollateralState::Warning { .. } => 2,
+        CollateralState::Sufficient { .. } => 1,
+        CollateralState::Unknown { .. } => 0,
+    }
+}
+
+fn select_worst_status(
+    current: Option<CollateralStatus>,
+    state: CollateralState,
+    next: CollateralStatus,
+) -> CollateralStatus {
+    if let Some(existing) = current {
+        // Compare by rank embedded in status string
+        let existing_rank = status_rank_from_status(&existing.status);
+        let next_rank = status_rank(&state);
+        if next_rank > existing_rank {
+            next
+        } else {
+            existing
+        }
+    } else {
+        next
+    }
+}
+
+fn status_rank_from_status(status: &str) -> u8 {
+    match status {
+        "excluded" => 4,
+        "undercollateralized" => 3,
+        "warning" => 2,
+        "sufficient" => 1,
+        _ => 0,
+    }
+}
+
+fn status_to_proto(
+    status: CollateralStatus,
+) -> basilica_protocol::miner_discovery::CollateralStatus {
+    basilica_protocol::miner_discovery::CollateralStatus {
+        current_alpha: status.current_alpha,
+        current_usd_value: status.current_usd_value,
+        minimum_usd_required: status.minimum_usd_required,
+        status: status.status,
+        grace_period_remaining: status
+            .grace_period_remaining
+            .map(format_duration)
+            .unwrap_or_default(),
+        action_required: status.action_required.unwrap_or_default(),
+        alpha_usd_price: status.alpha_usd_price.unwrap_or_default(),
+        price_stale: status.price_stale,
+    }
+}
+
+fn format_duration(duration: chrono::Duration) -> String {
+    let total_seconds = duration.num_seconds().max(0);
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_status(status: &str) -> CollateralStatus {
+        CollateralStatus {
+            current_alpha: 10.0,
+            current_usd_value: 10.0,
+            minimum_usd_required: 5.0,
+            status: status.to_string(),
+            grace_period_remaining: None,
+            action_required: None,
+            alpha_usd_price: Some(1.0),
+            price_stale: false,
+        }
+    }
+
+    #[test]
+    fn test_format_duration_minutes_only() {
+        let d = chrono::Duration::minutes(42);
+        assert_eq!(format_duration(d), "42m");
+    }
+
+    #[test]
+    fn test_format_duration_hours_minutes() {
+        let d = chrono::Duration::minutes(125);
+        assert_eq!(format_duration(d), "2h 5m");
+    }
+
+    #[test]
+    fn test_select_worst_status_prefers_excluded() {
+        let current = make_status("warning");
+        let next = make_status("excluded");
+        let selected = select_worst_status(
+            Some(current),
+            CollateralState::Excluded {
+                current_usd: 0.0,
+                minimum_usd: 10.0,
+                reason: "expired".to_string(),
+            },
+            next.clone(),
+        );
+        assert_eq!(selected.status, "excluded");
+    }
+}
 
 fn canonicalize_gpu_category(category: &str) -> String {
     category.trim().to_uppercase()
@@ -27,13 +142,19 @@ fn canonicalize_gpu_category(category: &str) -> String {
 pub struct BidService {
     persistence: Arc<SimplePersistence>,
     auction_config: AuctionConfig,
+    collateral_manager: Option<Arc<CollateralManager>>,
 }
 
 impl BidService {
-    pub fn new(persistence: Arc<SimplePersistence>, auction_config: AuctionConfig) -> Self {
+    pub fn new(
+        persistence: Arc<SimplePersistence>,
+        auction_config: AuctionConfig,
+        collateral_manager: Option<Arc<CollateralManager>>,
+    ) -> Self {
         Self {
             persistence,
             auction_config,
+            collateral_manager,
         }
     }
 
@@ -306,10 +427,31 @@ impl MinerDiscovery for BidService {
             "Accepted miner bid"
         );
 
+        let collateral_status = match &self.collateral_manager {
+            Some(manager) => {
+                let mut worst_status = None;
+                for node_id in available_nodes.iter() {
+                    let (state, status) = manager
+                        .get_collateral_status(
+                            &bid.miner_hotkey,
+                            node_id,
+                            &canonical_category,
+                            bid.gpu_count,
+                        )
+                        .await
+                        .map_err(|e| Status::internal(format!("collateral status error: {e}")))?;
+                    worst_status = Some(select_worst_status(worst_status, state, status));
+                }
+                worst_status.map(status_to_proto)
+            }
+            None => None,
+        };
+
         Ok(Response::new(SubmitBidResponse {
             accepted: true,
             error_message: String::new(),
             epoch_id: epoch.id,
+            collateral_status,
         }))
     }
 }
@@ -318,8 +460,9 @@ pub async fn start_bid_server(
     config: GrpcServerConfig,
     persistence: Arc<SimplePersistence>,
     auction_config: AuctionConfig,
+    collateral_manager: Option<Arc<CollateralManager>>,
 ) -> Result<()> {
-    let service = BidService::new(persistence, auction_config);
+    let service = BidService::new(persistence, auction_config, collateral_manager);
     let addr = config
         .listen_address
         .parse()

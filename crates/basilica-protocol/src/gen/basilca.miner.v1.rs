@@ -125,6 +125,36 @@ pub struct SubmitBidResponse {
     pub error_message: ::prost::alloc::string::String,
     #[prost(string, tag = "3")]
     pub epoch_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag = "4")]
+    pub collateral_status: ::core::option::Option<CollateralStatus>,
+}
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CollateralStatus {
+    /// Raw Alpha amount deposited
+    #[prost(double, tag = "1")]
+    pub current_alpha: f64,
+    /// USD value at current price
+    #[prost(double, tag = "2")]
+    pub current_usd_value: f64,
+    /// Minimum for this GPU category
+    #[prost(double, tag = "3")]
+    pub minimum_usd_required: f64,
+    /// "sufficient", "warning", "undercollateralized", "excluded"
+    #[prost(string, tag = "4")]
+    pub status: ::prost::alloc::string::String,
+    /// "23h 45m" or empty
+    #[prost(string, tag = "5")]
+    pub grace_period_remaining: ::prost::alloc::string::String,
+    /// "Deposit 25 Alpha (~$50) to maintain eligibility"
+    #[prost(string, tag = "6")]
+    pub action_required: ::prost::alloc::string::String,
+    /// Current Alpha/USD price used
+    #[prost(double, tag = "7")]
+    pub alpha_usd_price: f64,
+    /// True if price > 1hr old
+    #[prost(bool, tag = "8")]
+    pub price_stale: bool,
 }
 /// Generated client implementations.
 pub mod miner_discovery_client {
