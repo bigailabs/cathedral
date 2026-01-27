@@ -737,8 +737,10 @@ pub async fn resolve_offering_unified(
     // Show header hint
     println!(
         "{}",
-        style("  Type      │ GPU/CPU                   │ Provider        │ Loc  │ Memory   │ Price")
-            .dim()
+        style(
+            "  Type      │ GPU/CPU                   │ Provider        │ Loc  │ Memory   │ Price"
+        )
+        .dim()
     );
 
     // Use dialoguer to select
