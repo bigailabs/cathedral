@@ -58,6 +58,8 @@ Using `@basilica.deployment` decorator:
 | `22_vllm_embeddings.py` | vLLM Embeddings API (E5-Mistral) | `python3 22_vllm_embeddings.py` |
 | `22_vllm_embeddings_llama.py` | vLLM Embeddings with Llama-3.1-8B | `python3 22_vllm_embeddings_llama.py` |
 | `23_vllm_llama_with_embeddings.py` | Llama-3.1-8B + E5 Embeddings (RAG stack) | `python3 23_vllm_llama_with_embeddings.py` |
+| `24_clawdbot.py` | Clawdbot AI agent platform (SDK) | `python3 24_clawdbot.py` |
+| `24_clawdbot.sh` | Clawdbot AI agent platform (CLI) | `./24_clawdbot.sh` |
 
 ## Deployment Options
 
