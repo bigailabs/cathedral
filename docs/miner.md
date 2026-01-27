@@ -377,27 +377,24 @@ Miners can control which validators receive access to their nodes:
 
 #### 1. **Highest Stake** (Recommended)
 
-Assigns ALL nodes to the validator with highest stake.
+Automatically assigns ALL nodes to the validator with highest stake. No configuration required beyond setting the strategy.
 
 ```toml
 [validator_assignment]
 strategy = "highest_stake"
-# Optional: Force assignment to specific validator
-# validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 ```
 
 **Use cases:**
 
-- Production deployment with single trusted validator
+- Production deployment (recommended default)
 - Maximize security by working with most invested validator
-- Simplify operations (single validator relationship)
+- Simplify operations (automatic validator selection)
 
 **Behavior:**
 
 - Fetches validators from Bittensor metagraph
-- If `validator_hotkey` specified: uses that specific validator
-- Otherwise: selects highest-staked validator with validator_permit
-- Only considers online validators (with axon endpoints)
+- Selects highest-staked validator with validator_permit
+- `validator_hotkey` config is ignored with this strategy (use `fixed_assignment` if you need a specific validator)
 
 #### 2. **Fixed Assignment**
 
@@ -1355,16 +1352,14 @@ openssl req -x509 -newkey rsa:4096 -nodes \
 ```toml
 [validator_assignment]
 strategy = "highest_stake"
-# Optional: assign to specific validator
-# validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 ```
 
 **Benefits:**
 
-- Limits exposure to most invested validators
+- Automatically selects the most invested validator
 - Reduces attack surface
 - Simplifies operations and monitoring
-- Easier to establish trust relationships
+- No manual validator tracking required
 
 #### SSH Key Auditing
 
