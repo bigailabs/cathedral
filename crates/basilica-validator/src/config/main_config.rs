@@ -293,6 +293,15 @@ pub struct ValidationServerConfig {
     /// Base delay for workflow retry backoff (milliseconds)
     #[serde(default = "default_workflow_retry_base_delay_ms")]
     pub workflow_retry_base_delay_ms: u64,
+    /// Optional override for CPU PoW threshold (ms per iteration)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cpu_ms_per_iteration: Option<f64>,
+    /// Optional override for minimum bandwidth threshold (Mbps)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_bandwidth_mbps: Option<f64>,
+    /// Optional override for storage PoW duration threshold (ms)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_storage_duration_ms: Option<u64>,
 }
 
 impl Default for ValidationServerConfig {
@@ -309,6 +318,9 @@ impl Default for ValidationServerConfig {
             server_ready_check_interval_ms: default_server_ready_check_interval_ms(),
             max_workflow_retry_attempts: default_max_workflow_retry_attempts(),
             workflow_retry_base_delay_ms: default_workflow_retry_base_delay_ms(),
+            max_cpu_ms_per_iteration: None,
+            min_bandwidth_mbps: None,
+            max_storage_duration_ms: None,
         }
     }
 }

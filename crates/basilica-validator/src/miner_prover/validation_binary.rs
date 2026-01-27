@@ -270,6 +270,26 @@ impl ValidationServerManager {
             .arg("--queue-capacity")
             .arg(config.queue_capacity.to_string());
 
+        // Pass threshold overrides as environment variables if configured
+        if let Some(cpu_threshold) = config.max_cpu_ms_per_iteration {
+            command.env(
+                "VERITAS_MAX_CPU_MS_PER_ITERATION",
+                cpu_threshold.to_string(),
+            );
+        }
+        if let Some(bandwidth_threshold) = config.min_bandwidth_mbps {
+            command.env(
+                "VERITAS_MIN_BANDWIDTH_MBPS",
+                bandwidth_threshold.to_string(),
+            );
+        }
+        if let Some(storage_threshold) = config.max_storage_duration_ms {
+            command.env(
+                "VERITAS_MAX_STORAGE_DURATION_MS",
+                storage_threshold.to_string(),
+            );
+        }
+
         // Configure for process group isolation
         ProcessGroup::configure_command(&mut command);
 
