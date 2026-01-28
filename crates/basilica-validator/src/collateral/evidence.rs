@@ -15,6 +15,36 @@ pub struct SlashEvidence {
     pub node_id: String,
     pub validator_hotkey: String,
     pub shadow_mode: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SlashEvidencePayload<'a> {
+    rental_id: &'a str,
+    misbehaviour_type: &'a str,
+    timestamp: DateTime<Utc>,
+    details: &'a str,
+    miner_hotkey: &'a str,
+    node_id: &'a str,
+    validator_hotkey: &'a str,
+    shadow_mode: bool,
+}
+
+impl SlashEvidence {
+    pub fn signing_payload(&self) -> Result<Vec<u8>> {
+        let payload = SlashEvidencePayload {
+            rental_id: &self.rental_id,
+            misbehaviour_type: &self.misbehaviour_type,
+            timestamp: self.timestamp,
+            details: &self.details,
+            miner_hotkey: &self.miner_hotkey,
+            node_id: &self.node_id,
+            validator_hotkey: &self.validator_hotkey,
+            shadow_mode: self.shadow_mode,
+        };
+        Ok(serde_json::to_vec(&payload)?)
+    }
 }
 
 #[derive(Clone)]
@@ -68,6 +98,7 @@ mod tests {
             node_id: "node".to_string(),
             validator_hotkey: "vhk".to_string(),
             shadow_mode: true,
+            signature: None,
         };
         let (url, json) = store.store(&evidence).await.unwrap();
         assert!(url.contains("validator.example.com"));

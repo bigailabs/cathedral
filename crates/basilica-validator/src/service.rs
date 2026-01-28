@@ -11,7 +11,7 @@ use crate::collateral::SlashExecutor;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_bid_server;
-use crate::metrics::ValidatorMetrics;
+use crate::metrics::{ValidatorMetrics, ValidatorPrometheusMetrics};
 use crate::miner_prover::{MinerProver, MinerProverParams};
 use crate::payouts::CliffManager;
 use crate::persistence::bids::BidRepository;
@@ -28,11 +28,33 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, SystemTime};
 use sysinfo::{Pid, System};
 use tokio::signal;
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info};
 
 /// Main validator service that manages all validator components and their lifecycle
 pub struct ValidatorService {
     config: ValidatorConfig,
+}
+
+struct RuntimeHandles {
+    scoring_task: JoinHandle<()>,
+    weight_setter_task: JoinHandle<()>,
+    delivery_sync_task: Option<JoinHandle<()>>,
+    miner_prover_task: JoinHandle<()>,
+    api_handler_task: JoinHandle<()>,
+    bid_server_task: JoinHandle<()>,
+    cleanup_task: Option<JoinHandle<()>>,
+    collateral_scan_task: JoinHandle<()>,
+}
+
+struct TaskInputs {
+    weight_setter: Arc<WeightSetter>,
+    miner_prover: MinerProver,
+    api_handler: ApiHandler,
+    delivery_sync_task: Option<DeliverySyncTask>,
+    persistence: Arc<SimplePersistence>,
+    collateral_manager: Option<Arc<CollateralManager>>,
+    gpu_profile_repo: Arc<GpuProfileRepository>,
 }
 
 impl ValidatorService {
@@ -43,256 +65,71 @@ impl ValidatorService {
 
     /// Start the validator with all its components
     pub async fn start(&self) -> Result<()> {
-        let storage_path =
-            PathBuf::from(&self.config.storage.data_dir).join("validator_storage.json");
-        let storage = MemoryStorage::with_file(storage_path).await?;
-
-        // Extract database path from URL (remove sqlite: prefix if present)
-        let db_url = &self.config.database.url;
-        let db_path = if let Some(stripped) = db_url.strip_prefix("sqlite:") {
-            stripped
-        } else {
-            db_url
-        };
-
-        debug!("Database URL: {}", db_url);
-        debug!("Database path: {}", db_path);
-
-        // Ensure the database directory exists
-        if let Some(parent) = std::path::Path::new(db_path).parent() {
-            debug!("Creating directory: {:?}", parent);
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let persistence =
-            SimplePersistence::new(db_path, self.config.bittensor.common.hotkey_name.clone())
-                .await?;
-
-        persistence.run_migrations().await?;
-
-        let persistence_arc = Arc::new(persistence);
-
-        // Create GPU profile repository (needed for weight setter and cleanup task)
+        let storage = self.init_storage().await?;
+        let persistence_arc = self.init_persistence().await?;
         let gpu_profile_repo = Arc::new(GpuProfileRepository::new(persistence_arc.pool().clone()));
+        let validator_metrics = self.init_metrics(persistence_arc.clone()).await?;
+        let bittensor_service = self.init_bittensor_service().await?;
 
-        // Initialize metrics system if enabled
-        let validator_metrics = if self.config.metrics.enabled {
-            let metrics =
-                ValidatorMetrics::new(self.config.metrics.clone(), persistence_arc.clone())?;
-            metrics.start_server().await?;
-            info!("Validator metrics server started with GPU metrics collection");
-            Some(metrics)
-        } else {
-            None
-        };
+        let chain_registration = self
+            .init_chain_registration(bittensor_service.clone())
+            .await?;
+        self.log_chain_registration(&chain_registration).await;
 
-        let bittensor_service: Arc<BittensorService> =
-            Arc::new(BittensorService::new(self.config.bittensor.common.clone()).await?);
-
-        // Initialize chain registration and perform startup registration
-        let chain_registration =
-            ChainRegistration::new(&self.config, bittensor_service.clone()).await?;
-
-        // Perform one-time startup registration
-        chain_registration.register_startup().await?;
-        info!("Validator registered on chain with axon endpoint");
-
-        // Log the discovered UID
-        if let Some(uid) = chain_registration.get_discovered_uid().await {
-            info!("Validator registered with discovered UID: {uid}");
-        } else {
-            info!("No UID discovered - validator may not be registered on chain");
-        }
-
-        // Initialize weight setter with block-based timing from emission config
-        let blocks_per_weight_set = self.config.emission.weight_set_interval_blocks;
-
-        // Create GPU scoring engine using the existing gpu_profile_repo
-        let gpu_scoring_engine = if let Some(ref metrics) = validator_metrics {
-            Arc::new(GpuScoringEngine::with_metrics(
-                gpu_profile_repo.clone(),
-                persistence_arc.clone(),
-                Arc::new(metrics.clone()),
-                self.config.emission.clone(),
-            ))
-        } else {
-            Arc::new(GpuScoringEngine::new(
-                gpu_profile_repo.clone(),
-                persistence_arc.clone(),
-                self.config.emission.clone(),
-            ))
-        };
-
-        let weight_setter = WeightSetter::new(
-            self.config.bittensor.common.clone(),
+        let weight_setter = self.build_weight_setter(
             bittensor_service.clone(),
             storage.clone(),
             persistence_arc.clone(),
-            self.config.verification.min_score_threshold,
-            blocks_per_weight_set,
-            gpu_scoring_engine,
-            self.config.emission.clone(),
-            self.config.auction.clone(),
             gpu_profile_repo.clone(),
-            validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
+            validator_metrics.as_ref(),
         )?;
-        let weight_setter = Arc::new(weight_setter);
+        let validator_hotkey = self.build_validator_hotkey(&bittensor_service)?;
 
-        // Create validator hotkey for API handler
-        // Get the account ID from bittensor service and convert to SS58 string
-        let account_id = bittensor_service.get_account_id();
-        let ss58_address = format!("{account_id}");
-        let validator_hotkey = basilica_common::identity::Hotkey::new(ss58_address)
-            .map_err(|e| anyhow::anyhow!("Failed to create hotkey: {}", e))?;
-
-        let mut api_handler = ApiHandler::new(
-            self.config.api.clone(),
+        let mut api_handler = self.build_api_handler(
             persistence_arc.clone(),
             gpu_profile_repo.clone(),
             storage.clone(),
-            self.config.clone(),
             validator_hotkey.clone(),
         );
 
         let collateral_metrics = validator_metrics.as_ref().map(|m| m.prometheus());
-        let (collateral_manager, slash_executor, collateral_refresh_interval) =
-            if self.config.collateral.enabled {
-                let collateral_config = self.config.collateral.clone();
-                let refresh_interval = collateral_config.price_refresh_interval();
-                let grace_tracker = Arc::new(GracePeriodTracker::new(
-                    persistence_arc.clone(),
-                    collateral_config.grace_period(),
-                ));
-                let evaluator = Arc::new(CollateralEvaluator::new(
-                    collateral_config.clone(),
-                    grace_tracker.clone(),
-                ));
-                let price_oracle = Arc::new(PriceOracle::new(
-                    collateral_config.taostats_base_url.clone(),
-                    collateral_config.alpha_price_path.clone(),
-                    collateral_config.price_refresh_interval(),
-                    collateral_config.price_stale_after(),
-                ));
-                let collateral_manager = Arc::new(CollateralManager::new(
-                    persistence_arc.clone(),
-                    price_oracle,
-                    evaluator,
-                    grace_tracker.clone(),
-                    collateral_config.clone(),
-                    collateral_metrics.clone(),
-                ));
-                let evidence_store = EvidenceStore::new(
-                    collateral_config.evidence_base_url.clone(),
-                    collateral_config.evidence_storage_path.clone(),
-                );
-                let slash_executor = Arc::new(SlashExecutor::new(
-                    collateral_config.clone(),
-                    evidence_store,
-                    grace_tracker,
-                    persistence_arc.clone(),
-                    collateral_metrics.clone(),
-                ));
-                (
-                    Some(collateral_manager),
-                    Some(slash_executor),
-                    Some(refresh_interval),
-                )
-            } else {
-                (None, None, None)
-            };
+        let (collateral_manager, slash_executor, collateral_refresh_interval) = self
+            .init_collateral_components(
+                persistence_arc.clone(),
+                collateral_metrics.clone(),
+                bittensor_service.clone(),
+            );
+        self.spawn_collateral_refresh(collateral_manager.clone(), collateral_refresh_interval);
 
-        if let (Some(manager), Some(refresh_interval)) =
-            (collateral_manager.clone(), collateral_refresh_interval)
-        {
-            let refresh_secs = refresh_interval.num_seconds().max(1) as u64;
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(StdDuration::from_secs(refresh_secs));
-                loop {
-                    interval.tick().await;
-                    manager.refresh_price_cache().await;
-                }
-            });
-        }
+        let cliff_manager = self.init_cliff_manager(
+            bittensor_service.clone(),
+            collateral_manager.clone(),
+            gpu_profile_repo.clone(),
+        )?;
 
-        let cliff_manager = if self.config.billing.enabled && self.config.cliff.enabled {
-            let price_oracle = Arc::new(PriceOracle::new(
-                self.config.collateral.taostats_base_url.clone(),
-                self.config.collateral.alpha_price_path.clone(),
-                self.config.collateral.price_refresh_interval(),
-                self.config.collateral.price_stale_after(),
-            ));
-            let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> =
-                bittensor_service.clone();
-            let cliff_manager = CliffManager::new(
-                &self.config.billing,
-                self.config.cliff.clone(),
-                signer,
-                collateral_manager.clone(),
-                price_oracle,
-                gpu_profile_repo.clone(),
-            )?;
-            Some(Arc::new(cliff_manager))
-        } else {
-            None
-        };
-
-        let miner_prover = MinerProver::new(MinerProverParams {
-            config: self.config.verification.clone(),
-            automatic_config: self.config.automatic_verification.clone(),
-            ssh_session_config: self.config.ssh_session.clone(),
-            bittensor_service: bittensor_service.clone(),
-            persistence: persistence_arc.clone(),
-            metrics: validator_metrics.as_ref().map(|m| Arc::new(m.clone())),
-            netuid: self.config.bittensor.common.netuid,
-            cliff_manager: cliff_manager.clone(),
-        })?;
+        let miner_prover = self.init_miner_prover(
+            bittensor_service.clone(),
+            persistence_arc.clone(),
+            validator_metrics.as_ref(),
+            cliff_manager.clone(),
+        )?;
 
         let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
-        let delivery_sync_task = if self.config.billing.enabled {
-            let api_client = Arc::new(BillingApiClient::new(
-                self.config.billing.api_endpoint.clone(),
-                bittensor_service.clone(),
-                self.config.billing.timeout_secs,
-            )?);
-            Some(DeliverySyncTask::new(
-                api_client,
-                delivery_repo.clone(),
-                self.config.billing.sync_interval_secs,
-                self.config.billing.lookback_hours,
-                cliff_manager.clone(),
-            ))
-        } else {
-            None
-        };
+        let delivery_sync_task = self.init_delivery_sync_task(
+            bittensor_service.clone(),
+            delivery_repo.clone(),
+            cliff_manager.clone(),
+        )?;
 
-        let rental_manager = if let Some(ref metrics) = validator_metrics {
-            let manager = crate::rental::RentalManager::create(
-                &self.config,
+        let rental_manager = self
+            .init_rental_manager(
                 persistence_arc.clone(),
-                metrics.prometheus(),
+                validator_metrics.as_ref(),
                 collateral_manager.clone(),
                 slash_executor.clone(),
-                Some(validator_hotkey.as_str().to_string()),
+                &validator_hotkey,
             )
             .await?;
-
-            manager.start();
-
-            manager
-                .initialize_rental_metrics()
-                .await
-                .context("Failed to initialize rental metrics")?;
-
-            manager
-                .initialize_node_metrics()
-                .await
-                .context("Failed to initialize node metrics")?;
-
-            Some(manager)
-        } else {
-            tracing::warn!("Rental manager disabled: metrics must be enabled for rentals");
-            None
-        };
 
         if let Ok(miner_client) = miner_prover
             .get_verification_engine()
@@ -305,15 +142,344 @@ impl ValidatorService {
             api_handler = api_handler.with_rental_manager(Arc::new(rental_manager));
         }
 
-        // Store metrics for cleanup (if needed)
-        let _validator_metrics = validator_metrics;
-
         info!("All components initialized successfully");
 
-        // Start scoring update task
-        let weight_setter_clone = weight_setter.clone();
-        let scoring_task_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(StdDuration::from_secs(300)); // Update scores every 5 minutes
+        let handles = self
+            .spawn_tasks(TaskInputs {
+                weight_setter,
+                miner_prover,
+                api_handler,
+                delivery_sync_task,
+                persistence: persistence_arc.clone(),
+                collateral_manager: collateral_manager.clone(),
+                gpu_profile_repo: gpu_profile_repo.clone(),
+            })
+            .await;
+
+        info!("Validator started successfully - all services running");
+        signal::ctrl_c().await?;
+        info!("Shutdown signal received, stopping validator...");
+
+        self.shutdown(handles);
+
+        info!("Validator shutdown complete");
+        Ok(())
+    }
+
+    async fn init_storage(&self) -> Result<MemoryStorage> {
+        let storage_path =
+            PathBuf::from(&self.config.storage.data_dir).join("validator_storage.json");
+        MemoryStorage::with_file(storage_path).await
+    }
+
+    fn resolve_db_path(&self) -> Result<String> {
+        let db_url = &self.config.database.url;
+        let db_path = if let Some(stripped) = db_url.strip_prefix("sqlite:") {
+            stripped
+        } else {
+            db_url
+        };
+        debug!("Database URL: {}", db_url);
+        debug!("Database path: {}", db_path);
+        if let Some(parent) = std::path::Path::new(db_path).parent() {
+            debug!("Creating directory: {:?}", parent);
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(db_path.to_string())
+    }
+
+    async fn init_persistence(&self) -> Result<Arc<SimplePersistence>> {
+        let db_path = self.resolve_db_path()?;
+        let persistence =
+            SimplePersistence::new(&db_path, self.config.bittensor.common.hotkey_name.clone())
+                .await?;
+        persistence.run_migrations().await?;
+        Ok(Arc::new(persistence))
+    }
+
+    async fn init_metrics(
+        &self,
+        persistence: Arc<SimplePersistence>,
+    ) -> Result<Option<ValidatorMetrics>> {
+        if !self.config.metrics.enabled {
+            return Ok(None);
+        }
+        let metrics = ValidatorMetrics::new(self.config.metrics.clone(), persistence)?;
+        metrics.start_server().await?;
+        info!("Validator metrics server started with GPU metrics collection");
+        Ok(Some(metrics))
+    }
+
+    async fn init_bittensor_service(&self) -> Result<Arc<BittensorService>> {
+        Ok(Arc::new(
+            BittensorService::new(self.config.bittensor.common.clone()).await?,
+        ))
+    }
+
+    async fn init_chain_registration(
+        &self,
+        bittensor_service: Arc<BittensorService>,
+    ) -> Result<ChainRegistration> {
+        let chain_registration = ChainRegistration::new(&self.config, bittensor_service).await?;
+        chain_registration.register_startup().await?;
+        Ok(chain_registration)
+    }
+
+    async fn log_chain_registration(&self, chain_registration: &ChainRegistration) {
+        info!("Validator registered on chain with axon endpoint");
+        if let Some(uid) = chain_registration.get_discovered_uid().await {
+            info!("Validator registered with discovered UID: {uid}");
+        } else {
+            info!("No UID discovered - validator may not be registered on chain");
+        }
+    }
+
+    fn build_weight_setter(
+        &self,
+        bittensor_service: Arc<BittensorService>,
+        storage: MemoryStorage,
+        persistence: Arc<SimplePersistence>,
+        gpu_profile_repo: Arc<GpuProfileRepository>,
+        validator_metrics: Option<&ValidatorMetrics>,
+    ) -> Result<Arc<WeightSetter>> {
+        let gpu_scoring_engine = if let Some(metrics) = validator_metrics {
+            Arc::new(GpuScoringEngine::with_metrics(
+                gpu_profile_repo.clone(),
+                persistence.clone(),
+                Arc::new(metrics.clone()),
+                self.config.emission.clone(),
+            ))
+        } else {
+            Arc::new(GpuScoringEngine::new(
+                gpu_profile_repo.clone(),
+                persistence.clone(),
+                self.config.emission.clone(),
+            ))
+        };
+
+        let weight_setter = WeightSetter::new(
+            self.config.bittensor.common.clone(),
+            bittensor_service,
+            storage,
+            persistence,
+            self.config.verification.min_score_threshold,
+            self.config.emission.weight_set_interval_blocks,
+            gpu_scoring_engine,
+            self.config.emission.clone(),
+            self.config.auction.clone(),
+            gpu_profile_repo,
+            validator_metrics.map(|m| Arc::new(m.clone())),
+        )?;
+        Ok(Arc::new(weight_setter))
+    }
+
+    fn build_validator_hotkey(
+        &self,
+        bittensor_service: &BittensorService,
+    ) -> Result<basilica_common::identity::Hotkey> {
+        let account_id = bittensor_service.get_account_id();
+        let ss58_address = format!("{account_id}");
+        basilica_common::identity::Hotkey::new(ss58_address)
+            .map_err(|e| anyhow::anyhow!("Failed to create hotkey: {}", e))
+    }
+
+    fn build_api_handler(
+        &self,
+        persistence: Arc<SimplePersistence>,
+        gpu_profile_repo: Arc<GpuProfileRepository>,
+        storage: MemoryStorage,
+        validator_hotkey: basilica_common::identity::Hotkey,
+    ) -> ApiHandler {
+        ApiHandler::new(
+            self.config.api.clone(),
+            persistence,
+            gpu_profile_repo,
+            storage,
+            self.config.clone(),
+            validator_hotkey,
+        )
+    }
+
+    fn init_collateral_components(
+        &self,
+        persistence: Arc<SimplePersistence>,
+        collateral_metrics: Option<Arc<ValidatorPrometheusMetrics>>,
+        signer: Arc<BittensorService>,
+    ) -> (
+        Option<Arc<CollateralManager>>,
+        Option<Arc<SlashExecutor>>,
+        Option<chrono::Duration>,
+    ) {
+        if !self.config.collateral.enabled {
+            return (None, None, None);
+        }
+
+        let collateral_config = self.config.collateral.clone();
+        let refresh_interval = collateral_config.price_refresh_interval();
+        let grace_tracker = Arc::new(GracePeriodTracker::new(
+            persistence.clone(),
+            collateral_config.grace_period(),
+        ));
+        let evaluator = Arc::new(CollateralEvaluator::new(
+            collateral_config.clone(),
+            grace_tracker.clone(),
+        ));
+        let price_oracle = Arc::new(PriceOracle::new(
+            collateral_config.taostats_base_url.clone(),
+            collateral_config.alpha_price_path.clone(),
+            collateral_config.price_refresh_interval(),
+            collateral_config.price_stale_after(),
+        ));
+        let collateral_manager = Arc::new(CollateralManager::new(
+            persistence.clone(),
+            price_oracle,
+            evaluator,
+            grace_tracker.clone(),
+            collateral_config.clone(),
+            collateral_metrics.clone(),
+        ));
+        let evidence_store = EvidenceStore::new(
+            collateral_config.evidence_base_url.clone(),
+            collateral_config.evidence_storage_path.clone(),
+        );
+        let slash_executor = Arc::new(SlashExecutor::new(
+            collateral_config,
+            evidence_store,
+            grace_tracker,
+            collateral_metrics,
+            Some(signer),
+        ));
+        (
+            Some(collateral_manager),
+            Some(slash_executor),
+            Some(refresh_interval),
+        )
+    }
+
+    fn spawn_collateral_refresh(
+        &self,
+        collateral_manager: Option<Arc<CollateralManager>>,
+        refresh_interval: Option<chrono::Duration>,
+    ) {
+        if let (Some(manager), Some(interval)) = (collateral_manager, refresh_interval) {
+            let refresh_secs = interval.num_seconds().max(1) as u64;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(StdDuration::from_secs(refresh_secs));
+                loop {
+                    interval.tick().await;
+                    manager.refresh_price_cache().await;
+                }
+            });
+        }
+    }
+
+    fn init_cliff_manager(
+        &self,
+        bittensor_service: Arc<BittensorService>,
+        collateral_manager: Option<Arc<CollateralManager>>,
+        gpu_profile_repo: Arc<GpuProfileRepository>,
+    ) -> Result<Option<Arc<CliffManager>>> {
+        if !self.config.billing.enabled || !self.config.cliff.enabled {
+            return Ok(None);
+        }
+        let price_oracle = Arc::new(PriceOracle::new(
+            self.config.collateral.taostats_base_url.clone(),
+            self.config.collateral.alpha_price_path.clone(),
+            self.config.collateral.price_refresh_interval(),
+            self.config.collateral.price_stale_after(),
+        ));
+        let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> = bittensor_service;
+        let cliff_manager = CliffManager::new(
+            &self.config.billing,
+            self.config.cliff.clone(),
+            signer,
+            collateral_manager,
+            price_oracle,
+            gpu_profile_repo,
+        )?;
+        Ok(Some(Arc::new(cliff_manager)))
+    }
+
+    fn init_miner_prover(
+        &self,
+        bittensor_service: Arc<BittensorService>,
+        persistence: Arc<SimplePersistence>,
+        validator_metrics: Option<&ValidatorMetrics>,
+        cliff_manager: Option<Arc<CliffManager>>,
+    ) -> Result<MinerProver> {
+        MinerProver::new(MinerProverParams {
+            config: self.config.verification.clone(),
+            automatic_config: self.config.automatic_verification.clone(),
+            ssh_session_config: self.config.ssh_session.clone(),
+            bittensor_service,
+            persistence,
+            metrics: validator_metrics.map(|m| Arc::new(m.clone())),
+            netuid: self.config.bittensor.common.netuid,
+            cliff_manager,
+        })
+    }
+
+    fn init_delivery_sync_task(
+        &self,
+        bittensor_service: Arc<BittensorService>,
+        delivery_repo: Arc<MinerDeliveryRepository>,
+        cliff_manager: Option<Arc<CliffManager>>,
+    ) -> Result<Option<DeliverySyncTask>> {
+        if !self.config.billing.enabled {
+            return Ok(None);
+        }
+        let api_client = Arc::new(BillingApiClient::new(
+            self.config.billing.api_endpoint.clone(),
+            bittensor_service,
+            self.config.billing.timeout_secs,
+        )?);
+        Ok(Some(DeliverySyncTask::new(
+            api_client,
+            delivery_repo,
+            self.config.billing.sync_interval_secs,
+            self.config.billing.lookback_hours,
+            cliff_manager,
+        )))
+    }
+
+    async fn init_rental_manager(
+        &self,
+        persistence: Arc<SimplePersistence>,
+        validator_metrics: Option<&ValidatorMetrics>,
+        collateral_manager: Option<Arc<CollateralManager>>,
+        slash_executor: Option<Arc<SlashExecutor>>,
+        validator_hotkey: &basilica_common::identity::Hotkey,
+    ) -> Result<Option<crate::rental::RentalManager>> {
+        let Some(metrics) = validator_metrics else {
+            tracing::warn!("Rental manager disabled: metrics must be enabled for rentals");
+            return Ok(None);
+        };
+        let manager = crate::rental::RentalManager::create(
+            &self.config,
+            persistence,
+            metrics.prometheus(),
+            collateral_manager,
+            slash_executor,
+            Some(validator_hotkey.as_str().to_string()),
+        )
+        .await?;
+
+        manager.start();
+        manager
+            .initialize_rental_metrics()
+            .await
+            .context("Failed to initialize rental metrics")?;
+        manager
+            .initialize_node_metrics()
+            .await
+            .context("Failed to initialize node metrics")?;
+        Ok(Some(manager))
+    }
+
+    async fn spawn_tasks(&self, inputs: TaskInputs) -> RuntimeHandles {
+        let weight_setter_clone = inputs.weight_setter.clone();
+        let scoring_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(StdDuration::from_secs(300));
             loop {
                 interval.tick().await;
                 if let Err(e) = weight_setter_clone.update_all_miner_scores().await {
@@ -322,36 +488,35 @@ impl ValidatorService {
             }
         });
 
-        let weight_setter_clone = weight_setter.clone();
-        let weight_setter_handle = tokio::spawn(async move {
-            if let Err(e) = weight_setter_clone.start().await {
+        let weight_setter_task = tokio::spawn(async move {
+            if let Err(e) = inputs.weight_setter.start().await {
                 error!("Weight setter task failed: {}", e);
             }
         });
 
-        let delivery_sync_handle = delivery_sync_task.map(|delivery_sync_task| {
+        let delivery_sync_handle = inputs.delivery_sync_task.map(|delivery_sync_task| {
             tokio::spawn(async move {
                 delivery_sync_task.run().await;
             })
         });
 
-        let miner_prover_handle = tokio::spawn(async move {
-            if let Err(e) = miner_prover.start().await {
+        let miner_prover_task = tokio::spawn(async move {
+            if let Err(e) = inputs.miner_prover.start().await {
                 error!("Miner prover task failed: {}", e);
             }
         });
 
-        let api_handler_handle = tokio::spawn(async move {
-            if let Err(e) = api_handler.start().await {
+        let api_handler_task = tokio::spawn(async move {
+            if let Err(e) = inputs.api_handler.start().await {
                 error!("API handler task failed: {}", e);
             }
         });
 
         let bid_grpc_config = self.config.bid_grpc.clone();
-        let bid_persistence = persistence_arc.clone();
+        let bid_persistence = inputs.persistence.clone();
         let bid_auction_config = self.config.auction.clone();
-        let bid_collateral_manager = collateral_manager.clone();
-        let bid_server_handle = tokio::spawn(async move {
+        let bid_collateral_manager = inputs.collateral_manager.clone();
+        let bid_server_task = tokio::spawn(async move {
             if let Err(e) = start_bid_server(
                 bid_grpc_config,
                 bid_persistence,
@@ -364,14 +529,12 @@ impl ValidatorService {
             }
         });
 
-        // Start cleanup task if enabled
-        let cleanup_task_handle = if self.config.cleanup.enabled {
+        let cleanup_task = if self.config.cleanup.enabled {
             let cleanup_config = self.config.cleanup.clone();
-            let gpu_repo = gpu_profile_repo.clone();
-            let bid_repo = Arc::new(BidRepository::new(persistence_arc.pool().clone()));
-
+            let bid_repo = Arc::new(BidRepository::new(inputs.persistence.pool().clone()));
             Some(tokio::spawn(async move {
-                let cleanup_task = CleanupTask::new(cleanup_config, gpu_repo, bid_repo);
+                let cleanup_task =
+                    CleanupTask::new(cleanup_config, inputs.gpu_profile_repo, bid_repo);
                 if let Err(e) = cleanup_task.start().await {
                     error!("Database cleanup task failed: {}", e);
                 }
@@ -384,38 +547,39 @@ impl ValidatorService {
         let mut collateral_scan = Collateral::new(
             self.config.verification.clone(),
             self.config.collateral.clone(),
-            persistence_arc.clone(),
+            inputs.persistence.clone(),
         );
-
-        let collateral_scan_handle = tokio::spawn(async move {
+        let collateral_scan_task = tokio::spawn(async move {
             if let Err(e) = collateral_scan.start().await {
                 error!("Collateral scan task failed: {}", e);
             }
         });
 
-        info!("Validator started successfully - all services running");
+        RuntimeHandles {
+            scoring_task,
+            weight_setter_task,
+            delivery_sync_task: delivery_sync_handle,
+            miner_prover_task,
+            api_handler_task,
+            bid_server_task,
+            cleanup_task,
+            collateral_scan_task,
+        }
+    }
 
-        signal::ctrl_c().await?;
-        info!("Shutdown signal received, stopping validator...");
-
-        scoring_task_handle.abort();
-        weight_setter_handle.abort();
-        if let Some(handle) = delivery_sync_handle {
+    fn shutdown(&self, handles: RuntimeHandles) {
+        handles.scoring_task.abort();
+        handles.weight_setter_task.abort();
+        if let Some(handle) = handles.delivery_sync_task {
             handle.abort();
         }
-        miner_prover_handle.abort();
-        if let Some(handle) = cleanup_task_handle {
+        handles.miner_prover_task.abort();
+        if let Some(handle) = handles.cleanup_task {
             handle.abort();
         }
-        api_handler_handle.abort();
-        bid_server_handle.abort();
-
-        collateral_scan_handle.abort();
-
-        // SQLite connections will be closed automatically when dropped
-        info!("Validator shutdown complete");
-
-        Ok(())
+        handles.api_handler_task.abort();
+        handles.bid_server_task.abort();
+        handles.collateral_scan_task.abort();
     }
 
     /// Stop all running validator processes

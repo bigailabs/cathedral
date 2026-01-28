@@ -57,7 +57,7 @@ impl SimplePersistence {
         }
     }
 
-    pub async fn get_collateral_amount(
+    async fn get_collateral_amount_internal(
         &self,
         hotkey: &str,
         node_id: &str,
@@ -80,27 +80,20 @@ impl SimplePersistence {
         }
     }
 
+    pub async fn get_collateral_amount(
+        &self,
+        hotkey: &str,
+        node_id: &str,
+    ) -> Result<Option<U256>, anyhow::Error> {
+        self.get_collateral_amount_internal(hotkey, node_id).await
+    }
+
     pub async fn get_alpha_collateral_amount(
         &self,
         hotkey: &str,
         node_id: &str,
     ) -> Result<Option<U256>, anyhow::Error> {
-        let row = sqlx::query(
-            "SELECT collateral FROM collateral_status WHERE hotkey = ? AND node_id = ?",
-        )
-        .bind(hotkey)
-        .bind(node_id)
-        .fetch_optional(self.pool())
-        .await?;
-
-        if let Some(row) = row {
-            let collateral_str: String = row.get(0);
-            let collateral = U256::from_str_radix(&collateral_str, 10)
-                .map_err(|_| anyhow::anyhow!("Invalid collateral"))?;
-            Ok(Some(collateral))
-        } else {
-            Ok(None)
-        }
+        self.get_collateral_amount_internal(hotkey, node_id).await
     }
 
     pub async fn handle_deposit(&self, deposit: &Deposit) -> Result<(), anyhow::Error> {

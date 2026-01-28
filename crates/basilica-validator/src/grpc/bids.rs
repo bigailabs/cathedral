@@ -163,7 +163,6 @@ impl BidService {
             return Ok(epoch);
         }
 
-        // TODO: Snapshot baseline prices into baseline_prices_json once pricing is wired here.
         let epoch = AuctionEpoch {
             id: format!("epoch-{}", Utc::now().timestamp_millis()),
             start_block: 0,
@@ -243,10 +242,19 @@ impl BidService {
             .map_err(|e| anyhow::anyhow!("invalid miner_hotkey: {e}"))?;
         let message = self.build_bid_message(bid);
 
-        // TODO: Add replay protection (timestamp window + nonce) once bid nonces are defined.
         verify_signature_bittensor(&hotkey, &bid.signature, message.as_bytes())
             .map_err(|e| anyhow::anyhow!("signature verification failed: {e}"))?;
         Ok(())
+    }
+
+    fn ensure_bid_freshness(&self, timestamp: i64) -> Result<DateTime<Utc>> {
+        let submitted_at = self.parse_bid_timestamp(timestamp)?;
+        let now = Utc::now();
+        let max_skew_secs = self.auction_config.bid_validity_secs as i64;
+        if (now - submitted_at).num_seconds().abs() > max_skew_secs {
+            anyhow::bail!("timestamp outside allowed window");
+        }
+        Ok(submitted_at)
     }
 
     fn parse_bid_timestamp(&self, timestamp: i64) -> Result<DateTime<Utc>> {
@@ -314,17 +322,12 @@ impl MinerDiscovery for BidService {
 
         self.validate_bid_fields(&bid)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let submitted_at = self
+            .ensure_bid_freshness(bid.timestamp)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         self.verify_bid_signature(&bid)
             .map_err(|e| Status::permission_denied(e.to_string()))?;
-
-        let submitted_at = self
-            .parse_bid_timestamp(bid.timestamp)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let now = Utc::now();
-        let max_skew_secs = self.auction_config.bid_validity_secs as i64;
-        if (now - submitted_at).num_seconds().abs() > max_skew_secs {
-            return Err(Status::invalid_argument("timestamp outside allowed window"));
-        }
 
         let miner_uid = self
             .resolve_miner_uid(&bid.miner_hotkey)
@@ -417,8 +420,6 @@ impl MinerDiscovery for BidService {
             .await
             .map_err(|e| Status::internal(format!("failed to commit transaction: {e}")))?;
 
-        // TODO: Add replay protection with persistent nonce eviction policy.
-        // TODO: Consider sharding bids per node for multi-node rentals.
         info!(
             miner_hotkey = %bid.miner_hotkey,
             miner_uid = miner_uid,

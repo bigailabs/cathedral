@@ -24,8 +24,9 @@ use crate::billing::BillingClient;
 use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::config::auction::AuctionConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
+use crate::persistence::bids::{BidRepository, MinerBidRecord};
 use crate::persistence::entities::MisbehaviourType;
-use crate::persistence::{bids::BidRepository, SimplePersistence, ValidatorPersistence};
+use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 
 /// Rental manager for coordinating container deployments
@@ -88,6 +89,26 @@ pub(crate) fn get_gpu_type(node_details: &crate::api::types::NodeDetails) -> Str
             category.to_string()
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+struct RentalSelection {
+    node_id: String,
+    miner_id: String,
+    reservation_id: Option<String>,
+    miner_bid_rate: Option<f64>,
+    miner_uid: Option<u16>,
+}
+
+impl RentalSelection {
+    fn from_request(request: &RentalRequest) -> Self {
+        Self {
+            node_id: request.node_id.clone(),
+            miner_id: request.miner_id.clone(),
+            reservation_id: None,
+            miner_bid_rate: None,
+            miner_uid: None,
+        }
+    }
 }
 
 impl RentalManager {
@@ -342,21 +363,97 @@ impl RentalManager {
 
     /// Start a new rental
     pub async fn start_rental(&self, request: RentalRequest) -> Result<RentalResponse> {
-        async fn release_reservation(
-            persistence: &SimplePersistence,
-            reservation_id: &Option<String>,
-        ) {
-            if let Some(reservation_id) = reservation_id {
-                let _ = persistence.release_reservation(reservation_id).await;
-            }
-        }
-
-        let mut node_id = request.node_id.clone();
-        let mut miner_id = request.miner_id.clone();
-
-        // Generate rental ID
         let rental_id = format!("rental-{}", Uuid::new_v4());
+        let mut selection = RentalSelection::from_request(&request);
+        let gpu_category = self
+            .resolve_gpu_category(&request, &selection.node_id, &selection.miner_id)
+            .await;
+        self.apply_bid_selection(&request, &rental_id, &gpu_category, &mut selection)
+            .await?;
+        selection.miner_uid = extract_miner_uid(&selection.miner_id);
 
+        self.ensure_not_banned(&selection).await?;
+        let ssh_endpoint = self.require_ssh_endpoint(&selection).await?;
+        let node_details = self.require_node_details(&selection, &rental_id).await?;
+
+        tracing::info!(
+            node_id = %selection.node_id,
+            rental_id = %rental_id,
+            miner_uid = selection.miner_uid,
+            "Starting rental {} on node {} (miner: {})",
+            rental_id,
+            selection.node_id,
+            selection.miner_id
+        );
+
+        self.ensure_no_active_rental(&selection, &rental_id).await?;
+
+        let ssh_credentials = self.build_ssh_credentials(&ssh_endpoint);
+        let container_client = self.create_container_client(&ssh_credentials)?;
+
+        let container_info = self
+            .deploy_container_or_log_failure(
+                &container_client,
+                &request,
+                &rental_id,
+                &selection,
+                &ssh_credentials,
+            )
+            .await?;
+
+        let end_user_ssh_credentials =
+            self.resolve_end_user_ssh_credentials(&ssh_endpoint, &container_info);
+
+        let finalize_result = self
+            .finalize_rental(
+                &request,
+                &rental_id,
+                &selection,
+                &ssh_credentials,
+                &node_details,
+                &container_info,
+            )
+            .await;
+        self.release_reservation(&selection.reservation_id).await;
+
+        let rental_info = match finalize_result {
+            Ok(info) => info,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+
+        self.record_rental_metrics(&request, &selection, &rental_info);
+
+        tracing::info!(
+            node_id = %selection.node_id,
+            rental_id = %rental_id,
+            miner_uid = selection.miner_uid,
+            "Successfully started rental {} on node {} (miner: {})",
+            rental_id,
+            selection.node_id,
+            selection.miner_id
+        );
+
+        Ok(RentalResponse {
+            rental_id,
+            ssh_credentials: end_user_ssh_credentials,
+            container_info,
+        })
+    }
+
+    async fn release_reservation(&self, reservation_id: &Option<String>) {
+        if let Some(reservation_id) = reservation_id {
+            let _ = self.persistence.release_reservation(reservation_id).await;
+        }
+    }
+
+    async fn resolve_gpu_category(
+        &self,
+        request: &RentalRequest,
+        node_id: &str,
+        miner_id: &str,
+    ) -> String {
         let mut gpu_category = request
             .container_spec
             .resources
@@ -365,231 +462,284 @@ impl RentalManager {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         if gpu_category == "unknown" {
-            if let Ok(Some(details)) = self.persistence.get_node_details(&node_id, &miner_id).await
-            {
+            if let Ok(Some(details)) = self.persistence.get_node_details(node_id, miner_id).await {
                 gpu_category = get_gpu_type(&details);
             }
         }
-        let mut miner_bid_rate: Option<f64> = None;
-        let mut reservation_id: Option<String> = None;
-        if gpu_category != "unknown" {
-            let bid_repo = BidRepository::new(self.persistence.pool().clone());
-            if let Some(epoch) = bid_repo.get_active_epoch().await? {
-                let cutoff = chrono::Utc::now()
-                    - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
-                let candidates = bid_repo
-                    .get_bid_candidates_with_available_nodes(
-                        &epoch.id,
-                        &gpu_category,
-                        request.container_spec.resources.gpu_count,
-                        cutoff,
-                        self.auction_config.bid_node_freshness_secs,
-                        50,
-                    )
-                    .await?;
-                let mut preferred = Vec::new();
-                let mut fallback = Vec::new();
-                for (candidate, candidate_node_id) in candidates {
-                    let preference = match &self.collateral_manager {
-                        Some(collateral) => {
-                            collateral
-                                .get_preference(
-                                    &candidate.miner_hotkey,
-                                    &candidate_node_id,
-                                    &gpu_category,
-                                    request.container_spec.resources.gpu_count,
-                                )
-                                .await
-                        }
-                        None => CollateralPreference::Fallback,
-                    };
-                    match preference {
-                        CollateralPreference::Preferred => {
-                            preferred.push((candidate, candidate_node_id))
-                        }
-                        CollateralPreference::Fallback => {
-                            fallback.push((candidate, candidate_node_id))
-                        }
-                        CollateralPreference::Excluded => {
-                            tracing::info!(
-                                node_id = %candidate_node_id,
-                                miner_uid = candidate.miner_uid,
-                                "Skipping excluded node due to insufficient collateral"
-                            );
-                        }
-                    }
-                }
+        gpu_category
+    }
 
-                let mut ordered = preferred;
-                ordered.extend(fallback);
-                // TODO: Make max reservation attempts configurable.
-                for (candidate, candidate_node_id) in ordered.into_iter().take(3) {
-                    let winning_miner_id = format!("miner_{}", candidate.miner_uid);
-                    let expires_at = chrono::Utc::now()
-                        + chrono::Duration::seconds(
-                            self.auction_config.bid_reservation_secs as i64,
-                        );
-                    let candidate_reservation_id = format!("reserve-{}", Uuid::new_v4());
-                    let reserved = self
-                        .persistence
-                        .reserve_node(
-                            &candidate_reservation_id,
-                            &candidate_node_id,
-                            &winning_miner_id,
-                            &rental_id,
-                            expires_at,
-                        )
-                        .await?;
-                    if reserved {
-                        miner_bid_rate = Some(candidate.bid_per_hour);
-                        node_id = candidate_node_id;
-                        miner_id = winning_miner_id;
-                        reservation_id = Some(candidate_reservation_id);
-                        break;
-                    }
-                }
-                // TODO: Add location/latency constraints to bid selection once available.
-                // TODO: Consider per-node bids for multi-node rentals.
-                // TODO: Implement secure cloud fallback when all community miners fail.
-                //       If all bid winners fail deployment, fall back to aggregator_service
-                //       to provision on secure cloud (AWS/GCP/Lambda). The API layer should
-                //       handle this fallback since it has access to both validator and aggregator.
-                //       See: basilica-backend/crates/basilica-api/src/api/routes/secure_cloud.rs
-                // TODO: If all candidates are excluded for collateral, consider fallback to
-                //       secure cloud rather than failing the rental.
+    async fn apply_bid_selection(
+        &self,
+        request: &RentalRequest,
+        rental_id: &str,
+        gpu_category: &str,
+        selection: &mut RentalSelection,
+    ) -> Result<()> {
+        if gpu_category == "unknown" {
+            return Ok(());
+        }
+
+        let bid_repo = BidRepository::new(self.persistence.pool().clone());
+        let Some(epoch) = bid_repo.get_active_epoch().await? else {
+            return Ok(());
+        };
+
+        let cutoff = chrono::Utc::now()
+            - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
+        let candidates = bid_repo
+            .get_bid_candidates_with_available_nodes(
+                &epoch.id,
+                gpu_category,
+                request.container_spec.resources.gpu_count,
+                cutoff,
+                self.auction_config.bid_node_freshness_secs,
+                50,
+            )
+            .await?;
+        let ordered = self
+            .rank_bid_candidates(
+                candidates,
+                gpu_category,
+                request.container_spec.resources.gpu_count,
+            )
+            .await;
+
+        const MAX_RESERVATION_ATTEMPTS: usize = 3;
+        for (candidate, candidate_node_id) in ordered.into_iter().take(MAX_RESERVATION_ATTEMPTS) {
+            let winning_miner_id = format!("miner_{}", candidate.miner_uid);
+            let expires_at = chrono::Utc::now()
+                + chrono::Duration::seconds(self.auction_config.bid_reservation_secs as i64);
+            let candidate_reservation_id = format!("reserve-{}", Uuid::new_v4());
+            let reserved = self
+                .persistence
+                .reserve_node(
+                    &candidate_reservation_id,
+                    &candidate_node_id,
+                    &winning_miner_id,
+                    rental_id,
+                    expires_at,
+                )
+                .await?;
+            if reserved {
+                selection.miner_bid_rate = Some(candidate.bid_per_hour);
+                selection.node_id = candidate_node_id;
+                selection.miner_id = winning_miner_id;
+                selection.reservation_id = Some(candidate_reservation_id);
+                break;
             }
         }
 
-        let miner_uid = extract_miner_uid(&miner_id);
+        Ok(())
+    }
 
-        // Check if node is banned before attempting rental
-        if let Some(miner_uid) = miner_uid {
-            if let Some(ban_expiry) = self.ban_manager.get_ban_expiry(miner_uid, &node_id).await? {
-                release_reservation(self.persistence.as_ref(), &reservation_id).await;
+    async fn rank_bid_candidates(
+        &self,
+        candidates: Vec<(MinerBidRecord, String)>,
+        gpu_category: &str,
+        gpu_count: u32,
+    ) -> Vec<(MinerBidRecord, String)> {
+        let mut preferred = Vec::new();
+        let mut fallback = Vec::new();
+
+        for (candidate, candidate_node_id) in candidates {
+            let preference = match &self.collateral_manager {
+                Some(collateral) => {
+                    collateral
+                        .get_preference(
+                            &candidate.miner_hotkey,
+                            &candidate_node_id,
+                            gpu_category,
+                            gpu_count,
+                        )
+                        .await
+                }
+                None => CollateralPreference::Fallback,
+            };
+            match preference {
+                CollateralPreference::Preferred => preferred.push((candidate, candidate_node_id)),
+                CollateralPreference::Fallback => fallback.push((candidate, candidate_node_id)),
+                CollateralPreference::Excluded => {
+                    tracing::info!(
+                        node_id = %candidate_node_id,
+                        miner_uid = candidate.miner_uid,
+                        "Skipping excluded node due to insufficient collateral"
+                    );
+                }
+            }
+        }
+
+        let mut ordered = preferred;
+        ordered.extend(fallback);
+        ordered
+    }
+
+    async fn ensure_not_banned(&self, selection: &RentalSelection) -> Result<()> {
+        if let Some(miner_uid) = selection.miner_uid {
+            if let Some(ban_expiry) = self
+                .ban_manager
+                .get_ban_expiry(miner_uid, &selection.node_id)
+                .await?
+            {
+                self.release_reservation(&selection.reservation_id).await;
                 tracing::warn!(
-                    node_id = %node_id,
-                    miner_id = %miner_id,
+                    node_id = %selection.node_id,
+                    miner_id = %selection.miner_id,
                     miner_uid = miner_uid,
                     ban_expiry = %ban_expiry,
                     "Attempted rental on a banned node; rejecting request"
                 );
                 return Err(anyhow::anyhow!(
                     "Node {} is currently banned. Ban expires at: {:?}",
-                    node_id,
+                    selection.node_id,
                     ban_expiry
                 ));
             }
         }
+        Ok(())
+    }
+
+    async fn require_ssh_endpoint(&self, selection: &RentalSelection) -> Result<String> {
         let ssh_endpoint = self
             .persistence
-            .get_node_ssh_endpoint(&node_id, &miner_id)
+            .get_node_ssh_endpoint(&selection.node_id, &selection.miner_id)
             .await?;
-        let ssh_endpoint = match ssh_endpoint {
-            Some(endpoint) => endpoint,
+        match ssh_endpoint {
+            Some(endpoint) => Ok(endpoint),
             None => {
-                release_reservation(self.persistence.as_ref(), &reservation_id).await;
-                return Err(anyhow::anyhow!(
+                self.release_reservation(&selection.reservation_id).await;
+                Err(anyhow::anyhow!(
                     "SSH endpoint not found for node {} (miner: {})",
-                    node_id,
-                    miner_id
-                ));
+                    selection.node_id,
+                    selection.miner_id
+                ))
             }
-        };
+        }
+    }
 
+    async fn require_node_details(
+        &self,
+        selection: &RentalSelection,
+        rental_id: &str,
+    ) -> Result<crate::api::types::NodeDetails> {
         let node_details = self
             .persistence
-            .get_node_details(&node_id, &miner_id)
+            .get_node_details(&selection.node_id, &selection.miner_id)
             .await?;
-        let node_details = match node_details {
-            Some(details) => details,
+        match node_details {
+            Some(details) => Ok(details),
             None => {
-                release_reservation(self.persistence.as_ref(), &reservation_id).await;
+                self.release_reservation(&selection.reservation_id).await;
                 tracing::warn!(
-                    node_id = %node_id,
-                    miner_uid = miner_uid,
+                    node_id = %selection.node_id,
+                    miner_uid = selection.miner_uid,
                     rental_id = %rental_id,
                     "Node details not found for node {} (miner: {})",
-                    node_id,
-                    miner_id
+                    selection.node_id,
+                    selection.miner_id
                 );
-                return Err(anyhow::anyhow!(
+                Err(anyhow::anyhow!(
                     "Node details not found for node {} (miner: {})",
-                    node_id,
-                    miner_id
-                ));
+                    selection.node_id,
+                    selection.miner_id
+                ))
             }
-        };
+        }
+    }
 
-        tracing::info!(
-            node_id = %node_id,
-            rental_id = %rental_id,
-            miner_uid = miner_uid,
-            "Starting rental {} on node {} (miner: {})",
-            rental_id,
-            node_id,
-            miner_id
-        );
-
-        // Check if node already has active rental
+    async fn ensure_no_active_rental(
+        &self,
+        selection: &RentalSelection,
+        rental_id: &str,
+    ) -> Result<()> {
         if self
             .persistence
-            .has_active_rental(&node_id, &miner_id)
+            .has_active_rental(&selection.node_id, &selection.miner_id)
             .await?
         {
-            release_reservation(self.persistence.as_ref(), &reservation_id).await;
+            self.release_reservation(&selection.reservation_id).await;
             tracing::warn!(
-                node_id = %node_id,
+                node_id = %selection.node_id,
                 rental_id = %rental_id,
-                miner_uid = miner_uid,
+                miner_uid = selection.miner_uid,
                 "Node {} already has an active rental, cannot start another",
-                node_id
+                selection.node_id
             );
             return Err(anyhow::anyhow!(
                 "Node {} already has an active rental",
-                node_id
+                selection.node_id
             ));
         }
+        Ok(())
+    }
 
-        // Format SSH credentials with username (default to root)
-        // ssh_endpoint format from DB is "host:port", need to add username
-        let ssh_credentials = if ssh_endpoint.contains('@') {
-            ssh_endpoint.clone()
+    fn build_ssh_credentials(&self, ssh_endpoint: &str) -> String {
+        if ssh_endpoint.contains('@') {
+            ssh_endpoint.to_string()
         } else {
             format!("root@{}", ssh_endpoint)
-        };
+        }
+    }
 
-        let container_client = self.create_container_client(&ssh_credentials)?;
+    fn resolve_end_user_ssh_credentials(
+        &self,
+        ssh_endpoint: &str,
+        container_info: &ContainerInfo,
+    ) -> Option<String> {
+        container_info
+            .mapped_ports
+            .iter()
+            .find(|p| p.container_port == 22)
+            .map(|ssh_mapping| {
+                let host = if ssh_endpoint.contains('@') {
+                    ssh_endpoint
+                        .split('@')
+                        .nth(1)
+                        .and_then(|hp| hp.split(':').next())
+                        .unwrap_or("localhost")
+                } else {
+                    ssh_endpoint.split(':').next().unwrap_or("localhost")
+                };
+                format!("root@{}:{}", host, ssh_mapping.host_port)
+            })
+    }
 
-        // Deploy container with end-user's SSH public key
-        let container_info = match self
+    async fn deploy_container_or_log_failure(
+        &self,
+        container_client: &ContainerClient,
+        request: &RentalRequest,
+        rental_id: &str,
+        selection: &RentalSelection,
+        ssh_credentials: &str,
+    ) -> Result<ContainerInfo> {
+        match self
             .deployment_manager
             .deploy_container(
-                &container_client,
+                container_client,
                 &request.container_spec,
-                &rental_id,
+                rental_id,
                 &request.ssh_public_key,
             )
             .await
         {
-            Ok(info) => info,
+            Ok(info) => Ok(info),
             Err(e) => {
-                release_reservation(self.persistence.as_ref(), &reservation_id).await;
+                self.release_reservation(&selection.reservation_id).await;
                 tracing::error!(
-                    node_id = %node_id,
+                    node_id = %selection.node_id,
                     rental_id = %rental_id,
-                    miner_uid = miner_uid,
+                    miner_uid = selection.miner_uid,
                     "[RENTAL_FLOW] Failed to deploy container on node {}: {}",
-                    node_id,
+                    selection.node_id,
                     e
                 );
 
-                // Log misbehaviour for deployment failure
-                if let Some(miner_uid) = miner_uid {
+                if let Some(miner_uid) = selection.miner_uid {
                     let details = BanManager::create_rental_failure_details(
-                        &rental_id,
-                        &node_id,
+                        rental_id,
+                        &selection.node_id,
                         &e.to_string(),
-                        Some(&ssh_credentials),
+                        Some(ssh_credentials),
                     );
 
                     if let Err(log_err) = tokio::task::block_in_place(|| {
@@ -597,8 +747,8 @@ impl RentalManager {
                             self.ban_manager
                                 .log_misbehaviour(
                                     miner_uid,
-                                    &node_id,
-                                    if miner_bid_rate.is_some() {
+                                    &selection.node_id,
+                                    if selection.miner_bid_rate.is_some() {
                                         MisbehaviourType::BidWonDeploymentFailed
                                     } else {
                                         MisbehaviourType::BadRental
@@ -610,110 +760,85 @@ impl RentalManager {
                     }) {
                         tracing::warn!(
                             "Failed to log misbehaviour for node {}: {}",
-                            node_id,
+                            selection.node_id,
                             log_err
                         );
                     }
                 }
 
-                return Err(e);
+                Err(e)
             }
-        };
+        }
+    }
 
-        // From this point on, cleanup container on any error
+    async fn finalize_rental(
+        &self,
+        request: &RentalRequest,
+        rental_id: &str,
+        selection: &RentalSelection,
+        ssh_credentials: &str,
+        node_details: &crate::api::types::NodeDetails,
+        container_info: &ContainerInfo,
+    ) -> Result<RentalInfo> {
         let container_id = container_info.container_id.clone();
+        let mut metadata = request.metadata.clone();
+        if let Some(rate) = selection.miner_bid_rate {
+            metadata.insert("miner_bid_rate".to_string(), rate.to_string());
+        }
 
-        // Check if SSH port is mapped and construct proper SSH credentials for end-user
-        let end_user_ssh_credentials = container_info
-            .mapped_ports
-            .iter()
-            .find(|p| p.container_port == 22)
-            .map(|ssh_mapping| {
-                // Extract host from ssh_endpoint (format: "host:port" or "user@host:port")
-                let host = if ssh_endpoint.contains('@') {
-                    ssh_endpoint
-                        .split('@')
-                        .nth(1)
-                        .and_then(|hp| hp.split(':').next())
-                        .unwrap_or("localhost")
-                } else {
-                    ssh_endpoint.split(':').next().unwrap_or("localhost")
-                };
-                format!("root@{}:{}", host, ssh_mapping.host_port)
-            });
-
-        let finalize_rental = async {
-            let mut metadata = request.metadata.clone();
-            if let Some(rate) = miner_bid_rate {
-                metadata.insert("miner_bid_rate".to_string(), rate.to_string());
-            }
-
-            // Store rental info
-            let now = chrono::Utc::now();
-            let rental_info = RentalInfo {
-                rental_id: rental_id.clone(),
-                validator_hotkey: request.validator_hotkey.clone(),
-                node_id: node_id.clone(),
-                container_id: container_id.clone(),
-                ssh_session_id: format!("direct-{}", rental_id),
-                ssh_credentials: ssh_credentials.clone(),
-                state: RentalState::Active,
-                created_at: now,
-                updated_at: now,
-                container_spec: request.container_spec.clone(),
-                miner_id: miner_id.clone(),
-                node_details: node_details.clone(),
-                metadata,
-            };
-
-            // Save to persistence
-            self.persistence.save_rental(&rental_info).await?;
-
-            Ok::<RentalInfo, anyhow::Error>(rental_info)
+        let now = chrono::Utc::now();
+        let rental_info = RentalInfo {
+            rental_id: rental_id.to_string(),
+            validator_hotkey: request.validator_hotkey.clone(),
+            node_id: selection.node_id.clone(),
+            container_id: container_id.clone(),
+            ssh_session_id: format!("direct-{}", rental_id),
+            ssh_credentials: ssh_credentials.to_string(),
+            state: RentalState::Active,
+            created_at: now,
+            updated_at: now,
+            container_spec: request.container_spec.clone(),
+            miner_id: selection.miner_id.clone(),
+            node_details: node_details.clone(),
+            metadata,
         };
 
-        let rental_info = match finalize_rental.await {
-            Ok(result) => result,
-            Err(e) => {
-                release_reservation(self.persistence.as_ref(), &reservation_id).await;
-                tracing::error!(
-                    node_id = %node_id,
-                    rental_id = %rental_id,
-                    miner_uid = miner_uid,
-                    container_id = %container_id,
-                    "[RENTAL_FLOW] Failed to finalize rental setup: {}",
-                    e
-                );
-                self.cleanup_container_on_failure(
-                    &ssh_credentials,
-                    &container_id,
-                    &node_id,
-                    &rental_id,
-                )
-                .await;
-                return Err(e);
-            }
-        };
-
-        release_reservation(self.persistence.as_ref(), &reservation_id).await;
-
-        if let Some(miner_uid) = miner_uid {
-            let gpu_type = get_gpu_type(&rental_info.node_details);
-
-            // Record rental status
-            self.metrics.record_node_rental_status(
-                &request.node_id,
-                miner_uid,
-                &gpu_type,
-                true, // is_rented = true
-            );
-
-            // Record rental creation
-            self.metrics.record_rental_created(miner_uid, &gpu_type);
-
-            tracing::debug!(
-                node_id = %node_id,
+        if let Err(e) = self.persistence.save_rental(&rental_info).await {
+            tracing::error!(
+                node_id = %selection.node_id,
                 rental_id = %rental_id,
+                miner_uid = selection.miner_uid,
+                container_id = %container_id,
+                "[RENTAL_FLOW] Failed to finalize rental setup: {}",
+                e
+            );
+            self.cleanup_container_on_failure(
+                ssh_credentials,
+                &container_id,
+                &selection.node_id,
+                rental_id,
+            )
+            .await;
+            return Err(e);
+        }
+
+        Ok(rental_info)
+    }
+
+    fn record_rental_metrics(
+        &self,
+        request: &RentalRequest,
+        selection: &RentalSelection,
+        rental_info: &RentalInfo,
+    ) {
+        if let Some(miner_uid) = selection.miner_uid {
+            let gpu_type = get_gpu_type(&rental_info.node_details);
+            self.metrics
+                .record_node_rental_status(&request.node_id, miner_uid, &gpu_type, true);
+            self.metrics.record_rental_created(miner_uid, &gpu_type);
+            tracing::debug!(
+                node_id = %selection.node_id,
+                rental_id = %rental_info.rental_id,
                 miner_uid = miner_uid,
                 "Recorded rental start for node {} (miner_uid: {}, gpu_type: {})",
                 request.node_id,
@@ -721,22 +846,6 @@ impl RentalManager {
                 gpu_type
             );
         }
-
-        tracing::info!(
-            node_id = %node_id,
-            rental_id = %rental_id,
-            miner_uid = miner_uid,
-            "Successfully started rental {} on node {} (miner: {})",
-            rental_id,
-            node_id,
-            miner_id
-        );
-
-        Ok(RentalResponse {
-            rental_id,
-            ssh_credentials: end_user_ssh_credentials,
-            container_info,
-        })
     }
 
     /// Get rental status

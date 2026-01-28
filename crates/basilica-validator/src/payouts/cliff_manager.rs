@@ -10,8 +10,9 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use crate::billing::api_client::{
-    AccumulateRewardsRequestBody, PendingRewardsQuery, ProcessThresholdRequestBody,
-    ProcessValidationFailureRequestBody, UpdateUptimeRequestBody, ValidatorSigner,
+    AccumulateRewardsRequestBody, PendingRewardsQuery, PendingStatusResponseBody,
+    ProcessThresholdRequestBody, ProcessValidationFailureRequestBody, UpdateUptimeRequestBody,
+    ValidatorSigner,
 };
 use crate::billing::BillingApiClient;
 use crate::collateral::manager::CollateralManager;
@@ -68,29 +69,14 @@ impl CliffManager {
             )]);
         }
 
-        if delivery.node_id.is_empty() {
-            return Err(anyhow::anyhow!("node_id is required for cliff processing"));
-        }
+        self.ensure_node_id(&delivery)?;
 
-        let gpu_count = self
-            .get_gpu_count_for_category(delivery.miner_uid, &delivery.gpu_category)
-            .await
-            .unwrap_or(1);
-
-        let has_collateral = if self.config.collateral_bypasses_cliff {
-            self.has_sufficient_collateral(
-                &delivery.miner_hotkey,
-                &delivery.node_id,
-                &delivery.gpu_category,
-                gpu_count,
-            )
+        let gpu_count = self.resolve_gpu_count(&delivery).await;
+        if self
+            .should_bypass_cliff(&delivery, gpu_count)
             .await
             .unwrap_or(false)
-        } else {
-            false
-        };
-
-        if has_collateral {
+        {
             return Ok(vec![Self::decorate_delivery(
                 delivery,
                 true,
@@ -100,58 +86,116 @@ impl CliffManager {
             )]);
         }
 
-        let pending = self
-            .billing_api
-            .get_pending_rewards_status(PendingRewardsQuery {
-                miner_hotkey: delivery.miner_hotkey.clone(),
-                node_id: delivery.node_id.clone(),
-            })
-            .await
-            .context("Failed to get pending rewards status")?;
-
+        let pending = self.fetch_pending_status(&delivery).await?;
         let cliff_days_remaining = Self::cliff_days_remaining(
             self.config.duration_days,
             pending.continuous_uptime_minutes,
         );
 
         let mut outputs = Vec::new();
-
-        if pending.exists
-            && !pending.threshold_reached
-            && pending.continuous_uptime_minutes
-                >= (self.config.duration_days as i32 * MINUTES_PER_DAY)
-            && Self::parse_decimal(&pending.pending_alpha).unwrap_or(Decimal::ZERO) > Decimal::ZERO
-        {
-            let backpay = self
-                .billing_api
-                .process_threshold_reached(ProcessThresholdRequestBody {
-                    miner_hotkey: delivery.miner_hotkey.clone(),
-                    node_id: delivery.node_id.clone(),
-                })
-                .await
-                .context("Failed to process cliff backpay")?;
-
-            let backpay_usd = Self::parse_decimal(&backpay.backpay_usd)
-                .unwrap_or(Decimal::ZERO)
-                .to_f64()
-                .unwrap_or(0.0);
-
-            // TODO: Decide whether backpay should inherit total_hours or remain zero.
-            outputs.push(MinerDelivery {
-                miner_hotkey: delivery.miner_hotkey.clone(),
-                miner_uid: delivery.miner_uid,
-                total_hours: 0.0,
-                user_revenue_usd: backpay_usd,
-                gpu_category: delivery.gpu_category.clone(),
-                miner_payment_usd: backpay_usd,
-                has_collateral: false,
-                payout_type: "backpay".to_string(),
-                cliff_days_remaining: 0,
-                pending_alpha: 0.0,
-                node_id: delivery.node_id.clone(),
-            });
+        if let Some(backpay) = self.maybe_process_backpay(&delivery, &pending).await? {
+            outputs.push(backpay);
         }
 
+        outputs.extend(
+            self.accumulate_rewards(delivery, cliff_days_remaining)
+                .await?,
+        );
+
+        Ok(outputs)
+    }
+
+    fn ensure_node_id(&self, delivery: &MinerDelivery) -> Result<()> {
+        if delivery.node_id.is_empty() {
+            anyhow::bail!("node_id is required for cliff processing");
+        }
+        Ok(())
+    }
+
+    async fn resolve_gpu_count(&self, delivery: &MinerDelivery) -> u32 {
+        self.get_gpu_count_for_category(delivery.miner_uid, &delivery.gpu_category)
+            .await
+            .unwrap_or(1)
+    }
+
+    async fn should_bypass_cliff(&self, delivery: &MinerDelivery, gpu_count: u32) -> Result<bool> {
+        if !self.config.collateral_bypasses_cliff {
+            return Ok(false);
+        }
+        self.has_sufficient_collateral(
+            &delivery.miner_hotkey,
+            &delivery.node_id,
+            &delivery.gpu_category,
+            gpu_count,
+        )
+        .await
+    }
+
+    async fn fetch_pending_status(
+        &self,
+        delivery: &MinerDelivery,
+    ) -> Result<PendingStatusResponseBody> {
+        self.billing_api
+            .get_pending_rewards_status(PendingRewardsQuery {
+                miner_hotkey: delivery.miner_hotkey.clone(),
+                node_id: delivery.node_id.clone(),
+            })
+            .await
+            .context("Failed to get pending rewards status")
+    }
+
+    async fn maybe_process_backpay(
+        &self,
+        delivery: &MinerDelivery,
+        pending: &PendingStatusResponseBody,
+    ) -> Result<Option<MinerDelivery>> {
+        if !pending.exists
+            || pending.threshold_reached
+            || pending.continuous_uptime_minutes
+                < (self.config.duration_days as i32 * MINUTES_PER_DAY)
+        {
+            return Ok(None);
+        }
+
+        let pending_alpha = Self::parse_decimal(&pending.pending_alpha).unwrap_or(Decimal::ZERO);
+        if pending_alpha <= Decimal::ZERO {
+            return Ok(None);
+        }
+
+        let backpay = self
+            .billing_api
+            .process_threshold_reached(ProcessThresholdRequestBody {
+                miner_hotkey: delivery.miner_hotkey.clone(),
+                node_id: delivery.node_id.clone(),
+            })
+            .await
+            .context("Failed to process cliff backpay")?;
+
+        let backpay_usd = Self::parse_decimal(&backpay.backpay_usd)
+            .unwrap_or(Decimal::ZERO)
+            .to_f64()
+            .unwrap_or(0.0);
+
+        Ok(Some(MinerDelivery {
+            miner_hotkey: delivery.miner_hotkey.clone(),
+            miner_uid: delivery.miner_uid,
+            total_hours: 0.0,
+            user_revenue_usd: backpay_usd,
+            gpu_category: delivery.gpu_category.clone(),
+            miner_payment_usd: backpay_usd,
+            has_collateral: false,
+            payout_type: "backpay".to_string(),
+            cliff_days_remaining: 0,
+            pending_alpha: 0.0,
+            node_id: delivery.node_id.clone(),
+        }))
+    }
+
+    async fn accumulate_rewards(
+        &self,
+        delivery: MinerDelivery,
+        cliff_days_remaining: i32,
+    ) -> Result<Vec<MinerDelivery>> {
         let alpha_price = self.fetch_alpha_price_usd().await?;
         let epoch_earnings_usd = Decimal::from_f64(delivery.miner_payment_usd)
             .ok_or_else(|| anyhow::anyhow!("Invalid miner_payment_usd"))?;
@@ -177,22 +221,21 @@ impl CliffManager {
                     pending_alpha = %accumulate.pending_alpha,
                     "Miner rewards held due to cliff"
                 );
+                Ok(Vec::new())
             }
             AccumulationType::ImmediatePayout => {
                 let immediate_usd = Self::parse_decimal(&accumulate.immediate_usd)
                     .unwrap_or(epoch_earnings_usd)
                     .to_f64()
                     .unwrap_or(delivery.miner_payment_usd);
-                outputs.push(
-                    Self::decorate_delivery(
-                        delivery,
-                        false,
-                        "immediate",
-                        cliff_days_remaining,
-                        0.0,
-                    )
-                    .with_miner_payment(immediate_usd),
-                );
+                Ok(vec![Self::decorate_delivery(
+                    delivery,
+                    false,
+                    "immediate",
+                    cliff_days_remaining,
+                    0.0,
+                )
+                .with_miner_payment(immediate_usd)])
             }
             AccumulationType::Unspecified => {
                 warn!(
@@ -200,10 +243,9 @@ impl CliffManager {
                     node_id = %delivery.node_id,
                     "Billing returned unspecified accumulation type"
                 );
+                Ok(Vec::new())
             }
         }
-
-        Ok(outputs)
     }
 
     pub async fn update_miner_uptime(
@@ -300,7 +342,6 @@ impl CliffManager {
             }
         }
         if total == 0 {
-            // TODO: Resolve GPU count from miner nodes if assignments are missing.
             total = 1;
         }
         Ok(total)

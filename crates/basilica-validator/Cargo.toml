@@ -49,6 +49,7 @@ lru = { workspace = true }
 eventsource-stream = { workspace = true }
 regex = { workspace = true }
 rust_decimal = { workspace = true }
+bigdecimal = { workspace = true }
 
 # Internal dependencies
 basilica-common = { path = "../basilica-common" }
@@ -71,7 +72,7 @@ tempfile = { workspace = true }
 # Challenge implementation dependencies
 rand = { workspace = true }
 hex = { workspace = true }
-md5 = { workspace = true }
+sha2 = { workspace = true }
 fastrand = { workspace = true }
 
 # System information and process management

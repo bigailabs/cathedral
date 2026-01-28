@@ -6,13 +6,13 @@ use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
 use basilica_common::identity::Hotkey;
+use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use hex::encode;
+use std::str::FromStr;
 use std::sync::Arc;
 use tracing::warn;
 use uuid::Uuid;
-
-const ALPHA_DECIMALS: f64 = 1e18_f64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollateralPreference {
@@ -218,9 +218,12 @@ pub fn node_id_to_hex(node_id: &str) -> Result<String> {
 }
 
 fn u256_to_alpha(amount: alloy_primitives::U256) -> f64 {
-    // TODO: Switch to fixed-point decimal to avoid precision loss for very large values.
-    let amount_f64 = amount.to_string().parse::<f64>().unwrap_or(0.0);
-    amount_f64 / ALPHA_DECIMALS
+    let amount_decimal =
+        BigDecimal::from_str(&amount.to_string()).unwrap_or_else(|_| BigDecimal::from(0));
+    let divisor =
+        BigDecimal::from_str("1000000000000000000").unwrap_or_else(|_| BigDecimal::from(1));
+    let alpha = amount_decimal / divisor;
+    alpha.to_f64().unwrap_or(f64::MAX)
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,7 @@ pub struct PriceOracle {
     stale_after: Duration,
     client: reqwest::Client,
     cache: Arc<RwLock<Option<CachedPrice>>>,
+    fetch_lock: Arc<Mutex<()>>,
 }
 
 impl PriceOracle {
@@ -47,10 +48,17 @@ impl PriceOracle {
             stale_after,
             client: reqwest::Client::new(),
             cache: Arc::new(RwLock::new(None)),
+            fetch_lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub async fn get_alpha_usd_price(&self) -> Result<PriceSnapshot> {
+        if let Some(snapshot) = self.get_cached_if_valid().await {
+            self.log_if_stale(&snapshot);
+            return Ok(snapshot);
+        }
+
+        let _guard = self.fetch_lock.lock().await;
         if let Some(snapshot) = self.get_cached_if_valid().await {
             self.log_if_stale(&snapshot);
             return Ok(snapshot);
@@ -111,7 +119,6 @@ impl PriceOracle {
     fn log_if_stale(&self, snapshot: &PriceSnapshot) {
         if snapshot.is_stale {
             let age_seconds = (Utc::now() - snapshot.fetched_at).num_seconds().max(0);
-            // TODO: Rate-limit staleness warnings to avoid log spam during outages.
             warn!(
                 "Alpha price snapshot is stale (age={}s, stale_after={}s)",
                 age_seconds,
@@ -130,7 +137,6 @@ impl PriceOracle {
                 self.endpoint_path.trim_start_matches('/')
             )
         };
-        // TODO: Update endpoint path once TaoStats publishes a stable Alpha price API.
         let response = self.client.get(url).send().await?.error_for_status()?;
         let payload: AlphaPriceResponse = response.json().await?;
         Ok((payload.price, Utc::now()))
