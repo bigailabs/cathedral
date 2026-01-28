@@ -3,26 +3,27 @@ use crate::collateral::price_oracle::PriceSnapshot;
 use crate::config::collateral::CollateralConfig;
 use anyhow::Result;
 use chrono::Duration;
+use rust_decimal::Decimal;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CollateralState {
     Sufficient {
-        current_usd: f64,
-        minimum_usd: f64,
+        current_usd: Decimal,
+        minimum_usd: Decimal,
     },
     Warning {
-        current_usd: f64,
-        minimum_usd: f64,
+        current_usd: Decimal,
+        minimum_usd: Decimal,
     },
     Undercollateralized {
-        current_usd: f64,
-        minimum_usd: f64,
+        current_usd: Decimal,
+        minimum_usd: Decimal,
         grace_remaining: Duration,
     },
     Excluded {
-        current_usd: f64,
-        minimum_usd: f64,
+        current_usd: Decimal,
+        minimum_usd: Decimal,
         reason: String,
     },
     Unknown {
@@ -32,13 +33,13 @@ pub enum CollateralState {
 
 #[derive(Debug, Clone)]
 pub struct CollateralStatus {
-    pub current_alpha: f64,
-    pub current_usd_value: f64,
-    pub minimum_usd_required: f64,
+    pub current_alpha: Decimal,
+    pub current_usd_value: Decimal,
+    pub minimum_usd_required: Decimal,
     pub status: String,
     pub grace_period_remaining: Option<Duration>,
     pub action_required: Option<String>,
-    pub alpha_usd_price: Option<f64>,
+    pub alpha_usd_price: Option<Decimal>,
     pub price_stale: bool,
 }
 
@@ -55,7 +56,7 @@ impl CollateralEvaluator {
         }
     }
 
-    pub fn get_minimum_usd(&self, gpu_category: &str, gpu_count: u32) -> f64 {
+    pub fn get_minimum_usd(&self, gpu_category: &str, gpu_count: u32) -> Decimal {
         let key = gpu_category.trim().to_uppercase();
         let per_gpu = self
             .config
@@ -63,8 +64,8 @@ impl CollateralEvaluator {
             .get(&key)
             .or_else(|| self.config.minimum_usd_per_gpu.get("DEFAULT"))
             .copied()
-            .unwrap_or(0.0);
-        per_gpu * gpu_count as f64
+            .unwrap_or(Decimal::ZERO);
+        per_gpu * Decimal::from(gpu_count)
     }
 
     pub async fn evaluate(
@@ -73,12 +74,12 @@ impl CollateralEvaluator {
         node_id: &str,
         gpu_category: &str,
         gpu_count: u32,
-        collateral_alpha: f64,
+        collateral_alpha: Decimal,
         price_snapshot: Option<PriceSnapshot>,
     ) -> Result<(CollateralState, CollateralStatus)> {
         let minimum_usd = self.get_minimum_usd(gpu_category, gpu_count);
 
-        if minimum_usd <= 0.0 {
+        if minimum_usd <= Decimal::ZERO {
             let reason = "minimum_usd is not configured".to_string();
             return Ok((
                 CollateralState::Unknown {
@@ -86,7 +87,7 @@ impl CollateralEvaluator {
                 },
                 CollateralStatus {
                     current_alpha: collateral_alpha,
-                    current_usd_value: 0.0,
+                    current_usd_value: Decimal::ZERO,
                     minimum_usd_required: minimum_usd,
                     status: "unknown".to_string(),
                     grace_period_remaining: None,
@@ -98,7 +99,7 @@ impl CollateralEvaluator {
         }
 
         let (current_usd, price_stale, alpha_usd_price) = match price_snapshot {
-            Some(snapshot) if snapshot.alpha_usd > 0.0 => {
+            Some(snapshot) if snapshot.alpha_usd > Decimal::ZERO => {
                 let usd = collateral_alpha * snapshot.alpha_usd;
                 (usd, snapshot.is_stale, Some(snapshot.alpha_usd))
             }
@@ -110,7 +111,7 @@ impl CollateralEvaluator {
                     },
                     CollateralStatus {
                         current_alpha: collateral_alpha,
-                        current_usd_value: 0.0,
+                        current_usd_value: Decimal::ZERO,
                         minimum_usd_required: minimum_usd,
                         status: "unknown".to_string(),
                         grace_period_remaining: None,
@@ -153,7 +154,7 @@ impl CollateralEvaluator {
             let action_required = self.action_required_warning(
                 warning_threshold,
                 current_usd,
-                alpha_usd_price.unwrap_or(0.0),
+                alpha_usd_price.unwrap_or(Decimal::ZERO),
             );
             return Ok((
                 CollateralState::Warning {
@@ -210,8 +211,11 @@ impl CollateralEvaluator {
             ));
         }
 
-        let action_required =
-            self.action_required_urgent(minimum_usd, current_usd, alpha_usd_price.unwrap_or(0.0));
+        let action_required = self.action_required_urgent(
+            minimum_usd,
+            current_usd,
+            alpha_usd_price.unwrap_or(Decimal::ZERO),
+        );
         Ok((
             CollateralState::Undercollateralized {
                 current_usd,
@@ -233,18 +237,23 @@ impl CollateralEvaluator {
 
     fn action_required_warning(
         &self,
-        warning_threshold: f64,
-        current_usd: f64,
-        alpha_usd_price: f64,
+        warning_threshold: Decimal,
+        current_usd: Decimal,
+        alpha_usd_price: Decimal,
     ) -> Option<String> {
-        let needed_usd = (warning_threshold - current_usd).max(0.0);
-        if needed_usd <= 0.0 {
+        let needed_usd = if warning_threshold > current_usd {
+            warning_threshold - current_usd
+        } else {
+            Decimal::ZERO
+        };
+        if needed_usd <= Decimal::ZERO {
             return None;
         }
-        if alpha_usd_price <= 0.0 {
+        if alpha_usd_price <= Decimal::ZERO {
             return Some("Alpha price unavailable; cannot estimate top-up".to_string());
         }
-        let needed_alpha = needed_usd / alpha_usd_price;
+        let needed_alpha = (needed_usd / alpha_usd_price).round_dp(2);
+        let needed_usd = needed_usd.round_dp(2);
         Some(format!(
             "Deposit {:.2} Alpha (~${:.2}) to reach safe level (1.5x minimum)",
             needed_alpha, needed_usd
@@ -253,18 +262,23 @@ impl CollateralEvaluator {
 
     fn action_required_urgent(
         &self,
-        minimum_usd: f64,
-        current_usd: f64,
-        alpha_usd_price: f64,
+        minimum_usd: Decimal,
+        current_usd: Decimal,
+        alpha_usd_price: Decimal,
     ) -> Option<String> {
-        let needed_usd = (minimum_usd - current_usd).max(0.0);
-        if needed_usd <= 0.0 {
+        let needed_usd = if minimum_usd > current_usd {
+            minimum_usd - current_usd
+        } else {
+            Decimal::ZERO
+        };
+        if needed_usd <= Decimal::ZERO {
             return None;
         }
-        if alpha_usd_price <= 0.0 {
+        if alpha_usd_price <= Decimal::ZERO {
             return Some("Alpha price unavailable; cannot estimate top-up".to_string());
         }
-        let needed_alpha = needed_usd / alpha_usd_price;
+        let needed_alpha = (needed_usd / alpha_usd_price).round_dp(2);
+        let needed_usd = needed_usd.round_dp(2);
         Some(format!(
             "URGENT: Deposit {:.2} Alpha (~${:.2}) within grace period or node will be excluded",
             needed_alpha, needed_usd
@@ -276,8 +290,9 @@ impl CollateralEvaluator {
 mod tests {
     use super::*;
     use crate::persistence::SimplePersistence;
+    use rust_decimal::Decimal;
 
-    fn make_snapshot(price: f64) -> PriceSnapshot {
+    fn make_snapshot(price: Decimal) -> PriceSnapshot {
         PriceSnapshot {
             alpha_usd: price,
             fetched_at: chrono::Utc::now(),
@@ -291,12 +306,19 @@ mod tests {
         let tracker = Arc::new(GracePeriodTracker::new(persistence, Duration::hours(24)));
         let evaluator = CollateralEvaluator::new(CollateralConfig::default(), tracker);
         let (state, status) = evaluator
-            .evaluate("hk", "node", "H100", 2, 200.0, Some(make_snapshot(1.0)))
+            .evaluate(
+                "hk",
+                "node",
+                "H100",
+                2,
+                Decimal::from(200),
+                Some(make_snapshot(Decimal::ONE)),
+            )
             .await
             .unwrap();
         assert!(matches!(state, CollateralState::Sufficient { .. }));
         assert_eq!(status.status, "sufficient");
-        assert_eq!(status.minimum_usd_required, 100.0);
+        assert_eq!(status.minimum_usd_required, Decimal::from(100));
     }
 
     #[tokio::test]
@@ -305,7 +327,14 @@ mod tests {
         let tracker = Arc::new(GracePeriodTracker::new(persistence, Duration::hours(24)));
         let evaluator = CollateralEvaluator::new(CollateralConfig::default(), tracker);
         let (_state, status) = evaluator
-            .evaluate("hk", "node", "H100", 1, 1.0, Some(make_snapshot(1.0)))
+            .evaluate(
+                "hk",
+                "node",
+                "H100",
+                1,
+                Decimal::ONE,
+                Some(make_snapshot(Decimal::ONE)),
+            )
             .await
             .unwrap();
         assert_eq!(status.status, "undercollateralized");

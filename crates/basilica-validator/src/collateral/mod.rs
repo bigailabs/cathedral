@@ -8,4 +8,5 @@ pub mod slash_executor;
 
 pub use evaluator::{CollateralState, CollateralStatus};
 pub use manager::{CollateralManager, CollateralPreference};
-pub use slash_executor::SlashExecutor;
+#[allow(unused_imports)]
+pub use slash_executor::{CollateralChainClient, SlashExecutor};

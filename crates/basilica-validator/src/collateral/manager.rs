@@ -6,9 +6,10 @@ use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
 use basilica_common::identity::Hotkey;
-use bigdecimal::{BigDecimal, ToPrimitive};
 use chrono::Utc;
 use hex::encode;
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::warn;
@@ -63,9 +64,9 @@ impl CollateralManager {
                     reason: "collateral disabled".to_string(),
                 },
                 CollateralStatus {
-                    current_alpha: 0.0,
-                    current_usd_value: 0.0,
-                    minimum_usd_required: 0.0,
+                    current_alpha: Decimal::ZERO,
+                    current_usd_value: Decimal::ZERO,
+                    minimum_usd_required: Decimal::ZERO,
                     status: "unknown".to_string(),
                     grace_period_remaining: None,
                     action_required: None,
@@ -85,7 +86,8 @@ impl CollateralManager {
 
         if let Some(metrics) = &self.metrics {
             if let Some(snapshot) = &price_snapshot {
-                metrics.record_collateral_price(snapshot.alpha_usd, snapshot.is_stale);
+                let alpha_usd = snapshot.alpha_usd.to_f64().unwrap_or_default();
+                metrics.record_collateral_price(alpha_usd, snapshot.is_stale);
                 let staleness_seconds =
                     (Utc::now() - snapshot.fetched_at).num_seconds().max(0) as f64;
                 metrics.record_collateral_price_staleness_seconds(staleness_seconds);
@@ -95,7 +97,7 @@ impl CollateralManager {
         let collateral_alpha = self
             .get_collateral_alpha(hotkey, node_id)
             .await
-            .unwrap_or(0.0);
+            .unwrap_or(Decimal::ZERO);
 
         let (state, status) = self
             .evaluator
@@ -145,7 +147,8 @@ impl CollateralManager {
         match self.price_oracle.get_alpha_usd_price().await {
             Ok(snapshot) => {
                 if let Some(metrics) = self.metrics.as_ref() {
-                    metrics.record_collateral_price(snapshot.alpha_usd, snapshot.is_stale);
+                    let alpha_usd = snapshot.alpha_usd.to_f64().unwrap_or_default();
+                    metrics.record_collateral_price(alpha_usd, snapshot.is_stale);
                     let staleness_seconds =
                         (Utc::now() - snapshot.fetched_at).num_seconds().max(0) as f64;
                     metrics.record_collateral_price_staleness_seconds(staleness_seconds);
@@ -177,19 +180,19 @@ impl CollateralManager {
         self.grace_tracker.force_exclude(hotkey, node_id).await
     }
 
-    pub async fn get_collateral_alpha(&self, hotkey: &str, node_id: &str) -> Result<f64> {
+    pub async fn get_collateral_alpha(&self, hotkey: &str, node_id: &str) -> Result<Decimal> {
         let hotkey_hex = match hotkey_ss58_to_hex(hotkey) {
             Ok(val) => val,
             Err(err) => {
                 warn!("Failed to convert hotkey to hex: {}", err);
-                return Ok(0.0);
+                return Ok(Decimal::ZERO);
             }
         };
         let node_hex = match node_id_to_hex(node_id) {
             Ok(val) => val,
             Err(err) => {
                 warn!("Failed to convert node_id to hex: {}", err);
-                return Ok(0.0);
+                return Ok(Decimal::ZERO);
             }
         };
 
@@ -217,13 +220,10 @@ pub fn node_id_to_hex(node_id: &str) -> Result<String> {
     Ok(encode(uuid.as_bytes()))
 }
 
-fn u256_to_alpha(amount: alloy_primitives::U256) -> f64 {
-    let amount_decimal =
-        BigDecimal::from_str(&amount.to_string()).unwrap_or_else(|_| BigDecimal::from(0));
-    let divisor =
-        BigDecimal::from_str("1000000000000000000").unwrap_or_else(|_| BigDecimal::from(1));
-    let alpha = amount_decimal / divisor;
-    alpha.to_f64().unwrap_or(f64::MAX)
+fn u256_to_alpha(amount: alloy_primitives::U256) -> Decimal {
+    let amount_decimal = Decimal::from_str(&amount.to_string()).unwrap_or(Decimal::ZERO);
+    // TODO: Use BigDecimal when values exceed Decimal's max precision.
+    amount_decimal * Decimal::from_i128_with_scale(1, 18)
 }
 
 #[cfg(test)]
@@ -233,6 +233,7 @@ mod tests {
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
     use chrono::Duration;
+    use rust_decimal::Decimal;
 
     #[tokio::test]
     async fn test_node_id_to_hex() {
@@ -274,6 +275,6 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(alpha, 0.0);
+        assert_eq!(alpha, Decimal::ZERO);
     }
 }

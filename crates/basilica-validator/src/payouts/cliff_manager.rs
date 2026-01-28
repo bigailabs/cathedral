@@ -322,8 +322,7 @@ impl CliffManager {
             .get_alpha_usd_price()
             .await
             .context("Failed to fetch Alpha price")?;
-        Decimal::from_f64(snapshot.alpha_usd)
-            .ok_or_else(|| anyhow::anyhow!("Invalid alpha price: {}", snapshot.alpha_usd))
+        Ok(snapshot.alpha_usd)
     }
 
     async fn get_gpu_count_for_category(&self, miner_uid: u32, gpu_category: &str) -> Result<u32> {

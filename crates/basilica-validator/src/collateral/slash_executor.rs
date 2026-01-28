@@ -2,20 +2,87 @@ use crate::billing::api_client::ValidatorSigner;
 use crate::collateral::evidence::{EvidenceStore, SlashEvidence};
 use crate::collateral::grace_tracker::GracePeriodTracker;
 use crate::collateral::manager::{hotkey_ss58_to_hex, node_id_to_hex};
-use crate::config::collateral::CollateralConfig;
+use crate::config::collateral::{CollateralConfig, TrusteeKeySource};
 use crate::metrics::ValidatorPrometheusMetrics;
 use alloy_primitives::U256;
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::Region;
+use aws_sdk_secretsmanager::Client as SecretsClient;
 use chrono::Utc;
 use collateral_contract::config::{CollateralNetworkConfig, Network};
 use collateral_contract::{alpha_collaterals, slash_collateral};
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 use tokio::fs;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+#[async_trait]
+pub trait CollateralChainClient: Send + Sync {
+    async fn alpha_collaterals(
+        &self,
+        hotkey_bytes: [u8; 32],
+        node_bytes: [u8; 16],
+        network_config: &CollateralNetworkConfig,
+    ) -> Result<U256>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_slash(
+        &self,
+        private_key: &str,
+        hotkey_bytes: [u8; 32],
+        node_bytes: [u8; 16],
+        alpha_amount: U256,
+        url: &str,
+        checksum: u128,
+        network_config: &CollateralNetworkConfig,
+    ) -> Result<()>;
+}
+
+struct OnchainCollateralClient;
+
+#[async_trait]
+impl CollateralChainClient for OnchainCollateralClient {
+    async fn alpha_collaterals(
+        &self,
+        hotkey_bytes: [u8; 32],
+        node_bytes: [u8; 16],
+        network_config: &CollateralNetworkConfig,
+    ) -> Result<U256> {
+        Ok(alpha_collaterals(hotkey_bytes, node_bytes, network_config).await?)
+    }
+
+    async fn submit_slash(
+        &self,
+        private_key: &str,
+        hotkey_bytes: [u8; 32],
+        node_bytes: [u8; 16],
+        alpha_amount: U256,
+        url: &str,
+        checksum: u128,
+        network_config: &CollateralNetworkConfig,
+    ) -> Result<()> {
+        slash_collateral(
+            private_key,
+            hotkey_bytes,
+            node_bytes,
+            alpha_amount,
+            url,
+            checksum,
+            network_config,
+        )
+        .await?;
+        Ok(())
+    }
+}
 
 #[derive(Clone)]
 pub struct SlashExecutor {
@@ -25,6 +92,83 @@ pub struct SlashExecutor {
     metrics: Option<Arc<ValidatorPrometheusMetrics>>,
     rate_limiter: Arc<SlashRateLimiter>,
     signer: Option<Arc<dyn ValidatorSigner>>,
+    chain_client: Arc<dyn CollateralChainClient>,
+}
+
+#[async_trait]
+trait KeyProvider: Send + Sync {
+    async fn load_private_key(&self) -> Result<String>;
+}
+
+struct FileKeyProvider {
+    path: PathBuf,
+}
+
+struct EnvKeyProvider {
+    env_var: String,
+}
+
+struct AwsSecretsKeyProvider {
+    secret_name: String,
+    region: Option<String>,
+}
+
+#[async_trait]
+impl KeyProvider for FileKeyProvider {
+    async fn load_private_key(&self) -> Result<String> {
+        let contents = fs::read_to_string(&self.path).await?;
+        normalize_private_key(&contents, "trustee_private_key_file")
+    }
+}
+
+#[async_trait]
+impl KeyProvider for EnvKeyProvider {
+    async fn load_private_key(&self) -> Result<String> {
+        let value = env::var(&self.env_var).with_context(|| {
+            format!(
+                "{} is required when trustee_key_source=env_var",
+                self.env_var
+            )
+        })?;
+        normalize_private_key(&value, "trustee_key_env_var")
+    }
+}
+
+#[async_trait]
+impl KeyProvider for AwsSecretsKeyProvider {
+    async fn load_private_key(&self) -> Result<String> {
+        let region_provider = match &self.region {
+            Some(region) => {
+                RegionProviderChain::first_try(Region::new(region.clone())).or_default_provider()
+            }
+            None => RegionProviderChain::default_provider(),
+        };
+        let config = aws_config::from_env().region(region_provider).load().await;
+        let client = SecretsClient::new(&config);
+        let response = client
+            .get_secret_value()
+            .secret_id(&self.secret_name)
+            .send()
+            .await?;
+        // TODO: Support structured secret payloads (e.g., JSON) and rotation metadata.
+        let secret = if let Some(value) = response.secret_string() {
+            value.to_string()
+        } else if let Some(binary) = response.secret_binary() {
+            String::from_utf8(binary.as_ref().to_vec())
+                .context("aws_secret_name contains non-utf8 secret_binary")?
+        } else {
+            anyhow::bail!("aws_secret_name returned empty secret");
+        };
+        normalize_private_key(&secret, "aws_secret_name")
+    }
+}
+
+fn normalize_private_key(raw: &str, source: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{} resolved to empty private key", source);
+    }
+    Ok(trimmed.to_string())
 }
 
 impl SlashExecutor {
@@ -35,6 +179,24 @@ impl SlashExecutor {
         metrics: Option<Arc<ValidatorPrometheusMetrics>>,
         signer: Option<Arc<dyn ValidatorSigner>>,
     ) -> Self {
+        Self::new_with_chain_client(
+            config,
+            evidence_store,
+            grace_tracker,
+            metrics,
+            signer,
+            Arc::new(OnchainCollateralClient),
+        )
+    }
+
+    pub fn new_with_chain_client(
+        config: CollateralConfig,
+        evidence_store: EvidenceStore,
+        grace_tracker: Arc<GracePeriodTracker>,
+        metrics: Option<Arc<ValidatorPrometheusMetrics>>,
+        signer: Option<Arc<dyn ValidatorSigner>>,
+        chain_client: Arc<dyn CollateralChainClient>,
+    ) -> Self {
         let rate_limiter = Arc::new(SlashRateLimiter::new(&config));
         Self {
             config,
@@ -43,6 +205,7 @@ impl SlashExecutor {
             metrics,
             rate_limiter,
             signer,
+            chain_client,
         }
     }
 
@@ -112,13 +275,14 @@ impl SlashExecutor {
     }
 
     fn compute_partial_slash_amount(&self, collateral: U256) -> Option<U256> {
-        if self.config.slash_fraction >= 1.0 {
+        if self.config.slash_fraction >= Decimal::ONE {
             return None;
         }
         if collateral.is_zero() {
             return None;
         }
-        let numerator = (self.config.slash_fraction * 10_000.0).round() as u64;
+        let numerator_decimal = (self.config.slash_fraction * Decimal::from(10_000u64)).round();
+        let numerator = numerator_decimal.to_u64().unwrap_or(0);
         if numerator == 0 || numerator >= 10_000 {
             return None;
         }
@@ -260,16 +424,31 @@ impl SlashExecutor {
     }
 
     async fn load_private_key(&self) -> Result<String> {
-        let private_key = if let Some(path) = self.config.trustee_private_key_file.as_ref() {
-            fs::read_to_string(path).await?
-        } else {
-            String::new()
+        let provider: Box<dyn KeyProvider> = match self.config.trustee_key_source {
+            TrusteeKeySource::File => {
+                let path =
+                    self.config.trustee_private_key_file.clone().context(
+                        "trustee_private_key_file is required when trustee_key_source=file",
+                    )?;
+                Box::new(FileKeyProvider { path })
+            }
+            TrusteeKeySource::AwsSecrets => {
+                let secret_name = self.config.aws_secret_name.clone().unwrap_or_default();
+                if secret_name.trim().is_empty() {
+                    anyhow::bail!(
+                        "aws_secret_name is required when trustee_key_source=aws_secrets"
+                    );
+                }
+                Box::new(AwsSecretsKeyProvider {
+                    secret_name,
+                    region: self.config.aws_region.clone(),
+                })
+            }
+            TrusteeKeySource::EnvVar => Box::new(EnvKeyProvider {
+                env_var: "TRUSTEE_PRIVATE_KEY".to_string(),
+            }),
         };
-        let private_key = private_key.trim().to_string();
-        if private_key.is_empty() {
-            anyhow::bail!("trustee_private_key_file is required when shadow_mode=false");
-        }
-        Ok(private_key)
+        provider.load_private_key().await
     }
 
     async fn resolve_slash_amount(
@@ -295,16 +474,17 @@ impl SlashExecutor {
     }
 
     async fn submit_slash(&self, submission: SlashSubmission<'_>) -> Result<()> {
-        slash_collateral(
-            submission.private_key,
-            submission.hotkey_bytes,
-            submission.node_bytes,
-            submission.alpha_amount,
-            submission.url,
-            submission.checksum,
-            submission.network_config,
-        )
-        .await?;
+        self.chain_client
+            .submit_slash(
+                submission.private_key,
+                submission.hotkey_bytes,
+                submission.node_bytes,
+                submission.alpha_amount,
+                submission.url,
+                submission.checksum,
+                submission.network_config,
+            )
+            .await?;
         Ok(())
     }
 
@@ -464,7 +644,10 @@ impl SlashExecutor {
         miner_hotkey: &str,
         node_id: &str,
     ) -> Result<U256> {
-        let amount = alpha_collaterals(*hotkey_bytes, *node_bytes, network_config).await?;
+        let amount = self
+            .chain_client
+            .alpha_collaterals(*hotkey_bytes, *node_bytes, network_config)
+            .await?;
         if amount.is_zero() {
             anyhow::bail!(
                 "alpha collateral is zero for node {} (hotkey: {})",
@@ -479,6 +662,7 @@ impl SlashExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -527,7 +711,7 @@ mod tests {
     async fn test_compute_partial_slash_amount() {
         let temp = tempdir().unwrap();
         let config = CollateralConfig {
-            slash_fraction: 0.5,
+            slash_fraction: Decimal::new(5, 1),
             evidence_storage_path: temp.path().to_path_buf(),
             ..CollateralConfig::default()
         };

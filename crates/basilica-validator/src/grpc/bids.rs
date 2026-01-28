@@ -10,6 +10,7 @@ use basilica_protocol::miner_discovery::{
     SubmitBidResponse, ValidatorAuthRequest,
 };
 use chrono::{DateTime, TimeZone, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_health::server::health_reporter;
 use tracing::{info, warn};
@@ -63,16 +64,19 @@ fn status_to_proto(
     status: CollateralStatus,
 ) -> basilica_protocol::miner_discovery::CollateralStatus {
     basilica_protocol::miner_discovery::CollateralStatus {
-        current_alpha: status.current_alpha,
-        current_usd_value: status.current_usd_value,
-        minimum_usd_required: status.minimum_usd_required,
+        current_alpha: status.current_alpha.to_f64().unwrap_or_default(),
+        current_usd_value: status.current_usd_value.to_f64().unwrap_or_default(),
+        minimum_usd_required: status.minimum_usd_required.to_f64().unwrap_or_default(),
         status: status.status,
         grace_period_remaining: status
             .grace_period_remaining
             .map(format_duration)
             .unwrap_or_default(),
         action_required: status.action_required.unwrap_or_default(),
-        alpha_usd_price: status.alpha_usd_price.unwrap_or_default(),
+        alpha_usd_price: status
+            .alpha_usd_price
+            .and_then(|price| price.to_f64())
+            .unwrap_or_default(),
         price_stale: status.price_stale,
     }
 }
@@ -91,16 +95,17 @@ fn format_duration(duration: chrono::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
 
     fn make_status(status: &str) -> CollateralStatus {
         CollateralStatus {
-            current_alpha: 10.0,
-            current_usd_value: 10.0,
-            minimum_usd_required: 5.0,
+            current_alpha: Decimal::from(10),
+            current_usd_value: Decimal::from(10),
+            minimum_usd_required: Decimal::from(5),
             status: status.to_string(),
             grace_period_remaining: None,
             action_required: None,
-            alpha_usd_price: Some(1.0),
+            alpha_usd_price: Some(Decimal::ONE),
             price_stale: false,
         }
     }
@@ -124,8 +129,8 @@ mod tests {
         let selected = select_worst_status(
             Some(current),
             CollateralState::Excluded {
-                current_usd: 0.0,
-                minimum_usd: 10.0,
+                current_usd: Decimal::ZERO,
+                minimum_usd: Decimal::from(10),
                 reason: "expired".to_string(),
             },
             next.clone(),

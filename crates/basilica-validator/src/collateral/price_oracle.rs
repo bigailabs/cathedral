@@ -1,5 +1,7 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
+use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -7,14 +9,14 @@ use tracing::{debug, warn};
 
 #[derive(Debug, Clone)]
 pub struct PriceSnapshot {
-    pub alpha_usd: f64,
+    pub alpha_usd: Decimal,
     pub fetched_at: DateTime<Utc>,
     pub is_stale: bool,
 }
 
 #[derive(Debug, Clone)]
 struct CachedPrice {
-    alpha_usd: f64,
+    alpha_usd: Decimal,
     fetched_at: DateTime<Utc>,
 }
 
@@ -107,7 +109,7 @@ impl PriceOracle {
         None
     }
 
-    fn snapshot(&self, price: f64, fetched_at: DateTime<Utc>) -> PriceSnapshot {
+    fn snapshot(&self, price: Decimal, fetched_at: DateTime<Utc>) -> PriceSnapshot {
         let is_stale = (Utc::now() - fetched_at) > self.stale_after;
         PriceSnapshot {
             alpha_usd: price,
@@ -127,7 +129,7 @@ impl PriceOracle {
         }
     }
 
-    async fn fetch_price(&self) -> Result<(f64, DateTime<Utc>)> {
+    async fn fetch_price(&self) -> Result<(Decimal, DateTime<Utc>)> {
         let url = if self.endpoint_path.starts_with("http") {
             self.endpoint_path.clone()
         } else {
@@ -139,13 +141,16 @@ impl PriceOracle {
         };
         let response = self.client.get(url).send().await?.error_for_status()?;
         let payload: AlphaPriceResponse = response.json().await?;
-        Ok((payload.price, Utc::now()))
+        let price = Decimal::from_f64(payload.price)
+            .context("Alpha price cannot be represented as Decimal")?;
+        Ok((price, Utc::now()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -159,11 +164,11 @@ mod tests {
             Duration::hours(1),
         );
         oracle.cache.write().await.replace(CachedPrice {
-            alpha_usd: 1.25,
+            alpha_usd: Decimal::new(125, 2),
             fetched_at: Utc::now(),
         });
         let snapshot = oracle.get_alpha_usd_price().await.unwrap();
-        assert_eq!(snapshot.alpha_usd, 1.25);
+        assert_eq!(snapshot.alpha_usd, Decimal::new(125, 2));
         assert!(!snapshot.is_stale);
     }
 
@@ -176,7 +181,7 @@ mod tests {
             Duration::hours(1),
         );
         oracle.cache.write().await.replace(CachedPrice {
-            alpha_usd: 1.25,
+            alpha_usd: Decimal::new(125, 2),
             fetched_at: Utc::now() - Duration::hours(2),
         });
         let snapshot = oracle.get_alpha_usd_price().await.unwrap();
@@ -198,12 +203,12 @@ mod tests {
             Duration::hours(1),
         );
         oracle.cache.write().await.replace(CachedPrice {
-            alpha_usd: 0.9,
+            alpha_usd: Decimal::new(9, 1),
             fetched_at: Utc::now() - Duration::hours(2),
         });
         // Force fetch by expiring cache TTL.
         let snapshot = oracle.get_alpha_usd_price().await.unwrap();
-        assert_eq!(snapshot.alpha_usd, 0.9);
+        assert_eq!(snapshot.alpha_usd, Decimal::new(9, 1));
         assert!(snapshot.is_stale);
     }
 
@@ -222,7 +227,7 @@ mod tests {
             Duration::hours(1),
         );
         let snapshot = oracle.get_alpha_usd_price().await.unwrap();
-        assert_eq!(snapshot.alpha_usd, 1.42);
+        assert_eq!(snapshot.alpha_usd, Decimal::new(142, 2));
         assert!(!snapshot.is_stale);
     }
 }
