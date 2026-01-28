@@ -189,6 +189,10 @@ impl SlashExecutor {
         )
     }
 
+    pub fn is_shadow_mode(&self) -> bool {
+        self.config.shadow_mode
+    }
+
     pub fn new_with_chain_client(
         config: CollateralConfig,
         evidence_store: EvidenceStore,
@@ -681,7 +685,7 @@ mod tests {
             evidence_base_url: "https://validator.example.com/evidence".to_string(),
             ..CollateralConfig::default()
         };
-        let store = EvidenceStore::new(
+        let store = EvidenceStore::new_local(
             config.evidence_base_url.clone(),
             config.evidence_storage_path.clone(),
         );
@@ -715,7 +719,7 @@ mod tests {
             evidence_storage_path: temp.path().to_path_buf(),
             ..CollateralConfig::default()
         };
-        let store = EvidenceStore::new(
+        let store = EvidenceStore::new_local(
             config.evidence_base_url.clone(),
             config.evidence_storage_path.clone(),
         );

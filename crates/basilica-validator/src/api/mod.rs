@@ -16,6 +16,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -36,6 +37,7 @@ pub struct ApiState {
     miner_client: Option<Arc<crate::miner_prover::miner_client::MinerClient>>,
     #[allow(dead_code)]
     validator_hotkey: basilica_common::identity::Hotkey,
+    pub evidence_storage_path: PathBuf,
 }
 
 impl ApiState {
@@ -47,6 +49,7 @@ impl ApiState {
         validator_config: crate::config::ValidatorConfig,
         validator_hotkey: basilica_common::identity::Hotkey,
     ) -> Self {
+        let evidence_storage_path = validator_config.collateral.evidence_storage_path.clone();
         Self {
             config,
             persistence,
@@ -56,6 +59,7 @@ impl ApiState {
             rental_manager: None,
             miner_client: None,
             validator_hotkey,
+            evidence_storage_path,
         }
     }
 
@@ -136,6 +140,7 @@ impl ApiHandler {
             .route("/rentals/:id", get(routes::get_rental_status))
             .route("/rentals/:id", delete(routes::stop_rental))
             .route("/rentals/:id/logs", get(routes::stream_rental_logs))
+            .route("/evidence/:file_name", get(routes::get_evidence))
             .route("/nodes", get(routes::list_available_nodes))
             // Existing miner routes
             .route("/miners", get(routes::list_miners))

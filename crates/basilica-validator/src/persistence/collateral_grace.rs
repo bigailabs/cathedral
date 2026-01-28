@@ -1,6 +1,7 @@
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
+use std::collections::HashSet;
 use sqlx::Row;
 
 impl SimplePersistence {
@@ -60,6 +61,35 @@ impl SimplePersistence {
             .await?;
         Ok(())
     }
+
+    pub async fn get_excluded_nodes(
+        &self,
+        grace_period: Duration,
+    ) -> Result<HashSet<(String, String)>> {
+        let rows = sqlx::query(
+            "SELECT hotkey, node_id, undercollateralized_since FROM collateral_grace_periods",
+        )
+        .fetch_all(self.pool())
+        .await?;
+
+        let cutoff = Utc::now() - grace_period;
+        let mut excluded = HashSet::new();
+        for row in rows {
+            let hotkey: String = row.get(0);
+            let node_id: String = row.get(1);
+            let since_raw: String = row.get(2);
+            let since = DateTime::parse_from_rfc3339(&since_raw)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok();
+            if let Some(since) = since {
+                if since <= cutoff {
+                    excluded.insert((hotkey, node_id));
+                }
+            }
+        }
+
+        Ok(excluded)
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +126,39 @@ mod tests {
             .await
             .unwrap();
         assert!(cleared.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_excluded_nodes_filters_by_grace_period() {
+        let persistence = SimplePersistence::for_testing().await.unwrap();
+        let now = Utc::now();
+
+        let expired_hotkey = "hk-expired";
+        let expired_node = "node-expired";
+        persistence
+            .mark_undercollateralized(expired_hotkey, expired_node, now - Duration::hours(25))
+            .await
+            .unwrap();
+
+        let active_hotkey = "hk-active";
+        let active_node = "node-active";
+        persistence
+            .mark_undercollateralized(active_hotkey, active_node, now - Duration::hours(2))
+            .await
+            .unwrap();
+
+        let excluded = persistence
+            .get_excluded_nodes(Duration::hours(24))
+            .await
+            .unwrap();
+
+        assert!(excluded.contains(&(
+            expired_hotkey.to_string(),
+            expired_node.to_string()
+        )));
+        assert!(!excluded.contains(&(
+            active_hotkey.to_string(),
+            active_node.to_string()
+        )));
     }
 }

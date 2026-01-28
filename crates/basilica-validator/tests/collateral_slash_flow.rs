@@ -34,7 +34,7 @@ async fn test_collateral_slash_flow_writes_signed_evidence() {
         ..Default::default()
     };
 
-    let store = EvidenceStore::new(
+    let store = EvidenceStore::new_local(
         config.evidence_base_url.clone(),
         config.evidence_storage_path.clone(),
     );

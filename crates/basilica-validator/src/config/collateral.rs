@@ -31,6 +31,8 @@ pub struct CollateralConfig {
     pub warning_threshold_multiplier: Decimal,
     #[serde(default = "default_grace_period_hours")]
     pub grace_period_hours: u64,
+    #[serde(default = "default_exclude_on_prolonged_price_failure")]
+    pub exclude_on_prolonged_price_failure: bool,
     #[serde(default = "default_minimum_usd_per_gpu")]
     pub minimum_usd_per_gpu: HashMap<String, Decimal>,
     #[serde(default)]
@@ -63,6 +65,16 @@ pub struct CollateralConfig {
     pub evidence_base_url: String,
     #[serde(default = "default_evidence_storage_path")]
     pub evidence_storage_path: PathBuf,
+    #[serde(default)]
+    pub evidence_r2_account_id: Option<String>,
+    #[serde(default)]
+    pub evidence_r2_access_key_id: Option<String>,
+    #[serde(default)]
+    pub evidence_r2_secret_access_key: Option<String>,
+    #[serde(default)]
+    pub evidence_r2_bucket: Option<String>,
+    #[serde(default)]
+    pub evidence_public_url_base: Option<String>,
 }
 
 impl Default for CollateralConfig {
@@ -76,6 +88,7 @@ impl Default for CollateralConfig {
             price_stale_after_secs: default_price_stale_after_secs(),
             warning_threshold_multiplier: default_warning_threshold_multiplier(),
             grace_period_hours: default_grace_period_hours(),
+            exclude_on_prolonged_price_failure: default_exclude_on_prolonged_price_failure(),
             minimum_usd_per_gpu: default_minimum_usd_per_gpu(),
             contract_address: None,
             network: default_collateral_network(),
@@ -92,6 +105,11 @@ impl Default for CollateralConfig {
             aws_region: None,
             evidence_base_url: default_evidence_base_url(),
             evidence_storage_path: default_evidence_storage_path(),
+            evidence_r2_account_id: None,
+            evidence_r2_access_key_id: None,
+            evidence_r2_secret_access_key: None,
+            evidence_r2_bucket: None,
+            evidence_public_url_base: None,
         }
     }
 }
@@ -156,6 +174,35 @@ impl CollateralConfig {
             anyhow::bail!("collateral.slash_circuit_breaker_cooldown_secs must be > 0");
         }
         if !self.shadow_mode {
+            let missing = [
+                ("collateral.evidence_r2_account_id", self.evidence_r2_account_id.as_ref()),
+                (
+                    "collateral.evidence_r2_access_key_id",
+                    self.evidence_r2_access_key_id.as_ref(),
+                ),
+                (
+                    "collateral.evidence_r2_secret_access_key",
+                    self.evidence_r2_secret_access_key.as_ref(),
+                ),
+                ("collateral.evidence_r2_bucket", self.evidence_r2_bucket.as_ref()),
+                (
+                    "collateral.evidence_public_url_base",
+                    self.evidence_public_url_base.as_ref(),
+                ),
+            ]
+            .into_iter()
+            .filter(|(_, value)| value.map(|v| v.trim().is_empty()).unwrap_or(true))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+
+            if !missing.is_empty() {
+                anyhow::bail!(
+                    "Missing R2 evidence config when shadow_mode=false: {}",
+                    missing.join(", ")
+                );
+            }
+        }
+        if !self.shadow_mode {
             match self.trustee_key_source {
                 TrusteeKeySource::File => {
                     if self.trustee_private_key_file.is_none() {
@@ -217,6 +264,10 @@ fn default_warning_threshold_multiplier() -> Decimal {
 
 fn default_grace_period_hours() -> u64 {
     24
+}
+
+fn default_exclude_on_prolonged_price_failure() -> bool {
+    true
 }
 
 fn default_minimum_usd_per_gpu() -> HashMap<String, Decimal> {

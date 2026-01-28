@@ -124,7 +124,7 @@ async fn build_executor(
     config.network = "local".to_string();
     config.contract_address = Some("0x0000000000000000000000000000000000000001".to_string());
 
-    let store = EvidenceStore::new(
+    let store = EvidenceStore::new_local(
         config.evidence_base_url.clone(),
         config.evidence_storage_path.clone(),
     );

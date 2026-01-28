@@ -2,7 +2,7 @@ use crate::collateral::grace_tracker::GracePeriodTracker;
 use crate::collateral::price_oracle::PriceSnapshot;
 use crate::config::collateral::CollateralConfig;
 use anyhow::Result;
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 
@@ -100,10 +100,23 @@ impl CollateralEvaluator {
 
         let (current_usd, price_stale, alpha_usd_price) = match price_snapshot {
             Some(snapshot) if snapshot.alpha_usd > Decimal::ZERO => {
+                let age = Utc::now() - snapshot.fetched_at;
+                let prolonged =
+                    age > self.config.price_stale_after() + self.config.price_stale_after();
+                if self.config.exclude_on_prolonged_price_failure && prolonged {
+                    return self
+                        .handle_price_unavailable(hotkey, node_id, minimum_usd, collateral_alpha)
+                        .await;
+                }
                 let usd = collateral_alpha * snapshot.alpha_usd;
                 (usd, snapshot.is_stale, Some(snapshot.alpha_usd))
             }
             _ => {
+                if self.config.exclude_on_prolonged_price_failure {
+                    return self
+                        .handle_price_unavailable(hotkey, node_id, minimum_usd, collateral_alpha)
+                        .await;
+                }
                 let reason = "Alpha price unavailable".to_string();
                 return Ok((
                     CollateralState::Unknown {
@@ -282,6 +295,75 @@ impl CollateralEvaluator {
         Some(format!(
             "URGENT: Deposit {:.2} Alpha (~${:.2}) within grace period or node will be excluded",
             needed_alpha, needed_usd
+        ))
+    }
+
+    async fn handle_price_unavailable(
+        &self,
+        hotkey: &str,
+        node_id: &str,
+        minimum_usd: Decimal,
+        collateral_alpha: Decimal,
+    ) -> Result<(CollateralState, CollateralStatus)> {
+        if self
+            .grace_tracker
+            .get_since(hotkey, node_id)
+            .await?
+            .is_none()
+        {
+            // TODO: Track price-feed outage duration separately from collateral grace periods.
+            self.grace_tracker
+                .mark_undercollateralized(hotkey, node_id)
+                .await?;
+        }
+
+        let grace_remaining = self
+            .grace_tracker
+            .get_grace_remaining(hotkey, node_id)
+            .await?
+            .unwrap_or_else(Duration::zero);
+
+        if grace_remaining <= Duration::zero() {
+            return Ok((
+                CollateralState::Excluded {
+                    current_usd: Decimal::ZERO,
+                    minimum_usd,
+                    reason: "price_unavailable".to_string(),
+                },
+                CollateralStatus {
+                    current_alpha: collateral_alpha,
+                    current_usd_value: Decimal::ZERO,
+                    minimum_usd_required: minimum_usd,
+                    status: "excluded".to_string(),
+                    grace_period_remaining: Some(Duration::zero()),
+                    action_required: Some(
+                        "Alpha price unavailable; node excluded after grace period".to_string(),
+                    ),
+                    alpha_usd_price: None,
+                    price_stale: true,
+                },
+            ));
+        }
+
+        Ok((
+            CollateralState::Undercollateralized {
+                current_usd: Decimal::ZERO,
+                minimum_usd,
+                grace_remaining,
+            },
+            CollateralStatus {
+                current_alpha: collateral_alpha,
+                current_usd_value: Decimal::ZERO,
+                minimum_usd_required: minimum_usd,
+                status: "undercollateralized".to_string(),
+                grace_period_remaining: Some(grace_remaining),
+                action_required: Some(
+                    "Alpha price unavailable; grace period started for collateral checks"
+                        .to_string(),
+                ),
+                alpha_usd_price: None,
+                price_stale: true,
+            },
         ))
     }
 }

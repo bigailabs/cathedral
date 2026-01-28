@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::collateral::SlashExecutor;
 use crate::metrics::ValidatorPrometheusMetrics;
+use crate::payouts::CliffManager;
 use crate::persistence::entities::{MisbehaviourLog, MisbehaviourType};
 use crate::persistence::SimplePersistence;
 
@@ -15,6 +16,7 @@ pub struct BanManager {
     metrics: Option<Arc<ValidatorPrometheusMetrics>>,
     slash_executor: Option<Arc<SlashExecutor>>,
     validator_hotkey: Option<String>,
+    cliff_manager: Option<Arc<CliffManager>>,
 }
 
 impl BanManager {
@@ -24,12 +26,14 @@ impl BanManager {
         metrics: Option<Arc<ValidatorPrometheusMetrics>>,
         slash_executor: Option<Arc<SlashExecutor>>,
         validator_hotkey: Option<String>,
+        cliff_manager: Option<Arc<CliffManager>>,
     ) -> Self {
         Self {
             persistence,
             metrics,
             slash_executor,
             validator_hotkey,
+            cliff_manager,
         }
     }
 
@@ -167,7 +171,32 @@ impl BanManager {
                 &validator_hotkey,
                 &rental_id,
             )
-            .await
+            .await?;
+
+        if slash_executor.is_shadow_mode() {
+            return Ok(());
+        }
+
+        if let Some(cliff_manager) = &self.cliff_manager {
+            if let Err(err) = cliff_manager
+                .process_validation_failure(
+                    &miner_hotkey,
+                    executor_id,
+                    details,
+                    Some(type_of_misbehaviour.as_str()),
+                )
+                .await
+            {
+                warn!(
+                    miner_uid = miner_uid,
+                    executor_id = executor_id,
+                    error = %err,
+                    "Failed to forfeit pending rewards after slash"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Check if an executor is currently banned
@@ -579,7 +608,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone(), None, None, None);
+        let ban_manager = BanManager::new(persistence.clone(), None, None, None, None);
         let miner_uid = 1;
         let executor_id = "executor1";
 
@@ -663,7 +692,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone(), None, None, None);
+        let ban_manager = BanManager::new(persistence.clone(), None, None, None, None);
         let miner_uid = 1;
         let executor_id = "executor1";
 
@@ -726,7 +755,7 @@ mod tests {
         );
         persistence.run_migrations().await.unwrap();
 
-        let ban_manager = BanManager::new(persistence.clone(), None, None, None);
+        let ban_manager = BanManager::new(persistence.clone(), None, None, None, None);
         let miner_uid = 1;
         let executor_id = "executor1";
 

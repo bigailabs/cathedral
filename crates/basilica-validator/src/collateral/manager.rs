@@ -221,9 +221,18 @@ pub fn node_id_to_hex(node_id: &str) -> Result<String> {
 }
 
 fn u256_to_alpha(amount: alloy_primitives::U256) -> Decimal {
-    let amount_decimal = Decimal::from_str(&amount.to_string()).unwrap_or(Decimal::ZERO);
-    // TODO: Use BigDecimal when values exceed Decimal's max precision.
-    amount_decimal * Decimal::from_i128_with_scale(1, 18)
+    let amount_str = amount.to_string();
+    match Decimal::from_str(&amount_str) {
+        Ok(value) => value * Decimal::from_i128_with_scale(1, 18),
+        Err(_) => {
+            warn!(
+                "Collateral amount {} exceeds Decimal precision; capping at Decimal::MAX",
+                amount_str
+            );
+            // TODO: Switch to BigDecimal or fixed-point U256 conversion to avoid loss.
+            Decimal::MAX * Decimal::from_i128_with_scale(1, 18)
+        }
+    }
 }
 
 #[cfg(test)]

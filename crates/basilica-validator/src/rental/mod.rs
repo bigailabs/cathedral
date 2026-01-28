@@ -24,6 +24,7 @@ use crate::billing::BillingClient;
 use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::config::auction::AuctionConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
+use crate::payouts::CliffManager;
 use crate::persistence::bids::{BidRepository, MinerBidRecord};
 use crate::persistence::entities::MisbehaviourType;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
@@ -180,6 +181,7 @@ impl RentalManager {
             Some(metrics.clone()),
             None,
             None,
+            None,
         ));
 
         // Create health monitor with SSH key manager, metrics, and ban manager
@@ -212,6 +214,7 @@ impl RentalManager {
         metrics: Arc<ValidatorPrometheusMetrics>,
         collateral_manager: Option<Arc<CollateralManager>>,
         slash_executor: Option<Arc<crate::collateral::SlashExecutor>>,
+        cliff_manager: Option<Arc<CliffManager>>,
         validator_hotkey: Option<String>,
     ) -> Result<Self> {
         // Create SSH key manager
@@ -228,6 +231,7 @@ impl RentalManager {
             Some(metrics.clone()),
             slash_executor,
             validator_hotkey,
+            cliff_manager,
         ));
 
         // Create health monitor
@@ -741,6 +745,7 @@ impl RentalManager {
                         &e.to_string(),
                         Some(ssh_credentials),
                     );
+                    let miner_attributable = is_miner_attributable_failure(&e);
 
                     if let Err(log_err) = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
@@ -748,7 +753,7 @@ impl RentalManager {
                                 .log_misbehaviour(
                                     miner_uid,
                                     &selection.node_id,
-                                    if selection.miner_bid_rate.is_some() {
+                                    if selection.miner_bid_rate.is_some() && miner_attributable {
                                         MisbehaviourType::BidWonDeploymentFailed
                                     } else {
                                         MisbehaviourType::BadRental
@@ -1062,6 +1067,15 @@ impl RentalManager {
 
         Ok(available_rentals)
     }
+}
+
+fn is_miner_attributable_failure(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    // TODO: Replace string matching with structured error codes from deployment manager.
+    message.contains("container_already_exists")
+        || message.contains("gpu_not_available")
+        || message.contains("rejected")
+        || message.contains("refused")
 }
 
 impl Drop for RentalManager {

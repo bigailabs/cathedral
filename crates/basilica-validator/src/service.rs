@@ -29,7 +29,7 @@ use std::time::{Duration as StdDuration, SystemTime};
 use sysinfo::{Pid, System};
 use tokio::signal;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Main validator service that manages all validator components and their lifecycle
 pub struct ValidatorService {
@@ -98,7 +98,8 @@ impl ValidatorService {
                 persistence_arc.clone(),
                 collateral_metrics.clone(),
                 bittensor_service.clone(),
-            );
+            )
+            .await?;
         self.spawn_collateral_refresh(collateral_manager.clone(), collateral_refresh_interval);
 
         let cliff_manager = self.init_cliff_manager(
@@ -127,6 +128,7 @@ impl ValidatorService {
                 validator_metrics.as_ref(),
                 collateral_manager.clone(),
                 slash_executor.clone(),
+                cliff_manager.clone(),
                 &validator_hotkey,
             )
             .await?;
@@ -269,6 +271,11 @@ impl ValidatorService {
             self.config.auction.clone(),
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),
+            if self.config.collateral.enabled {
+                Some(self.config.collateral.grace_period())
+            } else {
+                None
+            },
         )?;
         Ok(Arc::new(weight_setter))
     }
@@ -300,21 +307,24 @@ impl ValidatorService {
         )
     }
 
-    fn init_collateral_components(
+    async fn init_collateral_components(
         &self,
         persistence: Arc<SimplePersistence>,
         collateral_metrics: Option<Arc<ValidatorPrometheusMetrics>>,
         signer: Arc<BittensorService>,
-    ) -> (
+    ) -> Result<(
         Option<Arc<CollateralManager>>,
         Option<Arc<SlashExecutor>>,
         Option<chrono::Duration>,
-    ) {
+    )> {
         if !self.config.collateral.enabled {
-            return (None, None, None);
+            return Ok((None, None, None));
         }
 
         let collateral_config = self.config.collateral.clone();
+        if collateral_config.shadow_mode {
+            warn!("Collateral shadow_mode is enabled; on-chain slashing is disabled");
+        }
         let refresh_interval = collateral_config.price_refresh_interval();
         let grace_tracker = Arc::new(GracePeriodTracker::new(
             persistence.clone(),
@@ -338,10 +348,7 @@ impl ValidatorService {
             collateral_config.clone(),
             collateral_metrics.clone(),
         ));
-        let evidence_store = EvidenceStore::new(
-            collateral_config.evidence_base_url.clone(),
-            collateral_config.evidence_storage_path.clone(),
-        );
+        let evidence_store = EvidenceStore::from_config(&collateral_config).await?;
         let slash_executor = Arc::new(SlashExecutor::new(
             collateral_config,
             evidence_store,
@@ -349,11 +356,11 @@ impl ValidatorService {
             collateral_metrics,
             Some(signer),
         ));
-        (
+        Ok((
             Some(collateral_manager),
             Some(slash_executor),
             Some(refresh_interval),
-        )
+        ))
     }
 
     fn spawn_collateral_refresh(
@@ -448,6 +455,7 @@ impl ValidatorService {
         validator_metrics: Option<&ValidatorMetrics>,
         collateral_manager: Option<Arc<CollateralManager>>,
         slash_executor: Option<Arc<SlashExecutor>>,
+        cliff_manager: Option<Arc<CliffManager>>,
         validator_hotkey: &basilica_common::identity::Hotkey,
     ) -> Result<Option<crate::rental::RentalManager>> {
         let Some(metrics) = validator_metrics else {
@@ -460,6 +468,7 @@ impl ValidatorService {
             metrics.prometheus(),
             collateral_manager,
             slash_executor,
+            cliff_manager,
             Some(validator_hotkey.as_str().to_string()),
         )
         .await?;
