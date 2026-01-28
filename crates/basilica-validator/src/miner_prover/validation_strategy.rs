@@ -594,13 +594,16 @@ impl ValidationNode {
                 // TODO: Decide whether to fail closed when no GPU UUIDs are on record.
                 true
             } else {
+                // nvidia-smi returns UUIDs with dashes (e.g., GPU-84ccface-663f-f5fd-8e8e-109d0f78bd2f)
+                // but the CUDA API stores them without dashes (e.g., GPU-84ccface663ff5fd8e8e109d0f78bd2f)
+                // Normalize by removing dashes for comparison
                 let detected_uuids: Vec<String> = nvidia_smi_output
                     .as_deref()
                     .unwrap_or("")
                     .lines()
                     .map(|l| l.trim())
                     .filter(|l| l.starts_with("GPU-"))
-                    .map(|l| l.to_string())
+                    .map(|l| l.replace('-', "").replacen("GPU", "GPU-", 1))
                     .collect();
                 detected_uuids.iter().any(|u| known_uuids.contains(u))
             }
