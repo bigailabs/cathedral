@@ -3,8 +3,9 @@
 //! Handles the execution and parsing of validator binary outputs for hardware attestation.
 
 use super::types::{
-    BandwidthPowResult, BinaryCpuInfo, BinaryMemoryInfo, BinaryNetworkInfo, CompressedMatrix,
-    CpuPowResult, GpuInfo, NodeResult, SmUtilizationStats, StoragePowResult, ValidatorBinaryOutput,
+    BandwidthPowDirectionResult, BandwidthPowResult, BinaryCpuInfo, BinaryMemoryInfo,
+    BinaryNetworkInfo, CompressedMatrix, CpuPowResult, GpuInfo, NodeResult, SmUtilizationStats,
+    StoragePowResult, ValidatorBinaryOutput,
 };
 use anyhow::{Context, Result};
 use basilica_common::ssh::SshConnectionDetails;
@@ -1440,16 +1441,24 @@ impl BinaryValidator {
             duration_ms: v.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
         });
 
-        let bandwidth_pow = raw_json.get("bandwidth_pow").map(|v| BandwidthPowResult {
-            valid: v.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
-            mode: v
-                .get("mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            bytes: v.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
-            chunk_size: v.get("chunk_size").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            duration_ms: v.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+        let bandwidth_pow = raw_json.get("bandwidth_pow").map(|v| {
+            let download = v.get("download").map(|d| BandwidthPowDirectionResult {
+                valid: d.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+                bytes: d.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                chunk_size: d.get("chunk_size").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                duration_ms: d.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+            });
+            let upload = v.get("upload").map(|u| BandwidthPowDirectionResult {
+                valid: u.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+                bytes: u.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                chunk_size: u.get("chunk_size").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                duration_ms: u.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0),
+            });
+            BandwidthPowResult {
+                valid: v.get("valid").and_then(|v| v.as_bool()).unwrap_or(false),
+                download,
+                upload,
+            }
         });
 
         let node_result = NodeResult {

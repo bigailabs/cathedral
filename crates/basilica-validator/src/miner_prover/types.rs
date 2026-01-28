@@ -221,12 +221,18 @@ pub struct StoragePowResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BandwidthPowResult {
+pub struct BandwidthPowDirectionResult {
     pub valid: bool,
-    pub mode: String,
     pub bytes: u64,
     pub chunk_size: u32,
     pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BandwidthPowResult {
+    pub valid: bool,
+    pub download: Option<BandwidthPowDirectionResult>,
+    pub upload: Option<BandwidthPowDirectionResult>,
 }
 
 /// Detailed node information for verification processes
