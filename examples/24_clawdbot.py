@@ -14,48 +14,27 @@ import sys
 
 from basilica import BasilicaClient
 
+api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
+if not api_key:
+    sys.exit("Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
 
-def main():
-    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("Set ANTHROPIC_API_KEY or OPENAI_API_KEY")
-        sys.exit(1)
+client = BasilicaClient()
 
-    client = BasilicaClient()
+deployment = client.deploy(
+    name="clawdbot",
+    image="ghcr.io/one-covenant/basilica-clawdbot:latest",
+    port=18789,
+    env={k: os.environ[k] for k in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"] if k in os.environ},
+    cpu="2",
+    memory="4Gi",
+    timeout=600,
+)
 
-    # Deploy Clawdbot
-    env = {}
-    if os.getenv("ANTHROPIC_API_KEY"):
-        env["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_API_KEY")
-    if os.getenv("OPENAI_API_KEY"):
-        env["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+print(f"Clawdbot deployed: {deployment.url}")
 
-    deployment = client.deploy(
-        name="clawdbot",
-        image="ghcr.io/one-covenant/basilica-clawdbot:latest",
-        port=18789,
-        env=env,
-        cpu="2",
-        memory="4Gi",
-    )
-
-    # Extract gateway token from logs
-    token = None
-    try:
-        logs = deployment.logs(tail=50)
-        match = re.search(r"CLAWDBOT_GATEWAY_TOKEN=([a-f0-9]{64})", logs)
-        if match:
-            token = match.group(1)
-    except Exception:
-        pass
-
-    # Print access info
-    print(f"\nClawdbot deployed: {deployment.url}")
-    if token:
-        print(f"Control UI: {deployment.url}/chat?session=main&token={token}")
-    else:
-        print("Run: basilica deploy logs clawdbot  # to get the token")
-
-
-if __name__ == "__main__":
-    main()
+# Extract gateway token from logs
+match = re.search(r"CLAWDBOT_GATEWAY_TOKEN=([a-f0-9]{64})", deployment.logs(tail=200))
+if match:
+    print(f"Control UI: {deployment.url}/chat?session=main&token={match.group(1)}")
+else:
+    print(f"Get token: basilica deploy logs {deployment.name} | grep CLAWDBOT_GATEWAY_TOKEN")
