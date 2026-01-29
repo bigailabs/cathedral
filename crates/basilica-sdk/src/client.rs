@@ -45,11 +45,12 @@ use crate::{
     types::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
-        DeploymentEventsResponse, DeploymentListResponse, DeploymentResponse,
-        DepositAccountResponse, HealthCheckResponse, HistoricalRentalsResponse,
+        DeleteShareTokenResponse, DeploymentEventsResponse, DeploymentListResponse,
+        DeploymentResponse, DepositAccountResponse, HealthCheckResponse, HistoricalRentalsResponse,
         ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
-        RegisterSshKeyRequest, RentalStatusWithSshResponse, RentalUsageResponse,
-        ScaleDeploymentRequest, SshKeyResponse, UsageHistoryResponse, WaitOptions, WaitResult,
+        RegenerateShareTokenResponse, RegisterSshKeyRequest, RentalStatusWithSshResponse,
+        RentalUsageResponse, ScaleDeploymentRequest, ShareTokenStatusResponse, SshKeyResponse,
+        UsageHistoryResponse, WaitOptions, WaitResult,
     },
     StartRentalApiRequest,
 };
@@ -1074,6 +1075,76 @@ impl BasilicaClient {
         }
     }
 
+    // ============================================================================
+    // Share Token Management
+    // ============================================================================
+
+    /// Regenerate share token for a private deployment.
+    ///
+    /// Creates a new token and invalidates any previous token. The raw token
+    /// is only returned once and cannot be retrieved later.
+    ///
+    /// # Arguments
+    /// * `instance_name` - The deployment instance name
+    ///
+    /// # Errors
+    /// * `ApiError::BadRequest` - Deployment is public (public deployments don't need tokens)
+    /// * `ApiError::NotFound` - Deployment not found or not owned by user
+    /// * `ApiError::Authentication` - Invalid or missing authentication
+    pub async fn regenerate_share_token(
+        &self,
+        instance_name: &str,
+    ) -> Result<RegenerateShareTokenResponse> {
+        let path = format!(
+            "/deployments/{}/share-token",
+            urlencoding::encode(instance_name)
+        );
+        self.post_empty(&path).await
+    }
+
+    /// Check if a share token exists for a deployment.
+    ///
+    /// # Arguments
+    /// * `instance_name` - The deployment instance name
+    ///
+    /// # Errors
+    /// * `ApiError::BadRequest` - Deployment is public
+    /// * `ApiError::NotFound` - Deployment not found or not owned by user
+    /// * `ApiError::Authentication` - Invalid or missing authentication
+    pub async fn get_share_token_status(
+        &self,
+        instance_name: &str,
+    ) -> Result<ShareTokenStatusResponse> {
+        let path = format!(
+            "/deployments/{}/share-token",
+            urlencoding::encode(instance_name)
+        );
+        self.get(&path).await
+    }
+
+    /// Revoke (delete) the share token for a deployment.
+    ///
+    /// After revocation, the deployment will not be accessible via the share URL
+    /// until a new token is generated with `regenerate_share_token`.
+    ///
+    /// # Arguments
+    /// * `instance_name` - The deployment instance name
+    ///
+    /// # Errors
+    /// * `ApiError::BadRequest` - Deployment is public
+    /// * `ApiError::NotFound` - Deployment not found or not owned by user
+    /// * `ApiError::Authentication` - Invalid or missing authentication
+    pub async fn delete_share_token(
+        &self,
+        instance_name: &str,
+    ) -> Result<DeleteShareTokenResponse> {
+        let path = format!(
+            "/deployments/{}/share-token",
+            urlencoding::encode(instance_name)
+        );
+        self.delete(&path).await
+    }
+
     // ===== Private Helper Methods =====
 
     /// Apply authentication to request
@@ -1103,6 +1174,16 @@ impl BasilicaClient {
     async fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);
         let request = self.http_client.post(&url).json(body);
+        let request = self.apply_auth(request).await?;
+
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    /// Generic POST request without body
+    async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let request = self.http_client.post(&url);
         let request = self.apply_auth(request).await?;
 
         let response = request.send().await.map_err(ApiError::HttpClient)?;
