@@ -22,9 +22,9 @@ use tokio::runtime::Runtime;
 
 use crate::types::{
     AvailableNode, CpuOffering, CpuRentalResponse, CreateDeploymentRequest,
-    DeleteDeploymentResponse, DeleteShareTokenResponse, DeploymentListResponse,
-    DeploymentResponse, HealthCheckResponse, ListAvailableNodesQuery, ListCpuRentalsResponse,
-    ListRentalsQuery, RegenerateShareTokenResponse, RentalResponse, RentalStatusWithSshResponse,
+    DeleteDeploymentResponse, DeleteShareTokenResponse, DeploymentListResponse, DeploymentResponse,
+    HealthCheckResponse, ListAvailableNodesQuery, ListCpuRentalsResponse, ListRentalsQuery,
+    RegenerateShareTokenResponse, RentalResponse, RentalStatusWithSshResponse,
     ShareTokenStatusResponse, SshKeyResponse, StartCpuRentalRequest, StartRentalApiRequest,
     StopCpuRentalResponse,
 };

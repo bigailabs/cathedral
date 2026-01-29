@@ -54,7 +54,9 @@ async fn handle_regenerate(client: &BasilicaClient, name: Option<String>) -> Res
     println!();
     println!(
         "{}",
-        style("Share token regenerated successfully!").green().bold()
+        style("Share token regenerated successfully!")
+            .green()
+            .bold()
     );
     println!();
     println!(
@@ -74,7 +76,10 @@ async fn handle_regenerate(client: &BasilicaClient, name: Option<String>) -> Res
     Ok(())
 }
 
-async fn handle_token_status(client: &BasilicaClient, name: Option<String>) -> Result<(), CliError> {
+async fn handle_token_status(
+    client: &BasilicaClient,
+    name: Option<String>,
+) -> Result<(), CliError> {
     let name = resolve_private_deployment_name(client, name).await?;
 
     let spinner = create_spinner(&format!("Checking share token for '{}'...", name));

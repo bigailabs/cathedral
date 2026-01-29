@@ -127,15 +127,14 @@ pub fn print_share_token_info(token: &str, share_url: &str) {
     println!();
     println!(
         "{}",
-        style("Share Token (save this - cannot be retrieved later):").yellow().bold()
+        style("Share Token (save this - cannot be retrieved later):")
+            .yellow()
+            .bold()
     );
     println!("  Token:     {}", style(token).cyan());
     println!("  Share URL: {}", style(share_url).cyan());
     println!();
-    println!(
-        "{}",
-        style("Access your deployment with:").dim()
-    );
+    println!("{}", style("Access your deployment with:").dim());
     println!("  curl \"{}\"", share_url);
 }
 
