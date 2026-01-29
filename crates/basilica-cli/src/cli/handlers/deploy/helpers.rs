@@ -121,6 +121,24 @@ pub fn print_deployment_success(deployment: &DeploymentResponse) {
     );
 }
 
+/// Print share token information with security warning.
+/// Called after creating a private deployment.
+pub fn print_share_token_info(token: &str, share_url: &str) {
+    println!();
+    println!(
+        "{}",
+        style("Share Token (save this - cannot be retrieved later):").yellow().bold()
+    );
+    println!("  Token:     {}", style(token).cyan());
+    println!("  Share URL: {}", style(share_url).cyan());
+    println!();
+    println!(
+        "{}",
+        style("Access your deployment with:").dim()
+    );
+    println!("  curl \"{}\"", share_url);
+}
+
 /// Print summons table
 pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
     if deployments.is_empty() {
@@ -134,6 +152,7 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
     struct Row {
         name: String,
         state: String,
+        access: String,
         replicas: String,
         url: String,
         created: String,
@@ -144,8 +163,13 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
         .map(|d| Row {
             name: d.instance_name.clone(),
             state: d.state.clone(),
+            access: if d.public {
+                style("Public").green().to_string()
+            } else {
+                style("Token").yellow().to_string()
+            },
             replicas: format!("{}/{}", d.replicas.ready, d.replicas.desired),
-            url: truncate_url(&d.url, 50),
+            url: truncate_url(&d.url, 45),
             created: d.created_at.clone(),
         })
         .collect();
