@@ -4,7 +4,7 @@ This document summarizes the end-to-end verification flow (veritas → basilica-
 implemented to enforce strict binary outcomes, propagate failure reasons, and harden proofs.
 
 ## Scope
-- veritas: executor + validator binaries, PoW proofs (CPU/storage/bandwidth), and verification logic.
+- veritas: executor + validator binaries, PoW proofs (CPU/storage), and verification logic.
 - basilica-2: validator orchestration, parsing, persistence, and node profile publication.
 
 ## Strict Binary Outcome
@@ -24,27 +24,15 @@ Failure reasons are now carried end-to-end:
 - basilica-2 parses and persists them.
 - Node profile CR includes them for external visibility.
 
-## Bandwidth PoW Fix (Network-Proving)
-**Issue:** Original bandwidth PoW hashed a deterministic RNG stream locally on executor/validator,
-which did **not** require network transfer.
-
-**Fix:** Introduced streaming download path so the validator must receive actual bytes over the
-network to compute the proof:
-- Executor exposes `POST /bandwidth_stream` (download stream).
-- Executor exposes `POST /bandwidth_upload_stream` (upload stream, server-timed).
-- Executor streams deterministic bytes (seed/nonce) to the validator for download.
-- Validator uploads payload to executor for upload (server times receive).
-- Validator hashes the received/transmitted bytes and measures duration to compute proof.
-
-This makes the proof dependent on actual network throughput between validator and executor.
-
 ## Remaining Assumptions / Risks
-1) **Upload mode** still measures *client-side* send time. It proves sender→receiver bandwidth,
-   but can be sensitive to TCP buffering; consider server-side timing if needed.
-2) **Failure reasons on pre-validations** are still limited to high-level reasons unless explicitly
+1) **Failure reasons on pre-validations** are still limited to high-level reasons unless explicitly
    added for Docker/NAT/storage.
-3) **Node profile on failure** is only updated if a successful node_result exists; failures won’t
+2) **Node profile on failure** is only updated if a successful node_result exists; failures won't
    publish CRs unless explicitly added.
+
+## Removed Features
+- **Bandwidth PoW**: Removed due to unreliable verification - network conditions are too variable
+  for consistent proof-of-work verification.
 
 ## References
 - `veritas` executor: `crates/executor-binary/src/server/handlers.rs`

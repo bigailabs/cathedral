@@ -210,7 +210,6 @@ mod tests {
             },
             cpu_pow: None,
             storage_pow: None,
-            bandwidth_pow: None,
             matrix_c: CompressedMatrix {
                 rows: 0,
                 cols: 0,

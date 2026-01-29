@@ -62,9 +62,6 @@ output_format = "json"
 # Maximum CPU time per iteration in milliseconds (validates CPU PoW performance)
 # max_cpu_ms_per_iteration = 0.5
 #
-# Minimum required bandwidth in Mbps (validates network bandwidth)
-# min_bandwidth_mbps = 100.0
-#
 # Maximum storage PoW duration in milliseconds (validates storage I/O performance)
 # max_storage_duration_ms = 5000
 
