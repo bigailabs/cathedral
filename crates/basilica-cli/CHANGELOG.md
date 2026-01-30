@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0]
+
+### Added
+- Share token management for private deployments (`share-token regenerate`, `share-token status`, `share-token revoke`)
+- `--private` flag for deploy command (deployments are public by default)
+- Access column (Public/Token) in deployments list table
+- `--show-token` flag for deploy status command
+- Spot instance indicator in GPU listings, rental selectors, and status views
+
 ## [0.14.0]
 
 ### Added
