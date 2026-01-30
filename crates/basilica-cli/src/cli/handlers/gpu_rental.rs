@@ -1767,7 +1767,12 @@ pub async fn handle_status(
                     println!("Rental Status: {}", rental.rental_id);
                     println!("  Provider: {}", rental.provider);
                     println!("  Status: {}", rental.status);
-                    println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
+                    let gpu_label = format!("{}x {}", rental.gpu_count, rental.gpu_type);
+                    if rental.is_spot {
+                        println!("  GPU: {} (Spot)", gpu_label);
+                    } else {
+                        println!("  GPU: {}", gpu_label);
+                    }
                     if let Some(ip) = &rental.ip_address {
                         println!("  IP Address: {}", ip);
                     }

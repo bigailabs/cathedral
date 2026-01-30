@@ -1339,6 +1339,8 @@ pub struct CpuRentalResponse {
     pub ssh_command: Option<String>,
     #[pyo3(get)]
     pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub is_spot: bool,
 }
 
 impl From<SdkSecureCloudRentalResponse> for CpuRentalResponse {
@@ -1351,6 +1353,7 @@ impl From<SdkSecureCloudRentalResponse> for CpuRentalResponse {
             ip_address: response.ip_address,
             ssh_command: response.ssh_command,
             hourly_cost: response.hourly_cost,
+            is_spot: response.is_spot,
         }
     }
 }
@@ -1420,6 +1423,8 @@ pub struct CpuRentalListItem {
     pub accumulated_cost: Option<String>,
     #[pyo3(get)]
     pub is_vip: bool,
+    #[pyo3(get)]
+    pub is_spot: bool,
 }
 
 impl From<SdkSecureCloudRentalListItem> for CpuRentalListItem {
@@ -1442,6 +1447,7 @@ impl From<SdkSecureCloudRentalListItem> for CpuRentalListItem {
             system_memory_gb: item.system_memory_gb,
             accumulated_cost: item.accumulated_cost,
             is_vip: item.is_vip,
+            is_spot: item.is_spot,
         }
     }
 }
@@ -1496,6 +1502,8 @@ pub struct GpuOffering {
     #[pyo3(get)]
     pub availability: bool,
     #[pyo3(get)]
+    pub is_spot: bool,
+    #[pyo3(get)]
     pub fetched_at: String,
 }
 
@@ -1512,6 +1520,7 @@ impl From<SdkGpuOffering> for GpuOffering {
             region: offering.region,
             hourly_rate: offering.hourly_rate_per_gpu.to_string(),
             availability: offering.availability,
+            is_spot: offering.is_spot,
             fetched_at: offering.fetched_at.to_rfc3339(),
         }
     }
@@ -1568,6 +1577,8 @@ pub struct SecureCloudRentalResponse {
     pub ssh_command: Option<String>,
     #[pyo3(get)]
     pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub is_spot: bool,
 }
 
 impl From<SdkSecureCloudRentalResponse> for SecureCloudRentalResponse {
@@ -1580,6 +1591,7 @@ impl From<SdkSecureCloudRentalResponse> for SecureCloudRentalResponse {
             ip_address: response.ip_address,
             ssh_command: response.ssh_command,
             hourly_cost: response.hourly_cost,
+            is_spot: response.is_spot,
         }
     }
 }
@@ -1649,6 +1661,8 @@ pub struct SecureCloudRentalListItem {
     pub accumulated_cost: Option<String>,
     #[pyo3(get)]
     pub is_vip: bool,
+    #[pyo3(get)]
+    pub is_spot: bool,
 }
 
 impl From<SdkSecureCloudRentalListItem> for SecureCloudRentalListItem {
@@ -1671,6 +1685,7 @@ impl From<SdkSecureCloudRentalListItem> for SecureCloudRentalListItem {
             system_memory_gb: item.system_memory_gb,
             accumulated_cost: item.accumulated_cost,
             is_vip: item.is_vip,
+            is_spot: item.is_spot,
         }
     }
 }

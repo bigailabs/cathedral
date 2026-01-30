@@ -247,10 +247,15 @@ pub async fn resolve_target_rental_unified(
                 continue;
             }
 
-            let gpu_info = if rental.gpu_count > 1 {
+            let base_gpu = if rental.gpu_count > 1 {
                 format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
             } else {
                 rental.gpu_type.to_uppercase()
+            };
+            let gpu_info = if rental.is_spot {
+                format!("{} (Spot)", base_gpu)
+            } else {
+                base_gpu
             };
 
             // Extract country code from location_code
