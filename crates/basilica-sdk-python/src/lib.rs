@@ -22,9 +22,10 @@ use tokio::runtime::Runtime;
 
 use crate::types::{
     AvailableNode, CpuOffering, CpuRentalResponse, CreateDeploymentRequest,
-    DeleteDeploymentResponse, DeploymentListResponse, DeploymentResponse, HealthCheckResponse,
-    ListAvailableNodesQuery, ListCpuRentalsResponse, ListRentalsQuery, RentalResponse,
-    RentalStatusWithSshResponse, SshKeyResponse, StartCpuRentalRequest, StartRentalApiRequest,
+    DeleteDeploymentResponse, DeleteShareTokenResponse, DeploymentListResponse, DeploymentResponse,
+    HealthCheckResponse, ListAvailableNodesQuery, ListCpuRentalsResponse, ListRentalsQuery,
+    RegenerateShareTokenResponse, RentalResponse, RentalStatusWithSshResponse,
+    ShareTokenStatusResponse, SshKeyResponse, StartCpuRentalRequest, StartRentalApiRequest,
     StopCpuRentalResponse,
 };
 
@@ -310,6 +311,71 @@ impl BasilicaClient {
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to read response: {}", e)))?;
 
         Ok(text)
+    }
+
+    // ===== Share Token Management =====
+
+    /// Regenerate a share token for a private deployment
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn regenerate_share_token(
+        &self,
+        py: Python,
+        instance_name: String,
+    ) -> PyResult<RegenerateShareTokenResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.regenerate_share_token(&instance_name).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Get share token status for a private deployment
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn get_share_token_status(
+        &self,
+        py: Python,
+        instance_name: String,
+    ) -> PyResult<ShareTokenStatusResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.get_share_token_status(&instance_name).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Delete/revoke the share token for a private deployment
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn delete_share_token(
+        &self,
+        py: Python,
+        instance_name: String,
+    ) -> PyResult<DeleteShareTokenResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.delete_share_token(&instance_name).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
     }
 
     /// Get account balance
@@ -632,11 +698,18 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::StorageBackend>()?;
     m.add_class::<types::PersistentStorageSpec>()?;
     m.add_class::<types::StorageSpec>()?;
+    m.add_class::<types::ProbeConfig>()?;
+    m.add_class::<types::HealthCheckConfig>()?;
     m.add_class::<types::CreateDeploymentRequest>()?;
     m.add_class::<types::DeploymentResponse>()?;
     m.add_class::<types::DeploymentSummary>()?;
     m.add_class::<types::DeploymentListResponse>()?;
     m.add_class::<types::DeleteDeploymentResponse>()?;
+
+    // Share Token types
+    m.add_class::<types::RegenerateShareTokenResponse>()?;
+    m.add_class::<types::ShareTokenStatusResponse>()?;
+    m.add_class::<types::DeleteShareTokenResponse>()?;
 
     // SSH Key types
     m.add_class::<types::SshKeyResponse>()?;

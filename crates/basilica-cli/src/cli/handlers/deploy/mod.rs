@@ -6,9 +6,12 @@ use crate::config::CliConfig;
 use crate::error::{CliError, DeployError};
 use crate::output::{json_output, print_error, print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
+use basilica_sdk::ApiError;
+use console::style;
 
 mod create;
 pub mod helpers;
+mod share_token;
 pub mod templates;
 mod validation;
 
@@ -28,9 +31,9 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
 
     match cmd.action {
         Some(DeployAction::List) => handle_list(&client, json).await,
-        Some(DeployAction::Status { name }) => {
+        Some(DeployAction::Status { name, show_token }) => {
             let name = helpers::resolve_deployment_name(name, &client).await?;
-            handle_status(&client, &name, json, show_phases).await
+            handle_status(&client, &name, json, show_phases, show_token).await
         }
         Some(DeployAction::Logs { name, follow, tail }) => {
             let name = helpers::resolve_deployment_name(name, &client).await?;
@@ -43,6 +46,9 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
         Some(DeployAction::Scale { name, replicas }) => {
             let name = helpers::resolve_deployment_name(name, &client).await?;
             handle_scale(&client, &name, replicas).await
+        }
+        Some(DeployAction::ShareToken { action }) => {
+            share_token::handle_share_token(&client, action).await
         }
         Some(DeployAction::Vllm {
             model,
@@ -89,6 +95,7 @@ async fn handle_status(
     name: &str,
     json: bool,
     verbose: bool,
+    show_token: bool,
 ) -> Result<(), CliError> {
     let spinner = create_spinner(&format!("Fetching summons '{}'...", name));
     let result = client.get_deployment(name).await;
@@ -107,8 +114,51 @@ async fn handle_status(
         json_output(&response)?;
     } else {
         helpers::print_deployment_details(&response, verbose);
+
+        if show_token {
+            handle_show_token_status(client, name).await?;
+        }
     }
 
+    Ok(())
+}
+
+/// Show token status for a deployment
+async fn handle_show_token_status(
+    client: &basilica_sdk::BasilicaClient,
+    name: &str,
+) -> Result<(), CliError> {
+    match client.get_share_token_status(name).await {
+        Ok(status) if status.exists => {
+            println!();
+            println!(
+                "{}",
+                style("Share token exists but cannot be retrieved.").yellow()
+            );
+            println!(
+                "Use {} to generate a new token.",
+                style("deploy share-token regenerate").cyan()
+            );
+        }
+        Ok(_) => {
+            println!();
+            println!(
+                "{}",
+                style("No share token configured for this deployment.").dim()
+            );
+            println!(
+                "Use {} to generate one.",
+                style("deploy share-token regenerate").cyan()
+            );
+        }
+        Err(ApiError::BadRequest { .. }) => {
+            // Deployment is public, no token needed
+            tracing::debug!("Deployment is public, share token not applicable");
+        }
+        Err(e) => {
+            tracing::warn!("Could not fetch share token status: {}", e);
+        }
+    }
     Ok(())
 }
 

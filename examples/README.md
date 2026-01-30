@@ -58,8 +58,22 @@ Using `@basilica.deployment` decorator:
 | `22_vllm_embeddings.py` | vLLM Embeddings API (E5-Mistral) | `python3 22_vllm_embeddings.py` |
 | `22_vllm_embeddings_llama.py` | vLLM Embeddings with Llama-3.1-8B | `python3 22_vllm_embeddings_llama.py` |
 | `23_vllm_llama_with_embeddings.py` | Llama-3.1-8B + E5 Embeddings (RAG stack) | `python3 23_vllm_llama_with_embeddings.py` |
-| `24_clawdbot.py` | Clawdbot AI agent platform (SDK) | `python3 24_clawdbot.py` |
-| `24_clawdbot.sh` | Clawdbot AI agent platform (CLI) | `./24_clawdbot.sh` |
+| `24_clawdbot.py` | Clawdbot AI agent platform | `python3 24_clawdbot.py` |
+| `25_kimi_k2_5.py` | Kimi-K2-Instruct 1T MoE (8x H200) | `python3 25_kimi_k2_5.py` |
+
+## Large Model Deployment Notes
+
+Models over 100B parameters (like Kimi-K2, DeepSeek-V3) require:
+- **8x H200/H100 GPUs** for tensor parallelism
+- **15-30 minutes** for model loading (500GB+ weights)
+- **Extended health check timeout** - may require monitoring via logs
+
+For extremely large models, consider using **GPU Rentals** (SSH access) instead:
+```bash
+basilica up h200 --gpu-count 8
+basilica ssh <rental-id>
+# Then run vLLM directly on the instance
+```
 
 ## Deployment Options
 
@@ -179,9 +193,12 @@ See `16_progress_callback.py` for a complete example.
 
 ## Available GPUs
 
-| Model | VRAM | CUDA |
-|-------|------|------|
-| NVIDIA RTX A4000 | 16GB | 12.8 |
+| Model | VRAM | CUDA | Use Case |
+|-------|------|------|----------|
+| NVIDIA RTX A4000 | 16GB | 12.8 | Small models (7B) |
+| NVIDIA A100 | 40/80GB | 12.x | Medium models (70B) |
+| NVIDIA H100 | 80GB | 12.x | Large models (70B+) |
+| NVIDIA H200 | 141GB | 12.x | Massive MoE models (1T+) |
 
 ## Container Requirements
 

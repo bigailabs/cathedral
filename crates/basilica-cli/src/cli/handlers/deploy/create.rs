@@ -74,7 +74,10 @@ pub async fn handle_create(
     // 9. Build topology spread config (if specified)
     let topology_spread = build_topology_spread(&cmd.topology_spread);
 
-    // 10. Create request
+    // 10. Build public flag using is_public() helper
+    let is_public = cmd.networking.is_public();
+
+    // 11. Create request
     let request = CreateDeploymentRequest {
         instance_name: name.clone(),
         image,
@@ -85,7 +88,7 @@ pub async fn handle_create(
         env: Some(env),
         resources: Some(resources),
         ttl_seconds: cmd.lifecycle.ttl,
-        public: cmd.networking.public,
+        public: is_public,
         storage,
         health_check,
         enable_billing: true,
@@ -122,6 +125,20 @@ pub async fn handle_create(
                     crate::output::json_output(&deployment)?;
                 } else {
                     super::helpers::print_deployment_success(&deployment);
+                    // Display share token for private deployments
+                    if !is_public {
+                        match (&deployment.share_token, &deployment.share_url) {
+                            (Some(token), Some(share_url)) => {
+                                super::helpers::print_share_token_info(token, share_url);
+                            }
+                            _ => {
+                                // Token generation may have failed silently
+                                crate::output::print_warning(
+                                    "Share token was not generated. Use 'deploy share-token regenerate' to create one."
+                                );
+                            }
+                        }
+                    }
                 }
             }
             WaitResult::Failed(reason) => {

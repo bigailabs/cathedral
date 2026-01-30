@@ -788,6 +788,12 @@ pub struct DeploymentResponse {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<DeploymentProgress>,
+    /// Share token for private deployments (only returned on creation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_token: Option<String>,
+    /// Shareable URL with token query parameter for private deployments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
 }
 
 /// Deployment summary for list responses
@@ -799,6 +805,9 @@ pub struct DeploymentSummary {
     pub url: String,
     pub replicas: ReplicaStatus,
     pub created_at: String,
+    /// Whether deployment is publicly accessible (no token required).
+    #[serde(default = "default_public")]
+    pub public: bool,
 }
 
 /// List deployments response
@@ -816,6 +825,32 @@ pub struct DeleteDeploymentResponse {
     pub instance_name: String,
     pub state: String,
     pub message: String,
+}
+
+/// Response for POST /deployments/{name}/share-token
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegenerateShareTokenResponse {
+    /// Raw token value. Only returned once, cannot be retrieved later.
+    pub token: String,
+    /// Full shareable URL with token as query parameter.
+    pub share_url: String,
+}
+
+/// Response for GET /deployments/{name}/share-token
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareTokenStatusResponse {
+    /// Whether a share token exists for this deployment.
+    pub exists: bool,
+}
+
+/// Response for DELETE /deployments/{name}/share-token
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteShareTokenResponse {
+    /// Whether a token was revoked.
+    pub revoked: bool,
 }
 
 /// Deployment event from Kubernetes
@@ -1295,5 +1330,125 @@ mod tests {
         set.insert(SpreadMode::UniqueNodes);
         assert_eq!(set.len(), 3);
         assert!(set.contains(&SpreadMode::Preferred));
+    }
+
+    // Share Token Tests
+
+    #[test]
+    fn test_regenerate_share_token_response_serialization() {
+        let response = RegenerateShareTokenResponse {
+            token: "abc123def456".to_string(),
+            share_url: "https://api.example.com/d/my-app?token=abc123def456".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("token"));
+        assert!(json.contains("shareUrl")); // camelCase
+    }
+
+    #[test]
+    fn test_regenerate_share_token_response_deserialization() {
+        let json = r#"{"token":"abc123","shareUrl":"https://example.com"}"#;
+        let response: RegenerateShareTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.token, "abc123");
+        assert_eq!(response.share_url, "https://example.com");
+    }
+
+    #[test]
+    fn test_share_token_status_response() {
+        let exists = ShareTokenStatusResponse { exists: true };
+        let not_exists = ShareTokenStatusResponse { exists: false };
+
+        assert!(exists.exists);
+        assert!(!not_exists.exists);
+        assert_ne!(exists, not_exists);
+    }
+
+    #[test]
+    fn test_share_token_status_response_serialization() {
+        let response = ShareTokenStatusResponse { exists: true };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"exists":true}"#);
+    }
+
+    #[test]
+    fn test_delete_share_token_response() {
+        let revoked = DeleteShareTokenResponse { revoked: true };
+        let not_revoked = DeleteShareTokenResponse { revoked: false };
+
+        assert!(revoked.revoked);
+        assert!(!not_revoked.revoked);
+        assert_ne!(revoked, not_revoked);
+    }
+
+    #[test]
+    fn test_delete_share_token_response_serialization() {
+        let response = DeleteShareTokenResponse { revoked: true };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"revoked":true}"#);
+    }
+
+    #[test]
+    fn test_deployment_summary_public_field_default() {
+        // Test that public field deserializes with default when missing
+        let json = r#"{
+            "instanceName": "my-app",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z"
+        }"#;
+        let summary: DeploymentSummary = serde_json::from_str(json).unwrap();
+        assert!(summary.public); // default_public() returns true
+    }
+
+    #[test]
+    fn test_deployment_summary_public_field_explicit() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z",
+            "public": false
+        }"#;
+        let summary: DeploymentSummary = serde_json::from_str(json).unwrap();
+        assert!(!summary.public);
+    }
+
+    #[test]
+    fn test_deployment_response_share_token_fields() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "userId": "user123",
+            "namespace": "u-user123",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z",
+            "shareToken": "abc123",
+            "shareUrl": "https://example.com?token=abc123"
+        }"#;
+        let response: DeploymentResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.share_token, Some("abc123".to_string()));
+        assert_eq!(
+            response.share_url,
+            Some("https://example.com?token=abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_deployment_response_share_token_fields_optional() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "userId": "user123",
+            "namespace": "u-user123",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z"
+        }"#;
+        let response: DeploymentResponse = serde_json::from_str(json).unwrap();
+        assert!(response.share_token.is_none());
+        assert!(response.share_url.is_none());
     }
 }

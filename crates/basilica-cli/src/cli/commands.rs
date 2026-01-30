@@ -746,9 +746,10 @@ pub struct NetworkingOptions {
     #[arg(short, long, value_name = "PORT[:NAME]", default_value = "8000")]
     pub port: Vec<String>,
 
-    /// Create public URL (default: true)
-    #[arg(long, default_value = "true")]
-    pub public: bool,
+    /// Make deployment private (requires share token for access).
+    /// By default, deployments are public.
+    #[arg(long)]
+    pub private: bool,
 
     /// Environment variables (KEY=VALUE)
     #[arg(short, long, value_name = "KEY=VALUE")]
@@ -759,11 +760,19 @@ pub struct NetworkingOptions {
     pub pip: Vec<String>,
 }
 
+impl NetworkingOptions {
+    /// Resolve whether deployment should be public.
+    /// Default is public unless --private is specified.
+    pub fn is_public(&self) -> bool {
+        !self.private
+    }
+}
+
 impl Default for NetworkingOptions {
     fn default() -> Self {
         Self {
             port: vec!["8000".to_string()],
-            public: true,
+            private: false,
             env: vec![],
             pip: vec![],
         }
@@ -818,6 +827,9 @@ pub enum DeployAction {
     Status {
         /// Deployment name (interactive selection if omitted)
         name: Option<String>,
+        /// Show share token status for private deployments
+        #[arg(long)]
+        show_token: bool,
     },
 
     /// Stream deployment logs
@@ -853,6 +865,13 @@ pub enum DeployAction {
         replicas: u32,
     },
 
+    /// Manage share tokens for private deployments
+    #[command(name = "share-token")]
+    ShareToken {
+        #[command(subcommand)]
+        action: ShareTokenAction,
+    },
+
     /// Deploy vLLM inference server
     #[command(name = "vllm")]
     Vllm {
@@ -877,6 +896,35 @@ pub enum DeployAction {
 
         #[command(flatten)]
         sglang: SglangOptions,
+    },
+}
+
+/// Share token management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum ShareTokenAction {
+    /// Regenerate share token (creates new token, invalidates previous)
+    #[command(name = "regenerate", visible_alias = "create")]
+    Regenerate {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+    },
+
+    /// Check if share token exists for a deployment
+    #[command(name = "status")]
+    Status {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+    },
+
+    /// Revoke share token (deployment becomes inaccessible via share URL)
+    #[command(name = "revoke", visible_alias = "delete")]
+    Revoke {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 
