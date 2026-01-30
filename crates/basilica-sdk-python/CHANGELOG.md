@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-01-30
+
+### Added
+- Share token management: `regenerate_share_token()`, `get_share_token_status()`, `revoke_share_token()`
+- Health check binding: `health_check()`
+- `is_spot` field on `GpuOffering`, `SecureCloudRentalResponse`, `CpuRentalResponse`, `SecureCloudRentalListItem`, `CpuRentalListItem`
+
 ## [0.14.0] - 2026-01-26
 
 ### Added
