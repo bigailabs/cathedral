@@ -353,6 +353,10 @@ pub struct SecureCloudRentalResponse {
 
     /// Hourly cost in USD (base_price × gpu_count × (1 + markup%/100))
     pub hourly_cost: f64,
+
+    /// Whether this rental is a spot/preemptible instance
+    #[serde(default)]
+    pub is_spot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,6 +555,10 @@ pub struct SecureCloudRentalListItem {
     /// Whether this is a VIP rental (managed machine, cannot be stopped by user)
     #[serde(default)]
     pub is_vip: bool,
+
+    /// Whether this rental is a spot/preemptible instance
+    #[serde(default)]
+    pub is_spot: bool,
 }
 
 /// List secure cloud rentals response

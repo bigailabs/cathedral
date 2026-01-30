@@ -375,10 +375,17 @@ pub fn display_secure_cloud_offerings_detailed(offerings: &[GpuOffering]) -> Res
     let rows: Vec<OfferingRow> = offerings
         .iter()
         .map(|offering| {
-            let gpu_info = if offering.gpu_count == 1 {
-                offering.gpu_type.to_string()
-            } else {
-                format!("{}x {}", offering.gpu_count, offering.gpu_type)
+            let gpu_info = {
+                let base = if offering.gpu_count == 1 {
+                    offering.gpu_type.to_string()
+                } else {
+                    format!("{}x {}", offering.gpu_count, offering.gpu_type)
+                };
+                if offering.is_spot {
+                    format!("{} (Spot)", base)
+                } else {
+                    base
+                }
             };
 
             // Calculate total hourly cost (per-GPU rate × gpu_count)
@@ -851,10 +858,17 @@ pub fn display_secure_cloud_rentals(
     let rows: Vec<SecureCloudRentalRow> = rentals
         .iter()
         .map(|rental| {
-            let gpu_str = if rental.gpu_count > 1 {
-                format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
-            } else {
-                rental.gpu_type.to_uppercase()
+            let gpu_str = {
+                let base = if rental.gpu_count > 1 {
+                    format!("{}x {}", rental.gpu_count, rental.gpu_type.to_uppercase())
+                } else {
+                    rental.gpu_type.to_uppercase()
+                };
+                if rental.is_spot {
+                    format!("{} (Spot)", base)
+                } else {
+                    base
+                }
             };
 
             let ssh = if rental.ssh_command.is_some() {
