@@ -214,7 +214,7 @@ pub async fn start_rental(
     if matches!(&gpu_category, GpuCategory::Other(_)) {
         error!(
             gpu_category = %request.gpu_category,
-            "[RENTAL_FLOW] gpu_category must be a known GPU type (e.g., H100, A100, B200)"
+            "[RENTAL_FLOW] GPU type '{}' is not supported", request.gpu_category
         );
         return Err(StatusCode::BAD_REQUEST);
     }

@@ -7,6 +7,7 @@ use anyhow::Result;
 use basilica_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
 };
+use basilica_common::types::GpuCategory;
 use serde::{Deserialize, Serialize};
 use ssh_key::PublicKey;
 use std::collections::HashMap;
@@ -70,12 +71,22 @@ impl<'de> Deserialize<'de> for NodeConfig {
         D: serde::Deserializer<'de>,
     {
         let raw = NodeConfigRaw::deserialize(deserializer)?;
+
+        // Validate gpu_category is a known GPU type
+        let gpu_cat: GpuCategory = raw.gpu_category.parse().unwrap(); // Infallible
+        if matches!(&gpu_cat, GpuCategory::Other(_)) {
+            return Err(serde::de::Error::custom(format!(
+                "GPU type '{}' is not supported",
+                raw.gpu_category
+            )));
+        }
+
         Ok(NodeConfig {
             host: raw.host,
             port: raw.port,
             username: raw.username,
             hourly_rate_per_gpu_cents: (raw.hourly_rate_per_gpu * 100.0).round() as u32,
-            gpu_category: raw.gpu_category,
+            gpu_category: gpu_cat.to_string(),
             gpu_count: raw.gpu_count,
             additional_opts: raw.additional_opts,
         })

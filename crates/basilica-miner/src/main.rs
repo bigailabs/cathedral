@@ -6,6 +6,7 @@
 use anyhow::Result;
 use basilica_common::identity::{Hotkey, MinerUid};
 use basilica_common::node_identity::NodeIdentity;
+use basilica_common::types::GpuCategory;
 use clap::Parser;
 use collateral_contract::collaterals;
 use collateral_contract::config::CollateralNetworkConfig;
@@ -327,7 +328,9 @@ async fn log_collateral_status(miner_hotkey: &str, nodes: &[RegisteredNode]) -> 
         let node_uuid = Uuid::parse_str(&node.node_id)?;
         let amount = collaterals(hotkey_bytes, node_uuid.into_bytes(), &network_config).await?;
         let alpha_amount = alpha_from_wei(amount);
-        let min_usd = minimum_usd_per_gpu(&node.config.gpu_category) * node.config.gpu_count as f64;
+        // Parse to GpuCategory for consistent handling (validation done at config load time)
+        let gpu_cat: GpuCategory = node.config.gpu_category.parse().unwrap();
+        let min_usd = minimum_usd_per_gpu(&gpu_cat) * node.config.gpu_count as f64;
         let warning_threshold = min_usd * 1.5;
         let (status, action) = match price {
             Some(alpha_price) => {
@@ -407,12 +410,12 @@ async fn fetch_alpha_price() -> Result<f64> {
     Ok(payload.price)
 }
 
-fn minimum_usd_per_gpu(gpu_category: &str) -> f64 {
-    match gpu_category.trim().to_uppercase().as_str() {
-        "H100" => 50.0,
-        "A100" => 25.0,
-        "B200" => 75.0,
-        _ => 10.0,
+fn minimum_usd_per_gpu(gpu_category: &GpuCategory) -> f64 {
+    match gpu_category {
+        GpuCategory::H100 => 50.0,
+        GpuCategory::A100 => 25.0,
+        GpuCategory::B200 => 75.0,
+        GpuCategory::Other(_) => 10.0,
     }
 }
 
@@ -595,10 +598,13 @@ mod tests {
 
     #[test]
     fn test_minimum_usd_per_gpu_defaults() {
-        assert_eq!(minimum_usd_per_gpu("H100"), 50.0);
-        assert_eq!(minimum_usd_per_gpu("A100"), 25.0);
-        assert_eq!(minimum_usd_per_gpu("B200"), 75.0);
-        assert_eq!(minimum_usd_per_gpu("unknown"), 10.0);
+        assert_eq!(minimum_usd_per_gpu(&GpuCategory::H100), 50.0);
+        assert_eq!(minimum_usd_per_gpu(&GpuCategory::A100), 25.0);
+        assert_eq!(minimum_usd_per_gpu(&GpuCategory::B200), 75.0);
+        assert_eq!(
+            minimum_usd_per_gpu(&GpuCategory::Other("unknown".to_string())),
+            10.0
+        );
     }
 
     #[test]

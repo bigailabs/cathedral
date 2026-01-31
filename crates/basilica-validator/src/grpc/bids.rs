@@ -4,6 +4,7 @@ use anyhow::Result;
 use basilica_common::config::GrpcServerConfig;
 use basilica_common::crypto::verify_signature_bittensor;
 use basilica_common::identity::Hotkey;
+use basilica_common::types::GpuCategory;
 use basilica_protocol::miner_discovery::{
     miner_discovery_server::{MinerDiscovery, MinerDiscoveryServer},
     DiscoverNodesRequest, ListNodeConnectionDetailsResponse, MinerAuthResponse, SubmitBidRequest,
@@ -139,10 +140,6 @@ mod tests {
     }
 }
 
-fn canonicalize_gpu_category(category: &str) -> String {
-    category.trim().to_uppercase()
-}
-
 #[derive(Clone)]
 pub struct BidService {
     persistence: Arc<SimplePersistence>,
@@ -202,6 +199,11 @@ impl BidService {
         if bid.gpu_category.len() > MAX_CATEGORY_LEN {
             anyhow::bail!("gpu_category too long");
         }
+        // Validate gpu_category is a known GPU type
+        let gpu_cat: GpuCategory = bid.gpu_category.parse().unwrap(); // Infallible
+        if matches!(&gpu_cat, GpuCategory::Other(_)) {
+            anyhow::bail!("GPU type '{}' is not supported", bid.gpu_category);
+        }
         if bid.bid_per_hour_cents == 0 {
             anyhow::bail!("bid_per_hour_cents must be greater than 0");
         }
@@ -227,7 +229,8 @@ impl BidService {
     }
 
     fn build_bid_message(&self, bid: &basilica_protocol::miner_discovery::MinerBid) -> String {
-        let gpu_category = canonicalize_gpu_category(&bid.gpu_category);
+        // Parse to GpuCategory for consistent formatting (validation already done in validate_bid_fields)
+        let gpu_category: GpuCategory = bid.gpu_category.parse().unwrap();
         format!(
             "{}|{}|{}|{}|{}|{}",
             bid.miner_hotkey.trim(),
@@ -339,7 +342,9 @@ impl MinerDiscovery for BidService {
             .await
             .map_err(|e| Status::not_found(e.to_string()))?;
         let miner_id = format!("miner_{}", miner_uid);
-        let canonical_category = canonicalize_gpu_category(&bid.gpu_category);
+        // Parse to GpuCategory for consistent formatting (validation already done in validate_bid_fields)
+        let gpu_category: GpuCategory = bid.gpu_category.parse().unwrap();
+        let canonical_category = gpu_category.to_string();
 
         let available_nodes = self
             .persistence

@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 
 use basilica_common::crypto::verify_signature_bittensor;
 use basilica_common::identity::Hotkey;
+use basilica_common::types::GpuCategory;
 use basilica_protocol::miner_discovery::{
     miner_discovery_server::{MinerDiscovery, MinerDiscoveryServer},
     DiscoverNodesRequest, ListNodeConnectionDetailsResponse, MinerAuthResponse, MinerBid,
@@ -159,7 +160,8 @@ impl ValidatorCommsServer {
     }
 
     fn build_bid_message(&self, bid: &MinerBid) -> String {
-        let gpu_category = canonicalize_gpu_category(&bid.gpu_category);
+        // Parse to GpuCategory for consistent formatting
+        let gpu_category: GpuCategory = bid.gpu_category.parse().unwrap();
         format!(
             "{}|{}|{}|{}|{}|{}",
             bid.miner_hotkey.trim(),
@@ -197,6 +199,14 @@ impl ValidatorCommsServer {
         timestamp: i64,
         nonce: Option<String>,
     ) -> Result<MinerBid, Status> {
+        // Validate gpu_category is a known GPU type
+        let gpu_cat: GpuCategory = gpu_category.parse().unwrap(); // Infallible
+        if matches!(&gpu_cat, GpuCategory::Other(_)) {
+            return Err(Status::invalid_argument(format!(
+                "GPU type '{}' is not supported",
+                gpu_category
+            )));
+        }
         let bid = MinerBid {
             miner_hotkey: self.miner_hotkey.clone(),
             gpu_category,
@@ -299,10 +309,6 @@ fn generate_session_token() -> String {
 fn session_ttl() -> Duration {
     // TODO: Make session TTL configurable via SecurityConfig.
     Duration::from_secs(3600)
-}
-
-fn canonicalize_gpu_category(category: &str) -> String {
-    category.trim().to_uppercase()
 }
 
 /// gRPC service implementation for MinerDiscovery
