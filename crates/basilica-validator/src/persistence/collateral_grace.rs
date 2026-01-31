@@ -1,8 +1,8 @@
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use std::collections::HashSet;
 use sqlx::Row;
+use std::collections::HashSet;
 
 impl SimplePersistence {
     pub async fn get_undercollateralized_since(
@@ -152,13 +152,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(excluded.contains(&(
-            expired_hotkey.to_string(),
-            expired_node.to_string()
-        )));
-        assert!(!excluded.contains(&(
-            active_hotkey.to_string(),
-            active_node.to_string()
-        )));
+        assert!(excluded.contains(&(expired_hotkey.to_string(), expired_node.to_string())));
+        assert!(!excluded.contains(&(active_hotkey.to_string(), active_node.to_string())));
     }
 }

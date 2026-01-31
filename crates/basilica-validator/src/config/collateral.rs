@@ -175,7 +175,10 @@ impl CollateralConfig {
         }
         if !self.shadow_mode {
             let missing = [
-                ("collateral.evidence_r2_account_id", self.evidence_r2_account_id.as_ref()),
+                (
+                    "collateral.evidence_r2_account_id",
+                    self.evidence_r2_account_id.as_ref(),
+                ),
                 (
                     "collateral.evidence_r2_access_key_id",
                     self.evidence_r2_access_key_id.as_ref(),
@@ -184,7 +187,10 @@ impl CollateralConfig {
                     "collateral.evidence_r2_secret_access_key",
                     self.evidence_r2_secret_access_key.as_ref(),
                 ),
-                ("collateral.evidence_r2_bucket", self.evidence_r2_bucket.as_ref()),
+                (
+                    "collateral.evidence_r2_bucket",
+                    self.evidence_r2_bucket.as_ref(),
+                ),
                 (
                     "collateral.evidence_public_url_base",
                     self.evidence_public_url_base.as_ref(),

@@ -12,9 +12,8 @@ use basilica_sdk::types::{
     GpuSpec as SdkGpuSpec, ListAvailableNodesQuery as SdkListAvailableNodesQuery,
     ListRentalsQuery as SdkListRentalsQuery,
     ListSecureCloudRentalsResponse as SdkListSecureCloudRentalsResponse,
-    NodeDetails as SdkNodeDetails, NodeSelection as SdkNodeSelection,
-    PortMappingRequest as SdkPortMappingRequest, RentalState, RentalStatus as SdkRentalStatus,
-    RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
+    NodeDetails as SdkNodeDetails, PortMappingRequest as SdkPortMappingRequest, RentalState,
+    RentalStatus as SdkRentalStatus, RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
     ResourceRequirementsRequest as SdkResourceRequirementsRequest,
     SecureCloudRentalListItem as SdkSecureCloudRentalListItem,
     SecureCloudRentalResponse as SdkSecureCloudRentalResponse, SshAccess as SdkSshAccess,
@@ -323,28 +322,6 @@ impl From<GpuRequirements> for SdkGpuRequirements {
     }
 }
 
-/// Node selection strategy
-#[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
-#[pyclass]
-#[derive(Clone)]
-pub enum NodeSelection {
-    NodeId { node_id: String },
-    ExactGpuConfiguration { gpu_requirements: GpuRequirements },
-}
-
-impl From<NodeSelection> for SdkNodeSelection {
-    fn from(selection: NodeSelection) -> Self {
-        match selection {
-            NodeSelection::NodeId { node_id } => SdkNodeSelection::NodeId { node_id },
-            NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
-                SdkNodeSelection::ExactGpuConfiguration {
-                    gpu_requirements: gpu_requirements.into(),
-                }
-            }
-        }
-    }
-}
-
 /// Port mapping request
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass]
@@ -482,15 +459,23 @@ impl From<VolumeMountRequest> for SdkVolumeMountRequest {
     }
 }
 
-/// Start rental API request
+/// Start rental API request with GPU-based selection
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass]
 #[derive(Clone)]
 pub struct StartRentalApiRequest {
     #[pyo3(get, set)]
-    pub node_selection: NodeSelection,
+    pub gpu_category: String,
+    #[pyo3(get, set)]
+    pub gpu_count: u32,
+    #[pyo3(get, set)]
+    pub min_memory_gb: Option<u32>,
+    #[pyo3(get, set)]
+    pub max_hourly_rate: Option<f64>,
     #[pyo3(get, set)]
     pub container_image: String,
+    #[pyo3(get, set)]
+    pub ssh_public_key: String,
     #[pyo3(get, set)]
     pub environment: HashMap<String, String>,
     #[pyo3(get, set)]
@@ -507,11 +492,15 @@ pub struct StartRentalApiRequest {
 #[pymethods]
 impl StartRentalApiRequest {
     #[new]
-    #[pyo3(signature = (node_selection, container_image, environment=None, ports=None, resources=None, command=None, volumes=None))]
+    #[pyo3(signature = (gpu_category, container_image, ssh_public_key, gpu_count=1, min_memory_gb=None, max_hourly_rate=None, environment=None, ports=None, resources=None, command=None, volumes=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        node_selection: NodeSelection,
+        gpu_category: String,
         container_image: String,
+        ssh_public_key: String,
+        gpu_count: u32,
+        min_memory_gb: Option<u32>,
+        max_hourly_rate: Option<f64>,
         environment: Option<HashMap<String, String>>,
         ports: Option<Vec<PortMappingRequest>>,
         resources: Option<ResourceRequirementsRequest>,
@@ -519,8 +508,12 @@ impl StartRentalApiRequest {
         volumes: Option<Vec<VolumeMountRequest>>,
     ) -> Self {
         Self {
-            node_selection,
+            gpu_category,
+            gpu_count,
+            min_memory_gb,
+            max_hourly_rate,
             container_image,
+            ssh_public_key,
             environment: environment.unwrap_or_default(),
             ports: ports.unwrap_or_default(),
             resources: resources.unwrap_or_default(),
@@ -533,8 +526,12 @@ impl StartRentalApiRequest {
 impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
     fn from(req: StartRentalApiRequest) -> Self {
         Self {
-            node_selection: req.node_selection.into(),
+            gpu_category: req.gpu_category,
+            gpu_count: req.gpu_count,
+            min_memory_gb: req.min_memory_gb,
+            max_hourly_rate: req.max_hourly_rate,
             container_image: req.container_image,
+            ssh_public_key: req.ssh_public_key,
             environment: req.environment,
             ports: req.ports.into_iter().map(Into::into).collect(),
             resources: req.resources.into(),

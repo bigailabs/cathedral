@@ -57,7 +57,10 @@ pub async fn handle_rental_command(
 
     match action {
         RentalAction::Start {
-            node,
+            gpu_category,
+            gpu_count,
+            min_memory_gb,
+            max_hourly_rate,
             image,
             ports,
             env,
@@ -65,12 +68,14 @@ pub async fn handle_rental_command(
             command,
             cpu_cores,
             memory_mb,
-            gpu_count,
             storage_mb,
         } => {
             handle_start_rental(
                 client,
-                node,
+                gpu_category,
+                gpu_count,
+                min_memory_gb,
+                max_hourly_rate,
                 image,
                 ports,
                 env,
@@ -78,7 +83,6 @@ pub async fn handle_rental_command(
                 command,
                 cpu_cores,
                 memory_mb,
-                gpu_count,
                 storage_mb,
             )
             .await
@@ -101,7 +105,10 @@ pub async fn handle_rental_command(
 #[allow(clippy::too_many_arguments)]
 async fn handle_start_rental(
     client: ValidatorClient,
-    node: String,
+    gpu_category: String,
+    gpu_count: u32,
+    min_memory_gb: Option<u32>,
+    max_hourly_rate: Option<f64>,
     image: String,
     ports: Vec<String>,
     env: Vec<String>,
@@ -109,10 +116,12 @@ async fn handle_start_rental(
     command: Vec<String>,
     cpu_cores: Option<f64>,
     memory_mb: Option<i64>,
-    gpu_count: Option<u32>,
     storage_mb: Option<i64>,
 ) -> Result<()> {
-    info!("Starting rental on node {}", node);
+    info!(
+        "Starting rental for {} x {} GPU(s)",
+        gpu_count, gpu_category
+    );
 
     // Parse port mappings and environment variables
     let port_mappings: Vec<PortMappingRequest> = parse_port_mappings(&ports)?
@@ -123,7 +132,10 @@ async fn handle_start_rental(
 
     // Build API request
     let request = StartRentalRequest {
-        node_id: node,
+        gpu_category,
+        gpu_count,
+        min_memory_gb,
+        max_hourly_rate,
         container_image: image,
         ssh_public_key,
         environment,
@@ -132,7 +144,7 @@ async fn handle_start_rental(
             cpu_cores: cpu_cores.unwrap_or(0.0),
             memory_mb: memory_mb.unwrap_or(0),
             storage_mb: storage_mb.unwrap_or(0),
-            gpu_count: gpu_count.unwrap_or(0),
+            gpu_count,
             gpu_types: Vec::new(),
         },
         command,

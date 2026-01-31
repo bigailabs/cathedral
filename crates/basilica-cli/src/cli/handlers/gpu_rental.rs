@@ -4,7 +4,8 @@ use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilte
 use crate::cli::handlers::gpu_rental_helpers::{
     active_rentals_query, get_ssh_private_key_path, print_cloud_section_header,
     resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
-    resolve_target_rental_unified, with_validator_timeout, RentalWithSsh, SelectedOffering,
+    resolve_target_rental_unified, with_validator_timeout, CommunityCloudSelection, RentalWithSsh,
+    SelectedOffering,
 };
 use crate::cli::handlers::region_mapping::region_matches_country;
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
@@ -20,8 +21,7 @@ use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
     HistoricalRentalItem, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
-    LocationProfile, NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess,
-    StartRentalApiRequest,
+    LocationProfile, RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use color_eyre::eyre::eyre;
@@ -874,10 +874,10 @@ async fn poll_cpu_rental_status(
     }
 }
 
-/// Handle community cloud rental with a pre-selected node (from unified selector)
+/// Handle community cloud rental with a pre-selected GPU category (from unified selector)
 async fn handle_community_cloud_rental_with_selection(
     api_client: basilica_sdk::BasilicaClient,
-    node_selection: NodeSelection,
+    selection: CommunityCloudSelection,
     options: UpOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {
@@ -908,16 +908,36 @@ async fn handle_community_cloud_rental_with_selection(
         options.command
     };
 
+    // Get SSH public key for the rental
+    let ssh_key = api_client
+        .get_ssh_key()
+        .await
+        .map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Failed to get SSH key");
+            CliError::Internal(eyre!(e))
+        })?
+        .ok_or_else(|| {
+            complete_spinner_error(spinner.clone(), "No SSH key registered");
+            CliError::Internal(
+                eyre!("No SSH key registered with Basilica")
+                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+            )
+        })?;
+
     let request = StartRentalApiRequest {
-        node_selection,
+        gpu_category: selection.gpu_category,
+        gpu_count: selection.gpu_count,
+        min_memory_gb: selection.min_memory_gb,
+        max_hourly_rate: None, // Could be added as CLI option in the future
         container_image,
+        ssh_public_key: ssh_key.public_key,
         environment: env_vars,
         ports: port_mappings,
         resources: ResourceRequirementsRequest {
             cpu_cores: options.cpu_cores.unwrap_or(0.0),
             memory_mb: options.memory_mb.unwrap_or(0),
             storage_mb: options.storage_mb.unwrap_or(0),
-            gpu_count: options.gpu_count.unwrap_or(0),
+            gpu_count: selection.gpu_count,
             gpu_types: vec![],
         },
         command,
@@ -1104,14 +1124,9 @@ pub async fn handle_up(
             )
             .await
         }
-        SelectedOffering::CommunityCloud(node_selection) => {
-            handle_community_cloud_rental_with_selection(
-                api_client,
-                node_selection,
-                options,
-                config,
-            )
-            .await
+        SelectedOffering::CommunityCloud(selection) => {
+            handle_community_cloud_rental_with_selection(api_client, selection, options, config)
+                .await
         }
         SelectedOffering::CpuOnly(offering) => {
             validate_no_community_cloud_options(&options)?;

@@ -130,9 +130,7 @@ impl EvidenceStore {
     }
 }
 
-async fn build_r2_client(
-    config: &crate::config::collateral::CollateralConfig,
-) -> Result<S3Client> {
+async fn build_r2_client(config: &crate::config::collateral::CollateralConfig) -> Result<S3Client> {
     let account_id = config
         .evidence_r2_account_id
         .as_ref()

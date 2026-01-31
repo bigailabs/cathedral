@@ -150,24 +150,28 @@ pub struct LogStreamQuery {
     pub since_seconds: Option<u32>,
 }
 
-/// Node selection strategy for rental requests
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum NodeSelection {
-    /// Select a specific node by ID
-    NodeId { node_id: String },
-    /// Select node with exact GPU configuration (exact count match)
-    ExactGpuConfiguration { gpu_requirements: GpuRequirements },
-}
-
-/// Start rental request with flexible node selection
+/// Start rental request with GPU-based node selection
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StartRentalApiRequest {
-    /// How to select the node for this rental
-    pub node_selection: NodeSelection,
+    /// GPU category: "H100", "A100", "B200", etc. (required)
+    pub gpu_category: String,
+
+    /// Number of GPUs required (required)
+    pub gpu_count: u32,
+
+    /// Minimum GPU memory in GB (e.g., 80 for 80GB)
+    #[serde(default)]
+    pub min_memory_gb: Option<u32>,
+
+    /// Maximum acceptable $/GPU-hour
+    #[serde(default)]
+    pub max_hourly_rate: Option<f64>,
 
     /// Container image to run
     pub container_image: String,
+
+    /// SSH public key
+    pub ssh_public_key: String,
 
     /// Environment variables
     #[serde(default)]

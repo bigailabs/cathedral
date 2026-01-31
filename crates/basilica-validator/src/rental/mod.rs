@@ -93,23 +93,12 @@ pub(crate) fn get_gpu_type(node_details: &crate::api::types::NodeDetails) -> Str
 }
 
 struct RentalSelection {
+    // Filled by bid selection
     node_id: String,
     miner_id: String,
+    miner_uid: Option<u16>,
     reservation_id: Option<String>,
     miner_bid_rate: Option<f64>,
-    miner_uid: Option<u16>,
-}
-
-impl RentalSelection {
-    fn from_request(request: &RentalRequest) -> Self {
-        Self {
-            node_id: request.node_id.clone(),
-            miner_id: request.miner_id.clone(),
-            reservation_id: None,
-            miner_bid_rate: None,
-            miner_uid: None,
-        }
-    }
 }
 
 impl RentalManager {
@@ -368,15 +357,14 @@ impl RentalManager {
     /// Start a new rental
     pub async fn start_rental(&self, request: RentalRequest) -> Result<RentalResponse> {
         let rental_id = format!("rental-{}", Uuid::new_v4());
-        let mut selection = RentalSelection::from_request(&request);
-        let gpu_category = self
-            .resolve_gpu_category(&request, &selection.node_id, &selection.miner_id)
-            .await;
-        self.apply_bid_selection(&request, &rental_id, &gpu_category, &mut selection)
-            .await?;
-        selection.miner_uid = extract_miner_uid(&selection.miner_id);
 
+        // 1. Find winning bid (required - no fallback)
+        let selection = self.select_node_from_bids(&request, &rental_id).await?;
+
+        // 2. Validate node is not banned
         self.ensure_not_banned(&selection).await?;
+
+        // 3. Get SSH endpoint and node details
         let ssh_endpoint = self.require_ssh_endpoint(&selection).await?;
         let node_details = self.require_node_details(&selection, &rental_id).await?;
 
@@ -390,11 +378,13 @@ impl RentalManager {
             selection.miner_id
         );
 
+        // 4. Ensure no active rental on this node
         self.ensure_no_active_rental(&selection, &rental_id).await?;
 
         let ssh_credentials = self.build_ssh_credentials(&ssh_endpoint);
         let container_client = self.create_container_client(&ssh_credentials)?;
 
+        // 5. Deploy container
         let container_info = self
             .deploy_container_or_log_failure(
                 &container_client,
@@ -427,7 +417,7 @@ impl RentalManager {
             }
         };
 
-        self.record_rental_metrics(&request, &selection, &rental_info);
+        self.record_rental_metrics(&selection, &rental_info);
 
         tracing::info!(
             node_id = %selection.node_id,
@@ -446,95 +436,92 @@ impl RentalManager {
         })
     }
 
-    async fn release_reservation(&self, reservation_id: &Option<String>) {
-        if let Some(reservation_id) = reservation_id {
-            let _ = self.persistence.release_reservation(reservation_id).await;
-        }
-    }
-
-    async fn resolve_gpu_category(
-        &self,
-        request: &RentalRequest,
-        node_id: &str,
-        miner_id: &str,
-    ) -> String {
-        let mut gpu_category = request
-            .container_spec
-            .resources
-            .gpu_types
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        if gpu_category == "unknown" {
-            if let Ok(Some(details)) = self.persistence.get_node_details(node_id, miner_id).await {
-                gpu_category = get_gpu_type(&details);
-            }
-        }
-        gpu_category
-    }
-
-    async fn apply_bid_selection(
+    /// Select a node from bids matching the request criteria
+    async fn select_node_from_bids(
         &self,
         request: &RentalRequest,
         rental_id: &str,
-        gpu_category: &str,
-        selection: &mut RentalSelection,
-    ) -> Result<()> {
-        if gpu_category == "unknown" {
-            return Ok(());
-        }
-
+    ) -> Result<RentalSelection> {
         let bid_repo = BidRepository::new(self.persistence.pool().clone());
-        let Some(epoch) = bid_repo.get_active_epoch().await? else {
-            return Ok(());
-        };
+
+        let epoch = bid_repo
+            .get_active_epoch()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("No active auction epoch"))?;
 
         let cutoff = chrono::Utc::now()
             - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
+
+        // Query bids matching criteria
         let candidates = bid_repo
             .get_bid_candidates_with_available_nodes(
                 &epoch.id,
-                gpu_category,
-                request.container_spec.resources.gpu_count,
+                &request.gpu_category,
+                request.gpu_count,
                 cutoff,
                 self.auction_config.bid_node_freshness_secs,
                 50,
             )
             .await?;
+
+        // Apply max_hourly_rate filter if specified
+        let candidates: Vec<_> = if let Some(max_rate) = request.max_hourly_rate {
+            candidates
+                .into_iter()
+                .filter(|(bid, _)| bid.bid_per_hour <= max_rate)
+                .collect()
+        } else {
+            candidates
+        };
+
+        // TODO: Apply min_memory_gb filter (requires node details lookup)
+
+        // Rank by collateral preference
         let ordered = self
-            .rank_bid_candidates(
-                candidates,
-                gpu_category,
-                request.container_spec.resources.gpu_count,
-            )
+            .rank_bid_candidates(candidates, &request.gpu_category, request.gpu_count)
             .await;
 
+        if ordered.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No available nodes matching criteria: gpu_category={}, gpu_count={}",
+                request.gpu_category,
+                request.gpu_count
+            ));
+        }
+
+        // Try to reserve nodes
         const MAX_RESERVATION_ATTEMPTS: usize = 3;
-        for (candidate, candidate_node_id) in ordered.into_iter().take(MAX_RESERVATION_ATTEMPTS) {
-            let winning_miner_id = format!("miner_{}", candidate.miner_uid);
+        for (candidate, node_id) in ordered.into_iter().take(MAX_RESERVATION_ATTEMPTS) {
+            let miner_id = format!("miner_{}", candidate.miner_uid);
+            let reservation_id = format!("reserve-{}", Uuid::new_v4());
             let expires_at = chrono::Utc::now()
                 + chrono::Duration::seconds(self.auction_config.bid_reservation_secs as i64);
-            let candidate_reservation_id = format!("reserve-{}", Uuid::new_v4());
-            let reserved = self
+
+            if self
                 .persistence
-                .reserve_node(
-                    &candidate_reservation_id,
-                    &candidate_node_id,
-                    &winning_miner_id,
-                    rental_id,
-                    expires_at,
-                )
-                .await?;
-            if reserved {
-                selection.miner_bid_rate = Some(candidate.bid_per_hour);
-                selection.node_id = candidate_node_id;
-                selection.miner_id = winning_miner_id;
-                selection.reservation_id = Some(candidate_reservation_id);
-                break;
+                .reserve_node(&reservation_id, &node_id, &miner_id, rental_id, expires_at)
+                .await?
+            {
+                return Ok(RentalSelection {
+                    node_id,
+                    miner_id,
+                    miner_uid: Some(candidate.miner_uid as u16),
+                    reservation_id: Some(reservation_id),
+                    miner_bid_rate: Some(candidate.bid_per_hour),
+                });
             }
         }
 
-        Ok(())
+        Err(anyhow::anyhow!(
+            "Failed to reserve any matching node after {} attempts",
+            MAX_RESERVATION_ATTEMPTS
+        ))
+    }
+
+    async fn release_reservation(&self, reservation_id: &Option<String>) {
+        if let Some(reservation_id) = reservation_id {
+            let _ = self.persistence.release_reservation(reservation_id).await;
+        }
     }
 
     async fn rank_bid_candidates(
@@ -830,23 +817,18 @@ impl RentalManager {
         Ok(rental_info)
     }
 
-    fn record_rental_metrics(
-        &self,
-        request: &RentalRequest,
-        selection: &RentalSelection,
-        rental_info: &RentalInfo,
-    ) {
+    fn record_rental_metrics(&self, selection: &RentalSelection, rental_info: &RentalInfo) {
         if let Some(miner_uid) = selection.miner_uid {
             let gpu_type = get_gpu_type(&rental_info.node_details);
             self.metrics
-                .record_node_rental_status(&request.node_id, miner_uid, &gpu_type, true);
+                .record_node_rental_status(&selection.node_id, miner_uid, &gpu_type, true);
             self.metrics.record_rental_created(miner_uid, &gpu_type);
             tracing::debug!(
                 node_id = %selection.node_id,
                 rental_id = %rental_info.rental_id,
                 miner_uid = miner_uid,
                 "Recorded rental start for node {} (miner_uid: {}, gpu_type: {})",
-                request.node_id,
+                selection.node_id,
                 miner_uid,
                 gpu_type
             );

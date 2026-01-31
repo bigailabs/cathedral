@@ -38,4 +38,3 @@ fn is_valid_evidence_name(name: &str) -> bool {
     }
     true
 }
-
