@@ -9,6 +9,7 @@ use axum::{
     response::{sse::Event, IntoResponse, Sse},
     Json,
 };
+use basilica_common::types::GpuCategory;
 use basilica_common::utils::validate_docker_image;
 use futures::stream::Stream;
 use serde::Deserialize;
@@ -208,19 +209,23 @@ pub async fn start_rental(
     State(state): State<ApiState>,
     Json(request): Json<StartRentalRequest>,
 ) -> Result<Json<RentalResponse>, StatusCode> {
+    // Parse and validate gpu_category using GpuCategory enum
+    let gpu_category: GpuCategory = request.gpu_category.parse().unwrap(); // Infallible
+    if matches!(&gpu_category, GpuCategory::Other(_)) {
+        error!(
+            gpu_category = %request.gpu_category,
+            "[RENTAL_FLOW] gpu_category must be a known GPU type (e.g., H100, A100, B200)"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     info!(
-        gpu_category = %request.gpu_category,
+        gpu_category = %gpu_category,
         gpu_count = request.gpu_count,
         "[RENTAL_FLOW] Starting rental for {} x {}",
         request.gpu_count,
-        request.gpu_category
+        gpu_category
     );
-
-    // Validate gpu_category is not empty
-    if request.gpu_category.is_empty() {
-        error!("[RENTAL_FLOW] gpu_category is required");
-        return Err(StatusCode::BAD_REQUEST);
-    }
 
     // Validate gpu_count is at least 1
     if request.gpu_count == 0 {
@@ -271,7 +276,7 @@ pub async fn start_rental(
     // Convert request to internal rental request
     let rental_request = RentalRequest {
         validator_hotkey: state.validator_hotkey.to_string(),
-        gpu_category: request.gpu_category.clone(),
+        gpu_category: gpu_category.to_string(),
         gpu_count: request.gpu_count,
         min_memory_gb: request.min_memory_gb,
         max_hourly_rate: request.max_hourly_rate,
