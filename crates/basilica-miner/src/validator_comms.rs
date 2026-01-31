@@ -621,9 +621,9 @@ fn validate_bid(bid: &MinerBid, expected_hotkey: &str) -> Result<(), Status> {
     if bid.gpu_category.trim().is_empty() {
         return Err(Status::invalid_argument("gpu_category is required"));
     }
-    if bid.bid_per_hour <= 0.0 {
+    if !bid.bid_per_hour.is_finite() || bid.bid_per_hour <= 0.0 {
         return Err(Status::invalid_argument(
-            "bid_per_hour must be greater than 0",
+            "bid_per_hour must be a finite value greater than 0",
         ));
     }
     if bid.gpu_count == 0 {

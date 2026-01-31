@@ -47,7 +47,7 @@ impl AuctionConfig {
         if self.price_api_endpoint.trim().is_empty() {
             return Err(anyhow!("price_api_endpoint cannot be empty"));
         }
-        if !(0.0..=1.0).contains(&self.min_bid_floor_fraction) {
+        if !self.min_bid_floor_fraction.is_finite() || !(0.0..=1.0).contains(&self.min_bid_floor_fraction) {
             return Err(anyhow!(
                 "min_bid_floor_fraction must be between 0.0 and 1.0"
             ));
@@ -73,7 +73,7 @@ impl AuctionConfig {
         if self.taostats_cache_ttl_secs == 0 {
             return Err(anyhow!("taostats_cache_ttl_secs must be greater than 0"));
         }
-        if !(0.0..=1.0).contains(&self.miner_emission_share) {
+        if !self.miner_emission_share.is_finite() || !(0.0..=1.0).contains(&self.miner_emission_share) {
             return Err(anyhow!("miner_emission_share must be between 0.0 and 1.0"));
         }
         Ok(())

@@ -202,8 +202,8 @@ impl BidService {
         if bid.gpu_category.len() > MAX_CATEGORY_LEN {
             anyhow::bail!("gpu_category too long");
         }
-        if bid.bid_per_hour <= 0.0 {
-            anyhow::bail!("bid_per_hour must be greater than 0");
+        if !bid.bid_per_hour.is_finite() || bid.bid_per_hour <= 0.0 {
+            anyhow::bail!("bid_per_hour must be a finite value greater than 0");
         }
         if bid.gpu_count == 0 {
             anyhow::bail!("gpu_count must be greater than 0");

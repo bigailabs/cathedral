@@ -379,7 +379,7 @@ impl WeightSetter {
                 delivery.gpu_category
             };
             let miner_payment_usd = delivery.miner_payment_usd;
-            if miner_payment_usd <= 0.0 {
+            if !miner_payment_usd.is_finite() || miner_payment_usd <= 0.0 {
                 debug!(
                     miner_hotkey = %delivery.miner_hotkey,
                     node_id = %delivery.node_id,

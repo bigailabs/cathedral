@@ -262,8 +262,8 @@ impl DeploymentManager {
     fn validate_resources(&self, spec: &ContainerSpec) -> Result<()> {
         let limits = &self.config.default_resource_limits;
 
-        if limits.max_cpu_cores > 0.0
-            && spec.resources.cpu_cores > 0.0
+        if limits.max_cpu_cores.is_finite() && limits.max_cpu_cores > 0.0
+            && spec.resources.cpu_cores.is_finite() && spec.resources.cpu_cores > 0.0
             && spec.resources.cpu_cores > limits.max_cpu_cores
         {
             return Err(anyhow::anyhow!(

@@ -114,7 +114,7 @@ impl EmissionConfig {
     /// Validate the emission configuration
     pub fn validate(&self) -> Result<()> {
         // Validate burn percentage
-        if self.burn_percentage < 0.0 || self.burn_percentage > 100.0 {
+        if !self.burn_percentage.is_finite() || self.burn_percentage < 0.0 || self.burn_percentage > 100.0 {
             return Err(anyhow!(
                 "Burn percentage must be between 0.0 and 100.0, got: {}",
                 self.burn_percentage
@@ -144,7 +144,7 @@ impl EmissionConfig {
 
         // Validate individual allocations
         for (gpu_model, allocation) in &self.gpu_allocations {
-            if allocation.weight < 0.0 {
+            if !allocation.weight.is_finite() || allocation.weight < 0.0 {
                 return Err(anyhow!(
                     "GPU allocation weight for {} must be non-negative, got: {}",
                     gpu_model,
@@ -256,7 +256,7 @@ impl EmissionConfig {
         min_gpu_count: u32,
         min_gpu_vram: Option<u64>,
     ) -> Result<()> {
-        if weight < 0.0 {
+        if !weight.is_finite() || weight < 0.0 {
             return Err(anyhow!(
                 "GPU allocation weight cannot be negative: {}",
                 weight
