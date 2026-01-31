@@ -380,7 +380,12 @@ impl WeightSetter {
             };
             let miner_payment_usd = delivery.miner_payment_usd;
             if miner_payment_usd <= 0.0 {
-                // TODO: Decide if zero-payment deliveries should be excluded or flagged.
+                debug!(
+                    miner_hotkey = %delivery.miner_hotkey,
+                    node_id = %delivery.node_id,
+                    gpu_category = %category,
+                    "Skipping delivery with zero payment - no weight contribution"
+                );
                 continue;
             }
 

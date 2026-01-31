@@ -474,7 +474,10 @@ impl RentalManager {
             candidates
         };
 
-        // TODO: Apply min_memory_gb filter (requires node details lookup)
+        // Apply min_memory_gb filter if specified
+        let candidates = self
+            .filter_by_min_memory(candidates, request.min_memory_gb)
+            .await;
 
         // Rank by collateral preference
         let ordered = self
@@ -522,6 +525,53 @@ impl RentalManager {
         if let Some(reservation_id) = reservation_id {
             let _ = self.persistence.release_reservation(reservation_id).await;
         }
+    }
+
+    /// Filter candidates by minimum GPU memory requirement
+    async fn filter_by_min_memory(
+        &self,
+        candidates: Vec<(MinerBidRecord, String)>,
+        min_memory_gb: Option<u32>,
+    ) -> Vec<(MinerBidRecord, String)> {
+        let Some(min_memory) = min_memory_gb else {
+            return candidates;
+        };
+
+        if min_memory == 0 {
+            return candidates;
+        }
+
+        let mut filtered = Vec::new();
+        for (bid, node_id) in candidates {
+            let miner_id = format!("miner_{}", bid.miner_uid);
+            match self
+                .persistence
+                .get_node_first_gpu_memory_gb(&miner_id, &node_id)
+                .await
+            {
+                Ok(memory_gb) if memory_gb >= min_memory as f64 => {
+                    filtered.push((bid, node_id));
+                }
+                Ok(memory_gb) => {
+                    tracing::debug!(
+                        node_id = %node_id,
+                        miner_uid = bid.miner_uid,
+                        gpu_memory_gb = memory_gb,
+                        min_memory_gb = min_memory,
+                        "Skipping node - GPU memory below minimum requirement"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        miner_uid = bid.miner_uid,
+                        error = %e,
+                        "Failed to get GPU memory for node, excluding from candidates"
+                    );
+                }
+            }
+        }
+        filtered
     }
 
     async fn rank_bid_candidates(
