@@ -67,7 +67,7 @@ message ListNodeConnectionDetailsResponse {
 message MinerBid {
   string miner_hotkey = 1;
   string gpu_category = 2;        // "H100", "A100", "B200"
-  double bid_per_hour = 3;        // $/hr per GPU
+  uint32 bid_per_hour_cents = 3;  // cents per GPU per hour (e.g., 250 = $2.50/hour)
   uint32 gpu_count = 4;           // Capacity being bid
   bytes attestation = 5;          // Hardware attestation
   int64 timestamp = 6;

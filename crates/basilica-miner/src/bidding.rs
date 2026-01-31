@@ -40,7 +40,7 @@ impl AutoBidder {
         if !self.config.enabled {
             return false;
         }
-        if self.config.static_prices.is_empty() {
+        if self.config.static_prices_cents.is_empty() {
             warn!("Bidding enabled but no static_prices configured");
             return false;
         }
@@ -56,7 +56,7 @@ impl AutoBidder {
 
         info!(
             "Starting auto-bidder with {} GPU categories, interval: {:?}",
-            self.config.static_prices.len(),
+            self.config.static_prices_cents.len(),
             self.config.bid_interval
         );
 
@@ -126,7 +126,9 @@ impl AutoBidder {
                 Ok(bid) => {
                     info!(
                         "Submitting bid: {} x{} @ ${:.2}/GPU-hr",
-                        category, gpu_count, price
+                        category,
+                        gpu_count,
+                        price as f64 / 100.0
                     );
 
                     // Forward to validator if endpoint is configured
@@ -162,25 +164,25 @@ impl AutoBidder {
         Ok(())
     }
 
-    /// Get the bid price for a GPU category
-    fn get_bid_price(&self, category: &str) -> Option<f64> {
-        // First check static_prices
-        if let Some(&price) = self.config.static_prices.get(category) {
+    /// Get the bid price for a GPU category (in cents)
+    fn get_bid_price(&self, category: &str) -> Option<u32> {
+        // First check static_prices_cents
+        if let Some(&price_cents) = self.config.static_prices_cents.get(category) {
             // Ensure we don't bid below floor
-            if let Some(&floor) = self.config.floor_prices.get(category) {
-                return Some(price.max(floor));
+            if let Some(&floor_cents) = self.config.floor_prices_cents.get(category) {
+                return Some(price_cents.max(floor_cents));
             }
-            return Some(price);
+            return Some(price_cents);
         }
 
         // Try case-insensitive match
         let category_upper = category.to_uppercase();
-        for (key, &price) in &self.config.static_prices {
+        for (key, &price_cents) in &self.config.static_prices_cents {
             if key.to_uppercase() == category_upper {
-                if let Some(&floor) = self.config.floor_prices.get(key) {
-                    return Some(price.max(floor));
+                if let Some(&floor_cents) = self.config.floor_prices_cents.get(key) {
+                    return Some(price_cents.max(floor_cents));
                 }
-                return Some(price);
+                return Some(price_cents);
             }
         }
 
@@ -215,15 +217,15 @@ mod tests {
     use std::time::Duration;
 
     fn test_config() -> BiddingConfig {
-        let mut static_prices = HashMap::new();
-        static_prices.insert("H100".to_string(), 2.50);
-        static_prices.insert("A100".to_string(), 1.20);
+        let mut static_prices_cents = HashMap::new();
+        static_prices_cents.insert("H100".to_string(), 250); // $2.50 in cents
+        static_prices_cents.insert("A100".to_string(), 120); // $1.20 in cents
 
         BiddingConfig {
             enabled: true,
-            static_prices,
+            static_prices_cents,
             bid_interval: Duration::from_secs(60),
-            floor_prices: HashMap::new(),
+            floor_prices_cents: HashMap::new(),
         }
     }
 
@@ -233,23 +235,23 @@ mod tests {
         let node_manager = Arc::new(NodeManager::default());
         let bidder = AutoBidder::new(config, node_manager);
 
-        assert_eq!(bidder.get_bid_price("H100"), Some(2.50));
-        assert_eq!(bidder.get_bid_price("A100"), Some(1.20));
-        assert_eq!(bidder.get_bid_price("h100"), Some(2.50)); // case insensitive
+        assert_eq!(bidder.get_bid_price("H100"), Some(250)); // $2.50 in cents
+        assert_eq!(bidder.get_bid_price("A100"), Some(120)); // $1.20 in cents
+        assert_eq!(bidder.get_bid_price("h100"), Some(250)); // case insensitive
         assert_eq!(bidder.get_bid_price("RTX4090"), None);
     }
 
     #[test]
     fn test_get_bid_price_with_floor() {
         let mut config = test_config();
-        config.floor_prices.insert("H100".to_string(), 3.00); // Floor higher than static
+        config.floor_prices_cents.insert("H100".to_string(), 300); // Floor $3.00 higher than static $2.50
 
         let node_manager = Arc::new(NodeManager::default());
         let bidder = AutoBidder::new(config, node_manager);
 
         // Should return floor price since it's higher
-        assert_eq!(bidder.get_bid_price("H100"), Some(3.00));
-        assert_eq!(bidder.get_bid_price("A100"), Some(1.20)); // No floor, use static
+        assert_eq!(bidder.get_bid_price("H100"), Some(300)); // $3.00 in cents
+        assert_eq!(bidder.get_bid_price("A100"), Some(120)); // No floor, use static $1.20
     }
 
     #[test]

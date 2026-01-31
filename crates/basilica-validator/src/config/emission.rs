@@ -114,7 +114,10 @@ impl EmissionConfig {
     /// Validate the emission configuration
     pub fn validate(&self) -> Result<()> {
         // Validate burn percentage
-        if !self.burn_percentage.is_finite() || self.burn_percentage < 0.0 || self.burn_percentage > 100.0 {
+        if !self.burn_percentage.is_finite()
+            || self.burn_percentage < 0.0
+            || self.burn_percentage > 100.0
+        {
             return Err(anyhow!(
                 "Burn percentage must be between 0.0 and 100.0, got: {}",
                 self.burn_percentage

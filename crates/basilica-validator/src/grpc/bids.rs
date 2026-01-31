@@ -202,8 +202,8 @@ impl BidService {
         if bid.gpu_category.len() > MAX_CATEGORY_LEN {
             anyhow::bail!("gpu_category too long");
         }
-        if !bid.bid_per_hour.is_finite() || bid.bid_per_hour <= 0.0 {
-            anyhow::bail!("bid_per_hour must be a finite value greater than 0");
+        if bid.bid_per_hour_cents == 0 {
+            anyhow::bail!("bid_per_hour_cents must be greater than 0");
         }
         if bid.gpu_count == 0 {
             anyhow::bail!("gpu_count must be greater than 0");
@@ -229,10 +229,10 @@ impl BidService {
     fn build_bid_message(&self, bid: &basilica_protocol::miner_discovery::MinerBid) -> String {
         let gpu_category = canonicalize_gpu_category(&bid.gpu_category);
         format!(
-            "{}|{}|{:.8}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}",
             bid.miner_hotkey.trim(),
             gpu_category,
-            bid.bid_per_hour,
+            bid.bid_per_hour_cents,
             bid.gpu_count,
             bid.timestamp,
             bid.nonce.trim()
@@ -378,7 +378,7 @@ impl MinerDiscovery for BidService {
             miner_hotkey: bid.miner_hotkey.clone(),
             miner_uid,
             gpu_category: canonical_category.clone(),
-            bid_per_hour: bid.bid_per_hour,
+            bid_per_hour_cents: bid.bid_per_hour_cents,
             gpu_count: bid.gpu_count as i64,
             attestation: if bid.attestation.is_empty() {
                 None
@@ -429,7 +429,7 @@ impl MinerDiscovery for BidService {
             miner_hotkey = %bid.miner_hotkey,
             miner_uid = miner_uid,
             gpu_category = %canonical_category,
-            bid_per_hour = bid.bid_per_hour,
+            bid_per_hour_usd = bid.bid_per_hour_cents as f64 / 100.0,
             "Accepted miner bid"
         );
 

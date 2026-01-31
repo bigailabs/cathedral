@@ -92,9 +92,9 @@ pub struct MinerBid {
     /// "H100", "A100", "B200"
     #[prost(string, tag = "2")]
     pub gpu_category: ::prost::alloc::string::String,
-    /// $/hr per GPU
-    #[prost(double, tag = "3")]
-    pub bid_per_hour: f64,
+    /// cents per GPU per hour (e.g., 250 = $2.50/hour)
+    #[prost(uint32, tag = "3")]
+    pub bid_per_hour_cents: u32,
     /// Capacity being bid
     #[prost(uint32, tag = "4")]
     pub gpu_count: u32,

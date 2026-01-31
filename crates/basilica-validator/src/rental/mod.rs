@@ -98,7 +98,8 @@ struct RentalSelection {
     miner_id: String,
     miner_uid: Option<u16>,
     reservation_id: Option<String>,
-    miner_bid_rate: Option<f64>,
+    /// Miner bid rate in cents per GPU per hour
+    miner_bid_rate_cents: Option<u32>,
 }
 
 impl RentalManager {
@@ -465,10 +466,12 @@ impl RentalManager {
             .await?;
 
         // Apply max_hourly_rate filter if specified
+        // Convert max_rate from dollars to cents for comparison with bid_per_hour_cents
         let candidates: Vec<_> = if let Some(max_rate) = request.max_hourly_rate {
+            let max_rate_cents = (max_rate * 100.0).round() as u32;
             candidates
                 .into_iter()
-                .filter(|(bid, _)| bid.bid_per_hour <= max_rate)
+                .filter(|(bid, _)| bid.bid_per_hour_cents <= max_rate_cents)
                 .collect()
         } else {
             candidates
@@ -510,7 +513,7 @@ impl RentalManager {
                     miner_id,
                     miner_uid: Some(candidate.miner_uid as u16),
                     reservation_id: Some(reservation_id),
-                    miner_bid_rate: Some(candidate.bid_per_hour),
+                    miner_bid_rate_cents: Some(candidate.bid_per_hour_cents),
                 });
             }
         }
@@ -790,7 +793,9 @@ impl RentalManager {
                                 .log_misbehaviour(
                                     miner_uid,
                                     &selection.node_id,
-                                    if selection.miner_bid_rate.is_some() && miner_attributable {
+                                    if selection.miner_bid_rate_cents.is_some()
+                                        && miner_attributable
+                                    {
                                         MisbehaviourType::BidWonDeploymentFailed
                                     } else {
                                         MisbehaviourType::BadRental
@@ -824,8 +829,8 @@ impl RentalManager {
     ) -> Result<RentalInfo> {
         let container_id = container_info.container_id.clone();
         let mut metadata = request.metadata.clone();
-        if let Some(rate) = selection.miner_bid_rate {
-            metadata.insert("miner_bid_rate".to_string(), rate.to_string());
+        if let Some(rate_cents) = selection.miner_bid_rate_cents {
+            metadata.insert("miner_bid_rate_cents".to_string(), rate_cents.to_string());
         }
 
         let now = chrono::Utc::now();

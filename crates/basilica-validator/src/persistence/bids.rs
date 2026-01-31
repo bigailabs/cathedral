@@ -7,7 +7,8 @@ pub struct MinerBidRecord {
     pub miner_hotkey: String,
     pub miner_uid: i64,
     pub gpu_category: String,
-    pub bid_per_hour: f64,
+    /// Bid price in cents per GPU per hour (e.g., 250 = $2.50/hour)
+    pub bid_per_hour_cents: u32,
     pub gpu_count: i64,
     pub attestation: Option<Vec<u8>>,
     pub signature: Vec<u8>,
@@ -32,8 +33,10 @@ pub struct AuctionClearingResult {
     pub id: String,
     pub epoch_id: String,
     pub gpu_category: String,
-    pub baseline_price: f64,
-    pub clearing_price: Option<f64>,
+    /// Baseline price in cents per GPU per hour
+    pub baseline_price_cents: u32,
+    /// Clearing price in cents per GPU per hour
+    pub clearing_price_cents: Option<u32>,
     pub total_capacity: i64,
     pub winners_count: i64,
     pub cleared_at: DateTime<Utc>,
@@ -128,7 +131,7 @@ impl BidRepository {
         sqlx::query(
             r#"
             INSERT INTO miner_bids
-            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
+            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
@@ -136,7 +139,7 @@ impl BidRepository {
         .bind(&bid.miner_hotkey)
         .bind(bid.miner_uid)
         .bind(&bid.gpu_category)
-        .bind(bid.bid_per_hour)
+        .bind(bid.bid_per_hour_cents as i64)
         .bind(bid.gpu_count)
         .bind(&bid.attestation)
         .bind(&bid.signature)
@@ -157,7 +160,7 @@ impl BidRepository {
         sqlx::query(
             r#"
             INSERT INTO miner_bids
-            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
+            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
@@ -165,7 +168,7 @@ impl BidRepository {
         .bind(&bid.miner_hotkey)
         .bind(bid.miner_uid)
         .bind(&bid.gpu_category)
-        .bind(bid.bid_per_hour)
+        .bind(bid.bid_per_hour_cents as i64)
         .bind(bid.gpu_count)
         .bind(&bid.attestation)
         .bind(&bid.signature)
@@ -247,7 +250,7 @@ impl BidRepository {
     ) -> Result<Vec<MinerBidRecord>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
-            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid
+            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid
             FROM miner_bids
             WHERE epoch_id = ? AND gpu_category = ?
             ORDER BY submitted_at ASC
@@ -270,7 +273,7 @@ impl BidRepository {
                     miner_hotkey: r.get("miner_hotkey"),
                     miner_uid: r.get("miner_uid"),
                     gpu_category: r.get("gpu_category"),
-                    bid_per_hour: r.get("bid_per_hour"),
+                    bid_per_hour_cents: r.get::<i64, _>("bid_per_hour_cents") as u32,
                     gpu_count: r.get("gpu_count"),
                     attestation: r.get("attestation"),
                     signature: r.get("signature"),
@@ -291,15 +294,15 @@ impl BidRepository {
         sqlx::query(
             r#"
             INSERT INTO auction_clearing_results
-            (id, epoch_id, gpu_category, baseline_price, clearing_price, total_capacity, winners_count, cleared_at)
+            (id, epoch_id, gpu_category, baseline_price_cents, clearing_price_cents, total_capacity, winners_count, cleared_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&result.id)
         .bind(&result.epoch_id)
         .bind(&result.gpu_category)
-        .bind(result.baseline_price)
-        .bind(result.clearing_price)
+        .bind(result.baseline_price_cents as i64)
+        .bind(result.clearing_price_cents.map(|c| c as i64))
         .bind(result.total_capacity)
         .bind(result.winners_count)
         .bind(result.cleared_at.to_rfc3339())
@@ -317,12 +320,12 @@ impl BidRepository {
     ) -> Result<Option<MinerBidRecord>, sqlx::Error> {
         let row = sqlx::query(
             r#"
-            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour, gpu_count,
+            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count,
                    attestation, signature, nonce, submitted_at, epoch_id, is_valid
             FROM miner_bids
             WHERE epoch_id = ? AND gpu_category = ? AND is_valid = 1
               AND gpu_count >= ? AND submitted_at >= ?
-            ORDER BY bid_per_hour ASC, submitted_at ASC
+            ORDER BY bid_per_hour_cents ASC, submitted_at ASC
             LIMIT 1
             "#,
         )
@@ -344,7 +347,7 @@ impl BidRepository {
                     miner_hotkey: r.get("miner_hotkey"),
                     miner_uid: r.get("miner_uid"),
                     gpu_category: r.get("gpu_category"),
-                    bid_per_hour: r.get("bid_per_hour"),
+                    bid_per_hour_cents: r.get::<i64, _>("bid_per_hour_cents") as u32,
                     gpu_count: r.get("gpu_count"),
                     attestation: r.get("attestation"),
                     signature: r.get("signature"),
@@ -391,7 +394,7 @@ impl BidRepository {
     ) -> Result<Vec<(MinerBidRecord, String)>, sqlx::Error> {
         let query = format!(
             r#"
-            SELECT b.id, b.miner_hotkey, b.miner_uid, b.gpu_category, b.bid_per_hour, b.gpu_count,
+            SELECT b.id, b.miner_hotkey, b.miner_uid, b.gpu_category, b.bid_per_hour_cents, b.gpu_count,
                    b.attestation, b.signature, b.nonce, b.submitted_at, b.epoch_id, b.is_valid,
                    bn.node_id
             FROM miner_bids b
@@ -409,7 +412,7 @@ impl BidRepository {
               AND (me.status IS NULL OR me.status != 'offline')
               AND me.last_health_check IS NOT NULL
               AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
-            ORDER BY b.bid_per_hour ASC, b.submitted_at ASC
+            ORDER BY b.bid_per_hour_cents ASC, b.submitted_at ASC
             LIMIT ?
             "#
         );
@@ -433,7 +436,7 @@ impl BidRepository {
                 miner_hotkey: r.get("miner_hotkey"),
                 miner_uid: r.get("miner_uid"),
                 gpu_category: r.get("gpu_category"),
-                bid_per_hour: r.get("bid_per_hour"),
+                bid_per_hour_cents: r.get::<i64, _>("bid_per_hour_cents") as u32,
                 gpu_count: r.get("gpu_count"),
                 attestation: r.get("attestation"),
                 signature: r.get("signature"),
@@ -573,12 +576,12 @@ impl BidRepository {
     ) -> Result<Option<MinerBidRecord>, sqlx::Error> {
         let row = sqlx::query(
             r#"
-            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour, gpu_count,
+            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count,
                    attestation, signature, nonce, submitted_at, epoch_id, is_valid
             FROM miner_bids
             WHERE epoch_id = ? AND gpu_category = ? AND is_valid = 1
               AND miner_uid = ? AND submitted_at >= ?
-            ORDER BY bid_per_hour ASC, submitted_at ASC
+            ORDER BY bid_per_hour_cents ASC, submitted_at ASC
             LIMIT 1
             "#,
         )
@@ -600,7 +603,7 @@ impl BidRepository {
                     miner_hotkey: r.get("miner_hotkey"),
                     miner_uid: r.get("miner_uid"),
                     gpu_category: r.get("gpu_category"),
-                    bid_per_hour: r.get("bid_per_hour"),
+                    bid_per_hour_cents: r.get::<i64, _>("bid_per_hour_cents") as u32,
                     gpu_count: r.get("gpu_count"),
                     attestation: r.get("attestation"),
                     signature: r.get("signature"),
@@ -638,7 +641,7 @@ mod tests {
             miner_hotkey: "miner_hotkey".to_string(),
             miner_uid: 42,
             gpu_category: "H100".to_string(),
-            bid_per_hour: 2.5,
+            bid_per_hour_cents: 250, // $2.50 in cents
             gpu_count: 2,
             attestation: Some(vec![1, 2, 3]),
             signature: vec![9, 9, 9],
@@ -654,8 +657,8 @@ mod tests {
             id: "clear-1".to_string(),
             epoch_id: epoch_id.to_string(),
             gpu_category: "H100".to_string(),
-            baseline_price: 2.0,
-            clearing_price: Some(2.3),
+            baseline_price_cents: 200,       // $2.00 in cents
+            clearing_price_cents: Some(230), // $2.30 in cents
             total_capacity: 8,
             winners_count: 2,
             cleared_at: Utc::now(),

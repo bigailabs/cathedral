@@ -27,7 +27,10 @@ const SSH_MOVE_TO_AUTHORIZED_KEYS: &str =
     r#"mv -f "$tmp" ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"#;
 
 /// Configuration for a single node
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
+/// which are converted to cents internally on load.
+#[derive(Clone, Debug, Serialize)]
 pub struct NodeConfig {
     /// SSH hostname or IP address
     pub host: String,
@@ -35,16 +38,48 @@ pub struct NodeConfig {
     pub port: u16,
     /// SSH username for validator access
     pub username: String,
-    /// Hourly rental rate in dollars per GPU (e.g., 2.50 for $2.50/hour/GPU)
-    pub hourly_rate_per_gpu: f64,
+    /// Hourly rental rate in CENTS per GPU (converted from dollars in config)
+    /// Config accepts dollars (e.g., 2.50), stored as cents (250)
+    pub hourly_rate_per_gpu_cents: u32,
     /// GPU category for this node (e.g., "H100", "A100", "RTX4090")
-    #[serde(default = "default_gpu_category")]
     pub gpu_category: String,
     /// Number of GPUs on this node
-    #[serde(default = "default_gpu_count")]
     pub gpu_count: u32,
     /// Additional SSH options
     pub additional_opts: Option<String>,
+}
+
+/// Intermediate struct for deserializing NodeConfig with dollar values
+#[derive(Deserialize)]
+struct NodeConfigRaw {
+    host: String,
+    port: u16,
+    username: String,
+    /// Hourly rate in dollars (e.g., 2.50 for $2.50/hour)
+    hourly_rate_per_gpu: f64,
+    #[serde(default = "default_gpu_category")]
+    gpu_category: String,
+    #[serde(default = "default_gpu_count")]
+    gpu_count: u32,
+    additional_opts: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for NodeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = NodeConfigRaw::deserialize(deserializer)?;
+        Ok(NodeConfig {
+            host: raw.host,
+            port: raw.port,
+            username: raw.username,
+            hourly_rate_per_gpu_cents: (raw.hourly_rate_per_gpu * 100.0).round() as u32,
+            gpu_category: raw.gpu_category,
+            gpu_count: raw.gpu_count,
+            additional_opts: raw.additional_opts,
+        })
+    }
 }
 
 fn default_gpu_category() -> String {
@@ -412,7 +447,7 @@ mod tests {
             host: "192.168.1.100".to_string(),
             port: 22,
             username: "basilica".to_string(),
-            hourly_rate_per_gpu: 2.5,
+            hourly_rate_per_gpu_cents: 250, // $2.50 in cents
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,
