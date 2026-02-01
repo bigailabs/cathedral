@@ -45,8 +45,6 @@ services:
     depends_on:
       alice:
         condition: service_started
-      executor:
-        condition: service_healthy
     command: ["--config", "/app/miner.toml"]
     ports: !override
       - "8092:50051"   # gRPC server (override dev's 50051:50051)
@@ -56,43 +54,6 @@ services:
       - RUST_LOG=debug
       - RUST_BACKTRACE=1
     restart: unless-stopped
-
-  executor:
-    extends:
-      file: ../executor/compose.dev.yml
-      service: executor
-    container_name: basilica-executor-localnet
-    build:
-      context: ../..
-      dockerfile: scripts/executor/Dockerfile
-      args:
-        BITTENSOR_NETWORK: "local"
-    networks:
-      - basilica_network_dev
-    volumes:
-      - ../../config/executor-localnet.toml:/app/executor.toml:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-      - executor-data:/app/data
-      - ~/.ssh:/root/.ssh:ro
-    command: ["--server", "--config", "/app/executor.toml"]
-    ports: !override
-      - "50052:50052"  # gRPC server
-      - "8082:8080"   # Metrics endpoint (map to 8082 to avoid conflicts)
-      - "22222:22"    # SSH for validator
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "50052"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    # GPU support (requires NVIDIA Container Toolkit)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   validator:
     extends:
@@ -150,8 +111,6 @@ volumes:
   miner-data-dev:
   miner-ssh:
   miner-ssh-keys:
-  executor-data:
-  executor-data-dev:
   validator-data:
   validator-data-dev:
   prometheus-data:
