@@ -88,34 +88,81 @@ wait_for_service() {
     return 1
 }
 
+# Function to initialize wallets and subnet
+init_subnet_if_needed() {
+    local wallets_dir="${SCRIPT_DIR}/wallets"
+
+    # Check if wallets already exist
+    if [ -f "${wallets_dir}/validator/hotkeys/default" ] && [ -f "${wallets_dir}/miner_1/hotkeys/default" ]; then
+        echo "  Wallets already exist, skipping initialization"
+        return 0
+    fi
+
+    echo "  Initializing subnet (creating wallets, funding, registering)..."
+
+    # Check prerequisites
+    if ! command -v uvx &> /dev/null; then
+        echo "  ERROR: uv is not installed (required for btcli)"
+        echo "  Install: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        return 1
+    fi
+
+    if ! command -v jq &> /dev/null; then
+        echo "  ERROR: jq is not installed"
+        echo "  Install: brew install jq (macOS) or apt install jq (Linux)"
+        return 1
+    fi
+
+    # Run init-subnet.sh
+    "${SCRIPT_DIR}/init-subnet.sh"
+}
+
 # Start services based on profile
 if [ "${PROFILE}" = "all" ]; then
-    echo "[1/2] Starting all services..."
+    echo "[1/3] Starting all services..."
     docker compose up -d ${BUILD_FLAG}
 else
-    echo "[1/2] Starting services with profile: ${PROFILE}..."
+    echo "[1/3] Starting services with profile: ${PROFILE}..."
     docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
 fi
 
 echo ""
-echo "[2/2] Waiting for services..."
+echo "[2/3] Waiting for services..."
 
 # Wait for services based on profile
 case "${PROFILE}" in
     network)
         wait_for_service "Subtensor" "http://localhost:9944/health"
+        echo ""
+        echo "[3/3] Initializing subnet..."
+        init_subnet_if_needed
         ;;
     validator)
         wait_for_service "Subtensor" "http://localhost:9944/health"
+        echo ""
+        echo "[3/3] Initializing subnet..."
+        init_subnet_if_needed
+        echo ""
+        echo "Waiting for Validator..."
         wait_for_service "Validator" "http://localhost:8080/health" 60
         ;;
     miner)
         wait_for_service "Subtensor" "http://localhost:9944/health"
+        echo ""
+        echo "[3/3] Initializing subnet..."
+        init_subnet_if_needed
+        echo ""
+        echo "Waiting for remaining services..."
         wait_for_service "Validator" "http://localhost:8080/health" 60
         wait_for_service "Miner" "http://localhost:9091/metrics" 60
         ;;
     monitoring|all)
         wait_for_service "Subtensor" "http://localhost:9944/health"
+        echo ""
+        echo "[3/3] Initializing subnet..."
+        init_subnet_if_needed
+        echo ""
+        echo "Waiting for remaining services..."
         wait_for_service "Validator" "http://localhost:8080/health" 60
         wait_for_service "Miner" "http://localhost:9091/metrics" 60
         wait_for_service "Prometheus" "http://localhost:9099/-/healthy"
