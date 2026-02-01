@@ -63,6 +63,7 @@ services:
   # Validator Service
   # =============================================================================
   validator:
+    platform: linux/amd64  # Required for validator-binary (x86-64 ELF)
     build:
       context: ../..
       dockerfile: scripts/validator/Dockerfile
