@@ -690,7 +690,7 @@ impl ValidationNode {
         &self,
         node_info: &NodeInfoDetailed,
         ssh_details: &SshConnectionDetails,
-        binary_config: &crate::config::BinaryValidationConfig,
+        binary_config: Option<&crate::config::BinaryValidationConfig>,
         _validator_hotkey: &Hotkey,
         miner_uid: u16,
     ) -> Result<NodeVerificationResult> {
@@ -920,8 +920,12 @@ impl ValidationNode {
         let pre_validations_successful =
             ssh_connection_successful && quality_validations_successful;
 
-        if pre_validations_successful && binary_config.enabled {
-            // Move to BinaryValidating state
+        // Binary validation is enabled if config is present (Some = enabled)
+        let binary_validation_enabled = binary_config.is_some();
+
+        if pre_validations_successful && binary_validation_enabled {
+            let binary_cfg = binary_config.unwrap(); // Safe because we checked is_some()
+                                                     // Move to BinaryValidating state
             if let Some(ref metrics) = self.metrics {
                 metrics.prometheus().set_node_validation_state(
                     &node_id,
@@ -938,7 +942,7 @@ impl ValidationNode {
                     &node_info.id.to_string(),
                     miner_uid,
                     ssh_details,
-                    binary_config,
+                    binary_cfg,
                 )
                 .await
             {
@@ -996,7 +1000,8 @@ impl ValidationNode {
                     }
                 }
             }
-        } else if !binary_config.enabled && quality_validations_successful {
+        } else if !binary_validation_enabled && quality_validations_successful {
+            // Binary validation is disabled - use SSH score only (0.8 max)
             binary_validation_successful = true;
             binary_score = 0.8;
         }
@@ -1140,7 +1145,7 @@ impl ValidationNode {
         binary_score: f64,
         pre_validations_successful: bool,
         binary_successful: bool,
-        binary_config: &crate::config::BinaryValidationConfig,
+        binary_config: Option<&crate::config::BinaryValidationConfig>,
     ) -> f64 {
         info!(
             "[EVAL_FLOW] Starting combined score calculation - pre-val: {:.3} (success: {}), Binary: {:.3} (success: {})",
@@ -1153,14 +1158,14 @@ impl ValidationNode {
             return 0.0;
         }
 
-        // If binary validation is disabled, use SSH score only
-        if !binary_config.enabled {
+        // If binary validation is disabled (None), use SSH score only
+        let Some(binary_cfg) = binary_config else {
             info!(
                 "[EVAL_FLOW] Binary validation disabled, using SSH score only: {:.3}",
                 ssh_score
             );
             return ssh_score;
-        }
+        };
 
         // If binary validation is enabled but failed, penalize but don't zero
         if !binary_successful {
@@ -1173,8 +1178,8 @@ impl ValidationNode {
         }
 
         // Calculate weighted combination
-        let ssh_weight = 1.0 - binary_config.score_weight;
-        let binary_weight = binary_config.score_weight;
+        let ssh_weight = 1.0 - binary_cfg.score_weight;
+        let binary_weight = binary_cfg.score_weight;
 
         let combined_score = (ssh_score * ssh_weight) + (binary_score * binary_weight);
 

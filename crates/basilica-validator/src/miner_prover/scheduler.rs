@@ -60,15 +60,20 @@ impl VerificationScheduler {
         let config = self.config.clone();
         let discovery = Arc::new(discovery);
 
-        info!("Initializing validation binary server");
-        verification
-            .initialize_validation_server()
-            .await
-            .map_err(|e| {
-                error!("Failed to initialize validation server: {}", e);
-                e
-            })?;
-        info!("Validation binary server initialized successfully");
+        // Only initialize validation server if binary_validation is configured
+        if config.binary_validation.is_some() {
+            info!("Initializing validation binary server");
+            verification
+                .initialize_validation_server()
+                .await
+                .map_err(|e| {
+                    error!("Failed to initialize validation server: {}", e);
+                    e
+                })?;
+            info!("Validation binary server initialized successfully");
+        } else {
+            info!("Binary validation not configured - skipping validation server initialization");
+        }
 
         // Initialize worker queue if enabled
         if config.enable_worker_queue {
@@ -546,7 +551,7 @@ mod tests {
             fallback_to_static: true,
             cache_miner_info_ttl: Duration::from_secs(300),
             grpc_port_offset: None,
-            binary_validation: crate::config::BinaryValidationConfig::default(),
+            binary_validation: None, // Disabled in tests
             docker_validation: crate::config::DockerValidationConfig::default(),
             collateral_event_scan_interval: Duration::from_secs(12),
             node_validation_interval: Duration::from_secs(6 * 3600),

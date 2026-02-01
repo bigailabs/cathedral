@@ -117,58 +117,55 @@ init_subnet_if_needed() {
     "${SCRIPT_DIR}/init-subnet.sh"
 }
 
-# Start services based on profile
-if [ "${PROFILE}" = "all" ]; then
-    echo "[1/3] Starting all services..."
-    docker compose up -d ${BUILD_FLAG}
-else
-    echo "[1/3] Starting services with profile: ${PROFILE}..."
-    docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
-fi
+# Two-phase startup: Start subtensor first, init wallets, then start remaining services
+# This prevents race conditions where validator starts before wallets exist
+
+echo "[1/4] Starting subtensor (network profile)..."
+docker compose --profile network up -d ${BUILD_FLAG}
 
 echo ""
-echo "[2/3] Waiting for services..."
+echo "[2/4] Waiting for Subtensor..."
+wait_for_service "Subtensor" "http://localhost:9944/health"
 
-# Wait for services based on profile
-case "${PROFILE}" in
-    network)
-        wait_for_service "Subtensor" "http://localhost:9944/health"
-        echo ""
-        echo "[3/3] Initializing subnet..."
-        init_subnet_if_needed
-        ;;
-    validator)
-        wait_for_service "Subtensor" "http://localhost:9944/health"
-        echo ""
-        echo "[3/3] Initializing subnet..."
-        init_subnet_if_needed
-        echo ""
-        echo "Waiting for Validator..."
-        wait_for_service "Validator" "http://localhost:8080/health" 60
-        ;;
-    miner)
-        wait_for_service "Subtensor" "http://localhost:9944/health"
-        echo ""
-        echo "[3/3] Initializing subnet..."
-        init_subnet_if_needed
-        echo ""
-        echo "Waiting for remaining services..."
-        wait_for_service "Validator" "http://localhost:8080/health" 60
-        wait_for_service "Miner" "http://localhost:9091/metrics" 60
-        ;;
-    monitoring|all)
-        wait_for_service "Subtensor" "http://localhost:9944/health"
-        echo ""
-        echo "[3/3] Initializing subnet..."
-        init_subnet_if_needed
-        echo ""
-        echo "Waiting for remaining services..."
-        wait_for_service "Validator" "http://localhost:8080/health" 60
-        wait_for_service "Miner" "http://localhost:9091/metrics" 60
-        wait_for_service "Prometheus" "http://localhost:9099/-/healthy"
-        wait_for_service "Grafana" "http://localhost:3000/api/health"
-        ;;
-esac
+echo ""
+echo "[3/4] Initializing subnet..."
+init_subnet_if_needed
+
+# For network-only profile, we're done
+if [ "${PROFILE}" = "network" ]; then
+    echo ""
+    echo "[4/4] Network profile complete."
+else
+    echo ""
+    echo "[4/4] Starting remaining services for profile: ${PROFILE}..."
+
+    # Start the remaining services for the requested profile
+    if [ "${PROFILE}" = "all" ]; then
+        docker compose up -d ${BUILD_FLAG}
+    else
+        docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
+    fi
+
+    echo ""
+    echo "Waiting for services..."
+
+    # Wait for services based on profile
+    case "${PROFILE}" in
+        validator)
+            wait_for_service "Validator" "http://localhost:8080/health" 60
+            ;;
+        miner)
+            wait_for_service "Validator" "http://localhost:8080/health" 60
+            wait_for_service "Miner" "http://localhost:9091/metrics" 60
+            ;;
+        monitoring|all)
+            wait_for_service "Validator" "http://localhost:8080/health" 60
+            wait_for_service "Miner" "http://localhost:9091/metrics" 60
+            wait_for_service "Prometheus" "http://localhost:9099/-/healthy"
+            wait_for_service "Grafana" "http://localhost:3000/api/health"
+            ;;
+    esac
+fi
 
 echo ""
 echo "========================================"

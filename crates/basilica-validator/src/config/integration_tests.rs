@@ -41,15 +41,15 @@ mod tests {
             .gpu_allocations
             .insert("H100".to_string(), GpuAllocation::new(50.0));
         // Disable binary validation since we don't have the binaries in test
-        config.verification.binary_validation.enabled = false;
+        config.verification.binary_validation = None;
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_validator_config_serialization_with_emission() {
         let mut config = ValidatorConfig::default();
-        // Disable binary validation since we don't have the binaries in test
-        config.verification.binary_validation.enabled = false;
+        // Disable binary validation since we don't have the binaries in test (None = disabled)
+        config.verification.binary_validation = None;
 
         // Add valid GPU allocations for testing
         config.emission.burn_percentage = 10.0;
