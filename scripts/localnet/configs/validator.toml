@@ -23,7 +23,7 @@ netuid = 1
 chain_endpoint = "ws://subtensor:9944"
 weight_interval_secs = 300
 axon_port = 8080
-external_ip = "validator"
+external_ip = "172.28.0.20"
 
 [verification]
 max_concurrent_verifications = 50

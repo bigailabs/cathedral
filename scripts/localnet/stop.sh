@@ -43,7 +43,7 @@ echo "========================================"
 echo ""
 
 # Stop containers
-echo "[1/3] Stopping containers..."
+echo "[1/4] Stopping containers..."
 docker compose down 2>/dev/null || true
 docker compose --profile network down 2>/dev/null || true
 docker compose --profile validator down 2>/dev/null || true
@@ -52,24 +52,29 @@ docker compose --profile monitoring down 2>/dev/null || true
 
 if [ "$CLEAN" = true ]; then
     echo ""
-    echo "[2/3] Removing Docker volumes..."
+    echo "[2/4] Removing Docker volumes..."
     docker compose down -v 2>/dev/null || true
 
     # Also remove any orphaned volumes from this project
     docker volume ls --filter "name=localnet" -q | xargs -r docker volume rm 2>/dev/null || true
 
     echo ""
-    echo "[3/3] Removing wallets directory..."
+    echo "[3/4] Removing wallets directory..."
     if [ -d "${SCRIPT_DIR}/wallets" ]; then
         rm -rf "${SCRIPT_DIR}/wallets"
         echo "  Removed: ${SCRIPT_DIR}/wallets"
     else
         echo "  No wallets directory found"
     fi
+
+    echo ""
+    echo "[4/4] Removing Docker network..."
+    docker network rm localnet_basilica-localnet 2>/dev/null || true
 else
     echo ""
-    echo "[2/3] Skipping volume removal (use --clean to remove)"
-    echo "[3/3] Skipping wallet removal (use --clean to remove)"
+    echo "[2/4] Skipping volume removal (use --clean to remove)"
+    echo "[3/4] Skipping wallet removal (use --clean to remove)"
+    echo "[4/4] Skipping network removal (use --clean to remove)"
 fi
 
 echo ""

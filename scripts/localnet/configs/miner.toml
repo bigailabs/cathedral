@@ -70,9 +70,9 @@ default_node_username = "node"
 # Advertised Addresses
 # =============================================================================
 [advertised_addresses]
-grpc_endpoint = "http://miner:50051"
-axon_endpoint = "http://miner:50051"
-metrics_endpoint = "http://miner:9090"
+grpc_endpoint = "http://172.28.0.30:50051"
+axon_endpoint = "http://172.28.0.30:50051"
+metrics_endpoint = "http://172.28.0.30:9090"
 
 # =============================================================================
 # Validator Assignment Strategy
