@@ -33,12 +33,6 @@ services:
       - --unsafe-force-node-key-generation
     networks:
       - basilica-localnet
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9944/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   # =============================================================================
   # Database Layer - PostgreSQL for Validator
@@ -78,7 +72,7 @@ services:
     restart: unless-stopped
     depends_on:
       subtensor:
-        condition: service_healthy
+        condition: service_started
     environment:
       - RUST_LOG=info,basilica_validator=debug
       - RUST_BACKTRACE=1
@@ -115,7 +109,7 @@ services:
     restart: unless-stopped
     depends_on:
       subtensor:
-        condition: service_healthy
+        condition: service_started
       validator:
         condition: service_healthy
     environment:
