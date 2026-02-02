@@ -51,6 +51,12 @@ pub enum DeployError {
     #[error("GPU resource validation failed: {message}")]
     GpuResourceMismatch { message: String },
 
+    #[error("No private deployments found")]
+    NoPrivateDeployments,
+
+    #[error("Share token operation failed: {message}")]
+    ShareTokenError { message: String },
+
     #[error("Source error: {0}")]
     Source(#[from] SourceError),
 

@@ -1,13 +1,15 @@
 //! Deployment creation with phase tracking
 
 use crate::cli::commands::DeployCommand;
+use crate::cli::commands::{SpreadModeArg, TopologySpreadOptions};
 use crate::error::{CliError, DeployError};
 use crate::output::{print_info, print_success};
 use crate::progress::{complete_spinner_and_clear, create_spinner};
 use crate::source::{Framework, SourcePackager, SourceType};
 use basilica_sdk::types::{
     CreateDeploymentRequest, DeploymentResponse, GpuRequirementsSpec, HealthCheckConfig,
-    PersistentStorageSpec, ProbeConfig, ResourceRequirements, StorageBackend, StorageSpec,
+    PersistentStorageSpec, ProbeConfig, ResourceRequirements, SpreadMode, StorageBackend,
+    StorageSpec, TopologySpreadConfig,
 };
 use basilica_sdk::BasilicaClient;
 use std::time::{Duration, Instant};
@@ -69,7 +71,13 @@ pub async fn handle_create(
     // 8. Build health check config (uses primary_port for probe port default)
     let health_check = build_health_check(&cmd.health, &packager, primary_port);
 
-    // 9. Create request
+    // 9. Build topology spread config (if specified)
+    let topology_spread = build_topology_spread(&cmd.topology_spread);
+
+    // 10. Build public flag using is_public() helper
+    let is_public = cmd.networking.is_public();
+
+    // 11. Create request
     let request = CreateDeploymentRequest {
         instance_name: name.clone(),
         image,
@@ -80,13 +88,14 @@ pub async fn handle_create(
         env: Some(env),
         resources: Some(resources),
         ttl_seconds: cmd.lifecycle.ttl,
-        public: cmd.networking.public,
+        public: is_public,
         storage,
         health_check,
         enable_billing: true,
         queue_name: None,
         suspended: false,
         priority: None,
+        topology_spread,
     };
 
     // 10. Show progress spinner
@@ -116,6 +125,20 @@ pub async fn handle_create(
                     crate::output::json_output(&deployment)?;
                 } else {
                     super::helpers::print_deployment_success(&deployment);
+                    // Display share token for private deployments
+                    if !is_public {
+                        match (&deployment.share_token, &deployment.share_url) {
+                            (Some(token), Some(share_url)) => {
+                                super::helpers::print_share_token_info(token, share_url);
+                            }
+                            _ => {
+                                // Token generation may have failed silently
+                                crate::output::print_warning(
+                                    "Share token was not generated. Use 'deploy share-token regenerate' to create one."
+                                );
+                            }
+                        }
+                    }
                 }
             }
             WaitResult::Failed(reason) => {
@@ -395,6 +418,27 @@ fn build_storage_spec(storage: &crate::cli::commands::StorageOptions) -> Storage
             mount_path: storage.storage_path.clone(),
         }),
     }
+}
+
+/// Build topology spread config from CLI options
+fn build_topology_spread(options: &TopologySpreadOptions) -> Option<TopologySpreadConfig> {
+    // Determine effective mode
+    let mode = if options.unique_nodes {
+        SpreadMode::UniqueNodes
+    } else {
+        match options.spread_mode {
+            Some(SpreadModeArg::Preferred) => SpreadMode::Preferred,
+            Some(SpreadModeArg::Required) => SpreadMode::Required,
+            Some(SpreadModeArg::UniqueNodes) => SpreadMode::UniqueNodes,
+            None => return None, // No topology spread specified, use API default
+        }
+    };
+
+    Some(TopologySpreadConfig {
+        mode,
+        max_skew: options.max_skew,
+        topology_key: options.topology_key.clone(),
+    })
 }
 
 /// Build health check configuration with startup probe support

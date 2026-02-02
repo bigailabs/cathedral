@@ -289,6 +289,15 @@ async fn spawn_validation_pipeline(
         .max(50)
         .min(miners.len());
 
+    info!(
+        intended_strategy = ?intended_strategy,
+        configured_max = config.max_concurrent_verifications,
+        effective_concurrency = concurrency,
+        miner_count = miners.len(),
+        "[EVAL_FLOW] Concurrency settings for {:?} validation pipeline",
+        intended_strategy
+    );
+
     let results: Vec<_> = stream::iter(miners)
         .map(|miner| {
             let shared_state = shared_state.clone();

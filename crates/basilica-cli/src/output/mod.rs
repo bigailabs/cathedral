@@ -31,6 +31,11 @@ pub fn print_info(message: &str) {
     println!("{} {}", style("ℹ").blue(), message);
 }
 
+/// Print a warning message with yellow warning icon
+pub fn print_warning(message: &str) {
+    println!("{} {}", style("⚠").yellow(), style(message).yellow());
+}
+
 /// Print a link/URL with label
 pub fn print_link(label: &str, url: &str) {
     println!("{} {}: {}", style("→").cyan(), label, style(url).dim());

@@ -651,6 +651,8 @@ pub struct GpuOffering {
     #[serde(with = "rust_decimal::serde::str")]
     pub hourly_rate_per_gpu: Decimal,
     pub availability: bool,
+    #[serde(default)]
+    pub is_spot: bool,
     pub fetched_at: DateTime<Utc>,
     #[serde(skip)]
     pub raw_metadata: serde_json::Value,

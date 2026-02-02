@@ -377,6 +377,7 @@ impl ValidationWorkerQueue {
             ssh_connection_successful: false,
             binary_validation_successful: false,
             node_result: None,
+            failure_reasons: vec![],
             error: Some(error_message.clone()),
             execution_time,
             validation_details: super::types::ValidationDetails {

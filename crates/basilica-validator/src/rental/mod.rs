@@ -45,6 +45,8 @@ pub struct RentalManager {
     metrics: Arc<ValidatorPrometheusMetrics>,
     /// Ban manager for logging misbehaviours
     ban_manager: Arc<BanManager>,
+    /// Max age for full validation before allowing a rental
+    pre_rental_full_validation_max_age: std::time::Duration,
 }
 
 // /// Parse SSH host from credentials string format "user@host:port"
@@ -168,6 +170,8 @@ impl RentalManager {
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
             ban_manager,
+            // TODO: Wire this from config for callers using `new`.
+            pre_rental_full_validation_max_age: std::time::Duration::from_secs(12 * 60 * 60),
         }
     }
 
@@ -224,6 +228,7 @@ impl RentalManager {
             ssh_key_manager: Some(ssh_key_manager),
             metrics,
             ban_manager,
+            pre_rental_full_validation_max_age: config.verification.node_validation_interval,
         })
     }
 
@@ -356,6 +361,39 @@ impl RentalManager {
                     miner_id
                 )
             })?;
+
+        if let Some(miner_uid) = miner_uid {
+            let last_full_validation = self
+                .persistence
+                .get_last_full_validation_timestamp(&node_id, &miner_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        miner_id = %miner_id,
+                        error = %e,
+                        "Failed to read last full validation timestamp"
+                    );
+                    None
+                });
+
+            let is_stale = last_full_validation
+                .map(|ts| {
+                    chrono::Utc::now() - ts
+                        > chrono::Duration::from_std(self.pre_rental_full_validation_max_age)
+                            .unwrap_or(chrono::Duration::hours(12))
+                })
+                .unwrap_or(true);
+
+            if is_stale {
+                // TODO: Consider auto-triggering a full validation on stale rentals instead of rejecting.
+                return Err(anyhow::anyhow!(
+                    "Node {} requires a recent full validation before rental (miner_uid: {})",
+                    node_id,
+                    miner_uid
+                ));
+            }
+        }
 
         tracing::info!(
             node_id = %node_id,

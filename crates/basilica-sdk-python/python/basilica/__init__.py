@@ -65,6 +65,7 @@ from basilica._basilica import (
     GpuOffering,
     GpuRequirements,
     GpuSpec,
+    HealthCheckConfig,
     HealthCheckResponse,
     ListAvailableNodesQuery,
     ListCpuRentalsResponse,
@@ -75,6 +76,7 @@ from basilica._basilica import (
     PersistentStorageSpec,
     PodInfo,
     PortMappingRequest,
+    ProbeConfig,
     RentalResponse,
     RentalStatus,
     RentalStatusWithSshResponse,
@@ -83,6 +85,7 @@ from basilica._basilica import (
     ResourceRequirementsRequest,
     SecureCloudRentalListItem,
     SecureCloudRentalResponse,
+    SpreadMode,
     SshAccess,
     SshKeyResponse,
     StartCpuRentalRequest,
@@ -92,6 +95,7 @@ from basilica._basilica import (
     StopSecureCloudRentalResponse,
     StorageBackend,
     StorageSpec,
+    TopologySpreadConfig,
     VolumeMountRequest,
     node_by_gpu,
     node_by_id,
@@ -157,7 +161,7 @@ DEFAULT_COMMAND = ["/bin/bash"]
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
 
-__version__ = "0.13.0"
+__version__ = "0.15.0"
 __all__ = [
     # Main client
     "BasilicaClient",
@@ -212,9 +216,13 @@ __all__ = [
     "ResourceRequirements",
     "ReplicaStatus",
     "PodInfo",
+    "SpreadMode",
+    "TopologySpreadConfig",
     "StorageBackend",
     "PersistentStorageSpec",
     "StorageSpec",
+    "ProbeConfig",
+    "HealthCheckConfig",
     "CreateDeploymentRequest",
     "DeploymentResponse",
     "DeploymentSummary",
@@ -326,6 +334,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int],
         public: bool,
         pip_packages: Optional[List[str]],
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> CreateDeploymentRequest:
         """Build CreateDeploymentRequest from deploy parameters."""
         command = None
@@ -374,6 +383,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
     def deploy(
@@ -395,6 +405,7 @@ class BasilicaClient:
         public: bool = True,
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> Deployment:
         """
         Deploy an application to Basilica.
@@ -497,6 +508,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             pip_packages=pip_packages,
+            topology_spread=topology_spread,
         )
 
         response = self._client.create_deployment(request)
@@ -1039,6 +1051,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment (low-level API).
@@ -1062,6 +1075,7 @@ class BasilicaClient:
             ttl_seconds: Auto-delete timeout
             public: Create public URL
             storage: Storage path or StorageSpec
+            topology_spread: Topology spread configuration for pod distribution
 
         Returns:
             DeploymentResponse with deployment details
@@ -1108,6 +1122,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         return self._client.create_deployment(request)
@@ -1383,6 +1398,7 @@ class BasilicaClient:
         public: bool = True,
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> Deployment:
         """
         Deploy an application asynchronously.
@@ -1435,6 +1451,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             pip_packages=pip_packages,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()
@@ -1520,6 +1537,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment asynchronously (low-level API).
@@ -1566,6 +1584,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()

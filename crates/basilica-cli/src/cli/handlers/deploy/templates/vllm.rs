@@ -96,6 +96,7 @@ pub async fn handle_vllm_deploy(
         queue_name: None,
         suspended: false,
         priority: None,
+        topology_spread: None,
     };
 
     // Show spinner

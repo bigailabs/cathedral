@@ -510,6 +510,9 @@ pub struct DeployCommand {
     pub storage: StorageOptions,
 
     #[command(flatten)]
+    pub topology_spread: TopologySpreadOptions,
+
+    #[command(flatten)]
     pub health: HealthCheckOptions,
 
     #[command(flatten)]
@@ -641,6 +644,57 @@ impl Default for StorageOptions {
     }
 }
 
+/// CLI argument for spread mode
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum SpreadModeArg {
+    /// Best-effort spreading (ScheduleAnyway)
+    #[default]
+    Preferred,
+    /// Strict spreading (DoNotSchedule)
+    Required,
+    /// One pod per node (pod anti-affinity)
+    #[value(name = "unique-nodes", alias = "unique_nodes")]
+    UniqueNodes,
+}
+
+/// Topology spread configuration options
+#[derive(clap::Args, Debug, Clone)]
+pub struct TopologySpreadOptions {
+    /// Pod spreading mode: preferred, required, or unique-nodes
+    /// - preferred: Best-effort spreading (default)
+    /// - required: Strict spreading, pods fail to schedule if constraints unsatisfied
+    /// - unique-nodes: One pod per node guaranteed (for unique IP requirements)
+    #[arg(long, value_name = "MODE")]
+    pub spread_mode: Option<SpreadModeArg>,
+
+    /// Shorthand for --spread-mode unique-nodes (one pod per node)
+    #[arg(long, conflicts_with = "spread_mode")]
+    pub unique_nodes: bool,
+
+    /// Maximum skew for pod spreading (1-10, default: 1)
+    /// Only applies to preferred and required modes
+    #[arg(long, default_value = "1")]
+    pub max_skew: i32,
+
+    /// Topology key for spreading
+    /// - kubernetes.io/hostname (default, node-level)
+    /// - topology.kubernetes.io/zone (zone-level)
+    /// - topology.kubernetes.io/region (region-level)
+    #[arg(long, default_value = "kubernetes.io/hostname")]
+    pub topology_key: String,
+}
+
+impl Default for TopologySpreadOptions {
+    fn default() -> Self {
+        Self {
+            spread_mode: None,
+            unique_nodes: false,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        }
+    }
+}
+
 /// Health check configuration options
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct HealthCheckOptions {
@@ -692,9 +746,10 @@ pub struct NetworkingOptions {
     #[arg(short, long, value_name = "PORT[:NAME]", default_value = "8000")]
     pub port: Vec<String>,
 
-    /// Create public URL (default: true)
-    #[arg(long, default_value = "true")]
-    pub public: bool,
+    /// Make deployment private (requires share token for access).
+    /// By default, deployments are public.
+    #[arg(long)]
+    pub private: bool,
 
     /// Environment variables (KEY=VALUE)
     #[arg(short, long, value_name = "KEY=VALUE")]
@@ -705,11 +760,19 @@ pub struct NetworkingOptions {
     pub pip: Vec<String>,
 }
 
+impl NetworkingOptions {
+    /// Resolve whether deployment should be public.
+    /// Default is public unless --private is specified.
+    pub fn is_public(&self) -> bool {
+        !self.private
+    }
+}
+
 impl Default for NetworkingOptions {
     fn default() -> Self {
         Self {
             port: vec!["8000".to_string()],
-            public: true,
+            private: false,
             env: vec![],
             pip: vec![],
         }
@@ -764,6 +827,9 @@ pub enum DeployAction {
     Status {
         /// Deployment name (interactive selection if omitted)
         name: Option<String>,
+        /// Show share token status for private deployments
+        #[arg(long)]
+        show_token: bool,
     },
 
     /// Stream deployment logs
@@ -799,6 +865,13 @@ pub enum DeployAction {
         replicas: u32,
     },
 
+    /// Manage share tokens for private deployments
+    #[command(name = "share-token")]
+    ShareToken {
+        #[command(subcommand)]
+        action: ShareTokenAction,
+    },
+
     /// Deploy vLLM inference server
     #[command(name = "vllm")]
     Vllm {
@@ -823,6 +896,35 @@ pub enum DeployAction {
 
         #[command(flatten)]
         sglang: SglangOptions,
+    },
+}
+
+/// Share token management actions
+#[derive(Subcommand, Debug, Clone)]
+pub enum ShareTokenAction {
+    /// Regenerate share token (creates new token, invalidates previous)
+    #[command(name = "regenerate", visible_alias = "create")]
+    Regenerate {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+    },
+
+    /// Check if share token exists for a deployment
+    #[command(name = "status")]
+    Status {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+    },
+
+    /// Revoke share token (deployment becomes inaccessible via share URL)
+    #[command(name = "revoke", visible_alias = "delete")]
+    Revoke {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 }
 
