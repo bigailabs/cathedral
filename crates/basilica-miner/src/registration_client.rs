@@ -1,14 +1,16 @@
 //! Miner Registration Client
 //!
-//! Handles the miner→validator registration flow:
-//! - RegisterBid on startup (register nodes with SSH details + pricing)
-//! - HealthCheck loop (periodic heartbeat to keep registrations active)
-//! - UpdateBid when prices change
-//! - RemoveBid on shutdown
-//! - Deploys validator's SSH key to nodes after registration
+//! Low-level gRPC client for miner→validator communication:
+//! - RegisterBid: Register nodes with SSH details + pricing
+//! - HealthCheck: Periodic heartbeat to keep registrations active
+//! - UpdateBid: Update pricing when it changes
+//! - RemoveBid: Unregister nodes on shutdown
+//! - SSH key deployment to nodes
+//!
+//! Note: The registration lifecycle (registration, health checks, price updates)
+//! is orchestrated by AutoBidder. This module provides the underlying gRPC calls.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use basilica_protocol::miner_discovery::{
@@ -17,7 +19,6 @@ use basilica_protocol::miner_discovery::{
 };
 use chrono::Utc;
 use tokio::sync::RwLock;
-use tokio::time::interval;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
@@ -176,43 +177,25 @@ impl RegistrationClient {
         uuid::Uuid::new_v4().to_string()
     }
 
-    /// Register all nodes with the validator.
-    /// Called once on miner startup.
-    pub async fn register_nodes(&self) -> Result<RegistrationState> {
+    /// Register nodes with the validator using pre-built registrations.
+    /// This is the primary registration method - AutoBidder builds the registrations
+    /// with prices from BiddingConfig.
+    pub async fn register_nodes_with_registrations(
+        &self,
+        node_registrations: Vec<NodeRegistration>,
+    ) -> Result<RegistrationState> {
         if !self.has_registration_endpoint() {
             return Err(anyhow::anyhow!(
                 "validator_registration_endpoint not configured"
             ));
         }
 
-        let mut client = self.connect().await?;
-
-        // Get all nodes from node manager
-        let nodes = self
-            .node_manager
-            .list_nodes()
-            .await
-            .context("failed to list nodes")?;
-
-        if nodes.is_empty() {
-            warn!("No nodes configured to register");
+        if node_registrations.is_empty() {
+            warn!("No nodes to register");
             return Ok(RegistrationState::default());
         }
 
-        // Build node registrations
-        let node_registrations: Vec<NodeRegistration> = nodes
-            .iter()
-            .map(|n| NodeRegistration {
-                node_id: n.node_id.clone(),
-                host: n.config.host.clone(),
-                port: n.config.port as u32,
-                username: n.config.username.clone(),
-                gpu_category: n.config.gpu_category.clone(),
-                gpu_count: n.config.gpu_count,
-                hourly_rate_cents: n.config.hourly_rate_per_gpu_cents,
-                attestation: vec![], // TODO: Add attestation when available
-            })
-            .collect();
+        let mut client = self.connect().await?;
 
         // Build and sign request
         let timestamp = Utc::now().timestamp();
@@ -220,6 +203,7 @@ impl RegistrationClient {
         let message = self.build_register_bid_message(timestamp, &nonce);
         let signature = self.sign_message(&message)?;
 
+        let node_count = node_registrations.len();
         let request = RegisterBidRequest {
             miner_hotkey: self.miner_hotkey.clone(),
             nodes: node_registrations,
@@ -230,7 +214,7 @@ impl RegistrationClient {
 
         info!(
             miner_hotkey = %self.miner_hotkey,
-            node_count = nodes.len(),
+            node_count = node_count,
             "Registering nodes with validator"
         );
 
@@ -450,31 +434,6 @@ impl RegistrationClient {
     /// Get current registration state
     pub async fn get_state(&self) -> RegistrationState {
         self.state.read().await.clone()
-    }
-
-    /// Start the health check background loop.
-    /// This should be spawned as a background task after successful registration.
-    pub async fn run_health_check_loop(&self) {
-        let state = self.state.read().await;
-        let interval_secs = state.health_check_interval_secs;
-        drop(state);
-
-        let mut ticker = interval(Duration::from_secs(interval_secs as u64));
-
-        info!(interval_secs = interval_secs, "Starting health check loop");
-
-        loop {
-            ticker.tick().await;
-
-            match self.send_health_check().await {
-                Ok(nodes_active) => {
-                    debug!(nodes_active = nodes_active, "Health check sent");
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to send health check, will retry");
-                }
-            }
-        }
     }
 }
 #[cfg(test)]

@@ -28,9 +28,6 @@ const SSH_MOVE_TO_AUTHORIZED_KEYS: &str =
     r#"mv -f "$tmp" ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"#;
 
 /// Configuration for a single node
-///
-/// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
-/// which are converted to cents internally on load.
 #[derive(Clone, Debug, Serialize)]
 pub struct NodeConfig {
     /// SSH hostname or IP address
@@ -39,9 +36,6 @@ pub struct NodeConfig {
     pub port: u16,
     /// SSH username for validator access
     pub username: String,
-    /// Hourly rental rate in CENTS per GPU (converted from dollars in config)
-    /// Config accepts dollars (e.g., 2.50), stored as cents (250)
-    pub hourly_rate_per_gpu_cents: u32,
     /// GPU category for this node (e.g., "H100", "A100", "RTX4090")
     pub gpu_category: String,
     /// Number of GPUs on this node
@@ -50,14 +44,12 @@ pub struct NodeConfig {
     pub additional_opts: Option<String>,
 }
 
-/// Intermediate struct for deserializing NodeConfig with dollar values
+/// Intermediate struct for deserializing NodeConfig
 #[derive(Deserialize)]
 struct NodeConfigRaw {
     host: String,
     port: u16,
     username: String,
-    /// Hourly rate in dollars (e.g., 2.50 for $2.50/hour)
-    hourly_rate_per_gpu: f64,
     #[serde(default = "default_gpu_category")]
     gpu_category: String,
     #[serde(default = "default_gpu_count")]
@@ -85,7 +77,6 @@ impl<'de> Deserialize<'de> for NodeConfig {
             host: raw.host,
             port: raw.port,
             username: raw.username,
-            hourly_rate_per_gpu_cents: (raw.hourly_rate_per_gpu * 100.0).round() as u32,
             gpu_category: gpu_cat.to_string(),
             gpu_count: raw.gpu_count,
             additional_opts: raw.additional_opts,
@@ -458,7 +449,6 @@ mod tests {
             host: "192.168.1.100".to_string(),
             port: 22,
             username: "basilica".to_string(),
-            hourly_rate_per_gpu_cents: 250, // $2.50 in cents
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             additional_opts: None,

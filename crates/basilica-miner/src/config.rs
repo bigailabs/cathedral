@@ -165,15 +165,15 @@ pub struct MinerAdvertisedAddresses {
 ///
 /// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
 /// which are converted to cents internally on load.
+///
+/// AutoBidder always runs when a validator_registration_endpoint is configured.
+/// All GPU categories in your nodes MUST have prices defined in static_prices.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiddingConfig {
-    /// Enable automatic bidding
-    #[serde(default)]
-    pub enabled: bool,
-
     /// Static prices by GPU category in CENTS (converted from dollars in config)
     /// Config accepts dollars (e.g., 2.50), stored as cents (250)
+    /// Every GPU category in your nodes MUST have a price here.
     #[serde(
         default,
         rename = "static_prices",
@@ -181,7 +181,7 @@ pub struct BiddingConfig {
     )]
     pub static_prices_cents: std::collections::HashMap<String, u32>,
 
-    /// How often to submit bids
+    /// How often to submit price updates
     #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_bid_interval")]
     pub bid_interval: Duration,
@@ -223,7 +223,6 @@ fn default_bid_interval() -> Duration {
 impl Default for BiddingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             static_prices_cents: std::collections::HashMap::new(),
             bid_interval: default_bid_interval(),
             floor_prices_cents: std::collections::HashMap::new(),

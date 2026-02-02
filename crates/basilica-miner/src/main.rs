@@ -184,10 +184,11 @@ impl MinerState {
             bittensor_service,
         ));
 
-        // Initialize auto-bidder
+        // Initialize auto-bidder (owns registration lifecycle)
         let auto_bidder = Arc::new(AutoBidder::new(
             config.bidding.clone(),
             node_manager.clone(),
+            registration_client.clone(),
         ));
 
         // Use a placeholder UID that will be updated after chain registration
@@ -239,35 +240,6 @@ impl MinerState {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        // Start miner→validator registration if endpoint is configured
-        let registration_handle = if self.registration_client.has_registration_endpoint() {
-            let client = self.registration_client.clone();
-            Some(tokio::spawn(async move {
-                // Register nodes with validator
-                match client.register_nodes().await {
-                    Ok(state) => {
-                        info!("Successfully registered with validator");
-
-                        // Deploy validator's SSH key to nodes if provided
-                        if state.validator_ssh_public_key.is_some() {
-                            if let Err(e) = client.deploy_validator_ssh_key().await {
-                                error!("Failed to deploy validator SSH key: {}", e);
-                            }
-                        }
-
-                        // Start health check loop
-                        client.run_health_check_loop().await;
-                    }
-                    Err(e) => {
-                        error!("Failed to register with validator: {}", e);
-                    }
-                }
-            }))
-        } else {
-            info!("validator_registration_endpoint not configured, skipping registration");
-            None
-        };
-
         // Start validator discovery service
         let discovery = self.validator_discovery.clone();
         let discovery_interval = tokio::time::Duration::from_secs(600); // 10 minutes
@@ -281,20 +253,19 @@ impl MinerState {
             }
         });
 
-        // Start auto-bidder if enabled
-        let bidder = self.auto_bidder.clone();
-        let registration_client_for_bidder = self.registration_client.clone();
-        let bidder_shutdown_rx = shutdown_rx.clone();
-        let bidder_handle = tokio::spawn(async move {
-            // Give the registration a chance to complete first
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            bidder
-                .set_registration_client(registration_client_for_bidder)
-                .await;
-            if let Err(e) = bidder.run(bidder_shutdown_rx.clone()).await {
-                error!("Auto-bidder error: {}", e);
-            }
-        });
+        // Start auto-bidder (owns registration lifecycle: register, health checks, price updates)
+        let bidder_handle = if self.registration_client.has_registration_endpoint() {
+            let bidder = self.auto_bidder.clone();
+            let bidder_shutdown_rx = shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = bidder.run(bidder_shutdown_rx).await {
+                    error!("AutoBidder error: {}", e);
+                }
+            }))
+        } else {
+            info!("validator_registration_endpoint not configured, skipping registration");
+            None
+        };
 
         info!("All miner services started successfully");
 
@@ -304,14 +275,11 @@ impl MinerState {
                 info!("Received shutdown signal, stopping miner...");
             }
             _ = async {
-                if let Some(handle) = registration_handle {
+                if let Some(handle) = bidder_handle {
                     handle.await.ok();
                 }
             } => {
-                error!("Registration client stopped unexpectedly");
-            }
-            _ = bidder_handle => {
-                error!("Auto-bidder stopped unexpectedly");
+                error!("AutoBidder stopped unexpectedly");
             }
             _ = discovery_handle => {
                 error!("Validator discovery service stopped unexpectedly");
