@@ -117,24 +117,36 @@ impl VerificationEngine {
         let workflow_start = std::time::Instant::now();
         let mut verification_steps = Vec::new();
 
-        // Step 1: Get nodes from discovery + database fallback
-        let discovered_nodes = self
+        // Step 1: Get nodes from gRPC discovery (DB fallback only on failure)
+        let node_list = match self
             .discover_miner_nodes(task.miner_uid, &task.miner_endpoint, &task.miner_hotkey)
             .await
-            .unwrap_or_else(|e| {
-                warn!(
-                    "Failed to discover nodes for miner {} via gRPC: {}. Using database fallback.",
-                    task.miner_uid, e
+        {
+            Ok(discovered) => {
+                // gRPC succeeded - use ONLY discovered nodes (authoritative source)
+                info!(
+                    miner_uid = task.miner_uid,
+                    node_count = discovered.len(),
+                    "[EVAL_FLOW] gRPC discovery returned {} nodes",
+                    discovered.len()
                 );
-                Vec::new()
-            });
-
-        let known_node_data = self
-            .persistence
-            .get_known_nodes_for_miner(task.miner_uid)
-            .await?;
-        let known_nodes = self.convert_db_data_to_node_info(known_node_data, task.miner_uid)?;
-        let node_list = self.combine_node_lists(discovered_nodes, known_nodes);
+                discovered
+            }
+            Err(e) => {
+                // gRPC failed - fall back to database
+                warn!(
+                    miner_uid = task.miner_uid,
+                    "[EVAL_FLOW] gRPC discovery failed for miner {}: {}. Using database fallback.",
+                    task.miner_uid,
+                    e
+                );
+                let known_node_data = self
+                    .persistence
+                    .get_known_nodes_for_miner(task.miner_uid)
+                    .await?;
+                self.convert_db_data_to_node_info(known_node_data, task.miner_uid)?
+            }
+        };
 
         verification_steps.push(VerificationStep {
             step_name: "node_discovery".to_string(),
@@ -1577,30 +1589,6 @@ impl VerificationEngine {
         }
 
         Ok(nodes)
-    }
-
-    /// Combine discovered and known node lists
-    fn combine_node_lists(
-        &self,
-        discovered: Vec<NodeInfoDetailed>,
-        known: Vec<NodeInfoDetailed>,
-    ) -> Vec<NodeInfoDetailed> {
-        let mut combined = Vec::new();
-        let mut seen_ids = std::collections::HashSet::new();
-
-        for node in discovered {
-            if seen_ids.insert(node.id.to_string()) {
-                combined.push(node);
-            }
-        }
-
-        for node in known {
-            if seen_ids.insert(node.id.to_string()) {
-                combined.push(node);
-            }
-        }
-
-        combined
     }
 
     pub fn get_ssh_public_key(&self) -> Option<String> {
