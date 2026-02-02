@@ -136,15 +136,12 @@ wait_for_port() {
 }
 
 # Function to initialize wallets and subnet
-init_subnet_if_needed() {
-    local wallets_dir="${SCRIPT_DIR}/wallets"
-
-    # Check if wallets already exist
-    if [ -f "${wallets_dir}/validator/hotkeys/default" ] && [ -f "${wallets_dir}/miner_1/hotkeys/default" ]; then
-        echo "  Wallets already exist, skipping initialization"
-        return 0
-    fi
-
+# Always runs init-subnet.sh because:
+# - init-subnet.sh is fully idempotent
+# - It checks wallet existence internally and skips creation if they exist
+# - It handles "already registered" errors gracefully
+# - Funding checks balance before transferring
+init_subnet() {
     echo "  Initializing subnet (creating wallets, funding, registering)..."
 
     # Check prerequisites
@@ -176,7 +173,7 @@ wait_for_service "Subtensor" "http://localhost:9944/health"
 
 echo ""
 echo "[3/4] Initializing subnet..."
-init_subnet_if_needed
+init_subnet
 
 # For network-only profile, we're done
 if [ "${PROFILE}" = "network" ]; then
