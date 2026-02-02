@@ -123,7 +123,7 @@ services:
     volumes:
       - ./configs/miner.toml:/app/miner.toml:ro
       - miner-data:/var/lib/basilica/miner/data
-      - miner-ssh:/var/lib/basilica/miner/.ssh
+      - ./ssh-keys:/var/lib/basilica/miner/.ssh:ro
       - ./wallets:/var/lib/basilica/miner/.bittensor/wallets:ro
     ports:
       - "8092:50051"  # gRPC server (validator communications)
@@ -133,12 +133,6 @@ services:
       basilica-localnet:
         ipv4_address: 172.28.0.30
     command: ["--config", "/app/miner.toml"]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
 
   # =============================================================================
   # Monitoring - Prometheus
@@ -199,6 +193,5 @@ volumes:
   validator-data:
   validator-ssh:
   miner-data:
-  miner-ssh:
   prometheus-data:
   grafana-data:

@@ -67,6 +67,18 @@ echo "  Profile: ${PROFILE}"
 echo "========================================"
 echo ""
 
+# Generate SSH keys if they don't exist
+SSH_KEY_DIR="${SCRIPT_DIR}/ssh-keys"
+mkdir -p "${SSH_KEY_DIR}"
+MINER_KEY="${SSH_KEY_DIR}/miner_node_key"
+if [ ! -f "${MINER_KEY}" ]; then
+    echo "Generating miner SSH key..."
+    ssh-keygen -t ed25519 -f "${MINER_KEY}" -N "" -C "basilica-miner-localnet"
+    chmod 600 "${MINER_KEY}"
+    chmod 644 "${MINER_KEY}.pub"
+    echo ""
+fi
+
 # Function to wait for a service
 wait_for_service() {
     local name=$1
@@ -77,6 +89,28 @@ wait_for_service() {
     echo -n "  Waiting for ${name}..."
     while [ $attempt -le $max_attempts ]; do
         if curl -sf "${url}" > /dev/null 2>&1; then
+            echo " Ready!"
+            return 0
+        fi
+        echo -n "."
+        sleep 2
+        ((attempt++))
+    done
+    echo " Timeout!"
+    return 1
+}
+
+# Function to wait for a TCP port (for gRPC services without HTTP endpoints)
+wait_for_port() {
+    local name=$1
+    local host=$2
+    local port=$3
+    local max_attempts=${4:-30}
+    local attempt=1
+
+    echo -n "  Waiting for ${name}..."
+    while [ $attempt -le $max_attempts ]; do
+        if nc -z "${host}" "${port}" 2>/dev/null; then
             echo " Ready!"
             return 0
         fi
@@ -156,11 +190,11 @@ else
             ;;
         miner)
             wait_for_service "Validator" "http://localhost:8080/health" 60
-            wait_for_service "Miner" "http://localhost:9091/metrics" 60
+            wait_for_port "Miner" "localhost" 8092 60
             ;;
         monitoring|all)
             wait_for_service "Validator" "http://localhost:8080/health" 60
-            wait_for_service "Miner" "http://localhost:9091/metrics" 60
+            wait_for_port "Miner" "localhost" 8092 60
             wait_for_service "Prometheus" "http://localhost:9099/-/healthy"
             wait_for_service "Grafana" "http://localhost:3000/api/health"
             ;;
