@@ -177,13 +177,24 @@ echo ""
 # =============================================================================
 echo "[4/5] Registering validator on netuid=${NETUID}..."
 
-uvx --from bittensor-cli btcli subnet register \
+reg_out=$(uvx --from bittensor-cli btcli subnet register \
     --wallet.name "validator" \
     --wallet.hotkey "default" \
     --wallet.path "${WALLETS_DIR}" \
     --netuid "${NETUID}" \
     --network local \
-    --no-prompt || echo "  Validator may already be registered"
+    --no-prompt 2>&1)
+reg_exit=$?
+
+if [ $reg_exit -ne 0 ]; then
+    if echo "$reg_out" | grep -qi "already.*registered\|already.*exist"; then
+        echo "  Validator may already be registered"
+    else
+        echo "  ERROR: Validator registration failed"
+        echo "$reg_out"
+        exit 1
+    fi
+fi
 
 echo ""
 
@@ -192,13 +203,24 @@ echo ""
 # =============================================================================
 echo "[5/5] Registering miner on netuid=${NETUID}..."
 
-uvx --from bittensor-cli btcli subnet register \
+reg_out=$(uvx --from bittensor-cli btcli subnet register \
     --wallet.name "miner_1" \
     --wallet.hotkey "default" \
     --wallet.path "${WALLETS_DIR}" \
     --netuid "${NETUID}" \
     --network local \
-    --no-prompt || echo "  Miner may already be registered"
+    --no-prompt 2>&1)
+reg_exit=$?
+
+if [ $reg_exit -ne 0 ]; then
+    if echo "$reg_out" | grep -qi "already.*registered\|already.*exist"; then
+        echo "  Miner may already be registered"
+    else
+        echo "  ERROR: Miner registration failed"
+        echo "$reg_out"
+        exit 1
+    fi
+fi
 
 echo ""
 
