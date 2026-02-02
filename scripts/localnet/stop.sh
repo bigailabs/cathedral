@@ -3,7 +3,8 @@
 # Usage: ./stop.sh [--clean]
 #
 # Options:
-#   --clean   Remove all data (volumes + wallets) for fresh start
+#   --clean   Reset blockchain state (volumes + network) for fresh start
+#             Note: Wallets are preserved (can be re-registered on fresh chain)
 
 set -euo pipefail
 
@@ -22,7 +23,8 @@ for arg in "$@"; do
             echo "Usage: ./stop.sh [--clean]"
             echo ""
             echo "Options:"
-            echo "  --clean   Remove all data (volumes + wallets) for fresh start"
+            echo "  --clean   Reset blockchain state (volumes + network) for fresh start"
+            echo "            Note: Wallets are preserved (can be re-registered on fresh chain)"
             echo ""
             exit 0
             ;;
@@ -37,13 +39,13 @@ done
 echo "========================================"
 echo "  Stopping Basilica Localnet"
 if [ "$CLEAN" = true ]; then
-    echo "  Mode: Clean (remove all data)"
+    echo "  Mode: Clean (reset blockchain state)"
 fi
 echo "========================================"
 echo ""
 
 # Stop containers
-echo "[1/4] Stopping containers..."
+echo "[1/3] Stopping containers..."
 docker compose down 2>/dev/null || true
 docker compose --profile network down 2>/dev/null || true
 docker compose --profile validator down 2>/dev/null || true
@@ -52,29 +54,19 @@ docker compose --profile monitoring down 2>/dev/null || true
 
 if [ "$CLEAN" = true ]; then
     echo ""
-    echo "[2/4] Removing Docker volumes..."
+    echo "[2/3] Removing Docker volumes..."
     docker compose down -v 2>/dev/null || true
 
     # Also remove any orphaned volumes from this project
     docker volume ls --filter "name=localnet" -q | xargs -r docker volume rm 2>/dev/null || true
 
     echo ""
-    echo "[3/4] Removing wallets directory..."
-    if [ -d "${SCRIPT_DIR}/wallets" ]; then
-        rm -rf "${SCRIPT_DIR}/wallets"
-        echo "  Removed: ${SCRIPT_DIR}/wallets"
-    else
-        echo "  No wallets directory found"
-    fi
-
-    echo ""
-    echo "[4/4] Removing Docker network..."
+    echo "[3/3] Removing Docker network..."
     docker network rm localnet_basilica-localnet 2>/dev/null || true
 else
     echo ""
-    echo "[2/4] Skipping volume removal (use --clean to remove)"
-    echo "[3/4] Skipping wallet removal (use --clean to remove)"
-    echo "[4/4] Skipping network removal (use --clean to remove)"
+    echo "[2/3] Skipping volume removal (use --clean to remove)"
+    echo "[3/3] Skipping network removal (use --clean to remove)"
 fi
 
 echo ""
@@ -94,7 +86,8 @@ fi
 
 if [ "$CLEAN" = true ]; then
     echo ""
-    echo "All data has been removed. Ready for fresh start:"
+    echo "Blockchain state reset. Wallets preserved for re-registration."
+    echo "Ready for fresh start:"
     echo "  1. ./start.sh network"
     echo "  2. ./init-subnet.sh"
 else
