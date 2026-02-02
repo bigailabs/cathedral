@@ -170,38 +170,35 @@ pub struct MinerAdvertisedAddresses {
 ///
 /// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
 /// which are converted to cents internally on load.
-#[derive(Debug, Clone, Serialize)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiddingConfig {
     /// Enable automatic bidding
+    #[serde(default)]
     pub enabled: bool,
 
     /// Static prices by GPU category in CENTS (converted from dollars in config)
     /// Config accepts dollars (e.g., 2.50), stored as cents (250)
+    #[serde(
+        default,
+        rename = "static_prices",
+        deserialize_with = "deserialize_dollars_to_cents"
+    )]
     pub static_prices_cents: std::collections::HashMap<String, u32>,
 
     /// How often to submit bids
+    #[serde_as(as = "DurationSeconds<u64>")]
+    #[serde(default = "default_bid_interval")]
     pub bid_interval: Duration,
 
     /// Floor prices in CENTS (converted from dollars in config)
     /// If not set for a category, uses static_price as floor
+    #[serde(
+        default,
+        rename = "floor_prices",
+        deserialize_with = "deserialize_dollars_to_cents"
+    )]
     pub floor_prices_cents: std::collections::HashMap<String, u32>,
-}
-
-/// Intermediate struct for deserializing BiddingConfig with dollar values
-#[derive(Deserialize)]
-struct BiddingConfigRaw {
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    static_prices: std::collections::HashMap<String, f64>,
-    #[serde(default = "default_bid_interval_secs")]
-    bid_interval: u64,
-    #[serde(default)]
-    floor_prices: std::collections::HashMap<String, f64>,
-}
-
-fn default_bid_interval_secs() -> u64 {
-    300 // 5 minutes
 }
 
 /// Convert dollars (f64) to cents (u32)
@@ -209,27 +206,19 @@ fn dollars_to_cents(dollars: f64) -> u32 {
     (dollars * 100.0).round() as u32
 }
 
-impl<'de> Deserialize<'de> for BiddingConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = BiddingConfigRaw::deserialize(deserializer)?;
-        Ok(BiddingConfig {
-            enabled: raw.enabled,
-            static_prices_cents: raw
-                .static_prices
-                .into_iter()
-                .map(|(k, v)| (k, dollars_to_cents(v)))
-                .collect(),
-            bid_interval: Duration::from_secs(raw.bid_interval),
-            floor_prices_cents: raw
-                .floor_prices
-                .into_iter()
-                .map(|(k, v)| (k, dollars_to_cents(v)))
-                .collect(),
-        })
-    }
+/// Deserialize a HashMap of dollar values (f64) to cents (u32)
+fn deserialize_dollars_to_cents<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let dollars: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::deserialize(deserializer)?;
+    Ok(dollars
+        .into_iter()
+        .map(|(k, v)| (k, dollars_to_cents(v)))
+        .collect())
 }
 
 fn default_bid_interval() -> Duration {

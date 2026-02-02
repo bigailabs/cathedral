@@ -13,7 +13,7 @@ services:
   subtensor:
     image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
     container_name: basilica-subtensor
-    profiles: ["network", "validator", "miner", "monitoring"]
+    profiles: ["network", "validator", "miner", "all"]
     ports:
       - "9944:9944"
       - "30334:30334"

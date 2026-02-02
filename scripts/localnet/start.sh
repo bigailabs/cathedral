@@ -184,8 +184,9 @@ else
     echo "[4/4] Starting remaining services for profile: ${PROFILE}..."
 
     # Start the remaining services for the requested profile
+    # Note: "all" uses monitoring profile since it includes all services
     if [ "${PROFILE}" = "all" ]; then
-        docker compose up -d ${BUILD_FLAG}
+        docker compose --profile monitoring up -d ${BUILD_FLAG}
     else
         docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
     fi
