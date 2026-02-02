@@ -84,7 +84,12 @@ pub struct ValidatorCommsConfig {
     pub port: u16,
 
     /// Validator gRPC endpoint for bid submission (e.g. http://host:50052)
+    /// DEPRECATED: Use validator_registration_endpoint instead
     pub validator_bid_endpoint: Option<String>,
+
+    /// Validator gRPC endpoint for miner registration (new unified flow)
+    /// e.g. http://validator-host:50053
+    pub validator_registration_endpoint: Option<String>,
 
     /// Request timeout for validator calls
     #[serde_as(as = "DurationSeconds<u64>")]
@@ -308,6 +313,7 @@ impl Default for ValidatorCommsConfig {
             host: "0.0.0.0".to_string(),
             port: 50051,
             validator_bid_endpoint: None,
+            validator_registration_endpoint: None,
             request_timeout: Duration::from_secs(30),
         }
     }

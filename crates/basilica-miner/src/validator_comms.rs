@@ -1,9 +1,28 @@
 //! # Validator Communications
 //!
 //! gRPC server for handling validator requests with direct node access.
-//! Primary responsibilities:
-//! - Authenticate validators using Bittensor signatures
-//! - Provide node connection details to authorized validators
+//!
+//! ## DEPRECATION NOTICE
+//!
+//! The MinerDiscovery service (validator→miner flow) is **deprecated**.
+//! Use the new `MinerRegistration` service (miner→validator flow) instead.
+//!
+//! **Migration Path:**
+//! 1. Configure `validator_registration_endpoint` in miner config
+//! 2. Use `registration_client::RegistrationClient` for node registration
+//! 3. The miner will call `RegisterBid` on startup instead of waiting for validator
+//! 4. Health checks replace the session-based authentication
+//!
+//! **Deprecated methods:**
+//! - `AuthenticateValidator` - replaced by signature verification in RegisterBid
+//! - `DiscoverNodes` - replaced by RegisterBid (miner pushes nodes to validator)
+//! - `SubmitBid` (on miner side) - replaced by RegisterBid/UpdateBid
+//!
+//! **New methods (miner→validator):**
+//! - `RegisterBid` - one-time registration with SSH details + pricing
+//! - `UpdateBid` - update price for existing node
+//! - `RemoveBid` - remove nodes from availability
+//! - `HealthCheck` - periodic heartbeat to keep registrations active
 
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -312,6 +331,10 @@ fn session_ttl() -> Duration {
 }
 
 /// gRPC service implementation for MinerDiscovery
+///
+/// **DEPRECATED**: This service implements the old validator→miner flow.
+/// Use the new `MinerRegistration` service (miner→validator) instead.
+/// See module-level documentation for migration details.
 #[derive(Clone)]
 pub struct MinerDiscoveryService {
     server: ValidatorCommsServer,
@@ -321,10 +344,17 @@ pub struct MinerDiscoveryService {
 #[tonic::async_trait]
 impl MinerDiscovery for MinerDiscoveryService {
     /// Authenticate a validator using Bittensor signature
+    ///
+    /// **DEPRECATED**: Use `MinerRegistration.RegisterBid` instead.
+    /// This method will be removed in a future release.
     async fn authenticate_validator(
         &self,
         request: Request<ValidatorAuthRequest>,
     ) -> Result<Response<MinerAuthResponse>, Status> {
+        warn!(
+            "DEPRECATED: AuthenticateValidator called - use MinerRegistration.RegisterBid instead"
+        );
+
         let auth_request = request.into_inner();
 
         if auth_request.target_miner_hotkey.trim().is_empty() {
@@ -480,10 +510,16 @@ impl MinerDiscovery for MinerDiscoveryService {
     }
 
     /// Discover available nodes for validator
+    ///
+    /// **DEPRECATED**: Use `MinerRegistration.RegisterBid` instead.
+    /// In the new flow, the miner pushes nodes to the validator, not vice versa.
+    /// This method will be removed in a future release.
     async fn discover_nodes(
         &self,
         request: Request<DiscoverNodesRequest>,
     ) -> Result<Response<ListNodeConnectionDetailsResponse>, Status> {
+        warn!("DEPRECATED: DiscoverNodes called - use MinerRegistration.RegisterBid instead");
+
         const SESSION_TOKEN_HEADER: &str = "x-session-token";
         let metadata = request.metadata().clone();
         let discover_request = request.into_inner();
@@ -595,10 +631,18 @@ impl MinerDiscovery for MinerDiscoveryService {
         }))
     }
 
+    /// Submit a bid to the validator.
+    ///
+    /// **DEPRECATED**: Use `MinerRegistration.RegisterBid` or `UpdateBid` instead.
+    /// This method will be removed in a future release.
     async fn submit_bid(
         &self,
         request: Request<SubmitBidRequest>,
     ) -> Result<Response<SubmitBidResponse>, Status> {
+        warn!(
+            "DEPRECATED: SubmitBid (miner-side) called - use MinerRegistration.RegisterBid instead"
+        );
+
         let bid = request
             .into_inner()
             .bid
