@@ -100,7 +100,7 @@ message HealthCheckRequest {
   string miner_hotkey = 1;          // Miner's hotkey for identification
   repeated string node_ids = 2;     // Optional: specific nodes to check (empty = all)
   int64 timestamp = 3;              // Unix timestamp
-  bytes signature = 4;              // Signature over miner_hotkey|timestamp
+  bytes signature = 4;              // Signature over miner_hotkey|node_ids|timestamp
 }
 
 message HealthCheckResponse {

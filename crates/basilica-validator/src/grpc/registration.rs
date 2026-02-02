@@ -198,7 +198,13 @@ impl RegistrationService {
 
     /// Build the message to verify for HealthCheck signature
     fn build_health_check_message(&self, req: &HealthCheckRequest) -> String {
-        format!("{}|{}", req.miner_hotkey.trim(), req.timestamp)
+        let node_ids_str = req.node_ids.join(",");
+        format!(
+            "{}|{}|{}",
+            req.miner_hotkey.trim(),
+            node_ids_str,
+            req.timestamp
+        )
     }
 
     /// Verify a Bittensor signature
@@ -597,6 +603,7 @@ mod tests {
     async fn test_build_health_check_message() {
         let service = create_test_service().await;
 
+        // Test with empty node_ids (all nodes)
         let req = HealthCheckRequest {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
             node_ids: vec![],
@@ -607,7 +614,21 @@ mod tests {
         let message = service.build_health_check_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|1234567890"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY||1234567890"
+        );
+
+        // Test with specific node_ids
+        let req = HealthCheckRequest {
+            miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
+            node_ids: vec!["node-1".to_string(), "node-2".to_string()],
+            timestamp: 1234567890,
+            signature: vec![],
+        };
+
+        let message = service.build_health_check_message(&req);
+        assert_eq!(
+            message,
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1,node-2|1234567890"
         );
     }
 }

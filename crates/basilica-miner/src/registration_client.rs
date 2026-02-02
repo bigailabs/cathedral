@@ -157,8 +157,14 @@ impl RegistrationClient {
     }
 
     /// Build and sign the message for HealthCheck
-    fn build_health_check_message(&self, timestamp: i64) -> String {
-        format!("{}|{}", self.miner_hotkey.trim(), timestamp)
+    fn build_health_check_message(&self, node_ids: &[String], timestamp: i64) -> String {
+        let node_ids_str = node_ids.join(",");
+        format!(
+            "{}|{}|{}",
+            self.miner_hotkey.trim(),
+            node_ids_str,
+            timestamp
+        )
     }
 
     /// Sign a message using the miner's hotkey
@@ -315,12 +321,13 @@ impl RegistrationClient {
         let mut client = self.connect().await?;
 
         let timestamp = Utc::now().timestamp();
-        let message = self.build_health_check_message(timestamp);
+        let node_ids: Vec<String> = vec![]; // Empty = all nodes
+        let message = self.build_health_check_message(&node_ids, timestamp);
         let signature = self.sign_message(&message)?;
 
         let request = HealthCheckRequest {
             miner_hotkey: self.miner_hotkey.clone(),
-            node_ids: vec![], // Empty = all nodes
+            node_ids,
             timestamp,
             signature,
         };
@@ -477,8 +484,14 @@ mod tests {
         });
 
         let client = RegistrationClient::new(config, node_manager, bittensor);
-        let message = client.build_health_check_message(1234567890);
-        assert_eq!(message, "5GrwvaEF|1234567890");
+        // Test with empty node_ids (all nodes)
+        let message = client.build_health_check_message(&[], 1234567890);
+        assert_eq!(message, "5GrwvaEF||1234567890");
+
+        // Test with specific node_ids
+        let message = client
+            .build_health_check_message(&["node-1".to_string(), "node-2".to_string()], 1234567890);
+        assert_eq!(message, "5GrwvaEF|node-1,node-2|1234567890");
     }
 
     #[test]

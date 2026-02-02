@@ -173,7 +173,7 @@ pub struct HealthCheckRequest {
     /// Unix timestamp
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
-    /// Signature over miner_hotkey|timestamp
+    /// Signature over miner_hotkey|node_ids|timestamp
     #[prost(bytes = "vec", tag = "4")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }
