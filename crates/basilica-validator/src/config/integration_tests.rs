@@ -41,7 +41,7 @@ mod tests {
             .gpu_allocations
             .insert("H100".to_string(), GpuAllocation::new(50.0));
         // Disable binary validation since we don't have the binaries in test
-        config.verification.binary_validation.enabled = false;
+        config.verification.binary_validation = None;
         config.auction.price_api_endpoint = "http://localhost:50071".to_string();
         assert!(config.validate().is_ok());
     }
@@ -49,8 +49,8 @@ mod tests {
     #[test]
     fn test_validator_config_serialization_with_emission() {
         let mut config = ValidatorConfig::default();
-        // Disable binary validation since we don't have the binaries in test
-        config.verification.binary_validation.enabled = false;
+        // Disable binary validation since we don't have the binaries in test (None = disabled)
+        config.verification.binary_validation = None;
         config.auction.price_api_endpoint = "http://localhost:50071".to_string();
 
         // Add valid GPU allocations for testing
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn test_billing_api_endpoint_requires_gateway() {
         let mut config = ValidatorConfig::default();
-        config.verification.binary_validation.enabled = false;
+        config.verification.binary_validation = None;
         config.auction.price_api_endpoint =
             "http://basilica-api:8080/v1/prices/baseline".to_string();
         config.emission.burn_percentage = 10.0;

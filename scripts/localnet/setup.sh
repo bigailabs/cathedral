@@ -1,64 +1,104 @@
 #!/bin/bash
+# Basilica Localnet - One-time Setup
+# Creates SSH keys and prepares the environment
+# Wallet creation is handled by init-subnet.sh
+
 set -euo pipefail
 
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "=== Basilica Localnet Setup ==="
+echo "========================================"
+echo "  Basilica Localnet Setup"
+echo "========================================"
 echo ""
 
-# Check dependencies
+# =============================================================================
+# Check Prerequisites
+# =============================================================================
+echo "[1/3] Checking prerequisites..."
+
+# Check Docker
 if ! command -v docker &> /dev/null; then
-    echo "Error: Docker is not installed"
+    echo "  ERROR: Docker is not installed"
+    echo "  Install Docker: https://docs.docker.com/get-docker/"
     exit 1
 fi
+echo "  Docker: OK"
 
-# Setup wallets
-echo "1. Setting up wallets..."
-./setup-wallets.sh
+# Check Docker Compose
+if ! docker compose version &> /dev/null; then
+    echo "  ERROR: Docker Compose is not available"
+    echo "  Docker Compose should be included with Docker Desktop"
+    exit 1
+fi
+echo "  Docker Compose: OK"
 
-# Generate SSH keys
-echo ""
-echo "2. Generating SSH keys..."
-if [ -f "./ssh-keys/generate-static-keys.sh" ]; then
-    ./ssh-keys/generate-static-keys.sh
+# Check uv (required for btcli)
+if command -v uvx &> /dev/null; then
+    echo "  uv: OK"
 else
-    mkdir -p ssh-keys
-    cd ssh-keys && ../../../localnet/ssh-keys/generate-static-keys.sh && cd ..
+    echo "  uv: Not found (required for init-subnet.sh)"
+    echo "  Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
 fi
 
-# Start Subtensor (only Alice node to avoid equivocation)
 echo ""
-echo "3. Starting Subtensor..."
-docker compose -f compose.yml up -d alice
 
-# Wait for chain
-echo "   Waiting for chain to be ready..."
-while ! nc -z localhost 9944 2>/dev/null; do 
-    echo -n "."
-    sleep 2
-done
-echo " Ready!"
+# =============================================================================
+# Generate SSH Keys
+# =============================================================================
+echo "[2/3] Setting up SSH keys..."
 
-# Build and start Basilica services
+SSH_KEY_DIR="${SCRIPT_DIR}/ssh-keys"
+mkdir -p "${SSH_KEY_DIR}"
+
+# Generate miner SSH key for node access
+MINER_KEY="${SSH_KEY_DIR}/miner_node_key"
+if [ -f "${MINER_KEY}" ]; then
+    echo "  Miner SSH key already exists"
+else
+    echo "  Generating miner SSH key..."
+    ssh-keygen -t ed25519 -f "${MINER_KEY}" -N "" -C "basilica-miner-localnet"
+    chmod 600 "${MINER_KEY}"
+    chmod 644 "${MINER_KEY}.pub"
+fi
+
+# Generate validator SSH key
+VALIDATOR_KEY="${SSH_KEY_DIR}/validator_key"
+if [ -f "${VALIDATOR_KEY}" ]; then
+    echo "  Validator SSH key already exists"
+else
+    echo "  Generating validator SSH key..."
+    ssh-keygen -t ed25519 -f "${VALIDATOR_KEY}" -N "" -C "basilica-validator-localnet"
+    chmod 600 "${VALIDATOR_KEY}"
+    chmod 644 "${VALIDATOR_KEY}.pub"
+fi
+
+echo "  SSH keys stored in: ${SSH_KEY_DIR}"
 echo ""
-echo "4. Starting Basilica services..."
-docker compose -f compose.yml build executor miner validator
-docker compose -f compose.yml up -d executor prometheus grafana
-sleep 5  # Wait for executor to be healthy
-docker compose -f compose.yml up -d miner validator
+
+# =============================================================================
+# Pull Docker Images
+# =============================================================================
+echo "[3/3] Pulling Docker images..."
+
+cd "${SCRIPT_DIR}"
+docker compose pull subtensor postgres prometheus grafana 2>/dev/null || true
 
 echo ""
-echo "=== Setup Complete! ==="
+echo "========================================"
+echo "  Setup Complete!"
+echo "========================================"
 echo ""
-echo "Services running:"
-echo "  - Subtensor (Alice): ws://localhost:9944"
-echo "  - Executor: localhost:50052 (gRPC), http://localhost:8082/metrics"
-echo "  - Miner: localhost:8092 (gRPC), http://localhost:8090/metrics"
-echo "  - Validator: localhost:50053 (gRPC), http://localhost:3002 (API)"
-echo "  - Prometheus: http://localhost:9090"
-echo "  - Grafana: http://localhost:3000"
+echo "Next steps:"
+echo "  1. Start Subtensor:     ./start.sh network"
+echo "  2. Initialize subnet:   ./init-subnet.sh"
+echo "  3. Start services:      ./start.sh miner"
+echo "  4. Check health:        ./test.sh"
 echo ""
-echo "Note: Services run with local Subtensor instance on ws://localhost:9944"
+echo "Available profiles:"
+echo "  network     - Subtensor only"
+echo "  validator   - Subtensor + Postgres + Validator"
+echo "  miner       - Above + Miner"
+echo "  monitoring  - All + Prometheus + Grafana"
+echo "  all         - Everything (default)"
 echo ""
-echo "To check status: ./test-services.sh"
-echo "To stop: docker compose down"
