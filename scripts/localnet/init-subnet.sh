@@ -36,6 +36,14 @@ if ! command -v jq &> /dev/null; then
 fi
 echo "  jq: OK"
 
+# Check bc (needed for balance comparison in fund_wallet)
+if ! command -v bc &> /dev/null; then
+    echo "  ERROR: bc is not installed"
+    echo "  Install bc: brew install bc (macOS) or apt install bc (Linux)"
+    exit 1
+fi
+echo "  bc: OK"
+
 # Check Subtensor is running
 if ! curl -sf "http://localhost:9944/health" > /dev/null 2>&1; then
     echo "  ERROR: Subtensor is not running"

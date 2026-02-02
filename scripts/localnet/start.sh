@@ -67,6 +67,19 @@ echo "  Profile: ${PROFILE}"
 echo "========================================"
 echo ""
 
+# Check prerequisites
+if ! command -v curl &> /dev/null; then
+    echo "ERROR: curl is not installed"
+    echo "Install: brew install curl (macOS) or apt install curl (Linux)"
+    exit 1
+fi
+
+if ! command -v nc &> /dev/null; then
+    echo "ERROR: netcat (nc) is not installed"
+    echo "Install: brew install netcat (macOS) or apt install netcat-openbsd (Linux)"
+    exit 1
+fi
+
 # Generate SSH keys if they don't exist
 SSH_KEY_DIR="${SCRIPT_DIR}/ssh-keys"
 mkdir -p "${SSH_KEY_DIR}"

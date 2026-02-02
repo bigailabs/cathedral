@@ -2,7 +2,7 @@
 # Pre-configured for local Subtensor network
 
 [database]
-url = "sqlite:/opt/basilica/data/validator.db"
+url = "sqlite:///opt/basilica/data/validator.db"
 max_connections = 10
 run_migrations = true
 

@@ -67,7 +67,7 @@ description: Debug Basilica localnet services using existing scripts and Docker 
 
 ```bash
 ./stop.sh              # Stop containers, preserve data
-./stop.sh --clean      # Remove all volumes and wallets for fresh start
+./stop.sh --clean      # Remove containers, volumes, and network for fresh start (wallets in scripts/localnet/wallets/ are preserved)
 ```
 
 ## Docker Compose Commands
@@ -226,8 +226,8 @@ uvx --from bittensor-cli btcli wallet balance \
 ### Full Reset
 
 ```bash
-./stop.sh --clean    # Removes all volumes and wallets
-./start.sh miner     # Fresh start with wallet initialization
+./stop.sh --clean    # Removes containers, volumes, and network (scripts/localnet/wallets/ is preserved)
+./start.sh miner     # Fresh start with wallet re-registration
 ```
 
 ## Common Error Patterns

@@ -58,7 +58,10 @@ if [ "$CLEAN" = true ]; then
     docker compose down -v 2>/dev/null || true
 
     # Also remove any orphaned volumes from this project
-    docker volume ls --filter "name=localnet" -q | xargs -r docker volume rm 2>/dev/null || true
+    VOLUMES=$(docker volume ls --filter "label=com.docker.compose.project=localnet_basilica-localnet" -q)
+    if [ -n "$VOLUMES" ]; then
+        docker volume rm $VOLUMES 2>/dev/null || true
+    fi
 
     echo ""
     echo "[3/3] Removing Docker network..."
