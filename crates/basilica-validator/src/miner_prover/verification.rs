@@ -1266,10 +1266,13 @@ impl VerificationEngine {
 
     /// Initialize validation server mode
     pub async fn initialize_validation_server(&mut self) -> Result<()> {
+        let Some(ref binary_config) = self.config.binary_validation else {
+            info!("Binary validation not configured - skipping validation server initialization");
+            return Ok(());
+        };
         info!("Initializing validation server mode for VerificationEngine");
         let mut node = self.validation_node.write().await;
-        node.initialize_server_mode(&self.config.binary_validation)
-            .await?;
+        node.initialize_server_mode(binary_config).await?;
         info!("Validation server mode initialized successfully");
         Ok(())
     }
@@ -1473,14 +1476,13 @@ impl VerificationEngine {
                     .await
             }
             ValidationStrategy::Full => {
-                let binary_config = &self.config.binary_validation;
                 self.validation_node
                     .read()
                     .await
                     .execute_full_validation(
                         node_info,
                         &ssh_details,
-                        binary_config,
+                        self.config.binary_validation.as_ref(),
                         &self.validator_hotkey,
                         miner_uid,
                     )

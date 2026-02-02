@@ -112,9 +112,9 @@ pub struct VerificationConfig {
     /// gRPC port offset from axon port (if not using default 50061)
     #[serde(default)]
     pub grpc_port_offset: Option<u16>,
-    /// Binary validation configuration
+    /// Binary validation configuration (None = disabled)
     #[serde(default)]
-    pub binary_validation: BinaryValidationConfig,
+    pub binary_validation: Option<BinaryValidationConfig>,
     /// Docker validation configuration
     #[serde(default)]
     pub docker_validation: DockerValidationConfig,
@@ -222,7 +222,7 @@ impl VerificationConfig {
             fallback_to_static: true,
             cache_miner_info_ttl: Duration::from_secs(300),
             grpc_port_offset: None,
-            binary_validation: BinaryValidationConfig::default(),
+            binary_validation: None, // Disabled in test by default
             docker_validation: DockerValidationConfig::default(),
             collateral_event_scan_interval: Duration::from_secs(12),
             node_validation_interval: Duration::from_secs(3600),
@@ -235,6 +235,7 @@ impl VerificationConfig {
 }
 
 /// Configuration for binary validation using validator-binary and executor-binary
+/// Note: The presence of this config enables binary validation; absence disables it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryValidationConfig {
     /// Path to validator-binary executable
@@ -245,8 +246,6 @@ pub struct BinaryValidationConfig {
     pub execution_timeout_secs: u64,
     /// Output format for binary execution
     pub output_format: String,
-    /// Enable binary validation (fallback to SSH test only)
-    pub enabled: bool,
     /// Binary validation weight in final score calculation
     pub score_weight: f64,
     /// Default node port for SSH tunnel cleanup
@@ -423,7 +422,6 @@ impl Default for BinaryValidationConfig {
             executor_binary_path: PathBuf::from("./executor-binary"),
             execution_timeout_secs: 1200,
             output_format: "json".to_string(),
-            enabled: true,
             score_weight: 0.8,
             node_port: default_node_port(),
             server_mode: ValidationServerConfig::default(),
@@ -824,7 +822,7 @@ impl Default for ValidatorConfig {
                 fallback_to_static: default_fallback_to_static(),
                 cache_miner_info_ttl: default_cache_miner_info_ttl(),
                 grpc_port_offset: None,
-                binary_validation: BinaryValidationConfig::default(),
+                binary_validation: None, // Disabled by default
                 docker_validation: DockerValidationConfig::default(),
                 storage_validation: StorageValidationConfig::default(),
                 collateral_event_scan_interval: default_collateral_event_scan_interval(),
@@ -964,9 +962,9 @@ impl ConfigValidation for ValidatorConfig {
             }
         }
 
-        // Validate binary validation configuration
-        if self.verification.binary_validation.enabled {
-            let validator_path = &self.verification.binary_validation.validator_binary_path;
+        // Validate binary validation configuration if present (presence = enabled)
+        if let Some(ref binary_config) = self.verification.binary_validation {
+            let validator_path = &binary_config.validator_binary_path;
             if !validator_path.exists() {
                 return Err(ConfigurationError::InvalidValue {
                     key: "verification.binary_validation.validator_binary_path".to_string(),
@@ -975,7 +973,7 @@ impl ConfigValidation for ValidatorConfig {
                 });
             }
 
-            let executor_path = &self.verification.binary_validation.executor_binary_path;
+            let executor_path = &binary_config.executor_binary_path;
             if !executor_path.exists() {
                 return Err(ConfigurationError::InvalidValue {
                     key: "verification.binary_validation.executor_binary_path".to_string(),

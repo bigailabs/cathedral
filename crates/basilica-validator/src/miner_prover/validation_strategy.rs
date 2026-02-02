@@ -809,15 +809,15 @@ impl ValidationNode {
         &self,
         node_info: &NodeInfoDetailed,
         ssh_details: &SshConnectionDetails,
-        binary_config: &crate::config::BinaryValidationConfig,
+        binary_config: Option<&crate::config::BinaryValidationConfig>,
         _validator_hotkey: &Hotkey,
         miner_uid: u16,
     ) -> Result<NodeVerificationResult> {
         info!(
             miner_uid = miner_uid,
             node_id = %node_info.id,
-            binary_validation_enabled = binary_config.enabled,
-            binary_timeout_secs = binary_config.execution_timeout_secs,
+            binary_validation_enabled = binary_config.is_some(),
+            binary_timeout_secs = binary_config.map(|c| c.execution_timeout_secs).unwrap_or(0),
             "[EVAL_FLOW] Executing full validation"
         );
 
@@ -1055,8 +1055,12 @@ impl ValidationNode {
         let pre_validations_successful =
             ssh_connection_successful && quality_validations_successful;
 
-        if pre_validations_successful && binary_config.enabled {
-            // Move to BinaryValidating state
+        // Binary validation is enabled if config is present (Some = enabled)
+        let binary_validation_enabled = binary_config.is_some();
+
+        if pre_validations_successful && binary_validation_enabled {
+            let binary_cfg = binary_config.unwrap(); // Safe because we checked is_some()
+                                                     // Move to BinaryValidating state
             if let Some(ref metrics) = self.metrics {
                 metrics.prometheus().set_node_validation_state(
                     &node_id,
@@ -1073,7 +1077,7 @@ impl ValidationNode {
                     &node_info.id.to_string(),
                     miner_uid,
                     ssh_details,
-                    binary_config,
+                    binary_cfg,
                 )
                 .await
             {
@@ -1155,7 +1159,8 @@ impl ValidationNode {
                     }
                 }
             }
-        } else if !binary_config.enabled && quality_validations_successful {
+        } else if !binary_validation_enabled && quality_validations_successful {
+            // Binary validation is disabled - use SSH score only (0.8 max)
             binary_validation_successful = true;
             binary_score = 1.0;
         }
@@ -1306,12 +1311,13 @@ impl ValidationNode {
         &self,
         pre_validations_successful: bool,
         binary_successful: bool,
-        binary_config: &crate::config::BinaryValidationConfig,
+        binary_config: Option<&crate::config::BinaryValidationConfig>,
     ) -> f64 {
         if !pre_validations_successful {
             return 0.0;
         }
-        if !binary_config.enabled {
+        // Binary validation disabled if None
+        if binary_config.is_none() {
             return 1.0;
         }
         if !binary_successful {
