@@ -55,6 +55,7 @@ struct TaskInputs {
     persistence: Arc<SimplePersistence>,
     collateral_manager: Option<Arc<CollateralManager>>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
+    validator_ssh_public_key: String,
 }
 
 impl ValidatorService {
@@ -133,6 +134,16 @@ impl ValidatorService {
             )
             .await?;
 
+        // Extract SSH public key from rental manager (required for miner registration)
+        let validator_ssh_public_key = rental_manager
+            .as_ref()
+            .map(|rm| rm.get_validator_ssh_public_key())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Rental manager required for SSH key - metrics must be enabled")
+            })?;
+
+        info!("Validator SSH public key loaded for miner registration");
+
         if let Some(rental_manager) = rental_manager {
             api_handler = api_handler.with_rental_manager(Arc::new(rental_manager));
         }
@@ -148,6 +159,7 @@ impl ValidatorService {
                 persistence: persistence_arc.clone(),
                 collateral_manager: collateral_manager.clone(),
                 gpu_profile_repo: gpu_profile_repo.clone(),
+                validator_ssh_public_key,
             })
             .await;
 
@@ -518,12 +530,14 @@ impl ValidatorService {
         let registration_persistence = inputs.persistence.clone();
         let registration_auction_config = self.config.auction.clone();
         let registration_collateral_manager = inputs.collateral_manager.clone();
+        let validator_ssh_public_key = inputs.validator_ssh_public_key.clone();
         let registration_server_task = tokio::spawn(async move {
             if let Err(e) = start_registration_server(
                 registration_grpc_config,
                 registration_persistence,
                 registration_auction_config,
                 registration_collateral_manager,
+                validator_ssh_public_key,
             )
             .await
             {

@@ -106,6 +106,7 @@ pub struct RegistrationService {
     persistence: Arc<SimplePersistence>,
     auction_config: AuctionConfig,
     collateral_manager: Option<Arc<CollateralManager>>,
+    validator_ssh_public_key: String,
 }
 
 #[allow(clippy::result_large_err)]
@@ -114,11 +115,13 @@ impl RegistrationService {
         persistence: Arc<SimplePersistence>,
         auction_config: AuctionConfig,
         collateral_manager: Option<Arc<CollateralManager>>,
+        validator_ssh_public_key: String,
     ) -> Self {
         Self {
             persistence,
             auction_config,
             collateral_manager,
+            validator_ssh_public_key,
         }
     }
 
@@ -325,11 +328,7 @@ impl MinerRegistration for RegistrationService {
         );
 
         // Return validator's SSH public key for miner to deploy
-        let validator_ssh_public_key = self
-            .auction_config
-            .validator_ssh_public_key
-            .clone()
-            .unwrap_or_default();
+        let validator_ssh_public_key = self.validator_ssh_public_key.clone();
 
         Ok(Response::new(RegisterBidResponse {
             accepted: true,
@@ -492,8 +491,14 @@ pub async fn start_registration_server(
     persistence: Arc<SimplePersistence>,
     auction_config: AuctionConfig,
     collateral_manager: Option<Arc<CollateralManager>>,
+    validator_ssh_public_key: String,
 ) -> Result<()> {
-    let service = RegistrationService::new(persistence, auction_config, collateral_manager);
+    let service = RegistrationService::new(
+        persistence,
+        auction_config,
+        collateral_manager,
+        validator_ssh_public_key,
+    );
     let addr = config
         .listen_address
         .parse()
@@ -522,7 +527,12 @@ mod tests {
 
     async fn create_test_service() -> RegistrationService {
         let persistence = SimplePersistence::for_testing().await.unwrap();
-        RegistrationService::new(Arc::new(persistence), AuctionConfig::default(), None)
+        RegistrationService::new(
+            Arc::new(persistence),
+            AuctionConfig::default(),
+            None,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPublicKey test@validator".to_string(),
+        )
     }
 
     #[tokio::test]
