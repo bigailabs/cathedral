@@ -47,6 +47,10 @@ enable_worker_queue = false
 # output_format = "json"
 # score_weight = 0.8
 
+# Storage validation - reduced for localnet (0.1TB instead of default 1TB)
+[verification.storage_validation]
+min_required_storage_bytes = 109951162777
+
 [ssh_validation]
 enabled = true
 timeout = { secs = 60 }
