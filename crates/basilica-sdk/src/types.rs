@@ -1,7 +1,6 @@
 //! Type definitions for the Basilica SDK
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 // Re-export types from basilica-validator that are used by the client
 pub use basilica_validator::api::types::{
@@ -334,17 +333,6 @@ pub struct StartSecureCloudRentalRequest {
     /// User's registered SSH key ID (NOT the public key string)
     /// Must be a key owned by the authenticated user
     pub ssh_public_key_id: String,
-
-    /// Docker container image (optional)
-    pub container_image: Option<String>,
-
-    /// Environment variables for the container
-    #[serde(default)]
-    pub environment: HashMap<String, String>,
-
-    /// Port mappings
-    #[serde(default)]
-    pub ports: Vec<PortMappingRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +357,10 @@ pub struct SecureCloudRentalResponse {
 
     /// Hourly cost in USD (base_price × gpu_count × (1 + markup%/100))
     pub hourly_cost: f64,
+
+    /// Whether this rental is a spot/preemptible instance
+    #[serde(default)]
+    pub is_spot: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +559,10 @@ pub struct SecureCloudRentalListItem {
     /// Whether this is a VIP rental (managed machine, cannot be stopped by user)
     #[serde(default)]
     pub is_vip: bool,
+
+    /// Whether this rental is a spot/preemptible instance
+    #[serde(default)]
+    pub is_spot: bool,
 }
 
 /// List secure cloud rentals response
@@ -670,6 +666,59 @@ fn default_public() -> bool {
     true
 }
 
+/// Pod spreading mode for controlling how pods are distributed across topology domains.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SpreadMode {
+    /// Best-effort spreading using TopologySpreadConstraints with ScheduleAnyway.
+    /// Pods prefer spreading but can be co-located if necessary.
+    #[default]
+    Preferred,
+    /// Strict spreading using TopologySpreadConstraints with DoNotSchedule.
+    /// Pods will not schedule if spreading constraints cannot be satisfied.
+    Required,
+    /// Hard one-pod-per-node using podAntiAffinity with requiredDuringScheduling.
+    /// Guarantees each pod runs on a unique node (for unique IP requirements).
+    UniqueNodes,
+}
+
+fn default_max_skew() -> i32 {
+    1
+}
+
+fn default_topology_key() -> String {
+    "kubernetes.io/hostname".to_string()
+}
+
+/// Configuration for pod topology spreading.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TopologySpreadConfig {
+    /// Spreading mode: preferred, required, or unique_nodes.
+    #[serde(default)]
+    pub mode: SpreadMode,
+
+    /// Maximum allowed difference in pod count between topology domains.
+    /// Only used for Preferred and Required modes (ignored for UniqueNodes).
+    /// Range: 1-10, default: 1.
+    #[serde(default = "default_max_skew")]
+    pub max_skew: i32,
+
+    /// Topology key for spreading (default: kubernetes.io/hostname).
+    #[serde(default = "default_topology_key")]
+    pub topology_key: String,
+}
+
+impl Default for TopologySpreadConfig {
+    fn default() -> Self {
+        Self {
+            mode: SpreadMode::default(),
+            max_skew: default_max_skew(),
+            topology_key: default_topology_key(),
+        }
+    }
+}
+
 /// Create deployment request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -702,6 +751,10 @@ pub struct CreateDeploymentRequest {
     pub suspended: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    /// Optional topology spreading configuration.
+    /// Controls how pod replicas are distributed across nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topology_spread: Option<TopologySpreadConfig>,
 }
 
 fn default_enable_billing() -> bool {
@@ -747,6 +800,12 @@ pub struct DeploymentResponse {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<DeploymentProgress>,
+    /// Share token for private deployments (only returned on creation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_token: Option<String>,
+    /// Shareable URL with token query parameter for private deployments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_url: Option<String>,
 }
 
 /// Deployment summary for list responses
@@ -758,6 +817,9 @@ pub struct DeploymentSummary {
     pub url: String,
     pub replicas: ReplicaStatus,
     pub created_at: String,
+    /// Whether deployment is publicly accessible (no token required).
+    #[serde(default = "default_public")]
+    pub public: bool,
 }
 
 /// List deployments response
@@ -775,6 +837,32 @@ pub struct DeleteDeploymentResponse {
     pub instance_name: String,
     pub state: String,
     pub message: String,
+}
+
+/// Response for POST /deployments/{name}/share-token
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegenerateShareTokenResponse {
+    /// Raw token value. Only returned once, cannot be retrieved later.
+    pub token: String,
+    /// Full shareable URL with token as query parameter.
+    pub share_url: String,
+}
+
+/// Response for GET /deployments/{name}/share-token
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareTokenStatusResponse {
+    /// Whether a share token exists for this deployment.
+    pub exists: bool,
+}
+
+/// Response for DELETE /deployments/{name}/share-token
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteShareTokenResponse {
+    /// Whether a token was revoked.
+    pub revoked: bool,
 }
 
 /// Deployment event from Kubernetes
@@ -941,4 +1029,438 @@ pub struct ListCpuOfferingsResponse {
 
     /// Total count of offerings
     pub count: usize,
+}
+
+// ============================================================================
+// Volume Management Types
+// ============================================================================
+
+/// Volume status enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeStatus {
+    Pending,
+    Available,
+    Attached,
+    Deleting,
+    Error,
+}
+
+impl std::fmt::Display for VolumeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VolumeStatus::Pending => write!(f, "Pending"),
+            VolumeStatus::Available => write!(f, "Available"),
+            VolumeStatus::Attached => write!(f, "Attached"),
+            VolumeStatus::Deleting => write!(f, "Deleting"),
+            VolumeStatus::Error => write!(f, "Error"),
+        }
+    }
+}
+
+/// Volume response from API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeResponse {
+    /// Unique volume identifier
+    pub volume_id: String,
+
+    /// User-friendly volume name
+    pub name: String,
+
+    /// Optional description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Cloud provider (e.g., "hyperstack")
+    pub provider: String,
+
+    /// Provider's internal volume ID
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_volume_id: Option<String>,
+
+    /// Volume size in GB
+    pub size_gb: u32,
+
+    /// Volume type (e.g., "ssd")
+    pub volume_type: String,
+
+    /// Region code (e.g., "US-1", "CANADA-1")
+    pub region: String,
+
+    /// Current volume status
+    pub status: VolumeStatus,
+
+    /// Rental ID if attached
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rental_id: Option<String>,
+
+    /// Estimated hourly cost in USD
+    pub estimated_hourly_cost: Option<f64>,
+
+    /// Accumulated cost from billing service (actual tracked cost)
+    /// None if billing service is unavailable
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accumulated_cost: Option<String>,
+
+    /// Creation timestamp
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// List volumes response
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListVolumesResponse {
+    /// List of volumes
+    pub volumes: Vec<VolumeResponse>,
+
+    /// Total count
+    pub total_count: u32,
+}
+
+/// Create volume request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateVolumeRequest {
+    /// Volume name (unique per user, case-insensitive)
+    pub name: String,
+
+    /// Optional description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Size in GB (1-10240)
+    pub size_gb: u32,
+
+    /// Cloud provider (e.g., "hyperstack")
+    pub provider: String,
+
+    /// Region code (e.g., "US-1", "CANADA-1")
+    pub region: String,
+}
+
+/// Attach volume request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachVolumeRequest {
+    /// Rental ID to attach the volume to
+    pub rental_id: String,
+}
+
+/// Response for volume attach/detach operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeOperationResponse {
+    /// Volume ID
+    pub volume_id: String,
+
+    /// New volume status
+    pub status: VolumeStatus,
+
+    /// Human-readable message
+    pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_spread_mode_default() {
+        assert_eq!(SpreadMode::default(), SpreadMode::Preferred);
+    }
+
+    #[test]
+    fn test_spread_mode_serialization() {
+        assert_eq!(
+            serde_json::to_string(&SpreadMode::Preferred).unwrap(),
+            "\"preferred\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SpreadMode::Required).unwrap(),
+            "\"required\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SpreadMode::UniqueNodes).unwrap(),
+            "\"unique_nodes\""
+        );
+    }
+
+    #[test]
+    fn test_spread_mode_deserialization() {
+        assert_eq!(
+            serde_json::from_str::<SpreadMode>("\"preferred\"").unwrap(),
+            SpreadMode::Preferred
+        );
+        assert_eq!(
+            serde_json::from_str::<SpreadMode>("\"required\"").unwrap(),
+            SpreadMode::Required
+        );
+        assert_eq!(
+            serde_json::from_str::<SpreadMode>("\"unique_nodes\"").unwrap(),
+            SpreadMode::UniqueNodes
+        );
+    }
+
+    #[test]
+    fn test_topology_spread_config_default() {
+        let config = TopologySpreadConfig::default();
+        assert_eq!(config.mode, SpreadMode::Preferred);
+        assert_eq!(config.max_skew, 1);
+        assert_eq!(config.topology_key, "kubernetes.io/hostname");
+    }
+
+    #[test]
+    fn test_topology_spread_config_serialization() {
+        let config = TopologySpreadConfig {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 2,
+            topology_key: "topology.kubernetes.io/zone".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"mode\":\"unique_nodes\""));
+        assert!(json.contains("\"maxSkew\":2"));
+        assert!(json.contains("\"topologyKey\":\"topology.kubernetes.io/zone\""));
+    }
+
+    #[test]
+    fn test_topology_spread_config_deserialization() {
+        let json = r#"{"mode":"unique_nodes","maxSkew":3,"topologyKey":"kubernetes.io/hostname"}"#;
+        let config: TopologySpreadConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mode, SpreadMode::UniqueNodes);
+        assert_eq!(config.max_skew, 3);
+        assert_eq!(config.topology_key, "kubernetes.io/hostname");
+    }
+
+    #[test]
+    fn test_topology_spread_config_deserialization_with_defaults() {
+        let json = r#"{}"#;
+        let config: TopologySpreadConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.mode, SpreadMode::Preferred);
+        assert_eq!(config.max_skew, 1);
+        assert_eq!(config.topology_key, "kubernetes.io/hostname");
+    }
+
+    #[test]
+    fn test_create_deployment_request_without_topology_spread() {
+        let request = CreateDeploymentRequest {
+            instance_name: "test".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 1,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(!json.contains("topologySpread"));
+    }
+
+    #[test]
+    fn test_create_deployment_request_with_topology_spread() {
+        let request = CreateDeploymentRequest {
+            instance_name: "test".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 3,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: Some(TopologySpreadConfig {
+                mode: SpreadMode::UniqueNodes,
+                max_skew: 1,
+                topology_key: "kubernetes.io/hostname".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"topologySpread\""));
+        assert!(json.contains("\"mode\":\"unique_nodes\""));
+    }
+
+    #[test]
+    fn test_spread_mode_deserialization_invalid_value() {
+        let result = serde_json::from_str::<SpreadMode>("\"invalid_mode\"");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown variant"));
+    }
+
+    #[test]
+    fn test_spread_mode_deserialization_wrong_type() {
+        let result = serde_json::from_str::<SpreadMode>("123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_topology_spread_config_deserialization_invalid_mode() {
+        let json = r#"{"mode":"bad_mode","maxSkew":1,"topologyKey":"kubernetes.io/hostname"}"#;
+        let result = serde_json::from_str::<TopologySpreadConfig>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_topology_spread_config_equality() {
+        let config1 = TopologySpreadConfig {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        };
+        let config2 = TopologySpreadConfig {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        };
+        let config3 = TopologySpreadConfig {
+            mode: SpreadMode::Required,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        };
+        assert_eq!(config1, config2);
+        assert_ne!(config1, config3);
+    }
+
+    #[test]
+    fn test_spread_mode_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(SpreadMode::Preferred);
+        set.insert(SpreadMode::Required);
+        set.insert(SpreadMode::UniqueNodes);
+        assert_eq!(set.len(), 3);
+        assert!(set.contains(&SpreadMode::Preferred));
+    }
+
+    // Share Token Tests
+
+    #[test]
+    fn test_regenerate_share_token_response_serialization() {
+        let response = RegenerateShareTokenResponse {
+            token: "abc123def456".to_string(),
+            share_url: "https://api.example.com/d/my-app?token=abc123def456".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("token"));
+        assert!(json.contains("shareUrl")); // camelCase
+    }
+
+    #[test]
+    fn test_regenerate_share_token_response_deserialization() {
+        let json = r#"{"token":"abc123","shareUrl":"https://example.com"}"#;
+        let response: RegenerateShareTokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.token, "abc123");
+        assert_eq!(response.share_url, "https://example.com");
+    }
+
+    #[test]
+    fn test_share_token_status_response() {
+        let exists = ShareTokenStatusResponse { exists: true };
+        let not_exists = ShareTokenStatusResponse { exists: false };
+
+        assert!(exists.exists);
+        assert!(!not_exists.exists);
+        assert_ne!(exists, not_exists);
+    }
+
+    #[test]
+    fn test_share_token_status_response_serialization() {
+        let response = ShareTokenStatusResponse { exists: true };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"exists":true}"#);
+    }
+
+    #[test]
+    fn test_delete_share_token_response() {
+        let revoked = DeleteShareTokenResponse { revoked: true };
+        let not_revoked = DeleteShareTokenResponse { revoked: false };
+
+        assert!(revoked.revoked);
+        assert!(!not_revoked.revoked);
+        assert_ne!(revoked, not_revoked);
+    }
+
+    #[test]
+    fn test_delete_share_token_response_serialization() {
+        let response = DeleteShareTokenResponse { revoked: true };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"revoked":true}"#);
+    }
+
+    #[test]
+    fn test_deployment_summary_public_field_default() {
+        // Test that public field deserializes with default when missing
+        let json = r#"{
+            "instanceName": "my-app",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z"
+        }"#;
+        let summary: DeploymentSummary = serde_json::from_str(json).unwrap();
+        assert!(summary.public); // default_public() returns true
+    }
+
+    #[test]
+    fn test_deployment_summary_public_field_explicit() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z",
+            "public": false
+        }"#;
+        let summary: DeploymentSummary = serde_json::from_str(json).unwrap();
+        assert!(!summary.public);
+    }
+
+    #[test]
+    fn test_deployment_response_share_token_fields() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "userId": "user123",
+            "namespace": "u-user123",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z",
+            "shareToken": "abc123",
+            "shareUrl": "https://example.com?token=abc123"
+        }"#;
+        let response: DeploymentResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.share_token, Some("abc123".to_string()));
+        assert_eq!(
+            response.share_url,
+            Some("https://example.com?token=abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_deployment_response_share_token_fields_optional() {
+        let json = r#"{
+            "instanceName": "my-app",
+            "userId": "user123",
+            "namespace": "u-user123",
+            "state": "Running",
+            "url": "https://example.com",
+            "replicas": {"desired": 1, "ready": 1},
+            "createdAt": "2024-01-01T00:00:00Z"
+        }"#;
+        let response: DeploymentResponse = serde_json::from_str(json).unwrap();
+        assert!(response.share_token.is_none());
+        assert!(response.share_url.is_none());
+    }
 }

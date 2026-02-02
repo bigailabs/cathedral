@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0]
+
+### Added
+- Share token management for private deployments (`share-token regenerate`, `share-token status`, `share-token revoke`)
+- `--private` flag for deploy command (deployments are public by default)
+- Access column (Public/Token) in deployments list table
+- `--show-token` flag for deploy status command
+- Spot instance indicator in GPU listings, rental selectors, and status views
+
+## [0.14.0]
+
+### Added
+- Topology spread options for deploy command (`--spread-mode`, `--max-skew`, `--topology-key`)
+
+## [0.13.0]
+
+### Changed
+- Renamed product offerings in user-facing text (API and SDK unchanged):
+  - "Secure Cloud" → "The Citadel"
+  - "Community Cloud" → "The Bourse"
+  - "VIP" → "The Priory"
+  - "Deployments" → "Summons"
+- Added `summon` as visible alias for `deploy` command
+- CLI `--compute` option now uses `citadel` and `bourse` as primary values (old names remain as aliases for backward compatibility)
+
+### Fixed
+- Display of logs in `deploy logs`
+
+## [0.12.0]
+
+### Added
+- Volume management commands for persistent storage across rentals
+  - `volumes create` - Create new volumes with configurable size and region
+  - `volumes list` - List all volumes with status and attachment info
+  - `volumes delete` - Delete volumes that are not attached
+  - `volumes attach` - Attach a volume to an active rental
+  - `volumes detach` - Detach a volume from a rental
+- Show IP address in interactive rental selection for use to be able to differentiate between rentals
+
+## [0.11.0]
+
+### Added
+- GPU interconnect type display in offering selection prompt (e.g., `8x H100 (SXM5)` instead of just `8x H100`)
+- CPU-only machine rental support across all commands (`ls`, `up`, `ps`, `status`, `ssh`)
+
+### Fixed
+- Price-max filter now correctly applies to total community node cost
+
+### Removed
+- SSH access is now always enabled; removed no-ssh flag for simplified rental flow
+
 ## [0.10.1]
 
 ### Added

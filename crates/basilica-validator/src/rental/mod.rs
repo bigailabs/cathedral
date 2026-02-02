@@ -52,6 +52,8 @@ pub struct RentalManager {
     collateral_manager: Option<Arc<CollateralManager>>,
     /// Auction configuration for bid-based selection
     auction_config: AuctionConfig,
+    /// Max age for full validation before allowing a rental
+    pre_rental_full_validation_max_age: std::time::Duration,
 }
 
 // /// Parse SSH host from credentials string format "user@host:port"
@@ -193,6 +195,8 @@ impl RentalManager {
             ban_manager,
             collateral_manager: None,
             auction_config: AuctionConfig::default(),
+            // TODO: Wire this from config for callers using `new`.
+            pre_rental_full_validation_max_age: std::time::Duration::from_secs(12 * 60 * 60),
         }
     }
 
@@ -261,6 +265,7 @@ impl RentalManager {
             ban_manager,
             collateral_manager,
             auction_config: config.auction.clone(),
+            pre_rental_full_validation_max_age: config.verification.node_validation_interval,
         })
     }
 
@@ -365,7 +370,10 @@ impl RentalManager {
         // 2. Validate node is not banned
         self.ensure_not_banned(&selection).await?;
 
-        // 3. Get SSH endpoint and node details
+        // 3. Ensure node has recent validation (PR #331 requirement)
+        self.ensure_recent_validation(&selection).await?;
+
+        // 4. Get SSH endpoint and node details
         let ssh_endpoint = self.require_ssh_endpoint(&selection).await?;
         let node_details = self.require_node_details(&selection, &rental_id).await?;
 
@@ -379,13 +387,13 @@ impl RentalManager {
             selection.miner_id
         );
 
-        // 4. Ensure no active rental on this node
+        // 5. Ensure no active rental on this node
         self.ensure_no_active_rental(&selection, &rental_id).await?;
 
         let ssh_credentials = self.build_ssh_credentials(&ssh_endpoint);
         let container_client = self.create_container_client(&ssh_credentials)?;
 
-        // 5. Deploy container
+        // 6. Deploy container
         let container_info = self
             .deploy_container_or_log_failure(
                 &container_client,
@@ -689,6 +697,46 @@ impl RentalManager {
                 ))
             }
         }
+    }
+
+    async fn ensure_recent_validation(&self, selection: &RentalSelection) -> Result<()> {
+        let Some(miner_uid) = selection.miner_uid else {
+            return Ok(());
+        };
+
+        let last_full_validation = self
+            .persistence
+            .get_last_full_validation_timestamp(&selection.node_id, &selection.miner_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    node_id = %selection.node_id,
+                    miner_id = %selection.miner_id,
+                    error = %e,
+                    "Failed to read last full validation timestamp"
+                );
+                None
+            });
+
+        let is_stale = last_full_validation
+            .map(|ts| {
+                chrono::Utc::now() - ts
+                    > chrono::Duration::from_std(self.pre_rental_full_validation_max_age)
+                        .unwrap_or(chrono::Duration::hours(12))
+            })
+            .unwrap_or(true);
+
+        if is_stale {
+            self.release_reservation(&selection.reservation_id).await;
+            // TODO: Consider auto-triggering a full validation on stale rentals instead of rejecting.
+            return Err(anyhow::anyhow!(
+                "Node {} requires a recent full validation before rental (miner_uid: {})",
+                selection.node_id,
+                miner_uid
+            ));
+        }
+
+        Ok(())
     }
 
     async fn ensure_no_active_rental(

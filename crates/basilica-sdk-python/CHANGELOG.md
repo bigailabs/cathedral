@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-01-30
+
+### Added
+- Share token management: `regenerate_share_token()`, `get_share_token_status()`, `revoke_share_token()`
+- Health check binding: `health_check()`
+- `is_spot` field on `GpuOffering`, `SecureCloudRentalResponse`, `CpuRentalResponse`, `SecureCloudRentalListItem`, `CpuRentalListItem`
+
+## [0.14.0] - 2026-01-26
+
+### Added
+- Topology spread support for pod distribution across nodes via `topology_spread` parameter
+- `TopologySpreadConfig` and `SpreadMode` types for configuring pod spread constraints
+- Secure cloud GPU rental API: `list_secure_cloud_gpus()`, `start_secure_cloud_rental()`, `stop_secure_cloud_rental()`, `list_secure_cloud_rentals()`
+- `GpuOffering`, `SecureCloudRentalResponse`, `SecureCloudRentalListItem` types for GPU rentals
+
+### Changed
+- Refactored SSH utilities to shared `rental_utils` module
+- Reorganized type stubs and removed obsolete classes
+- Removed `container_image`, `environment`, `ports` from secure cloud rental requests
+- Made `estimated_hourly_cost` optional in offerings
+
+### Fixed
+- Topology spread now available in `create_deployment_async()` and all deployment methods
+
+## [0.13.0] - 2026-01-20
+
+### Changed
+- Remove pre-flight node availability check from deploy methods
+- SDK no longer calls `list_nodes` to auto-detect GPU models before deployment
+- Deployments now rely on `min_gpu_memory_gb` for GPU scheduling instead of specific models
+- Let the API/scheduler handle GPU selection and autoscaling
+
+### Removed
+- `_extract_gpu_model_id()` function (no longer needed)
+- GPU model auto-detection logic that blocked deployments when no nodes were immediately available
+
+### Fixed
+- Deployments no longer fail with "No GPU nodes available" when cluster is empty
+- Autoscaler can now provision nodes for pending GPU workloads
+
 ## [0.12.0] - 2026-01-13
 
 ### Added
@@ -161,7 +201,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline API documentation
 - Example code for common workflows
 
-[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.12.0...HEAD
+[Unreleased]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.14.0...HEAD
+[0.14.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.13.0...basilica-sdk-python-v0.14.0
+[0.13.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.12.0...basilica-sdk-python-v0.13.0
 [0.12.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.11.0...basilica-sdk-python-v0.12.0
 [0.11.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.10.0...basilica-sdk-python-v0.11.0
 [0.10.0]: https://github.com/one-covenant/basilica/compare/basilica-sdk-python-v0.9.0...basilica-sdk-python-v0.10.0

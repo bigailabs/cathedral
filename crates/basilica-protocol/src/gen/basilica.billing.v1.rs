@@ -65,7 +65,7 @@ pub struct TrackRentalRequest {
         ::prost::alloc::string::String,
     >,
     /// Cloud type specific data
-    #[prost(oneof = "track_rental_request::CloudType", tags = "20, 21, 22")]
+    #[prost(oneof = "track_rental_request::CloudType", tags = "20, 21, 22, 23")]
     pub cloud_type: ::core::option::Option<track_rental_request::CloudType>,
 }
 /// Nested message and enum types in `TrackRentalRequest`.
@@ -80,6 +80,8 @@ pub mod track_rental_request {
         Secure(super::SecureCloudData),
         #[prost(message, tag = "22")]
         Orchestrator(super::OrchestratorCloudData),
+        #[prost(message, tag = "23")]
+        Storage(super::StorageCloudData),
     }
 }
 /// Community cloud rental data (validator-based)
@@ -191,6 +193,33 @@ pub struct OrchestratorCloudData {
     /// Amount of storage in GB
     #[prost(uint32, tag = "14")]
     pub storage_gb: u32,
+}
+/// Storage cloud rental data (block storage volumes)
+/// Uses additive pricing: total_cost = hours × (storage_cost)
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct StorageCloudData {
+    /// Provider name (e.g., "hyperstack")
+    #[prost(string, tag = "1")]
+    pub provider: ::prost::alloc::string::String,
+    /// Provider's volume ID
+    #[prost(string, tag = "2")]
+    pub provider_volume_id: ::prost::alloc::string::String,
+    /// Volume type (e.g., "Cloud-SSD")
+    #[prost(string, tag = "3")]
+    pub volume_type: ::prost::alloc::string::String,
+    /// Region where volume exists
+    #[prost(string, tag = "4")]
+    pub region: ::prost::alloc::string::String,
+    /// Volume size in GB
+    #[prost(uint32, tag = "5")]
+    pub size_gb: u32,
+    /// Price per GB per hour (already includes markup)
+    #[prost(double, tag = "6")]
+    pub base_price_per_storage: f64,
+    /// Optional: rental ID when attached
+    #[prost(string, tag = "7")]
+    pub attached_rental_id: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -309,7 +338,7 @@ pub struct ActiveRental {
         ::prost::alloc::string::String,
     >,
     /// Cloud type specific data
-    #[prost(oneof = "active_rental::CloudType", tags = "20, 21, 22")]
+    #[prost(oneof = "active_rental::CloudType", tags = "20, 21, 22, 23")]
     pub cloud_type: ::core::option::Option<active_rental::CloudType>,
 }
 /// Nested message and enum types in `ActiveRental`.
@@ -324,6 +353,8 @@ pub mod active_rental {
         Secure(super::SecureCloudData),
         #[prost(message, tag = "22")]
         Orchestrator(super::OrchestratorCloudData),
+        #[prost(message, tag = "23")]
+        Storage(super::StorageCloudData),
     }
 }
 #[allow(clippy::derive_partial_eq_without_eq)]

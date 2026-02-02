@@ -48,6 +48,23 @@ executor_binary_path = "/opt/basilica/bin/executor-binary/executor-binary"
 execution_timeout_secs = 1200
 output_format = "json"
 
+# Server mode configuration for validator binary
+[verification.binary_validation.server_mode]
+# bind_address = "127.0.0.1:4010"
+# remote_concurrency = 1024
+# verify_concurrency = 1
+# queue_capacity = 4096
+
+# Optional threshold overrides for veritas validator-binary
+# These are passed as environment variables to the validator binary process
+# Uncomment and adjust to override default thresholds:
+#
+# Maximum CPU time per iteration in milliseconds (validates CPU PoW performance)
+# max_cpu_ms_per_iteration = 0.5
+#
+# Maximum storage PoW duration in milliseconds (validates storage I/O performance)
+# max_storage_duration_ms = 5000
+
 [ssh_validation]
 enabled = true
 timeout = { secs = 60 }
@@ -106,7 +123,7 @@ ssh_retry_delay = { secs = 2, nanos = 0 }
 
 [emission]
 # Percentage of total emissions to burn (0.0-100.0)
-burn_percentage = 80.0
+burn_percentage = 95.0
 
 # UID to receive burn allocation
 burn_uid = 204
@@ -129,6 +146,6 @@ weight_version_key = 0
 # are distributed across GPU categories
 # Must sum to exactly 100.0
 [emission.gpu_allocations]
-A100 = { weight = 8.0, min_gpu_count = 1, min_gpu_vram = 1 }
-H100 = { weight = 12.0, min_gpu_count = 1, min_gpu_vram = 1 }
-B200 = { weight = 80.0, min_gpu_count = 8, min_gpu_vram = 1 }
+A100 = { weight = 100.0, min_gpu_count = 1, min_gpu_vram = 1 }
+# H100 = { weight = 12.0, min_gpu_count = 1, min_gpu_vram = 1 }
+# B200 = { weight = 80.0, min_gpu_count = 8, min_gpu_vram = 1 }

@@ -96,11 +96,12 @@ pub async fn handle_sglang_deploy(
         queue_name: None,
         suspended: false,
         priority: None,
+        topology_spread: None,
     };
 
     // Show spinner
     let spinner = create_spinner(&format!(
-        "Creating SGLang deployment '{}' with model '{}'...",
+        "Creating SGLang summons '{}' with model '{}'...",
         name, model
     ));
 
@@ -140,10 +141,10 @@ pub async fn handle_sglang_deploy(
         crate::output::json_output(&response)?;
     } else {
         print_success(&format!(
-            "SGLang deployment '{}' created (detached mode)",
+            "SGLang summons '{}' created (detached mode)",
             actual_name
         ));
-        println!("  Check status: basilica deploy status {}", actual_name);
+        println!("  Check status: basilica summon status {}", actual_name);
     }
 
     Ok(())
@@ -293,10 +294,10 @@ fn build_sglang_health_check() -> HealthCheckConfig {
     }
 }
 
-/// Print SGLang deployment success message
+/// Print SGLang summons success message
 fn print_sglang_success(deployment: &DeploymentResponse, model: &str) {
     print_success(&format!(
-        "SGLang deployment '{}' is ready!",
+        "SGLang summons '{}' is ready!",
         deployment.instance_name
     ));
     println!();
@@ -320,15 +321,15 @@ fn print_sglang_success(deployment: &DeploymentResponse, model: &str) {
     println!();
     println!("Commands:");
     println!(
-        "  View status:  basilica deploy status {}",
+        "  View status:  basilica summon status {}",
         deployment.instance_name
     );
     println!(
-        "  View logs:    basilica deploy logs {}",
+        "  View logs:    basilica summon logs {}",
         deployment.instance_name
     );
     println!(
-        "  Delete:       basilica deploy delete {}",
+        "  Delete:       basilica summon delete {}",
         deployment.instance_name
     );
 }

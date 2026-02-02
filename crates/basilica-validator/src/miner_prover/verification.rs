@@ -25,6 +25,7 @@ use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use futures::future::join_all;
+use serde_json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -239,6 +240,8 @@ impl VerificationEngine {
         let validation_results = join_all(validation_futures).await;
 
         // Process all validation results
+        let mut success_count = 0usize;
+        let mut failure_count = 0usize;
         for (node_info, result) in validation_results {
             match result {
                 Ok(result) => {
@@ -251,6 +254,7 @@ impl VerificationEngine {
                         "[EVAL_FLOW] SSH verification completed"
                     );
                     node_results.push(result);
+                    success_count += 1;
                     verification_steps.push(VerificationStep {
                         step_name: format!("ssh_verification_{}", node_info.id),
                         status: StepStatus::Completed,
@@ -282,6 +286,7 @@ impl VerificationEngine {
                         intended_strategy = ?task.intended_validation_strategy,
                         "[EVAL_FLOW] verification failed"
                     );
+                    failure_count += 1;
                     verification_steps.push(VerificationStep {
                         step_name: format!("ssh_verification_{}", node_info.id),
                         status: StepStatus::Failed,
@@ -291,6 +296,15 @@ impl VerificationEngine {
                 }
             }
         }
+        info!(
+            miner_uid = task.miner_uid,
+            intended_strategy = ?task.intended_validation_strategy,
+            total_nodes = total_nodes,
+            completed = success_count,
+            failed = failure_count,
+            skipped = nodes_skipped_for_strategy,
+            "[EVAL_FLOW] Node validation results collected"
+        );
 
         // Step 3: Calculate overall verification score
         let overall_score = if node_results.is_empty() {
@@ -635,6 +649,7 @@ impl VerificationEngine {
                 "node_id": node_result.node_id.to_string(),
                 "ssh_connection_successful": node_result.ssh_connection_successful,
                 "binary_validation_successful": node_result.binary_validation_successful,
+                "failure_reasons": node_result.failure_reasons,
                 "verification_method": "ssh_automation",
                 "node_result": node_result.node_result,
                 "gpu_count": node_result.gpu_count,
@@ -650,7 +665,11 @@ impl VerificationEngine {
             } else if node_result.validation_type == ValidationType::Full
                 && !node_result.binary_validation_successful
             {
-                Some("Binary validation failed".to_string())
+                Some(if node_result.failure_reasons.is_empty() {
+                    "Binary validation failed".to_string()
+                } else {
+                    node_result.failure_reasons.join("; ")
+                })
             } else {
                 None
             },
@@ -900,6 +919,7 @@ impl VerificationEngine {
                                 miner_uid,
                                 &node_result.node_id.to_string(),
                                 nr,
+                                &node_result.failure_reasons,
                             )
                             .await
                         {
@@ -1009,9 +1029,10 @@ impl VerificationEngine {
         miner_uid: u16,
         node_id: &str,
         nr: &super::types::NodeResult,
+        failure_reasons: &[String],
     ) -> Result<()> {
         let (namespace, cr, maybe_labels) = self
-            .prepare_node_profile_cr_and_labels(miner_uid, node_id, nr)
+            .prepare_node_profile_cr_and_labels(miner_uid, node_id, nr, failure_reasons)
             .await?;
 
         if let Some(publisher) = &self.node_profile_publisher {
@@ -1110,6 +1131,7 @@ impl VerificationEngine {
         miner_uid: u16,
         node_id: &str,
         nr: &super::types::NodeResult,
+        failure_reasons: &[String],
     ) -> Result<(
         String,
         kube::core::DynamicObject,
@@ -1161,6 +1183,7 @@ impl VerificationEngine {
             kube_node_name,
             last_validated.as_deref(),
             Some("Valid"),
+            Some(failure_reasons),
         )?;
 
         // Base labels from validation
@@ -1440,6 +1463,13 @@ impl VerificationEngine {
                 super::validation_strategy::ValidationStrategy::Full
             }
         };
+        debug!(
+            miner_uid = miner_uid,
+            node_id = %node_info.id,
+            determined_strategy = ?strategy,
+            intended_strategy = ?intended_strategy,
+            "[EVAL_FLOW] Validation strategy resolved"
+        );
 
         // Strategy filtering: skip if strategy doesn't match pipeline
         let strategy_matches = matches!(
@@ -1642,6 +1672,8 @@ mod node_profile_wiring_tests {
                     ip_addresses: vec!["10.0.0.2".into()],
                 }],
             },
+            cpu_pow: None,
+            storage_pow: None,
             matrix_c: CompressedMatrix {
                 rows: 0,
                 cols: 0,
@@ -1704,7 +1736,7 @@ mod node_profile_wiring_tests {
 
         let nr = sample_node_result();
         let (ns, cr, maybe_labels) = engine
-            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr, &[])
             .await?;
 
         // Assert namespace
@@ -1751,7 +1783,7 @@ mod node_profile_wiring_tests {
             )
             .await?;
         let (_ns2, _cr2, maybe_labels2) = engine
-            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr)
+            .prepare_node_profile_cr_and_labels(100, "node-abc", &nr, &[])
             .await?;
         let (_node2, labels2) = maybe_labels2.expect("labels present");
         assert_eq!(labels2.get("basilica.ai/docker-active").unwrap(), "true");

@@ -1,6 +1,7 @@
 //! GPU rental command handlers
 
 use crate::cli::commands::{ComputeCategoryArg, ListFilters, LogsOptions, PsFilters, UpOptions};
+use crate::cli::handlers::deploy::helpers::stream_logs_to_stdout;
 use crate::cli::handlers::gpu_rental_helpers::{
     active_rentals_query, get_ssh_private_key_path, print_cloud_section_header,
     resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
@@ -12,7 +13,7 @@ use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
 use crate::client::create_authenticated_client;
 use crate::config::CliConfig;
 use crate::output::{
-    compress_path, json_output, print_error, print_info, print_success, table_output,
+    compress_path, format_usd, json_output, print_error, print_info, print_success, table_output,
 };
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use crate::ssh::{find_private_key_for_public_key, parse_ssh_credentials, SshClient};
@@ -446,7 +447,7 @@ pub async fn handle_ls(
                 // Only display CPU offerings section if no GPU type filter
                 if show_cpu {
                     println!();
-                    println!("{}", style("Secure Cloud (CPU)").bold().cyan());
+                    println!("{}", style("The Citadel (CPU)").bold().cyan());
                     table_output::display_cpu_offerings_detailed(&filtered_cpu)?;
                 }
             }
@@ -554,19 +555,19 @@ pub async fn handle_ls(
                 };
                 json_output(&response)?;
             } else {
-                print_cloud_section_header("Community Cloud GPUs", true);
+                print_cloud_section_header("The Bourse (GPU)", true);
                 display_community_cloud_table(&community_nodes, &pricing_map)?;
 
                 println!();
 
-                print_cloud_section_header("Secure Cloud (GPU)", false);
+                print_cloud_section_header("The Citadel (GPU)", false);
                 display_secure_cloud_table(&secure_gpus)?;
 
                 // Only display CPU offerings section if no GPU type filter
                 if show_cpu {
                     println!();
 
-                    print_cloud_section_header("Secure Cloud (CPU)", false);
+                    print_cloud_section_header("The Citadel (CPU)", false);
                     table_output::display_cpu_offerings_detailed(&filtered_cpu)?;
                 }
             }
@@ -662,42 +663,11 @@ async fn handle_rental_with_offering(
     // Start rental
     let spinner = create_spinner(&format!("Starting {}...", rental_type));
 
-    use basilica_sdk::types::{PortMappingRequest, StartSecureCloudRentalRequest};
-
-    // Parse port mappings if provided
-    let ports: Vec<PortMappingRequest> = if !options.ports.is_empty() {
-        basilica_common::utils::parse_port_mappings(&options.ports)
-            .map_err(|e| {
-                complete_spinner_error(spinner.clone(), "Invalid port mapping");
-                CliError::Internal(eyre!(e).wrap_err("Failed to parse port mappings"))
-            })?
-            .into_iter()
-            .map(|pm| PortMappingRequest {
-                container_port: pm.container_port,
-                host_port: pm.host_port,
-                protocol: pm.protocol,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    // Parse environment variables if provided
-    let environment = if !options.env.is_empty() {
-        basilica_common::utils::parse_env_vars(&options.env).map_err(|e| {
-            complete_spinner_error(spinner.clone(), "Invalid environment variables");
-            CliError::Internal(eyre!(e).wrap_err("Failed to parse environment variables"))
-        })?
-    } else {
-        HashMap::new()
-    };
+    use basilica_sdk::types::StartSecureCloudRentalRequest;
 
     let request = StartSecureCloudRentalRequest {
         offering_id: offering.id().to_string(),
         ssh_public_key_id: ssh_key_id,
-        container_image: options.image.clone(),
-        environment,
-        ports,
     };
 
     // Start the rental using the appropriate API method
@@ -957,7 +927,7 @@ async fn handle_community_cloud_rental_with_selection(
     complete_spinner_and_clear(spinner);
 
     print_success(&format!(
-        "Successfully started community cloud rental {}",
+        "Successfully started Bourse rental {}",
         response.rental_id
     ));
 
@@ -1065,13 +1035,13 @@ fn validate_no_community_cloud_options(options: &UpOptions) -> Result<(), CliErr
     if !invalid_args.is_empty() {
         return Err(CliError::Internal(
             eyre!(
-                "The following options are only supported for community cloud rentals: {}",
+                "The following options are only supported for Bourse rentals: {}",
                 invalid_args.join(", ")
             )
-            .suggestion(
-                "Remove these options when using secure cloud, or use --compute community-cloud",
-            )
-            .note("Secure cloud provides bare metal access; these options configure Docker containers"),
+            .suggestion("Remove these options when using The Citadel, or use --compute bourse")
+            .note(
+                "The Citadel provides bare metal access; these options configure Docker containers",
+            ),
         ));
     }
     Ok(())
@@ -1193,7 +1163,7 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", total_cost)).green().bold()
+                        style(format_usd(&total_cost.to_string())).green().bold()
                     );
                     println!("\nTotal: {} historical rentals", community_history.len());
 
@@ -1282,7 +1252,7 @@ pub async fn handle_ps(
                         .collect();
                     secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-                    print_cloud_section_header("Secure Cloud (GPU) Rental History", true);
+                    print_cloud_section_header("The Citadel (GPU) Rental History", true);
                     table_output::display_rental_history(&secure_gpu_history)?;
 
                     let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
@@ -1294,18 +1264,18 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_gpu_total_cost))
+                        style(format_usd(&secure_gpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud GPU rentals",
+                        "\nTotal: {} historical Citadel (GPU) rentals",
                         secure_gpu_history.len()
                     );
 
                     println!();
 
-                    print_cloud_section_header("Secure Cloud (CPU) History", false);
+                    print_cloud_section_header("The Citadel (CPU) History", false);
                     table_output::display_cpu_rental_history(&secure_cpu_history)?;
 
                     let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
@@ -1317,12 +1287,12 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_cpu_total_cost))
+                        style(format_usd(&secure_cpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud CPU rentals",
+                        "\nTotal: {} historical Citadel (CPU) rentals",
                         secure_cpu_history.len()
                     );
 
@@ -1364,11 +1334,11 @@ pub async fn handle_ps(
                             .into_iter()
                             .collect();
 
-                    println!("{}", style("Secure Cloud (GPU)").bold().cyan());
+                    println!("{}", style("The Citadel (GPU)").bold().cyan());
                     table_output::display_secure_cloud_rentals(&gpu_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} Secure Cloud (GPU) rentals",
+                        "\nTotal: {} Citadel (GPU) rentals",
                         gpu_rentals_to_display.len()
                     );
 
@@ -1381,11 +1351,11 @@ pub async fn handle_ps(
                         .filter(|r| r.stopped_at.is_none() && r.gpu_count == 0)
                         .collect();
 
-                    println!("{}", style("Secure Cloud (CPU)").bold().cyan());
+                    println!("{}", style("The Citadel (CPU)").bold().cyan());
                     table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} Secure Cloud (CPU) rentals",
+                        "\nTotal: {} Citadel (CPU) rentals",
                         cpu_rentals_to_display.len()
                     );
 
@@ -1474,7 +1444,7 @@ pub async fn handle_ps(
                     secure_cpu_history.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
                     // Display community cloud history
-                    print_cloud_section_header("Community Cloud History", true);
+                    print_cloud_section_header("The Bourse History", true);
                     table_output::display_rental_history(&community_history)?;
 
                     let community_total_cost: rust_decimal::Decimal = community_history
@@ -1486,19 +1456,19 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", community_total_cost))
+                        style(format_usd(&community_total_cost.to_string()))
                             .green()
                             .bold()
                     );
                     println!(
-                        "\nTotal: {} historical community cloud rentals",
+                        "\nTotal: {} historical Bourse rentals",
                         community_history.len()
                     );
 
                     println!();
 
                     // Display secure cloud GPU history
-                    print_cloud_section_header("Secure Cloud (GPU) History", false);
+                    print_cloud_section_header("The Citadel (GPU) History", false);
                     table_output::display_rental_history(&secure_gpu_history)?;
 
                     let secure_gpu_total_cost: rust_decimal::Decimal = secure_gpu_history
@@ -1510,19 +1480,19 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_gpu_total_cost))
+                        style(format_usd(&secure_gpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud GPU rentals",
+                        "\nTotal: {} historical Citadel (GPU) rentals",
                         secure_gpu_history.len()
                     );
 
                     println!();
 
                     // Display secure cloud CPU history
-                    print_cloud_section_header("Secure Cloud (CPU) History", false);
+                    print_cloud_section_header("The Citadel (CPU) History", false);
                     table_output::display_cpu_rental_history(&secure_cpu_history)?;
 
                     let secure_cpu_total_cost: rust_decimal::Decimal = secure_cpu_history
@@ -1534,12 +1504,12 @@ pub async fn handle_ps(
                     println!(
                         "{}: {}",
                         style("Total Cost").cyan(),
-                        style(format!("${:.2}", secure_cpu_total_cost))
+                        style(format_usd(&secure_cpu_total_cost.to_string()))
                             .green()
                             .bold()
                     );
                     println!(
-                        "\nTotal: {} historical secure cloud CPU rentals",
+                        "\nTotal: {} historical Citadel (CPU) rentals",
                         secure_cpu_history.len()
                     );
 
@@ -1593,19 +1563,19 @@ pub async fn handle_ps(
                     json_output(&output)?;
                 } else {
                     // Section 1: Community Cloud
-                    print_cloud_section_header("Community Cloud", true);
+                    print_cloud_section_header("The Bourse", true);
 
                     table_output::display_rental_items(&community_rentals_list.rentals[..])?;
 
                     println!(
-                        "\nTotal: {} community cloud rentals",
+                        "\nTotal: {} Bourse rentals",
                         community_rentals_list.rentals.len()
                     );
 
                     println!();
 
                     // Section 2: Secure Cloud (GPU) with filters applied
-                    print_cloud_section_header("Secure Cloud (GPU)", false);
+                    print_cloud_section_header("The Citadel (GPU)", false);
 
                     let secure_rentals_to_display: Vec<_> =
                         filter_secure_cloud_rentals(&secure_rentals_list.rentals, &filters)
@@ -1615,14 +1585,14 @@ pub async fn handle_ps(
                     table_output::display_secure_cloud_rentals(&secure_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} Secure Cloud (GPU) rentals",
+                        "\nTotal: {} Citadel (GPU) rentals",
                         secure_rentals_to_display.len()
                     );
 
                     println!();
 
                     // Section 3: Secure Cloud (CPU) (no gpu_type or min_gpu_count filters apply)
-                    print_cloud_section_header("Secure Cloud (CPU)", false);
+                    print_cloud_section_header("The Citadel (CPU)", false);
 
                     let cpu_rentals_to_display: Vec<_> = cpu_rentals_list
                         .rentals
@@ -1633,7 +1603,7 @@ pub async fn handle_ps(
                     table_output::display_cpu_rentals(&cpu_rentals_to_display)?;
 
                     println!(
-                        "\nTotal: {} Secure Cloud (CPU) rentals",
+                        "\nTotal: {} Citadel (CPU) rentals",
                         cpu_rentals_to_display.len()
                     );
 
@@ -1812,7 +1782,12 @@ pub async fn handle_status(
                     println!("Rental Status: {}", rental.rental_id);
                     println!("  Provider: {}", rental.provider);
                     println!("  Status: {}", rental.status);
-                    println!("  GPU: {}x {}", rental.gpu_count, rental.gpu_type);
+                    let gpu_label = format!("{}x {}", rental.gpu_count, rental.gpu_type);
+                    if rental.is_spot {
+                        println!("  GPU: {} (Spot)", gpu_label);
+                    } else {
+                        println!("  GPU: {}", gpu_label);
+                    }
                     if let Some(ip) = &rental.ip_address {
                         println!("  IP Address: {}", ip);
                     }
@@ -1939,57 +1914,14 @@ pub async fn handle_logs(
         }
     }
 
-    // Parse and display SSE stream
-    use eventsource_stream::Eventsource;
-    use futures_util::StreamExt;
-    use serde::Deserialize;
-
-    #[derive(Debug, Deserialize)]
-    struct LogEntry {
-        timestamp: chrono::DateTime<chrono::Utc>,
-        stream: String,
-        message: String,
-    }
-
     complete_spinner_and_clear(spinner);
-
-    let stream = response.bytes_stream().eventsource();
 
     println!("Streaming logs for rental {}...", target);
     if options.follow {
         println!("Following log output - press Ctrl+C to stop");
     }
 
-    futures_util::pin_mut!(stream);
-
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(sse_event) => {
-                // Parse the data field as JSON
-                match serde_json::from_str::<LogEntry>(&sse_event.data) {
-                    Ok(entry) => {
-                        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S%.3f");
-                        let stream_indicator = match entry.stream.as_str() {
-                            "stdout" => "OUT",
-                            "stderr" => "ERR",
-                            "error" => "ERR",
-                            _ => &entry.stream,
-                        };
-                        println!("[{} {}] {}", timestamp, stream_indicator, entry.message);
-                    }
-                    Err(e) => {
-                        debug!("Failed to parse log event: {}, data: {}", e, sse_event.data);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Error reading log stream: {}", e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
+    stream_logs_to_stdout(response).await
 }
 
 /// Handle the `down` command - terminate rental
@@ -2062,10 +1994,7 @@ pub async fn handle_down(
                 match api_client.stop_rental(rental_id).await {
                     Ok(_) => {
                         complete_spinner_and_clear(spinner);
-                        print_success(&format!(
-                            "Successfully stopped community cloud rental {}",
-                            rental_id
-                        ));
+                        print_success(&format!("Successfully stopped Bourse rental {}", rental_id));
                         success_count += 1;
                     }
                     Err(e) => {
@@ -2095,7 +2024,7 @@ pub async fn handle_down(
                     Ok(_) => {
                         complete_spinner_and_clear(spinner);
                         print_success(&format!(
-                            "Successfully stopped secure cloud GPU rental {}",
+                            "Successfully stopped Citadel (GPU) rental {}",
                             rental_id
                         ));
                         success_count += 1;
@@ -2199,10 +2128,7 @@ pub async fn handle_down(
                     })?;
 
                 complete_spinner_and_clear(spinner);
-                print_success(&format!(
-                    "Successfully stopped community cloud rental {}",
-                    rental_id
-                ));
+                print_success(&format!("Successfully stopped Bourse rental {}", rental_id));
             }
             ComputeCategory::SecureCloud => {
                 // Check if this is a CPU rental by looking in CPU rentals list first
@@ -2263,7 +2189,7 @@ pub async fn handle_down(
 
                     complete_spinner_and_clear(spinner);
                     print_success(&format!(
-                        "Successfully stopped secure cloud rental {}",
+                        "Successfully stopped Citadel rental {}",
                         rental_id
                     ));
                 }
@@ -2328,8 +2254,8 @@ pub async fn handle_exec(
     debug!(
         "Executing command on {} rental: {}",
         match compute_type {
-            ComputeCategory::CommunityCloud => "community cloud",
-            ComputeCategory::SecureCloud => "secure cloud",
+            ComputeCategory::CommunityCloud => "The Bourse",
+            ComputeCategory::SecureCloud => "The Citadel",
         },
         rental_id
     );
@@ -2385,8 +2311,8 @@ pub async fn handle_ssh(
     debug!(
         "Opening SSH connection to {} rental: {}",
         match compute_type {
-            ComputeCategory::CommunityCloud => "community cloud",
-            ComputeCategory::SecureCloud => "secure cloud",
+            ComputeCategory::CommunityCloud => "The Bourse",
+            ComputeCategory::SecureCloud => "The Citadel",
         },
         rental_id
     );

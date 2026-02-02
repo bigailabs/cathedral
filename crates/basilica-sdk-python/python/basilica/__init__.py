@@ -62,30 +62,40 @@ from basilica._basilica import (
     DeploymentResponse,
     DeploymentSummary,
     EnvVar,
+    GpuOffering,
     GpuRequirements,
     GpuSpec,
+    HealthCheckConfig,
     HealthCheckResponse,
     ListAvailableNodesQuery,
     ListCpuRentalsResponse,
     ListRentalsQuery,
+    ListSecureCloudRentalsResponse,
     NodeDetails,
     NodeSelection,
     PersistentStorageSpec,
     PodInfo,
     PortMappingRequest,
+    ProbeConfig,
     RentalResponse,
     RentalStatus,
     RentalStatusWithSshResponse,
     ReplicaStatus,
     ResourceRequirements,
     ResourceRequirementsRequest,
+    SecureCloudRentalListItem,
+    SecureCloudRentalResponse,
+    SpreadMode,
     SshAccess,
     SshKeyResponse,
     StartCpuRentalRequest,
     StartRentalApiRequest,
+    StartSecureCloudRentalRequest,
     StopCpuRentalResponse,
+    StopSecureCloudRentalResponse,
     StorageBackend,
     StorageSpec,
+    TopologySpreadConfig,
     VolumeMountRequest,
     node_by_gpu,
     node_by_id,
@@ -151,44 +161,7 @@ DEFAULT_COMMAND = ["/bin/bash"]
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
 
-def _extract_gpu_model_id(full_name: str) -> str:
-    """Extract short GPU model ID from full NVML name for K8s scheduling.
-
-    Examples:
-        "NVIDIA A100 80GB PCIe" -> "A100"
-        "NVIDIA H100 80GB HBM3" -> "H100"
-        "NVIDIA GeForce RTX 3090" -> "RTX-3090"
-        "Tesla V100-SXM2-16GB" -> "V100"
-        "NVIDIA L40S" -> "L40S"
-    """
-    if not full_name:
-        return full_name
-
-    # Pattern to match common GPU model identifiers
-    # Matches: A100, H100, V100, L40S, RTX 4090, RTX 3090, etc.
-    patterns = [
-        r"\b(A100|H100|H200|B100|B200)\b",  # Data center: Ampere, Hopper, Blackwell
-        r"\b(V100|P100|T4|A10|A30|A40|L4|L40|L40S)\b",  # Other data center
-        r"\bRTX\s*(\d{4})\b",  # Consumer RTX (RTX 4090 -> RTX-4090)
-        r"\bGTX\s*(\d{4})\b",  # Consumer GTX
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, full_name, re.IGNORECASE)
-        if match:
-            model = match.group(1) if match.lastindex else match.group(0)
-            # Normalize RTX/GTX patterns
-            if "RTX" in full_name.upper() and model.isdigit():
-                return f"RTX-{model}"
-            if "GTX" in full_name.upper() and model.isdigit():
-                return f"GTX-{model}"
-            return model.upper()
-
-    # Fallback: return original name if no pattern matches
-    return full_name
-
-
-__version__ = "0.12.0"
+__version__ = "0.15.0"
 __all__ = [
     # Main client
     "BasilicaClient",
@@ -243,9 +216,13 @@ __all__ = [
     "ResourceRequirements",
     "ReplicaStatus",
     "PodInfo",
+    "SpreadMode",
+    "TopologySpreadConfig",
     "StorageBackend",
     "PersistentStorageSpec",
     "StorageSpec",
+    "ProbeConfig",
+    "HealthCheckConfig",
     "CreateDeploymentRequest",
     "DeploymentResponse",
     "DeploymentSummary",
@@ -260,6 +237,13 @@ __all__ = [
     "StopCpuRentalResponse",
     "CpuRentalListItem",
     "ListCpuRentalsResponse",
+    # GPU Rental types (secure cloud)
+    "GpuOffering",
+    "SecureCloudRentalListItem",
+    "SecureCloudRentalResponse",
+    "StartSecureCloudRentalRequest",
+    "StopSecureCloudRentalResponse",
+    "ListSecureCloudRentalsResponse",
 ]
 
 
@@ -350,6 +334,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int],
         public: bool,
         pip_packages: Optional[List[str]],
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> CreateDeploymentRequest:
         """Build CreateDeploymentRequest from deploy parameters."""
         command = None
@@ -377,30 +362,9 @@ class BasilicaClient:
 
         gpu_spec = None
         if gpu_count is not None:
-            effective_gpu_models = gpu_models
-            if not effective_gpu_models:
-                nodes = self.list_nodes(
-                    available=True,
-                    min_gpu_memory=min_gpu_memory_gb,
-                )
-                if not nodes:
-                    raise ResourceError(
-                        "No GPU nodes available"
-                        + (f" with {min_gpu_memory_gb}GB+ VRAM" if min_gpu_memory_gb else "")
-                    )
-                seen = set()
-                effective_gpu_models = []
-                for node in nodes:
-                    for gpu in node.node.gpu_specs:
-                        if gpu.name:
-                            model_id = _extract_gpu_model_id(gpu.name)
-                            if model_id not in seen:
-                                seen.add(model_id)
-                                effective_gpu_models.append(model_id)
-
             gpu_spec = GpuRequirementsSpec(
                 count=gpu_count,
-                model=effective_gpu_models,
+                model=gpu_models or [],
                 min_cuda_version=min_cuda_version,
                 min_gpu_memory_gb=min_gpu_memory_gb,
             )
@@ -419,6 +383,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
     def deploy(
@@ -440,6 +405,7 @@ class BasilicaClient:
         public: bool = True,
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> Deployment:
         """
         Deploy an application to Basilica.
@@ -542,6 +508,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             pip_packages=pip_packages,
+            topology_spread=topology_spread,
         )
 
         response = self._client.create_deployment(request)
@@ -618,22 +585,6 @@ class BasilicaClient:
         if gpu_count is None:
             gpu_count = reqs.gpu_count
 
-        # Use user-specified GPU models or auto-detect from available nodes
-        effective_gpu_models = gpu_models
-        if not effective_gpu_models:
-            nodes = self.list_nodes(available=True, min_gpu_memory=reqs.memory_gb)
-            if not nodes:
-                raise ResourceError(f"No GPU nodes available with {reqs.memory_gb}GB+ VRAM")
-            seen = set()
-            effective_gpu_models = []
-            for node in nodes:
-                for gpu in node.node.gpu_specs:
-                    if gpu.name:
-                        model_id = _extract_gpu_model_id(gpu.name)
-                        if model_id not in seen:
-                            seen.add(model_id)
-                            effective_gpu_models.append(model_id)
-
         # Generate name if not provided
         if name is None:
             import uuid
@@ -682,12 +633,12 @@ class BasilicaClient:
                 )
             )
 
-        # Build GPU spec
+        # Build GPU spec - use min_gpu_memory_gb for scheduling, let API find suitable GPUs
         gpu_spec = GpuRequirementsSpec(
             count=gpu_count,
-            model=effective_gpu_models,
+            model=gpu_models or [],
             min_cuda_version=None,
-            min_gpu_memory_gb=None,
+            min_gpu_memory_gb=reqs.memory_gb,
         )
 
         # Build resources
@@ -777,22 +728,6 @@ class BasilicaClient:
         if gpu_count is None:
             gpu_count = reqs.gpu_count
 
-        # Use user-specified GPU models or auto-detect from available nodes
-        effective_gpu_models = gpu_models
-        if not effective_gpu_models:
-            nodes = self.list_nodes(available=True, min_gpu_memory=reqs.memory_gb)
-            if not nodes:
-                raise ResourceError(f"No GPU nodes available with {reqs.memory_gb}GB+ VRAM")
-            seen = set()
-            effective_gpu_models = []
-            for node in nodes:
-                for gpu in node.node.gpu_specs:
-                    if gpu.name:
-                        model_id = _extract_gpu_model_id(gpu.name)
-                        if model_id not in seen:
-                            seen.add(model_id)
-                            effective_gpu_models.append(model_id)
-
         # Generate name if not provided
         if name is None:
             import uuid
@@ -834,12 +769,12 @@ class BasilicaClient:
                 )
             )
 
-        # Build GPU spec
+        # Build GPU spec - use min_gpu_memory_gb for scheduling, let API find suitable GPUs
         gpu_spec = GpuRequirementsSpec(
             count=gpu_count,
-            model=effective_gpu_models,
+            model=gpu_models or [],
             min_cuda_version=None,
-            min_gpu_memory_gb=None,
+            min_gpu_memory_gb=reqs.memory_gb,
         )
 
         # Build resources
@@ -1116,6 +1051,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment (low-level API).
@@ -1139,6 +1075,7 @@ class BasilicaClient:
             ttl_seconds: Auto-delete timeout
             public: Create public URL
             storage: Storage path or StorageSpec
+            topology_spread: Topology spread configuration for pod distribution
 
         Returns:
             DeploymentResponse with deployment details
@@ -1185,6 +1122,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         return self._client.create_deployment(request)
@@ -1270,7 +1208,7 @@ class BasilicaClient:
         self._client.delete_ssh_key()
 
     # -------------------------------------------------------------------------
-    # CPU Rental Methods
+    # Secure Cloud CPU Rental Methods
     # -------------------------------------------------------------------------
 
     def list_cpu_offerings(self) -> List[CpuOffering]:
@@ -1291,9 +1229,6 @@ class BasilicaClient:
         self,
         offering_id: str,
         ssh_public_key_id: Optional[str] = None,
-        container_image: Optional[str] = None,
-        environment: Optional[Dict[str, str]] = None,
-        ports: Optional[List[Dict[str, Any]]] = None,
     ) -> CpuRentalResponse:
         """
         Start a CPU-only rental.
@@ -1301,9 +1236,6 @@ class BasilicaClient:
         Args:
             offering_id: The offering ID from list_cpu_offerings()
             ssh_public_key_id: SSH key ID (auto-detected if not provided)
-            container_image: Optional Docker container image
-            environment: Environment variables for the container
-            ports: Port mappings (list of dicts with container_port, host_port, protocol)
 
         Returns:
             CpuRentalResponse with rental details and SSH command
@@ -1322,24 +1254,9 @@ class BasilicaClient:
                 )
             ssh_public_key_id = key.id
 
-        # Build port mappings
-        port_mappings = []
-        if ports:
-            for port in ports:
-                port_mappings.append(
-                    PortMappingRequest(
-                        container_port=port.get("container_port", 0),
-                        host_port=port.get("host_port", 0),
-                        protocol=port.get("protocol", "tcp"),
-                    )
-                )
-
         request = StartCpuRentalRequest(
             offering_id=offering_id,
             ssh_public_key_id=ssh_public_key_id,
-            container_image=container_image,
-            environment=environment,
-            ports=port_mappings,
         )
 
         return self._client.start_cpu_rental(request)
@@ -1366,6 +1283,99 @@ class BasilicaClient:
         return self._client.list_cpu_rentals()
 
     # -------------------------------------------------------------------------
+    # Secure Cloud GPU Rental Methods
+    # -------------------------------------------------------------------------
+
+    def list_secure_cloud_gpus(self) -> List[GpuOffering]:
+        """
+        List available GPU offerings from secure cloud providers.
+
+        Returns GPU instances from datacenter providers like DataCrunch,
+        Hyperstack, Lambda Labs, etc.
+
+        Returns:
+            List of GpuOffering objects with GPU specs and pricing
+
+        Example:
+            >>> offerings = client.list_secure_cloud_gpus()
+            >>> for o in offerings:
+            ...     print(f"{o.gpu_count}x {o.gpu_type} @ ${o.hourly_rate}/hr ({o.provider})")
+        """
+        return self._client.list_secure_cloud_gpus()
+
+    def start_secure_cloud_rental(
+        self,
+        offering_id: str,
+        ssh_public_key_id: Optional[str] = None,
+    ) -> SecureCloudRentalResponse:
+        """
+        Start a secure cloud GPU rental from a datacenter provider.
+
+        Args:
+            offering_id: The offering ID from list_secure_cloud_gpus()
+            ssh_public_key_id: SSH key ID (auto-detected if not provided)
+
+        Returns:
+            SecureCloudRentalResponse with rental details and SSH command
+
+        Example:
+            >>> offerings = client.list_secure_cloud_gpus()
+            >>> rental = client.start_secure_cloud_rental(offerings[0].id)
+            >>> print(f"SSH: {rental.ssh_command}")
+        """
+        # Auto-detect SSH key ID if not provided
+        if ssh_public_key_id is None:
+            key = self.get_ssh_key()
+            if key is None:
+                raise ValidationError(
+                    "No SSH key registered. Use register_ssh_key() first."
+                )
+            ssh_public_key_id = key.id
+
+        request = StartSecureCloudRentalRequest(
+            offering_id=offering_id,
+            ssh_public_key_id=ssh_public_key_id,
+        )
+
+        return self._client.start_secure_cloud_rental(request)
+
+    def stop_secure_cloud_rental(self, rental_id: str) -> StopSecureCloudRentalResponse:
+        """
+        Stop a secure cloud GPU rental.
+
+        Terminates the provider instance, finalizes billing, and returns total cost.
+
+        Args:
+            rental_id: The rental ID to stop
+
+        Returns:
+            StopSecureCloudRentalResponse with duration and total cost
+
+        Example:
+            >>> result = client.stop_secure_cloud_rental(rental_id)
+            >>> print(f"Total cost: ${result.total_cost}")
+        """
+        return self._client.stop_secure_cloud_rental(rental_id)
+
+    def list_secure_cloud_rentals(self) -> ListSecureCloudRentalsResponse:
+        """
+        List all secure cloud GPU rentals for the authenticated user.
+
+        Returns all datacenter GPU rentals including their status, IP addresses,
+        and cost information.
+
+        Returns:
+            ListSecureCloudRentalsResponse with rental list and total count
+
+        Example:
+            >>> rentals = client.list_secure_cloud_rentals()
+            >>> print(f"Active rentals: {rentals.total_count}")
+            >>> for r in rentals.rentals:
+            ...     print(f"  {r.rental_id}: {r.gpu_count}x {r.gpu_type} - ${r.hourly_cost}/hr")
+        """
+        return self._client.list_secure_cloud_rentals()
+
+    # -------------------------------------------------------------------------
     # Async API Methods
     # -------------------------------------------------------------------------
 
@@ -1388,6 +1398,7 @@ class BasilicaClient:
         public: bool = True,
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> Deployment:
         """
         Deploy an application asynchronously.
@@ -1440,6 +1451,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             pip_packages=pip_packages,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()
@@ -1525,6 +1537,7 @@ class BasilicaClient:
         ttl_seconds: Optional[int] = None,
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
+        topology_spread: Optional[TopologySpreadConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment asynchronously (low-level API).
@@ -1571,6 +1584,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=public,
             storage=storage_spec,
+            topology_spread=topology_spread,
         )
 
         loop = asyncio.get_running_loop()

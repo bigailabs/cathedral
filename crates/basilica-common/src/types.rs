@@ -193,15 +193,15 @@ impl FromStr for GpuCategory {
 
 /// Compute category for marketplace differentiation
 ///
-/// Distinguishes between datacenter providers (secure cloud) and miner-provided GPUs (community cloud).
+/// Distinguishes between datacenter providers (The Citadel) and miner-provided GPUs (The Bourse).
 /// Used for routing compute requests to appropriate infrastructure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeCategory {
-    /// Datacenter providers (aggregator service)
+    /// The Citadel - Datacenter providers (aggregator service)
     /// Examples: DataCrunch, Hyperstack, Lambda Labs, HydraHost
     SecureCloud,
-    /// Miner-provided GPUs (validator-mediated)
+    /// The Bourse - Miner-provided GPUs (validator-mediated)
     /// Bittensor subnet miners providing compute resources
     CommunityCloud,
 }
@@ -218,8 +218,8 @@ impl ComputeCategory {
     /// Get a human-readable description
     pub fn description(&self) -> &'static str {
         match self {
-            ComputeCategory::SecureCloud => "Datacenter providers",
-            ComputeCategory::CommunityCloud => "Miner-provided GPUs",
+            ComputeCategory::SecureCloud => "The Citadel - Datacenter providers",
+            ComputeCategory::CommunityCloud => "The Bourse - Miner-provided GPUs",
         }
     }
 }
@@ -593,7 +593,7 @@ pub enum CloudProvider {
     Hyperstack,
     Lambda,
     HydraHost,
-    /// VIP managed machines (not a real cloud provider, but uses Deployment model)
+    /// The Priory - VIP managed machines (not a real cloud provider, but uses Deployment model)
     Vip,
 }
 
@@ -651,6 +651,8 @@ pub struct GpuOffering {
     #[serde(with = "rust_decimal::serde::str")]
     pub hourly_rate_per_gpu: Decimal,
     pub availability: bool,
+    #[serde(default)]
+    pub is_spot: bool,
     pub fetched_at: DateTime<Utc>,
     #[serde(skip)]
     pub raw_metadata: serde_json::Value,

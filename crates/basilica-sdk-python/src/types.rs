@@ -8,12 +8,14 @@
 
 use basilica_sdk::types::{
     AvailabilityInfo as SdkAvailabilityInfo, AvailableNode as SdkAvailableNode,
-    CpuOffering as SdkCpuOffering, CpuSpec as SdkCpuSpec, GpuRequirements as SdkGpuRequirements,
-    GpuSpec as SdkGpuSpec, ListAvailableNodesQuery as SdkListAvailableNodesQuery,
-    ListRentalsQuery as SdkListRentalsQuery,
+    CpuOffering as SdkCpuOffering, CpuSpec as SdkCpuSpec, GpuOffering as SdkGpuOffering,
+    GpuRequirements as SdkGpuRequirements, GpuSpec as SdkGpuSpec,
+    HealthCheckConfig as SdkHealthCheckConfig,
+    ListAvailableNodesQuery as SdkListAvailableNodesQuery, ListRentalsQuery as SdkListRentalsQuery,
     ListSecureCloudRentalsResponse as SdkListSecureCloudRentalsResponse,
-    NodeDetails as SdkNodeDetails, PortMappingRequest as SdkPortMappingRequest, RentalState,
-    RentalStatus as SdkRentalStatus, RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
+    NodeDetails as SdkNodeDetails, PortMappingRequest as SdkPortMappingRequest,
+    ProbeConfig as SdkProbeConfig, RentalState, RentalStatus as SdkRentalStatus,
+    RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
     ResourceRequirementsRequest as SdkResourceRequirementsRequest,
     SecureCloudRentalListItem as SdkSecureCloudRentalListItem,
     SecureCloudRentalResponse as SdkSecureCloudRentalResponse, SshAccess as SdkSshAccess,
@@ -645,7 +647,8 @@ use basilica_sdk::types::{
     GpuRequirementsSpec as SdkGpuRequirementsSpec,
     PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
     ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
-    StorageBackend as SdkStorageBackend, StorageSpec as SdkStorageSpec,
+    SpreadMode as SdkSpreadMode, StorageBackend as SdkStorageBackend,
+    StorageSpec as SdkStorageSpec, TopologySpreadConfig as SdkTopologySpreadConfig,
 };
 
 /// Environment variable for container deployments
@@ -849,6 +852,238 @@ impl From<SdkPodInfo> for PodInfo {
     }
 }
 
+/// Pod spreading mode for controlling how pods are distributed across topology domains
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
+#[pyclass(eq, eq_int)]
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum SpreadMode {
+    /// Best-effort spreading (ScheduleAnyway)
+    #[default]
+    Preferred,
+    /// Strict spreading (DoNotSchedule)
+    Required,
+    /// One pod per node (pod anti-affinity)
+    UniqueNodes,
+}
+
+impl From<SpreadMode> for SdkSpreadMode {
+    fn from(mode: SpreadMode) -> Self {
+        match mode {
+            SpreadMode::Preferred => SdkSpreadMode::Preferred,
+            SpreadMode::Required => SdkSpreadMode::Required,
+            SpreadMode::UniqueNodes => SdkSpreadMode::UniqueNodes,
+        }
+    }
+}
+
+impl From<SdkSpreadMode> for SpreadMode {
+    fn from(mode: SdkSpreadMode) -> Self {
+        match mode {
+            SdkSpreadMode::Preferred => SpreadMode::Preferred,
+            SdkSpreadMode::Required => SpreadMode::Required,
+            SdkSpreadMode::UniqueNodes => SpreadMode::UniqueNodes,
+        }
+    }
+}
+
+/// Configuration for pod topology spreading
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct TopologySpreadConfig {
+    #[pyo3(get, set)]
+    pub mode: SpreadMode,
+    #[pyo3(get, set)]
+    pub max_skew: i32,
+    #[pyo3(get, set)]
+    pub topology_key: String,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl TopologySpreadConfig {
+    #[new]
+    #[pyo3(signature = (mode=SpreadMode::Preferred, max_skew=1, topology_key="kubernetes.io/hostname"))]
+    fn new(mode: SpreadMode, max_skew: i32, topology_key: &str) -> Self {
+        Self {
+            mode,
+            max_skew,
+            topology_key: topology_key.to_string(),
+        }
+    }
+
+    /// Create config for unique nodes (one pod per node)
+    #[staticmethod]
+    fn unique_nodes() -> Self {
+        Self {
+            mode: SpreadMode::UniqueNodes,
+            max_skew: 1,
+            topology_key: "kubernetes.io/hostname".to_string(),
+        }
+    }
+}
+
+impl From<TopologySpreadConfig> for SdkTopologySpreadConfig {
+    fn from(config: TopologySpreadConfig) -> Self {
+        Self {
+            mode: config.mode.into(),
+            max_skew: config.max_skew,
+            topology_key: config.topology_key,
+        }
+    }
+}
+
+impl From<SdkTopologySpreadConfig> for TopologySpreadConfig {
+    fn from(config: SdkTopologySpreadConfig) -> Self {
+        Self {
+            mode: config.mode.into(),
+            max_skew: config.max_skew,
+            topology_key: config.topology_key,
+        }
+    }
+}
+
+/// HTTP probe configuration for health checks
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ProbeConfig {
+    #[pyo3(get, set)]
+    pub path: String,
+    #[pyo3(get, set)]
+    pub port: Option<u16>,
+    #[pyo3(get, set)]
+    pub initial_delay_seconds: u32,
+    #[pyo3(get, set)]
+    pub period_seconds: u32,
+    #[pyo3(get, set)]
+    pub timeout_seconds: u32,
+    #[pyo3(get, set)]
+    pub failure_threshold: u32,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl ProbeConfig {
+    #[new]
+    #[pyo3(signature = (path, port=None, initial_delay_seconds=30, period_seconds=10, timeout_seconds=5, failure_threshold=3))]
+    fn new(
+        path: String,
+        port: Option<u16>,
+        initial_delay_seconds: u32,
+        period_seconds: u32,
+        timeout_seconds: u32,
+        failure_threshold: u32,
+    ) -> Self {
+        Self {
+            path,
+            port,
+            initial_delay_seconds,
+            period_seconds,
+            timeout_seconds,
+            failure_threshold,
+        }
+    }
+
+    /// Create a probe config for vLLM large model loading (30 min startup timeout)
+    #[staticmethod]
+    fn vllm_large_model() -> Self {
+        Self {
+            path: "/health".to_string(),
+            port: Some(8000),
+            initial_delay_seconds: 0,
+            period_seconds: 10,
+            timeout_seconds: 5,
+            failure_threshold: 180, // 30 minutes
+        }
+    }
+}
+
+impl From<ProbeConfig> for SdkProbeConfig {
+    fn from(config: ProbeConfig) -> Self {
+        Self {
+            path: config.path,
+            port: config.port,
+            initial_delay_seconds: config.initial_delay_seconds,
+            period_seconds: config.period_seconds,
+            timeout_seconds: config.timeout_seconds,
+            failure_threshold: config.failure_threshold,
+        }
+    }
+}
+
+/// Health check configuration for deployments
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct HealthCheckConfig {
+    #[pyo3(get, set)]
+    pub liveness: Option<ProbeConfig>,
+    #[pyo3(get, set)]
+    pub readiness: Option<ProbeConfig>,
+    #[pyo3(get, set)]
+    pub startup: Option<ProbeConfig>,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl HealthCheckConfig {
+    #[new]
+    #[pyo3(signature = (liveness=None, readiness=None, startup=None))]
+    fn new(
+        liveness: Option<ProbeConfig>,
+        readiness: Option<ProbeConfig>,
+        startup: Option<ProbeConfig>,
+    ) -> Self {
+        Self {
+            liveness,
+            readiness,
+            startup,
+        }
+    }
+
+    /// Create health check config for vLLM large model (1T+ params)
+    #[staticmethod]
+    fn vllm_large_model() -> Self {
+        Self {
+            liveness: Some(ProbeConfig {
+                path: "/health".to_string(),
+                port: Some(8000),
+                initial_delay_seconds: 60,
+                period_seconds: 30,
+                timeout_seconds: 10,
+                failure_threshold: 3,
+            }),
+            readiness: Some(ProbeConfig {
+                path: "/health".to_string(),
+                port: Some(8000),
+                initial_delay_seconds: 30,
+                period_seconds: 10,
+                timeout_seconds: 5,
+                failure_threshold: 3,
+            }),
+            startup: Some(ProbeConfig {
+                path: "/health".to_string(),
+                port: Some(8000),
+                initial_delay_seconds: 0,
+                period_seconds: 10,
+                timeout_seconds: 5,
+                failure_threshold: 180, // 30 minutes for large model loading
+            }),
+        }
+    }
+}
+
+impl From<HealthCheckConfig> for SdkHealthCheckConfig {
+    fn from(config: HealthCheckConfig) -> Self {
+        Self {
+            liveness: config.liveness.map(Into::into),
+            readiness: config.readiness.map(Into::into),
+            startup: config.startup.map(Into::into),
+        }
+    }
+}
+
 /// Storage backend type
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
 #[pyclass(eq, eq_int)]
@@ -996,14 +1231,17 @@ pub struct CreateDeploymentRequest {
     pub public: bool,
     #[pyo3(get, set)]
     pub storage: Option<StorageSpec>,
-    // health_check: Not exposed to Python - use None
+    #[pyo3(get, set)]
+    pub topology_spread: Option<TopologySpreadConfig>,
+    #[pyo3(get, set)]
+    pub health_check: Option<HealthCheckConfig>,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl CreateDeploymentRequest {
     #[new]
-    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None))]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None, topology_spread=None, health_check=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         instance_name: String,
@@ -1017,6 +1255,8 @@ impl CreateDeploymentRequest {
         ttl_seconds: Option<u32>,
         public: bool,
         storage: Option<StorageSpec>,
+        topology_spread: Option<TopologySpreadConfig>,
+        health_check: Option<HealthCheckConfig>,
     ) -> Self {
         Self {
             instance_name,
@@ -1030,6 +1270,8 @@ impl CreateDeploymentRequest {
             ttl_seconds,
             public,
             storage,
+            topology_spread,
+            health_check,
         }
     }
 }
@@ -1048,11 +1290,12 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             ttl_seconds: req.ttl_seconds,
             public: req.public,
             storage: req.storage.map(Into::into),
-            health_check: None,
+            health_check: req.health_check.map(Into::into),
             enable_billing: true,
             queue_name: None,
             suspended: false,
             priority: None,
+            topology_spread: req.topology_spread.map(Into::into),
         }
     }
 }
@@ -1109,6 +1352,12 @@ pub struct DeploymentResponse {
     pub message: Option<String>,
     #[pyo3(get)]
     pub progress: Option<DeploymentProgress>,
+    /// Share token for private deployments (only returned on creation).
+    #[pyo3(get)]
+    pub share_token: Option<String>,
+    /// Shareable URL with token query parameter for private deployments.
+    #[pyo3(get)]
+    pub share_url: Option<String>,
 }
 
 impl From<SdkDeploymentResponse> for DeploymentResponse {
@@ -1128,6 +1377,8 @@ impl From<SdkDeploymentResponse> for DeploymentResponse {
             phase: response.phase,
             message: response.message,
             progress: response.progress.map(Into::into),
+            share_token: response.share_token,
+            share_url: response.share_url,
         }
     }
 }
@@ -1147,6 +1398,9 @@ pub struct DeploymentSummary {
     pub replicas: ReplicaStatus,
     #[pyo3(get)]
     pub created_at: String,
+    /// Whether the deployment is publicly accessible.
+    #[pyo3(get)]
+    pub public: bool,
 }
 
 impl From<SdkDeploymentSummary> for DeploymentSummary {
@@ -1157,6 +1411,7 @@ impl From<SdkDeploymentSummary> for DeploymentSummary {
             url: summary.url,
             replicas: summary.replicas.into(),
             created_at: summary.created_at,
+            public: summary.public,
         }
     }
 }
@@ -1294,32 +1549,16 @@ pub struct StartCpuRentalRequest {
     pub offering_id: String,
     #[pyo3(get, set)]
     pub ssh_public_key_id: String,
-    #[pyo3(get, set)]
-    pub container_image: Option<String>,
-    #[pyo3(get, set)]
-    pub environment: HashMap<String, String>,
-    #[pyo3(get, set)]
-    pub ports: Vec<PortMappingRequest>,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl StartCpuRentalRequest {
     #[new]
-    #[pyo3(signature = (offering_id, ssh_public_key_id, container_image=None, environment=None, ports=None))]
-    fn new(
-        offering_id: String,
-        ssh_public_key_id: String,
-        container_image: Option<String>,
-        environment: Option<HashMap<String, String>>,
-        ports: Option<Vec<PortMappingRequest>>,
-    ) -> Self {
+    fn new(offering_id: String, ssh_public_key_id: String) -> Self {
         Self {
             offering_id,
             ssh_public_key_id,
-            container_image,
-            environment: environment.unwrap_or_default(),
-            ports: ports.unwrap_or_default(),
         }
     }
 }
@@ -1329,9 +1568,6 @@ impl From<StartCpuRentalRequest> for SdkStartSecureCloudRentalRequest {
         Self {
             offering_id: req.offering_id,
             ssh_public_key_id: req.ssh_public_key_id,
-            container_image: req.container_image,
-            environment: req.environment,
-            ports: req.ports.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1355,6 +1591,8 @@ pub struct CpuRentalResponse {
     pub ssh_command: Option<String>,
     #[pyo3(get)]
     pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub is_spot: bool,
 }
 
 impl From<SdkSecureCloudRentalResponse> for CpuRentalResponse {
@@ -1367,6 +1605,7 @@ impl From<SdkSecureCloudRentalResponse> for CpuRentalResponse {
             ip_address: response.ip_address,
             ssh_command: response.ssh_command,
             hourly_cost: response.hourly_cost,
+            is_spot: response.is_spot,
         }
     }
 }
@@ -1436,6 +1675,8 @@ pub struct CpuRentalListItem {
     pub accumulated_cost: Option<String>,
     #[pyo3(get)]
     pub is_vip: bool,
+    #[pyo3(get)]
+    pub is_spot: bool,
 }
 
 impl From<SdkSecureCloudRentalListItem> for CpuRentalListItem {
@@ -1458,6 +1699,7 @@ impl From<SdkSecureCloudRentalListItem> for CpuRentalListItem {
             system_memory_gb: item.system_memory_gb,
             accumulated_cost: item.accumulated_cost,
             is_vip: item.is_vip,
+            is_spot: item.is_spot,
         }
     }
 }
@@ -1478,6 +1720,312 @@ impl From<SdkListSecureCloudRentalsResponse> for ListCpuRentalsResponse {
         Self {
             rentals: response.rentals.into_iter().map(Into::into).collect(),
             total_count: response.total_count,
+        }
+    }
+}
+
+// ============================================================================
+// GPU Rental Types (Secure Cloud)
+// ============================================================================
+
+/// GPU offering from secure cloud providers
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct GpuOffering {
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub gpu_type: String,
+    #[pyo3(get)]
+    pub gpu_count: u32,
+    #[pyo3(get)]
+    pub vcpu_count: u32,
+    #[pyo3(get)]
+    pub system_memory_gb: u32,
+    #[pyo3(get)]
+    pub storage_gb: u32,
+    #[pyo3(get)]
+    pub region: String,
+    #[pyo3(get)]
+    pub hourly_rate: String,
+    #[pyo3(get)]
+    pub availability: bool,
+    #[pyo3(get)]
+    pub is_spot: bool,
+    #[pyo3(get)]
+    pub fetched_at: String,
+}
+
+impl From<SdkGpuOffering> for GpuOffering {
+    fn from(offering: SdkGpuOffering) -> Self {
+        Self {
+            id: offering.id,
+            provider: offering.provider.to_string(),
+            gpu_type: offering.gpu_type.to_string(),
+            gpu_count: offering.gpu_count,
+            vcpu_count: offering.vcpu_count,
+            system_memory_gb: offering.system_memory_gb,
+            storage_gb: offering.storage.unwrap_or_default().parse().unwrap_or(0),
+            region: offering.region,
+            hourly_rate: offering.hourly_rate_per_gpu.to_string(),
+            availability: offering.availability,
+            is_spot: offering.is_spot,
+            fetched_at: offering.fetched_at.to_rfc3339(),
+        }
+    }
+}
+
+/// Request to start a secure cloud GPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StartSecureCloudRentalRequest {
+    #[pyo3(get, set)]
+    pub offering_id: String,
+    #[pyo3(get, set)]
+    pub ssh_public_key_id: String,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl StartSecureCloudRentalRequest {
+    #[new]
+    fn new(offering_id: String, ssh_public_key_id: String) -> Self {
+        Self {
+            offering_id,
+            ssh_public_key_id,
+        }
+    }
+}
+
+impl From<StartSecureCloudRentalRequest> for SdkStartSecureCloudRentalRequest {
+    fn from(req: StartSecureCloudRentalRequest) -> Self {
+        Self {
+            offering_id: req.offering_id,
+            ssh_public_key_id: req.ssh_public_key_id,
+        }
+    }
+}
+
+/// Response from starting a secure cloud GPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct SecureCloudRentalResponse {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub deployment_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub ip_address: Option<String>,
+    #[pyo3(get)]
+    pub ssh_command: Option<String>,
+    #[pyo3(get)]
+    pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub is_spot: bool,
+}
+
+impl From<SdkSecureCloudRentalResponse> for SecureCloudRentalResponse {
+    fn from(response: SdkSecureCloudRentalResponse) -> Self {
+        Self {
+            rental_id: response.rental_id,
+            deployment_id: response.deployment_id,
+            provider: response.provider,
+            status: response.status,
+            ip_address: response.ip_address,
+            ssh_command: response.ssh_command,
+            hourly_cost: response.hourly_cost,
+            is_spot: response.is_spot,
+        }
+    }
+}
+
+/// Response from stopping a secure cloud GPU rental
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct StopSecureCloudRentalResponse {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub duration_hours: f64,
+    #[pyo3(get)]
+    pub total_cost: f64,
+}
+
+impl From<SdkStopSecureCloudRentalResponse> for StopSecureCloudRentalResponse {
+    fn from(response: SdkStopSecureCloudRentalResponse) -> Self {
+        Self {
+            rental_id: response.rental_id,
+            status: response.status,
+            duration_hours: response.duration_hours,
+            total_cost: response.total_cost,
+        }
+    }
+}
+
+/// Secure cloud GPU rental list item
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct SecureCloudRentalListItem {
+    #[pyo3(get)]
+    pub rental_id: String,
+    #[pyo3(get)]
+    pub provider: String,
+    #[pyo3(get)]
+    pub provider_instance_id: Option<String>,
+    #[pyo3(get)]
+    pub gpu_type: String,
+    #[pyo3(get)]
+    pub gpu_count: u32,
+    #[pyo3(get)]
+    pub instance_type: String,
+    #[pyo3(get)]
+    pub location_code: Option<String>,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub ip_address: Option<String>,
+    #[pyo3(get)]
+    pub hourly_cost: f64,
+    #[pyo3(get)]
+    pub created_at: String,
+    #[pyo3(get)]
+    pub stopped_at: Option<String>,
+    #[pyo3(get)]
+    pub ssh_command: Option<String>,
+    #[pyo3(get)]
+    pub vcpu_count: Option<u32>,
+    #[pyo3(get)]
+    pub system_memory_gb: Option<u32>,
+    #[pyo3(get)]
+    pub accumulated_cost: Option<String>,
+    #[pyo3(get)]
+    pub is_vip: bool,
+    #[pyo3(get)]
+    pub is_spot: bool,
+}
+
+impl From<SdkSecureCloudRentalListItem> for SecureCloudRentalListItem {
+    fn from(item: SdkSecureCloudRentalListItem) -> Self {
+        Self {
+            rental_id: item.rental_id,
+            provider: item.provider,
+            provider_instance_id: item.provider_instance_id,
+            gpu_type: item.gpu_type,
+            gpu_count: item.gpu_count,
+            instance_type: item.instance_type,
+            location_code: item.location_code,
+            status: item.status,
+            ip_address: item.ip_address,
+            hourly_cost: item.hourly_cost,
+            created_at: item.created_at.to_rfc3339(),
+            stopped_at: item.stopped_at.map(|dt| dt.to_rfc3339()),
+            ssh_command: item.ssh_command,
+            vcpu_count: item.vcpu_count,
+            system_memory_gb: item.system_memory_gb,
+            accumulated_cost: item.accumulated_cost,
+            is_vip: item.is_vip,
+            is_spot: item.is_spot,
+        }
+    }
+}
+
+/// List secure cloud GPU rentals response
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ListSecureCloudRentalsResponse {
+    #[pyo3(get)]
+    pub rentals: Vec<SecureCloudRentalListItem>,
+    #[pyo3(get)]
+    pub total_count: usize,
+}
+
+impl From<SdkListSecureCloudRentalsResponse> for ListSecureCloudRentalsResponse {
+    fn from(response: SdkListSecureCloudRentalsResponse) -> Self {
+        Self {
+            rentals: response.rentals.into_iter().map(Into::into).collect(),
+            total_count: response.total_count,
+        }
+    }
+}
+
+// ============================================================================
+// Share Token Types
+// ============================================================================
+
+use basilica_sdk::types::{
+    DeleteShareTokenResponse as SdkDeleteShareTokenResponse,
+    RegenerateShareTokenResponse as SdkRegenerateShareTokenResponse,
+    ShareTokenStatusResponse as SdkShareTokenStatusResponse,
+};
+
+/// Response from regenerating a share token for a private deployment
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct RegenerateShareTokenResponse {
+    /// Raw token value. Only returned once, cannot be retrieved later.
+    #[pyo3(get)]
+    pub token: String,
+    /// Full shareable URL with token as query parameter.
+    #[pyo3(get)]
+    pub share_url: String,
+}
+
+impl From<SdkRegenerateShareTokenResponse> for RegenerateShareTokenResponse {
+    fn from(response: SdkRegenerateShareTokenResponse) -> Self {
+        Self {
+            token: response.token,
+            share_url: response.share_url,
+        }
+    }
+}
+
+/// Response for checking share token status
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct ShareTokenStatusResponse {
+    /// Whether a share token exists for this deployment.
+    #[pyo3(get)]
+    pub exists: bool,
+}
+
+impl From<SdkShareTokenStatusResponse> for ShareTokenStatusResponse {
+    fn from(response: SdkShareTokenStatusResponse) -> Self {
+        Self {
+            exists: response.exists,
+        }
+    }
+}
+
+/// Response from deleting/revoking a share token
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct DeleteShareTokenResponse {
+    /// Whether a token was revoked.
+    #[pyo3(get)]
+    pub revoked: bool,
+}
+
+impl From<SdkDeleteShareTokenResponse> for DeleteShareTokenResponse {
+    fn from(response: SdkDeleteShareTokenResponse) -> Self {
+        Self {
+            revoked: response.revoked,
         }
     }
 }

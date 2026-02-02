@@ -23,35 +23,42 @@ ssh-keygen -t ed25519 -f ~/.ssh/miner_node_key -N ""
 # 2. Deploy key to GPU nodes
 ssh-copy-id -i ~/.ssh/miner_node_key.pub basilica@<gpu_node_ip>
 
-# 3. Create minimal config (also see config/miner.prod.toml)
+# 3. Copy and edit config from template
+cp config/miner.toml.example miner.toml
+# Edit miner.toml with your settings:
+# - [bittensor] wallet_name, hotkey_name, external_ip
+# - [node_management] nodes list with your GPU nodes
+# - [ssh_session] miner_node_key_path
+
+# Minimal example configuration:
 cat > miner.toml <<EOF
 [bittensor]
 wallet_name = "your_wallet"
 hotkey_name = "your_hotkey"
 external_ip = "your_public_ip"
-axon_port = 8080
+axon_port = 50051
 network = "finney"
 netuid = 39
-weight_interval_secs = 300
+chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
 
-[node_management]
-nodes = [
-  { host = "<node 1 IP>", port = 22, username = "root" },
-  { host = "<node 2 IP>", port = 22, username = "root" },
-]
+[database]
+url = "sqlite:///opt/basilica/data/miner.db"
 
 [validator_comms]
 host = "0.0.0.0"
-port = 8080
+port = 50051
+
+[node_management]
+nodes = [
+  { host = "<node_ip>", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+]
 
 [ssh_session]
 miner_node_key_path = "~/.ssh/miner_node_key"
+default_node_username = "basilica"
 
 [validator_assignment]
-enabled = true
 strategy = "highest_stake"
-min_stake_threshold = 12000.0
-validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 EOF
 
 # 4. Build and run (with docker compose)
@@ -253,7 +260,7 @@ node_id = UUID_v5_namespace(username@host:port)
 ```toml
 [node_management]
 nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica" }
+  { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 }
 ]
 ```
 
@@ -370,39 +377,39 @@ Miners can control which validators receive access to their nodes:
 
 #### 1. **Highest Stake** (Recommended)
 
-Assigns ALL nodes to the validator with highest stake above threshold.
+Automatically assigns ALL nodes to the validator with highest stake. No configuration required beyond setting the strategy.
 
 ```toml
 [validator_assignment]
 strategy = "highest_stake"
-min_stake_threshold = 12000.0  # TAO
+```
+
+**Use cases:**
+
+- Production deployment (recommended default)
+- Maximize security by working with most invested validator
+- Simplify operations (automatic validator selection)
+
+**Behavior:**
+
+- Fetches validators from Bittensor metagraph
+- Selects highest-staked validator with validator_permit
+- `validator_hotkey` config is ignored with this strategy (use `fixed_assignment` if you need a specific validator)
+
+#### 2. **Fixed Assignment**
+
+Assign nodes to a specific validator by hotkey. Mainly useful for debugging or testing.
+
+```toml
+[validator_assignment]
+strategy = "fixed_assignment"
 validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 ```
 
 **Use cases:**
 
-- Production deployment with single trusted validator
-- Maximize security by working with most invested validator
-- Simplify operations (single validator relationship)
-
-**Behavior:**
-
-- Fetches validators from Bittensor metagraph
-- Filters by `validator_permit = true` and stake ≥ threshold
-- If `validator_hotkey` specified: validates it meets criteria, uses it
-- Otherwise: selects highest-staked validator
-- Only considers online validators (with axon endpoints)
-
-#### 2. **Disabled** (Open Access)
-
-All validators can discover and access all nodes.
-
-```toml
-[validator_assignment]
-enabled = false
-```
-
-**⚠️ Warning**: Not recommended for production. Increases security surface.
+- Debugging with a specific known validator
+- Testing environments where you need deterministic validator assignment
 
 ### Discovery Process
 
@@ -410,7 +417,7 @@ enabled = false
 
 1. **Query Bittensor metagraph** for miners on subnet
 2. **Extract miner endpoints** from axon data
-3. **Connect to miner's gRPC service** (port 8080 by default)
+3. **Connect to miner's gRPC service** (port 50051 by default)
 4. **Authenticate** using Bittensor hotkey signature
 5. **Send discovery request** with SSH public key
 6. **Receive node connection details**
@@ -599,14 +606,13 @@ Before adding nodes to miner config, verify:
 
 ## Miner Configuration
 
-```text
-### Using the Simplified Configuration
+### Using the Configuration Template
 
-Use the simplified configuration template provided:
+Use the configuration template provided in the config directory:
 
 ```bash
-# Copy the simplified config
-cp config/miner.simplified.toml miner.toml
+# Copy the example config
+cp config/miner.toml.example miner.toml
 
 # Edit with your settings
 vim miner.toml
@@ -629,7 +635,7 @@ weight_interval_secs = 300           # Weight setting interval (5 minutes)
 
 # Axon configuration (for Bittensor network registration)
 external_ip = "<your public ip>"     # YOUR SERVER'S PUBLIC IP
-axon_port = 8080
+axon_port = 50051
 
 # Advanced settings (usually don't need to change)
 max_weight_uids = 256
@@ -659,18 +665,19 @@ sudo chown $USER:$USER /opt/basilica/data
 
 ```toml
 [validator_comms]
-host = "0.0.0.0"      # Internal binding (0.0.0.0 = all interfaces)
-port = 8080            # gRPC server port (must match external_ip routing)
+host = "0.0.0.0"       # Internal binding (0.0.0.0 = all interfaces)
+port = 50051           # gRPC server port
+request_timeout = 30   # Timeout in seconds
 ```
 
-**⚠️ Firewall**: Ensure port 8080 is accessible:
+**⚠️ Firewall**: Ensure port 50051 is accessible:
 
 ```bash
 # UFW
-sudo ufw allow 8080/tcp
+sudo ufw allow 50051/tcp
 
 # Or iptables
-sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 50051 -j ACCEPT
 ```
 
 #### 4. GPU Node Management
@@ -679,17 +686,21 @@ sudo iptables -A INPUT -p tcp --dport 8080 -j ACCEPT
 [node_management]
 # List your GPU compute nodes with SSH access details
 nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica" },
-  { host = "192.168.1.101", port = 22, username = "basilica" },
-  { host = "10.0.0.50", port = 2222, username = "gpu_user" },
+  { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+  { host = "192.168.1.101", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
 ]
+health_check_interval = 60   # Health check interval in seconds
+health_check_timeout = 10    # Health check timeout in seconds
+max_retry_attempts = 3
+auto_recovery = true
 ```
 
 **Node configuration fields:**
 
-- `host`: IP address or hostname of GPU node
-- `port`: SSH port (typically 22)
-- `username`: SSH username on the node
+- `host`: IP address or hostname of GPU node (required)
+- `port`: SSH port, typically 22 (required)
+- `username`: SSH username on the node (required)
+- `hourly_rate_per_gpu`: Hourly rental rate in USD per GPU (required)
 - `additional_opts` (optional): Extra SSH options like `"-o StrictHostKeyChecking=no"`
 
 #### 5. SSH Access Configuration
@@ -742,17 +753,16 @@ curl http://localhost:9090/metrics
 ```toml
 [validator_assignment]
 strategy = "highest_stake"           # Options: highest_stake, fixed_assignment
-min_stake_threshold = 12000.0        # Minimum TAO stake required
 
-# Optional: Assign to specific validator
+# Optional: Assign to specific validator (required for fixed_assignment)
 # validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 ```
 
 **Choosing a strategy:**
 
-- **Production**: Use `highest_stake` with high threshold (≥12000 TAO)
-- **Testing**: Use `highest_stake` to assign all nodes to the top validator
-- **Development**: Disable assignment by omitting this section
+- **Production**: Use `highest_stake` to assign all nodes to the top validator
+- **Fixed**: Use `fixed_assignment` with a specific `validator_hotkey` for known validators
+- **Development**: Use default `highest_stake` without specific hotkey
 
 #### 9. Advertised Addresses (Optional)
 
@@ -761,8 +771,8 @@ Override auto-detected addresses for NAT/proxy scenarios:
 ```toml
 [advertised_addresses]
 # Only needed if miner is behind NAT/proxy
-# grpc_endpoint = "http://203.0.113.45:8080"
-# axon_endpoint = "http://203.0.113.45:8080"
+# grpc_endpoint = "http://203.0.113.45:50051"
+# axon_endpoint = "http://203.0.113.45:50051"
 # metrics_endpoint = "http://203.0.113.45:9090"
 ```
 
@@ -949,7 +959,7 @@ docker run -d \
   -v /opt/basilica/config:/opt/basilica/config:ro \
   -v /opt/basilica/data:/opt/basilica/data \
   -v ~/.ssh:/root/.ssh:ro \
-  -p 8080:8080 \
+  -p 50051:50051 \
   -p 9090:9090 \
   basilica-miner:latest --config /opt/basilica/config/miner.toml
 ```
@@ -1011,18 +1021,18 @@ services:
       - ~/.ssh:/root/.ssh:ro
       - /var/log/basilica:/var/log/basilica
     ports:
-      - "8080:8080"
+      - "50051:50051"
       - "9090:9090"
     command: ["--config", "/opt/basilica/config/miner.toml"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:9090/metrics"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
   watchtower:
-    image: containrrr/watchtower:latest
+    image: nickfedor/watchtower:1.14.0
     container_name: basilica-watchtower
     restart: unless-stopped
     volumes:
@@ -1073,7 +1083,7 @@ validators_list = bittensor_service.get_neurons(netuid=39, filter="miners")
 # Extract miner endpoints
 for miner in validators_list:
     miner_endpoint = miner.axon.ip + ":" + miner.axon.port
-    # miner_endpoint = "203.0.113.45:8080"
+    # miner_endpoint = "203.0.113.45:50051"
 ```
 
 #### 2. gRPC Connection
@@ -1081,8 +1091,8 @@ for miner in validators_list:
 **Validator connects to miner's gRPC service:**
 
 ```bash
-# Validator connects to miner
-grpc_endpoint = "http://203.0.113.45:8080"
+# Validator connects to miner's gRPC endpoint
+grpc_endpoint = "http://203.0.113.45:50051"
 miner_client = MinerDiscoveryClient(grpc_endpoint)
 ```
 
@@ -1298,7 +1308,7 @@ sudo systemctl restart sshd
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp         # SSH (restrict to known IPs in production)
-sudo ufw allow 8080/tcp       # gRPC (for validators)
+sudo ufw allow 50051/tcp      # gRPC/Axon (for validators and Bittensor network)
 sudo ufw allow 9090/tcp       # Metrics (optional, can be localhost-only)
 sudo ufw enable
 ```
@@ -1341,18 +1351,15 @@ openssl req -x509 -newkey rsa:4096 -nodes \
 
 ```toml
 [validator_assignment]
-enabled = true
 strategy = "highest_stake"
-min_stake_threshold = 12000.0    # High threshold for security
-validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 ```
 
 **Benefits:**
 
-- Limits exposure to most invested validators
+- Automatically selects the most invested validator
 - Reduces attack surface
 - Simplifies operations and monitoring
-- Easier to establish trust relationships
+- No manual validator tracking required
 
 #### SSH Key Auditing
 
@@ -1486,11 +1493,11 @@ burst_capacity = 20
 **Check miner health:**
 
 ```bash
-# HTTP health endpoint
-curl http://localhost:8080/health
+# Prometheus metrics endpoint (health check)
+curl http://localhost:9090/metrics | grep basilica_miner
 
-# Expected response:
-# {"status":"healthy","timestamp":1234567890}
+# Check gRPC server is responding
+grpcurl -plaintext localhost:50051 list
 ```
 
 **Check database connectivity:**
@@ -1699,12 +1706,12 @@ Error: Address already in use (os error 98)
 **Solution:**
 
 ```bash
-# Check what's using port 8080
-sudo lsof -i :8080
+# Check what's using the port
+sudo lsof -i :50051
 
 # Kill process or change port in config
 # [validator_comms]
-# port = 8081
+# port = 50052
 ```
 
 #### 2. SSH Connection Issues
@@ -1777,13 +1784,13 @@ WARN: No validators found matching criteria
 ```bash
 # Check validator assignment config
 # [validator_assignment]
-# enabled = true
-# min_stake_threshold = 12000.0  # May be too high
+# strategy = "highest_stake"
+# validator_hotkey = "..." (optional)
 
-# Lower threshold or disable assignment for testing
-# min_stake_threshold = 1000.0
-# OR
-# enabled = false
+# For testing with a specific validator, use fixed_assignment:
+# [validator_assignment]
+# strategy = "fixed_assignment"
+# validator_hotkey = "5G3qVaXz..."
 
 # Restart miner
 sudo systemctl restart basilica-miner
@@ -1824,7 +1831,7 @@ WARN: No nodes registered - miner will not be able to serve validators
 # Check node_management config
 # [node_management]
 # nodes = [
-#   { host = "192.168.1.100", port = 22, username = "basilica" }
+#   { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 }
 # ]
 
 # Verify SSH access to each node
@@ -1933,10 +1940,10 @@ sudo systemctl restart basilica-miner
 
 ```bash
 # Check miner's gRPC endpoint
-curl -v http://localhost:8080
+grpcurl -plaintext localhost:50051 list
 
 # Test from external (validator perspective)
-curl -v http://<MINER_PUBLIC_IP>:8080
+grpcurl -plaintext <MINER_PUBLIC_IP>:50051 list
 
 # Check metrics endpoint
 curl http://localhost:9090/metrics | grep basilica_miner
@@ -1996,15 +2003,15 @@ For geo-distributed GPU nodes:
 [node_management]
 nodes = [
     # US East
-    { host = "us-east-1.example.com", port = 22, username = "basilica" },
-    { host = "us-east-2.example.com", port = 22, username = "basilica" },
+    { host = "us-east-1.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+    { host = "us-east-2.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
 
     # EU West
-    { host = "eu-west-1.example.com", port = 22, username = "basilica" },
-    { host = "eu-west-2.example.com", port = 22, username = "basilica" },
+    { host = "eu-west-1.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.80 },
+    { host = "eu-west-2.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.80 },
 
     # Asia Pacific
-    { host = "ap-south-1.example.com", port = 22, username = "basilica" },
+    { host = "ap-south-1.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.20 },
 ]
 ```
 
@@ -2095,7 +2102,7 @@ ulimit -n 65536
 ### Additional Resources
 
 - **GitHub Repository**: <https://github.com/one-covenant/basilica>
-- **Discord**: <https://discord.gg/jYcGzwed>
+- **Discord**: <https://discord.gg/Cy7c9vPsNK>
 - **Website**: <https://www.basilica.ai/>
 - **Validator Guide**: [docs/validator.md](validator.md)
 - **Architecture Overview**: [docs/architecture.md](architecture.md)
@@ -2103,4 +2110,4 @@ ulimit -n 65536
 
 ---
 
-**Happy Mining! ⛏️🫡**
+**Happy Mining!**
