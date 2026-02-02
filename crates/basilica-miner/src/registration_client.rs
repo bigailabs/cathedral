@@ -23,7 +23,22 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ValidatorCommsConfig;
 use crate::node_manager::NodeManager;
-use crate::validator_comms::BittensorServiceApi;
+
+/// Trait for Bittensor service operations needed for registration
+pub trait BittensorServiceApi: Send + Sync {
+    fn get_account_id(&self) -> String;
+    fn sign_data(&self, data: &[u8]) -> Result<String>;
+}
+
+impl BittensorServiceApi for bittensor::Service {
+    fn get_account_id(&self) -> String {
+        self.get_account_id().to_string()
+    }
+
+    fn sign_data(&self, data: &[u8]) -> Result<String> {
+        self.sign_data(data).map_err(|e| anyhow::anyhow!(e))
+    }
+}
 
 /// Registration state tracking
 #[derive(Debug, Clone)]

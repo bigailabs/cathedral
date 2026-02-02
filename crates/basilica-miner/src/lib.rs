@@ -9,8 +9,6 @@ pub mod config;
 pub mod node_manager;
 pub mod persistence;
 pub mod registration_client;
-// pub mod request_verification;
-pub mod validator_comms;
 pub mod validator_discovery;
 
 // Re-export commonly used types

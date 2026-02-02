@@ -1,24 +1,11 @@
-// Miner Discovery Protocol - Validator to Miner communication
+// Miner Registration Protocol - Miner to Validator communication
 syntax = "proto3";
 
 package basilca.miner.v1;
 
 import "common.proto";
 
-// MinerDiscovery service for validator-miner interaction (DEPRECATED - use MinerRegistration)
-service MinerDiscovery {
-  // Authenticate validator with the miner (DEPRECATED)
-  rpc AuthenticateValidator(ValidatorAuthRequest) returns (MinerAuthResponse);
-
-  // Discover available nodes from miner (DEPRECATED)
-  rpc DiscoverNodes(DiscoverNodesRequest) returns (ListNodeConnectionDetailsResponse);
-
-  // Submit a bid for auction-based incentives (DEPRECATED - use MinerRegistration.RegisterBid)
-  rpc SubmitBid(SubmitBidRequest) returns (SubmitBidResponse);
-}
-
 // MinerRegistration service for miner→validator registration flow
-// Replaces the old validator→miner discovery pattern
 service MinerRegistration {
   // One-time registration of nodes with SSH details + pricing (called on miner startup)
   rpc RegisterBid(RegisterBidRequest) returns (RegisterBidResponse);
@@ -31,75 +18,6 @@ service MinerRegistration {
 
   // Lightweight periodic heartbeat to keep registrations active
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-}
-
-message ValidatorAuthRequest {
-  string validator_hotkey = 1;
-  string signature = 2;
-  string nonce = 3;
-  basilca.common.v1.Timestamp timestamp = 4;
-  string target_miner_hotkey = 5;
-}
-
-message MinerAuthResponse {
-  bool authenticated = 1;
-  string session_token = 2;
-  basilca.common.v1.Timestamp expires_at = 3;
-  basilca.common.v1.ErrorInfo error = 4;
-
-  // Miner identity verification fields
-  string miner_hotkey = 5;       // Miner's hotkey for verification
-  string miner_signature = 6;     // Signature proving miner's identity
-  string response_nonce = 7;      // Nonce included in signature to prevent replay
-}
-
-// Node discovery request - validators request available nodes from miners
-message DiscoverNodesRequest {
-  string validator_hotkey = 1;
-  string signature = 2;
-  string nonce = 3;
-  string validator_public_key = 4;  // Required: SSH public key
-  basilca.common.v1.Timestamp timestamp = 5;
-  string target_miner_hotkey = 6;
-}
-
-// Node connection details for direct SSH access
-message NodeConnectionDetails {
-  string node_id = 1;
-  string host = 2;
-  string port = 3;
-  string username = 4;
-  string additional_opts = 5;
-  basilca.common.v1.GpuSpec gpu_spec = 6;
-  string status = 7;
-  uint32 hourly_rate_cents = 8;  // Price in cents per GPU per hour (e.g., 250 = $2.50/hour)
-}
-
-// Response containing list of available nodes
-message ListNodeConnectionDetailsResponse {
-  repeated NodeConnectionDetails nodes = 1; // list of nodes
-}
-
-message MinerBid {
-  string miner_hotkey = 1;
-  string gpu_category = 2;        // "H100", "A100", "B200"
-  uint32 bid_per_hour_cents = 3;  // cents per GPU per hour (e.g., 250 = $2.50/hour)
-  uint32 gpu_count = 4;           // Capacity being bid
-  bytes attestation = 5;          // Hardware attestation
-  int64 timestamp = 6;
-  bytes signature = 7;            // Signed by miner hotkey
-  string nonce = 8;               // Replay protection nonce
-}
-
-message SubmitBidRequest {
-  MinerBid bid = 1;
-}
-
-message SubmitBidResponse {
-  bool accepted = 1;
-  string error_message = 2;
-  string epoch_id = 3;
-  CollateralStatus collateral_status = 4;
 }
 
 message CollateralStatus {

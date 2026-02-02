@@ -10,7 +10,7 @@ use crate::collateral::price_oracle::PriceOracle;
 use crate::collateral::SlashExecutor;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
-use crate::grpc::start_bid_server;
+use crate::grpc::start_registration_server;
 use crate::metrics::{ValidatorMetrics, ValidatorPrometheusMetrics};
 use crate::miner_prover::{MinerProver, MinerProverParams};
 use crate::payouts::CliffManager;
@@ -42,7 +42,7 @@ struct RuntimeHandles {
     delivery_sync_task: Option<JoinHandle<()>>,
     miner_prover_task: JoinHandle<()>,
     api_handler_task: JoinHandle<()>,
-    bid_server_task: JoinHandle<()>,
+    registration_server_task: JoinHandle<()>,
     cleanup_task: Option<JoinHandle<()>>,
     collateral_scan_task: JoinHandle<()>,
 }
@@ -132,13 +132,6 @@ impl ValidatorService {
                 &validator_hotkey,
             )
             .await?;
-
-        if let Ok(miner_client) = miner_prover
-            .get_verification_engine()
-            .create_authenticated_client()
-        {
-            api_handler = api_handler.with_miner_client(Arc::new(miner_client));
-        }
 
         if let Some(rental_manager) = rental_manager {
             api_handler = api_handler.with_rental_manager(Arc::new(rental_manager));
@@ -521,20 +514,20 @@ impl ValidatorService {
             }
         });
 
-        let bid_grpc_config = self.config.bid_grpc.clone();
-        let bid_persistence = inputs.persistence.clone();
-        let bid_auction_config = self.config.auction.clone();
-        let bid_collateral_manager = inputs.collateral_manager.clone();
-        let bid_server_task = tokio::spawn(async move {
-            if let Err(e) = start_bid_server(
-                bid_grpc_config,
-                bid_persistence,
-                bid_auction_config,
-                bid_collateral_manager,
+        let registration_grpc_config = self.config.bid_grpc.clone();
+        let registration_persistence = inputs.persistence.clone();
+        let registration_auction_config = self.config.auction.clone();
+        let registration_collateral_manager = inputs.collateral_manager.clone();
+        let registration_server_task = tokio::spawn(async move {
+            if let Err(e) = start_registration_server(
+                registration_grpc_config,
+                registration_persistence,
+                registration_auction_config,
+                registration_collateral_manager,
             )
             .await
             {
-                error!("Bid gRPC server failed: {}", e);
+                error!("Registration gRPC server failed: {}", e);
             }
         });
 
@@ -570,7 +563,7 @@ impl ValidatorService {
             delivery_sync_task: delivery_sync_handle,
             miner_prover_task,
             api_handler_task,
-            bid_server_task,
+            registration_server_task,
             cleanup_task,
             collateral_scan_task,
         }
@@ -587,7 +580,7 @@ impl ValidatorService {
             handle.abort();
         }
         handles.api_handler_task.abort();
-        handles.bid_server_task.abort();
+        handles.registration_server_task.abort();
         handles.collateral_scan_task.abort();
     }
 

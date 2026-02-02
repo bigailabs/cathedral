@@ -1,22 +1,23 @@
 //! Automatic bidding module
 //!
-//! Periodically submits bids to validators based on configured pricing strategy.
+//! Periodically updates node prices with validators based on configured pricing strategy.
+//! In the new miner→validator flow, initial registration happens at startup via RegistrationClient,
+//! and this module handles periodic price updates.
 
 use anyhow::Result;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::config::BiddingConfig;
 use crate::node_manager::NodeManager;
-use crate::validator_comms::ValidatorCommsServer;
+use crate::registration_client::RegistrationClient;
 
-/// Automatic bidder that periodically submits bids to validators
+/// Automatic bidder that periodically updates node prices with validators
 pub struct AutoBidder {
     config: BiddingConfig,
     node_manager: Arc<NodeManager>,
-    validator_comms: Arc<RwLock<Option<ValidatorCommsServer>>>,
+    registration_client: Arc<RwLock<Option<Arc<RegistrationClient>>>>,
 }
 
 impl AutoBidder {
@@ -25,14 +26,14 @@ impl AutoBidder {
         Self {
             config,
             node_manager,
-            validator_comms: Arc::new(RwLock::new(None)),
+            registration_client: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Set the validator communications server (called after it's initialized)
-    pub async fn set_validator_comms(&self, validator_comms: ValidatorCommsServer) {
-        let mut comms = self.validator_comms.write().await;
-        *comms = Some(validator_comms);
+    /// Set the registration client (called after it's initialized)
+    pub async fn set_registration_client(&self, client: Arc<RegistrationClient>) {
+        let mut reg = self.registration_client.write().await;
+        *reg = Some(client);
     }
 
     /// Check if bidding is enabled and properly configured
@@ -80,32 +81,38 @@ impl AutoBidder {
         Ok(())
     }
 
-    /// Submit bids for all available capacity
+    /// Update prices for all registered nodes
     async fn submit_all_bids(&self) -> Result<()> {
-        // Get validator comms
-        let comms = self.validator_comms.read().await;
-        let validator_comms = match comms.as_ref() {
-            Some(vc) => vc,
+        // Get registration client
+        let client_guard = self.registration_client.read().await;
+        let client = match client_guard.as_ref() {
+            Some(c) => c.clone(),
             None => {
-                debug!("Validator comms not yet initialized, skipping bid submission");
+                debug!("Registration client not yet initialized, skipping price update");
                 return Ok(());
             }
         };
+        drop(client_guard); // Release lock before async operations
 
-        // Get available capacity by GPU category
-        let capacity = self.get_available_capacity().await?;
-
-        if capacity.is_empty() {
-            debug!("No available capacity to bid on");
+        // Check if registered
+        let state = client.get_state().await;
+        if !state.registered {
+            debug!("Not yet registered with validator, skipping price update");
             return Ok(());
         }
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs() as i64;
+        // Get all nodes and update their prices if needed
+        let nodes = self.node_manager.list_nodes().await?;
 
-        for (category, gpu_count) in capacity {
-            // Get price for this category
+        if nodes.is_empty() {
+            debug!("No nodes available for price update");
+            return Ok(());
+        }
+
+        for node in nodes {
+            let category = node.config.gpu_category.to_uppercase();
+
+            // Get configured price for this category
             let price = match self.get_bid_price(&category) {
                 Some(p) => p,
                 None => {
@@ -114,49 +121,30 @@ impl AutoBidder {
                 }
             };
 
-            // Create and submit the bid
-            match validator_comms.create_signed_bid(
-                category.clone(),
-                price,
-                gpu_count,
-                vec![], // attestation - empty for now
-                timestamp,
-                None, // nonce - auto-generated
-            ) {
-                Ok(bid) => {
-                    info!(
-                        "Submitting bid: {} x{} @ ${:.2}/GPU-hr",
-                        category,
-                        gpu_count,
-                        price as f64 / 100.0
-                    );
+            // Only update if price differs from current node price
+            if price == node.config.hourly_rate_per_gpu_cents {
+                debug!(
+                    "Price unchanged for node {} ({} @ ${:.2}/GPU-hr)",
+                    node.node_id,
+                    category,
+                    price as f64 / 100.0
+                );
+                continue;
+            }
 
-                    // Forward to validator if endpoint is configured
-                    if !validator_comms.has_validator_bid_endpoint() {
-                        debug!(
-                            "validator_bid_endpoint not configured, bid created but not submitted"
-                        );
-                        continue;
-                    }
+            info!(
+                "Updating price for node {}: {} @ ${:.2}/GPU-hr",
+                node.node_id,
+                category,
+                price as f64 / 100.0
+            );
 
-                    match validator_comms.forward_bid_to_validator(bid).await {
-                        Ok(response) => {
-                            if response.accepted {
-                                info!(
-                                    "Bid accepted for {} (epoch: {})",
-                                    category, response.epoch_id
-                                );
-                            } else {
-                                warn!("Bid rejected for {}: {}", category, response.error_message);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Failed to submit bid for {}: {}", category, e);
-                        }
-                    }
+            match client.update_node_price(&node.node_id, price).await {
+                Ok(()) => {
+                    info!("Price updated for node {}", node.node_id);
                 }
                 Err(e) => {
-                    error!("Failed to create signed bid for {}: {}", category, e);
+                    warn!("Failed to update price for node {}: {}", node.node_id, e);
                 }
             }
         }
@@ -188,32 +176,12 @@ impl AutoBidder {
 
         None
     }
-
-    /// Get available GPU capacity by category
-    async fn get_available_capacity(&self) -> Result<HashMap<String, u32>> {
-        let nodes = self.node_manager.list_nodes().await?;
-        let mut capacity: HashMap<String, u32> = HashMap::new();
-
-        for node in nodes {
-            let category = node.config.gpu_category.to_uppercase();
-            if category == "UNKNOWN" {
-                warn!(
-                    "Node {} has unknown GPU category, skipping for bidding",
-                    node.node_id
-                );
-                continue;
-            }
-
-            *capacity.entry(category).or_default() += node.config.gpu_count;
-        }
-
-        Ok(capacity)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     fn test_config() -> BiddingConfig {

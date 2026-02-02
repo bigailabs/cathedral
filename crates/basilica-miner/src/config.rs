@@ -77,17 +77,7 @@ pub struct MinerBittensorConfig {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorCommsConfig {
-    /// Host to bind the gRPC server to
-    pub host: String,
-
-    /// Port to bind the gRPC server to
-    pub port: u16,
-
-    /// Validator gRPC endpoint for bid submission (e.g. http://host:50052)
-    /// DEPRECATED: Use validator_registration_endpoint instead
-    pub validator_bid_endpoint: Option<String>,
-
-    /// Validator gRPC endpoint for miner registration (new unified flow)
+    /// Validator gRPC endpoint for miner registration
     /// e.g. http://validator-host:50053
     pub validator_registration_endpoint: Option<String>,
 
@@ -310,9 +300,6 @@ impl Default for MinerBittensorConfig {
 impl Default for ValidatorCommsConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
-            port: 50051,
-            validator_bid_endpoint: None,
             validator_registration_endpoint: None,
             request_timeout: Duration::from_secs(30),
         }
@@ -452,17 +439,9 @@ impl MinerConfig {
     }
 
     /// Get the advertised gRPC endpoint for validators
-    pub fn get_advertised_grpc_endpoint(&self) -> String {
-        self.advertised_addresses
-            .grpc_endpoint
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}:{}",
-                    self.validator_comms.host, self.validator_comms.port
-                )
-            })
+    /// Note: The miner no longer hosts a gRPC server; use validator_registration_endpoint to reach the validator
+    pub fn get_advertised_grpc_endpoint(&self) -> Option<String> {
+        self.advertised_addresses.grpc_endpoint.clone()
     }
 
     /// Get the advertised axon endpoint for Bittensor registration
@@ -472,30 +451,13 @@ impl MinerConfig {
         } else if let Some(external_ip) = &self.bittensor.external_ip {
             format!("http://{}:{}", external_ip, self.bittensor.axon_port)
         } else {
-            format!(
-                "http://{}:{}",
-                self.validator_comms.host, self.bittensor.axon_port
-            )
+            format!("http://0.0.0.0:{}", self.bittensor.axon_port)
         }
     }
 
     /// Get the advertised metrics endpoint
-    pub fn get_advertised_metrics_endpoint(&self) -> String {
-        self.advertised_addresses
-            .metrics_endpoint
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}:{}",
-                    self.validator_comms.host,
-                    self.metrics
-                        .prometheus
-                        .as_ref()
-                        .map(|p| p.port)
-                        .unwrap_or(9090)
-                )
-            })
+    pub fn get_advertised_metrics_endpoint(&self) -> Option<String> {
+        self.advertised_addresses.metrics_endpoint.clone()
     }
 
     /// Validate all advertised address configurations

@@ -4,7 +4,6 @@
 //! This module is organized following SOLID principles with clear separation of concerns.
 
 pub mod discovery;
-pub mod miner_client;
 pub mod scheduler;
 pub mod types;
 pub mod validation_binary;

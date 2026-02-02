@@ -3,7 +3,6 @@
 //! Provides builder pattern for VerificationEngine with guaranteed SSH key manager
 //! initialization and comprehensive validation for production environments.
 
-use super::miner_client::MinerClientConfig;
 use super::verification::VerificationEngine;
 use crate::config::{AutomaticVerificationConfig, SshSessionConfig, VerificationConfig};
 use crate::k8s_profile_publisher::NodeProfilePublisher;
@@ -73,14 +72,12 @@ impl VerificationEngineBuilder {
 
     #[cfg(test)]
     pub async fn build_for_testing(self) -> Result<VerificationEngine> {
-        let miner_client_config = self.build_miner_client_config();
         let ssh_client = self
             .ssh_client
             .unwrap_or_else(|| Arc::new(ValidatorSshClient::new()));
 
         let verification_engine = VerificationEngine::with_ssh_automation(
             self.config.clone(),
-            miner_client_config,
             self.validator_hotkey.clone(),
             ssh_client,
             self.persistence.clone(),
@@ -120,9 +117,8 @@ impl VerificationEngineBuilder {
         info!("Phase 2: Validating SSH automation readiness");
         self.validate_ssh_automation_readiness(&ssh_automation)?;
 
-        // Phase 3: Initialize other components
-        info!("Phase 3: Initializing other components");
-        let miner_client_config = self.build_miner_client_config();
+        // Phase 3: Initialize SSH client
+        info!("Phase 3: Initializing SSH client");
         let ssh_client = self
             .ssh_client
             .unwrap_or_else(|| Arc::new(ValidatorSshClient::new()));
@@ -131,7 +127,6 @@ impl VerificationEngineBuilder {
         info!("Phase 4: Constructing VerificationEngine");
         let verification_engine = VerificationEngine::with_ssh_automation(
             self.config.clone(),
-            miner_client_config,
             self.validator_hotkey.clone(),
             ssh_client,
             self.persistence.clone(),
@@ -200,15 +195,6 @@ impl VerificationEngineBuilder {
         }
 
         Ok(())
-    }
-
-    /// Build miner client configuration
-    fn build_miner_client_config(&self) -> MinerClientConfig {
-        MinerClientConfig {
-            timeout: self.config.discovery_timeout,
-            grpc_port_offset: self.config.grpc_port_offset,
-            ..Default::default()
-        }
     }
 }
 
@@ -409,7 +395,6 @@ mod tests {
             node_groups: crate::config::NodeGroupConfig::default(),
         };
 
-        let miner_client_config = MinerClientConfig::default();
         let hotkey = create_test_hotkey();
         let ssh_client = Arc::new(ValidatorSshClient::new());
         let persistence = Arc::new(tokio::task::block_in_place(|| {
@@ -423,7 +408,6 @@ mod tests {
         // Test creation with dynamic discovery but no SSH key manager (should fail)
         let result = VerificationEngine::with_ssh_automation(
             verification_config.clone(),
-            miner_client_config.clone(),
             hotkey.clone(),
             ssh_client.clone(),
             persistence.clone(),
@@ -439,7 +423,6 @@ mod tests {
         // Test creation with dynamic discovery disabled (should succeed)
         let result = VerificationEngine::with_ssh_automation(
             verification_config,
-            miner_client_config,
             hotkey,
             ssh_client,
             persistence,
