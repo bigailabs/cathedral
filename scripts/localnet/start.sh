@@ -92,6 +92,17 @@ if [ ! -f "${MINER_KEY}" ]; then
     echo ""
 fi
 
+# Copy example configs if local configs don't exist
+CONFIG_DIR="$SCRIPT_DIR/configs"
+if [ ! -f "$CONFIG_DIR/validator.toml" ]; then
+    echo "Creating validator.toml from example..."
+    cp "$CONFIG_DIR/validator.example.toml" "$CONFIG_DIR/validator.toml"
+fi
+if [ ! -f "$CONFIG_DIR/miner.toml" ]; then
+    echo "Creating miner.toml from example..."
+    cp "$CONFIG_DIR/miner.example.toml" "$CONFIG_DIR/miner.toml"
+fi
+
 # Function to wait for a service
 wait_for_service() {
     local name=$1
