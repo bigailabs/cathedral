@@ -19,7 +19,7 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tonic::transport::Channel;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::ValidatorCommsConfig;
 use crate::node_manager::NodeManager;
@@ -477,40 +477,6 @@ impl RegistrationClient {
         }
     }
 }
-
-/// Perform full miner registration flow:
-/// 1. Register nodes with validator
-/// 2. Deploy validator's SSH key to nodes
-/// 3. Return handle to health check loop
-pub async fn perform_registration(
-    config: ValidatorCommsConfig,
-    node_manager: Arc<NodeManager>,
-    bittensor_service: Arc<dyn BittensorServiceApi>,
-) -> Result<Arc<RegistrationClient>> {
-    let client = Arc::new(RegistrationClient::new(
-        config,
-        node_manager,
-        bittensor_service,
-    ));
-
-    if !client.has_registration_endpoint() {
-        warn!("validator_registration_endpoint not configured, skipping registration");
-        return Ok(client);
-    }
-
-    // Register nodes
-    let state = client.register_nodes().await?;
-
-    // Deploy validator's SSH key
-    if state.validator_ssh_public_key.is_some() {
-        if let Err(e) = client.deploy_validator_ssh_key().await {
-            error!(error = %e, "Failed to deploy validator SSH key, continuing anyway");
-        }
-    }
-
-    Ok(client)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

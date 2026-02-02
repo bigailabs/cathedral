@@ -15,4 +15,4 @@ pub mod validator_discovery;
 pub use bidding::AutoBidder;
 pub use config::{BiddingConfig, MinerConfig, SecurityConfig};
 pub use node_manager::NodeManager;
-pub use registration_client::{perform_registration, RegistrationClient, RegistrationState};
+pub use registration_client::{RegistrationClient, RegistrationState};

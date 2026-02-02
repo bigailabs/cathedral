@@ -1344,6 +1344,7 @@ impl SimplePersistence {
     /// Upsert a node from RegisterBid request.
     /// Creates the node if it doesn't exist, updates it if it does.
     /// Returns true if the node was created (new), false if updated (existing).
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_registered_node(
         &self,
         miner_id: &str,

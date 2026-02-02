@@ -108,6 +108,7 @@ pub struct RegistrationService {
     collateral_manager: Option<Arc<CollateralManager>>,
 }
 
+#[allow(clippy::result_large_err)]
 impl RegistrationService {
     pub fn new(
         persistence: Arc<SimplePersistence>,
