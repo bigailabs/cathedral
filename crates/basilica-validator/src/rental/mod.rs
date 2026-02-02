@@ -277,6 +277,16 @@ impl RentalManager {
         }
     }
 
+    /// Get the validator's SSH public key for sharing with miners during registration.
+    /// Panics if called before SSH key manager is initialized.
+    pub fn get_validator_ssh_public_key(&self) -> String {
+        self.ssh_key_manager
+            .as_ref()
+            .expect("SSH key manager not initialized")
+            .get_ssh_public_key()
+            .expect("SSH public key not generated")
+    }
+
     /// Initialize metrics for all existing rentals on startup
     pub async fn initialize_rental_metrics(&self) -> Result<()> {
         // Query all non-terminal rentals from persistence

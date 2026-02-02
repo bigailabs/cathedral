@@ -8,11 +8,11 @@ pub mod cli;
 pub mod config;
 pub mod node_manager;
 pub mod persistence;
-// pub mod request_verification;
-pub mod validator_comms;
+pub mod registration_client;
 pub mod validator_discovery;
 
 // Re-export commonly used types
 pub use bidding::AutoBidder;
 pub use config::{BiddingConfig, MinerConfig, SecurityConfig};
 pub use node_manager::NodeManager;
+pub use registration_client::{RegistrationClient, RegistrationState};

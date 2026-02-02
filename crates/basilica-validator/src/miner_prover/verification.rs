@@ -3,7 +3,6 @@
 //! Handles the actual verification of miners and their nodes.
 //! Implements Single Responsibility Principle by focusing only on verification logic.
 
-use super::miner_client::{MinerClient, MinerClientConfig};
 use super::types::MinerInfo;
 use super::types::{NodeInfoDetailed, NodeVerificationResult, ValidationType};
 use super::validation_states::{StateResult, ValidationState};
@@ -20,7 +19,7 @@ use crate::persistence::{
     entities::VerificationLog, gpu_profile_repository::GpuProfileRepository, SimplePersistence,
 };
 use crate::ssh::{ValidatorSshClient, ValidatorSshKeyManager};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
 use basilica_common::types::GpuCategory;
 use chrono::Utc;
@@ -36,7 +35,6 @@ use tracing::{debug, error, info, warn};
 #[derive(Clone)]
 pub struct VerificationEngine {
     config: VerificationConfig,
-    miner_client_config: MinerClientConfig,
     validator_hotkey: Hotkey,
     /// Database persistence for storing verification results
     persistence: Arc<SimplePersistence>,
@@ -63,38 +61,6 @@ pub struct VerificationEngine {
 }
 
 impl VerificationEngine {
-    /// Check if an endpoint is invalid
-    fn is_invalid_endpoint(&self, endpoint: &str) -> bool {
-        // Check for common invalid patterns
-        if endpoint.contains("0:0:0:0:0:0:0:0")
-            || endpoint.contains("0.0.0.0")
-            || endpoint.is_empty()
-            || !endpoint.starts_with("http")
-        {
-            debug!("Invalid endpoint detected: {}", endpoint);
-            return true;
-        }
-
-        // Validate URL parsing
-        if let Ok(url) = url::Url::parse(endpoint) {
-            if let Some(host) = url.host_str() {
-                // Check for zero or loopback addresses that indicate invalid configuration
-                if host == "0.0.0.0" || host == "::" || host == "localhost" || host == "127.0.0.1" {
-                    debug!("Invalid host in endpoint: {}", endpoint);
-                    return true;
-                }
-            } else {
-                debug!("No host found in endpoint: {}", endpoint);
-                return true;
-            }
-        } else {
-            debug!("Failed to parse endpoint as URL: {}", endpoint);
-            return true;
-        }
-
-        false
-    }
-
     /// Extract miner UID from `miner_###` identifiers
     fn miner_uid_from_miner_id(miner_id: &str) -> Option<u16> {
         miner_id
@@ -117,36 +83,19 @@ impl VerificationEngine {
         let workflow_start = std::time::Instant::now();
         let mut verification_steps = Vec::new();
 
-        // Step 1: Get nodes from gRPC discovery (DB fallback only on failure)
-        let node_list = match self
-            .discover_miner_nodes(task.miner_uid, &task.miner_endpoint, &task.miner_hotkey)
-            .await
-        {
-            Ok(discovered) => {
-                // gRPC succeeded - use ONLY discovered nodes (authoritative source)
-                info!(
-                    miner_uid = task.miner_uid,
-                    node_count = discovered.len(),
-                    "[EVAL_FLOW] gRPC discovery returned {} nodes",
-                    discovered.len()
-                );
-                discovered
-            }
-            Err(e) => {
-                // gRPC failed - fall back to database
-                warn!(
-                    miner_uid = task.miner_uid,
-                    "[EVAL_FLOW] gRPC discovery failed for miner {}: {}. Using database fallback.",
-                    task.miner_uid,
-                    e
-                );
-                let known_node_data = self
-                    .persistence
-                    .get_known_nodes_for_miner(task.miner_uid)
-                    .await?;
-                self.convert_db_data_to_node_info(known_node_data, task.miner_uid)?
-            }
-        };
+        // Step 1: Get nodes from database (populated by miner's RegisterBid call)
+        let known_node_data = self
+            .persistence
+            .get_known_nodes_for_miner(task.miner_uid)
+            .await?;
+        let node_list = self.convert_db_data_to_node_info(known_node_data, task.miner_uid)?;
+
+        info!(
+            miner_uid = task.miner_uid,
+            node_count = node_list.len(),
+            "[EVAL_FLOW] Found {} registered nodes for miner",
+            node_list.len()
+        );
 
         verification_steps.push(VerificationStep {
             step_name: "node_discovery".to_string(),
@@ -475,155 +424,6 @@ impl VerificationEngine {
                 None
             },
         })
-    }
-
-    /// Discover nodes from miner via gRPC
-    async fn discover_miner_nodes(
-        &self,
-        miner_uid: u16,
-        miner_endpoint: &str,
-        miner_hotkey: &str,
-    ) -> Result<Vec<NodeInfoDetailed>> {
-        info!(
-            miner_uid = miner_uid,
-            "[EVAL_FLOW] Starting node discovery from miner at: {}", miner_endpoint
-        );
-        debug!(
-            miner_uid = miner_uid,
-            "[EVAL_FLOW] Using config: timeout={:?}, grpc_port_offset={:?}, use_dynamic_discovery={}",
-            self.config.discovery_timeout,
-            self.config.grpc_port_offset,
-            self.use_dynamic_discovery
-        );
-
-        // Validate endpoint before attempting connection
-        if self.is_invalid_endpoint(miner_endpoint) {
-            error!(
-                miner_uid = miner_uid,
-                "[EVAL_FLOW] Invalid miner endpoint detected: {}", miner_endpoint
-            );
-            return Err(anyhow::anyhow!(
-                "Invalid miner endpoint: {}. Skipping discovery.",
-                miner_endpoint
-            ));
-        }
-        info!(
-            miner_uid = miner_uid,
-            "[EVAL_FLOW] Endpoint validation passed for: {}", miner_endpoint
-        );
-
-        // Create authenticated miner client
-        info!(
-            miner_uid = miner_uid,
-            "[EVAL_FLOW] Creating authenticated miner client with validator hotkey: {}",
-            self.validator_hotkey
-                .to_string()
-                .chars()
-                .take(8)
-                .collect::<String>()
-                + "..."
-        );
-        let client = self.create_authenticated_client()?;
-
-        // Connect and authenticate to miner
-        info!(
-            miner_uid = miner_uid,
-            "[EVAL_FLOW] Attempting gRPC connection to miner at: {}", miner_endpoint
-        );
-        let connection_start = std::time::Instant::now();
-        let mut connection = match client
-            .connect_and_authenticate(miner_uid, miner_endpoint, miner_hotkey)
-            .await
-        {
-            Ok(conn) => {
-                info!(
-                    miner_uid = miner_uid,
-                    "[EVAL_FLOW] Successfully connected and authenticated to miner in {:?}",
-                    connection_start.elapsed()
-                );
-                conn
-            }
-            Err(e) => {
-                error!(
-                    miner_uid = miner_uid,
-                    "[EVAL_FLOW] Failed to connect to miner at {} after {:?}: {}",
-                    miner_endpoint,
-                    connection_start.elapsed(),
-                    e
-                );
-                return Err(e).context("Failed to connect to miner for node discovery");
-            }
-        };
-
-        info!(miner_uid = miner_uid, "[EVAL_FLOW] Requesting nodes");
-        let request_start = std::time::Instant::now();
-        let node_details = match connection.request_nodes().await {
-            Ok(details) => {
-                info!(
-                    miner_uid = miner_uid,
-                    "[EVAL_FLOW] Successfully received node details in {:?}, count={}",
-                    request_start.elapsed(),
-                    details.len()
-                );
-                for (i, detail) in details.iter().enumerate() {
-                    info!(
-                        miner_uid = miner_uid,
-                        node_id = %detail.node_id,
-                        "[EVAL_FLOW] Node {}: id={}, endpoint={}:{}",
-                        i,
-                        detail.node_id,
-                        detail.host,
-                        detail.port
-                    );
-                }
-                details
-            }
-            Err(e) => {
-                error!(
-                    miner_uid = miner_uid,
-                    "[EVAL_FLOW] Failed to request nodes from miner after {:?}: {}",
-                    request_start.elapsed(),
-                    e
-                );
-                return Ok(vec![]);
-            }
-        };
-
-        let node_count = node_details.len();
-        let nodes: Vec<NodeInfoDetailed> = node_details
-            .into_iter()
-            .map(|details| -> Result<NodeInfoDetailed> {
-                debug!(
-                    miner_uid = miner_uid,
-                    node_id = %details.node_id,
-                    "[EVAL_FLOW] Discovered node details from miner: miner_uid={}, node_id={}",
-                    miner_uid, details.node_id
-                );
-
-                Ok(NodeInfoDetailed {
-                    id: NodeId::from_str(&details.node_id).map_err(|e| {
-                        anyhow::anyhow!("Invalid node ID '{}': {}", details.node_id, e)
-                    })?,
-                    miner_uid: MinerUid::new(miner_uid),
-                    status: "available".to_string(),
-                    capabilities: vec!["gpu".to_string()],
-                    node_ssh_endpoint: format!(
-                        "{}@{}:{}",
-                        details.username, details.host, details.port
-                    ),
-                    hourly_rate_cents: details.hourly_rate_cents,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        info!(
-            miner_uid = miner_uid,
-            "[EVAL_FLOW] Node discovery completed: {} nodes mapped from {} details",
-            nodes.len(),
-            node_count
-        );
-
-        Ok(nodes)
     }
 
     /// Store node verification result with actual miner information
@@ -1239,32 +1039,6 @@ impl VerificationEngine {
         self.persistence.sync_miners_from_metagraph(miners).await
     }
 
-    /// Create authenticated miner client
-    pub fn create_authenticated_client(&self) -> Result<MinerClient> {
-        let mut client = if let Some(ref bittensor_service) = self.bittensor_service {
-            let signer = Arc::new(super::miner_client::BittensorServiceSigner::new(
-                bittensor_service.clone(),
-            ));
-            MinerClient::with_signer(
-                self.miner_client_config.clone(),
-                self.validator_hotkey.clone(),
-                signer,
-            )
-        } else {
-            MinerClient::new(
-                self.miner_client_config.clone(),
-                self.validator_hotkey.clone(),
-            )
-        };
-
-        // Add SSH public key if available
-        if let Some(public_key) = self.get_ssh_public_key() {
-            client = client.with_ssh_public_key(public_key);
-        }
-
-        Ok(client)
-    }
-
     /// Get whether dynamic discovery is enabled
     pub fn use_dynamic_discovery(&self) -> bool {
         self.use_dynamic_discovery
@@ -1289,7 +1063,6 @@ impl VerificationEngine {
     #[allow(clippy::too_many_arguments)]
     pub fn with_ssh_automation(
         config: VerificationConfig,
-        miner_client_config: MinerClientConfig,
         validator_hotkey: Hotkey,
         ssh_client: Arc<ValidatorSshClient>,
         persistence: Arc<SimplePersistence>,
@@ -1309,7 +1082,6 @@ impl VerificationEngine {
 
         Ok(Self {
             config: config.clone(),
-            miner_client_config,
             validator_hotkey,
             persistence: persistence.clone(),
             use_dynamic_discovery,

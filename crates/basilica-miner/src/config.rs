@@ -77,14 +77,9 @@ pub struct MinerBittensorConfig {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorCommsConfig {
-    /// Host to bind the gRPC server to
-    pub host: String,
-
-    /// Port to bind the gRPC server to
-    pub port: u16,
-
-    /// Validator gRPC endpoint for bid submission (e.g. http://host:50052)
-    pub validator_bid_endpoint: Option<String>,
+    /// Validator gRPC endpoint for miner registration
+    /// e.g. http://validator-host:50053
+    pub validator_registration_endpoint: Option<String>,
 
     /// Request timeout for validator calls
     #[serde_as(as = "DurationSeconds<u64>")]
@@ -170,15 +165,15 @@ pub struct MinerAdvertisedAddresses {
 ///
 /// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
 /// which are converted to cents internally on load.
+///
+/// AutoBidder always runs when a validator_registration_endpoint is configured.
+/// All GPU categories in your nodes MUST have prices defined in static_prices.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiddingConfig {
-    /// Enable automatic bidding
-    #[serde(default)]
-    pub enabled: bool,
-
     /// Static prices by GPU category in CENTS (converted from dollars in config)
     /// Config accepts dollars (e.g., 2.50), stored as cents (250)
+    /// Every GPU category in your nodes MUST have a price here.
     #[serde(
         default,
         rename = "static_prices",
@@ -186,7 +181,7 @@ pub struct BiddingConfig {
     )]
     pub static_prices_cents: std::collections::HashMap<String, u32>,
 
-    /// How often to submit bids
+    /// How often to submit price updates
     #[serde_as(as = "DurationSeconds<u64>")]
     #[serde(default = "default_bid_interval")]
     pub bid_interval: Duration,
@@ -228,7 +223,6 @@ fn default_bid_interval() -> Duration {
 impl Default for BiddingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             static_prices_cents: std::collections::HashMap::new(),
             bid_interval: default_bid_interval(),
             floor_prices_cents: std::collections::HashMap::new(),
@@ -305,9 +299,7 @@ impl Default for MinerBittensorConfig {
 impl Default for ValidatorCommsConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
-            port: 50051,
-            validator_bid_endpoint: None,
+            validator_registration_endpoint: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -446,17 +438,9 @@ impl MinerConfig {
     }
 
     /// Get the advertised gRPC endpoint for validators
-    pub fn get_advertised_grpc_endpoint(&self) -> String {
-        self.advertised_addresses
-            .grpc_endpoint
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}:{}",
-                    self.validator_comms.host, self.validator_comms.port
-                )
-            })
+    /// Note: The miner no longer hosts a gRPC server; use validator_registration_endpoint to reach the validator
+    pub fn get_advertised_grpc_endpoint(&self) -> Option<String> {
+        self.advertised_addresses.grpc_endpoint.clone()
     }
 
     /// Get the advertised axon endpoint for Bittensor registration
@@ -466,30 +450,13 @@ impl MinerConfig {
         } else if let Some(external_ip) = &self.bittensor.external_ip {
             format!("http://{}:{}", external_ip, self.bittensor.axon_port)
         } else {
-            format!(
-                "http://{}:{}",
-                self.validator_comms.host, self.bittensor.axon_port
-            )
+            format!("http://0.0.0.0:{}", self.bittensor.axon_port)
         }
     }
 
     /// Get the advertised metrics endpoint
-    pub fn get_advertised_metrics_endpoint(&self) -> String {
-        self.advertised_addresses
-            .metrics_endpoint
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}:{}",
-                    self.validator_comms.host,
-                    self.metrics
-                        .prometheus
-                        .as_ref()
-                        .map(|p| p.port)
-                        .unwrap_or(9090)
-                )
-            })
+    pub fn get_advertised_metrics_endpoint(&self) -> Option<String> {
+        self.advertised_addresses.metrics_endpoint.clone()
     }
 
     /// Validate all advertised address configurations

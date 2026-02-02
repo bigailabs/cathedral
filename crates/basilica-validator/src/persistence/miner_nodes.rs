@@ -1336,4 +1336,313 @@ impl SimplePersistence {
 
         Ok(rate_cents.map(|v| v as u32))
     }
+
+    // =========================================================================
+    // Miner Registration (miner→validator flow) methods
+    // =========================================================================
+
+    /// Upsert a node from RegisterBid request.
+    /// Creates the node if it doesn't exist, updates it if it does.
+    /// Returns true if the node was created (new), false if updated (existing).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_registered_node(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+        host: &str,
+        port: u32,
+        username: &str,
+        gpu_category: &str,
+        gpu_count: u32,
+        hourly_rate_cents: u32,
+    ) -> Result<bool> {
+        // Build ssh_endpoint in the standard format: user@host:port
+        let ssh_endpoint = format!("{}@{}:{}", username, host, port);
+        let relationship_id = format!("{}_{}", miner_id, node_id);
+
+        // Check if this ssh_endpoint is already used by a different miner
+        let existing_miner: Option<String> = sqlx::query_scalar(
+            "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ? LIMIT 1",
+        )
+        .bind(&ssh_endpoint)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(other_miner) = existing_miner {
+            anyhow::bail!(
+                "SSH endpoint {} is already registered to {}",
+                ssh_endpoint,
+                other_miner
+            );
+        }
+
+        // Check if this node already exists for this miner
+        let existing_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        if existing_count == 0 {
+            // Insert new node
+            sqlx::query(
+                r#"
+                INSERT INTO miner_nodes (
+                    id, miner_id, node_id, ssh_endpoint, gpu_count,
+                    hourly_rate_cents, status, last_health_check, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'online', datetime('now'), datetime('now'), datetime('now'))
+                "#,
+            )
+            .bind(&relationship_id)
+            .bind(miner_id)
+            .bind(node_id)
+            .bind(&ssh_endpoint)
+            .bind(gpu_count as i64)
+            .bind(hourly_rate_cents as i64)
+            .execute(self.pool())
+            .await?;
+
+            info!(
+                miner_id = miner_id,
+                node_id = node_id,
+                ssh_endpoint = ssh_endpoint,
+                gpu_category = gpu_category,
+                gpu_count = gpu_count,
+                hourly_rate_cents = hourly_rate_cents,
+                "Registered new node via RegisterBid"
+            );
+            Ok(true)
+        } else {
+            // Update existing node
+            sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET ssh_endpoint = ?,
+                    gpu_count = ?,
+                    hourly_rate_cents = ?,
+                    status = 'online',
+                    last_health_check = datetime('now'),
+                    updated_at = datetime('now')
+                WHERE miner_id = ? AND node_id = ?
+                "#,
+            )
+            .bind(&ssh_endpoint)
+            .bind(gpu_count as i64)
+            .bind(hourly_rate_cents as i64)
+            .bind(miner_id)
+            .bind(node_id)
+            .execute(self.pool())
+            .await?;
+
+            info!(
+                miner_id = miner_id,
+                node_id = node_id,
+                hourly_rate_cents = hourly_rate_cents,
+                "Updated existing node via RegisterBid"
+            );
+            Ok(false)
+        }
+    }
+
+    /// Update last_health_check timestamp for nodes (HealthCheck RPC).
+    /// If node_ids is empty, updates all nodes for the miner.
+    /// Returns the number of nodes updated.
+    pub async fn update_nodes_health_check(
+        &self,
+        miner_id: &str,
+        node_ids: &[String],
+    ) -> Result<u32> {
+        let result = if node_ids.is_empty() {
+            // Update all nodes for this miner
+            sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET last_health_check = datetime('now'),
+                    updated_at = datetime('now')
+                WHERE miner_id = ?
+                "#,
+            )
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?
+        } else {
+            // Build query with IN clause for specific node_ids
+            // Using a transaction to update each node
+            let mut count = 0u64;
+            for node_id in node_ids {
+                let r = sqlx::query(
+                    r#"
+                    UPDATE miner_nodes
+                    SET last_health_check = datetime('now'),
+                        updated_at = datetime('now')
+                    WHERE miner_id = ? AND node_id = ?
+                    "#,
+                )
+                .bind(miner_id)
+                .bind(node_id)
+                .execute(self.pool())
+                .await?;
+                count += r.rows_affected();
+            }
+            return Ok(count as u32);
+        };
+
+        Ok(result.rows_affected() as u32)
+    }
+
+    /// Update hourly rate for a specific node (UpdateBid RPC).
+    /// Returns true if the node was found and updated.
+    pub async fn update_node_hourly_rate(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+        hourly_rate_cents: u32,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET hourly_rate_cents = ?,
+                updated_at = datetime('now')
+            WHERE miner_id = ? AND node_id = ?
+            "#,
+        )
+        .bind(hourly_rate_cents as i64)
+        .bind(miner_id)
+        .bind(node_id)
+        .execute(self.pool())
+        .await?;
+
+        if result.rows_affected() > 0 {
+            info!(
+                miner_id = miner_id,
+                node_id = node_id,
+                hourly_rate_cents = hourly_rate_cents,
+                "Updated node price via UpdateBid"
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Remove nodes from availability (RemoveBid RPC).
+    /// If node_ids is empty, removes all nodes for the miner.
+    /// Returns the number of nodes removed (marked offline).
+    pub async fn remove_registered_nodes(
+        &self,
+        miner_id: &str,
+        node_ids: &[String],
+    ) -> Result<u32> {
+        let result = if node_ids.is_empty() {
+            // Mark all nodes for this miner as offline
+            sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET status = 'offline',
+                    updated_at = datetime('now')
+                WHERE miner_id = ?
+                "#,
+            )
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?
+        } else {
+            // Mark specific nodes as offline
+            let mut count = 0u64;
+            for node_id in node_ids {
+                let r = sqlx::query(
+                    r#"
+                    UPDATE miner_nodes
+                    SET status = 'offline',
+                        updated_at = datetime('now')
+                    WHERE miner_id = ? AND node_id = ?
+                    "#,
+                )
+                .bind(miner_id)
+                .bind(node_id)
+                .execute(self.pool())
+                .await?;
+                count += r.rows_affected();
+            }
+            return Ok(count as u32);
+        };
+
+        let removed = result.rows_affected() as u32;
+        if removed > 0 {
+            info!(
+                miner_id = miner_id,
+                nodes_removed = removed,
+                "Removed nodes via RemoveBid"
+            );
+        }
+        Ok(removed)
+    }
+
+    /// Get nodes with fresh health checks for a miner.
+    /// Used by auction to filter available nodes.
+    pub async fn get_healthy_nodes_for_miner(
+        &self,
+        miner_id: &str,
+        health_check_ttl_secs: u64,
+    ) -> Result<Vec<String>> {
+        let query = format!(
+            r#"
+            SELECT node_id
+            FROM miner_nodes
+            WHERE miner_id = ?
+              AND status IN ('online', 'verified')
+              AND last_health_check IS NOT NULL
+              AND datetime(last_health_check) >= datetime('now', '-{} seconds')
+            "#,
+            health_check_ttl_secs
+        );
+
+        let rows = sqlx::query(&query)
+            .bind(miner_id)
+            .fetch_all(self.pool())
+            .await?;
+
+        let nodes: Vec<String> = rows.iter().map(|r| r.get("node_id")).collect();
+        Ok(nodes)
+    }
+
+    /// Check if a miner has any registered nodes (regardless of health check status).
+    pub async fn miner_has_registered_nodes(&self, miner_id: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ?")
+            .bind(miner_id)
+            .fetch_one(self.pool())
+            .await?;
+        Ok(count > 0)
+    }
+
+    /// Get count of nodes with stale health checks for a miner.
+    /// Used for monitoring/debugging.
+    pub async fn get_stale_node_count(
+        &self,
+        miner_id: &str,
+        health_check_ttl_secs: u64,
+    ) -> Result<u32> {
+        let query = format!(
+            r#"
+            SELECT COUNT(*) as count
+            FROM miner_nodes
+            WHERE miner_id = ?
+              AND (
+                last_health_check IS NULL
+                OR datetime(last_health_check) < datetime('now', '-{} seconds')
+              )
+            "#,
+            health_check_ttl_secs
+        );
+
+        let count: i64 = sqlx::query_scalar(&query)
+            .bind(miner_id)
+            .fetch_one(self.pool())
+            .await?;
+
+        Ok(count as u32)
+    }
 }

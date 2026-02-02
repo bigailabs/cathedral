@@ -12,11 +12,19 @@ description: Debug Basilica localnet services using existing scripts and Docker 
 | Service | Container Name | IP Address | Ports |
 |---------|---------------|------------|-------|
 | Subtensor | basilica-subtensor | 172.28.0.10 | 9944 (RPC), 30334 (P2P) |
-| PostgreSQL | basilica-postgres | 172.28.0.11 | 5432 |
 | Validator | basilica-validator | 172.28.0.20 | 8080 (API), 9090 (Metrics) |
 | Miner | basilica-miner | 172.28.0.30 | 8092 (gRPC), 8091 (Axon), 9091 (Metrics) |
 | Prometheus | basilica-prometheus | 172.28.0.40 | 9099 |
 | Grafana | basilica-grafana | 172.28.0.41 | 3000 |
+
+### Database Architecture
+
+> **IMPORTANT:** Validator and Miner use **SQLite**, NOT PostgreSQL.
+
+| Service | Database | File Path |
+|---------|----------|-----------|
+| Validator | SQLite | `/opt/basilica/data/validator.db` |
+| Miner | SQLite | `/var/lib/basilica/miner/data/miner.db` |
 
 ### Docker Compose Profiles
 
@@ -25,7 +33,7 @@ description: Debug Basilica localnet services using existing scripts and Docker 
 | `network` | subtensor |
 | `validator` | subtensor, validator |
 | `miner` | subtensor, validator, miner |
-| `monitoring` | subtensor, postgres, validator, miner, prometheus, grafana |
+| `monitoring` | subtensor, validator, miner, prometheus, grafana |
 | (none/all) | All services |
 
 ### Config Files
@@ -126,7 +134,7 @@ docker exec -it basilica-miner /bin/sh
 
 # Run command in container
 docker exec basilica-validator cat /app/validator.toml
-docker exec basilica-postgres pg_isready -U basilica -d validator
+docker exec basilica-validator ls -la /opt/basilica/data/  # Check validator data
 ```
 
 ### Volume Management
@@ -178,19 +186,26 @@ docker compose up -d validator && \
 docker compose logs -f validator
 ```
 
-### Database Issues
+### Database Issues (SQLite)
+
+Validator and miner use SQLite databases stored in their data volumes.
 
 ```bash
-# Check PostgreSQL is ready
-docker exec basilica-postgres pg_isready -U basilica -d validator
+# Check validator database exists
+docker exec basilica-validator ls -la /opt/basilica/data/validator.db
 
-# Connect to database
-docker exec -it basilica-postgres psql -U basilica -d validator
+# Check miner database exists
+docker exec basilica-miner ls -la /var/lib/basilica/miner/data/miner.db
 
-# Remove database volume for fresh start
-docker compose stop postgres
-docker volume rm localnet_postgres-data
-docker compose up -d postgres
+# Reset validator database (will be recreated on startup)
+docker compose stop validator
+docker volume rm localnet_validator-data
+docker compose up -d validator
+
+# Reset miner database
+docker compose stop miner
+docker volume rm localnet_miner-data
+docker compose up -d miner
 ```
 
 ### Network Connectivity
@@ -238,7 +253,7 @@ uvx --from bittensor-cli btcli wallet balance \
 | `Wallet not found` | Wallets not initialized | Run `./init-subnet.sh` after subtensor is up |
 | `Registration failed` | Insufficient balance | Check wallet balance, re-run `./init-subnet.sh` |
 | `Health check failed` | Service crashed/starting | Check logs, wait for startup (60s start_period) |
-| `Database connection failed` | PostgreSQL not ready | Wait for postgres healthcheck, check `docker compose ps postgres` |
+| `Database connection failed` | SQLite file corrupted or missing | Reset service volume: `docker volume rm localnet_validator-data` and restart |
 | `Port already in use` | Another service on port | Stop conflicting service or change port in docker-compose.yml |
 | `Cannot connect to Docker daemon` | Docker not running | Start Docker Desktop |
 | `No space left on device` | Docker storage full | `docker system prune -a` |
@@ -265,10 +280,9 @@ uvx --from bittensor-cli btcli wallet balance \
 | Volume | Mount Point | Purpose |
 |--------|------------|---------|
 | `subtensor-data` | `/tmp/alice` | Chain state |
-| `postgres-data` | `/var/lib/postgresql/data` | Database |
-| `validator-data` | `/opt/basilica/data` | Validator state + logs |
+| `validator-data` | `/opt/basilica/data` | Validator SQLite DB + state |
 | `validator-ssh` | `/opt/basilica/data/ssh_keys` | SSH keys |
-| `miner-data` | `/var/lib/basilica/miner/data` | Miner state |
+| `miner-data` | `/var/lib/basilica/miner/data` | Miner SQLite DB + state |
 | `miner-ssh` | `/var/lib/basilica/miner/.ssh` | SSH keys |
 | `prometheus-data` | `/prometheus` | Metrics storage |
 | `grafana-data` | `/var/lib/grafana` | Dashboards |

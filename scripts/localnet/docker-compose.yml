@@ -36,30 +36,6 @@ services:
         ipv4_address: 172.28.0.10
 
   # =============================================================================
-  # Database Layer - PostgreSQL for Validator
-  # =============================================================================
-  postgres:
-    image: postgres:16-alpine
-    container_name: basilica-postgres
-    profiles: ["monitoring"]
-    environment:
-      POSTGRES_USER: basilica
-      POSTGRES_PASSWORD: basilica
-      POSTGRES_DB: validator
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U basilica -d validator"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      basilica-localnet:
-        ipv4_address: 172.28.0.11
-
-  # =============================================================================
   # Validator Service
   # =============================================================================
   validator:
@@ -189,7 +165,6 @@ networks:
 
 volumes:
   subtensor-data:
-  postgres-data:
   validator-data:
   validator-ssh:
   miner-data:

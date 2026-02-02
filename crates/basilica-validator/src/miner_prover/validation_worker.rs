@@ -1220,7 +1220,6 @@ impl ValidationWorkerQueue {
 mod tests {
     use super::*;
     use crate::config::VerificationConfig;
-    use crate::miner_prover::miner_client::MinerClientConfig;
     use crate::miner_prover::verification_engine_builder::VerificationEngineBuilder;
     use basilica_common::identity::Hotkey;
 
@@ -1258,7 +1257,6 @@ mod tests {
         let verification_config = VerificationConfig::test_default();
         let automatic_config = AutomaticVerificationConfig::test_default();
         let ssh_config = SshSessionConfig::test_default();
-        let _miner_client_config = MinerClientConfig::default();
         let validator_hotkey =
             Hotkey::new("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string()).unwrap();
         let persistence = Arc::new(SimplePersistence::for_testing().await.unwrap());

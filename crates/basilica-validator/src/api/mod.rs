@@ -34,8 +34,6 @@ pub struct ApiState {
     #[allow(dead_code)]
     rental_manager: Option<Arc<rental::RentalManager>>,
     #[allow(dead_code)]
-    miner_client: Option<Arc<crate::miner_prover::miner_client::MinerClient>>,
-    #[allow(dead_code)]
     validator_hotkey: basilica_common::identity::Hotkey,
     pub evidence_storage_path: PathBuf,
 }
@@ -57,7 +55,6 @@ impl ApiState {
             storage,
             validator_config,
             rental_manager: None,
-            miner_client: None,
             validator_hotkey,
             evidence_storage_path,
         }
@@ -65,14 +62,6 @@ impl ApiState {
 
     pub fn with_rental_manager(mut self, rental_manager: Arc<rental::RentalManager>) -> Self {
         self.rental_manager = Some(rental_manager);
-        self
-    }
-
-    pub fn with_miner_client(
-        mut self,
-        miner_client: Arc<crate::miner_prover::miner_client::MinerClient>,
-    ) -> Self {
-        self.miner_client = Some(miner_client);
         self
     }
 }
@@ -107,15 +96,6 @@ impl ApiHandler {
     /// Set rental manager
     pub fn with_rental_manager(mut self, rental_manager: Arc<rental::RentalManager>) -> Self {
         self.state = self.state.with_rental_manager(rental_manager);
-        self
-    }
-
-    /// Set miner client
-    pub fn with_miner_client(
-        mut self,
-        miner_client: Arc<crate::miner_prover::miner_client::MinerClient>,
-    ) -> Self {
-        self.state = self.state.with_miner_client(miner_client);
         self
     }
 

@@ -23,6 +23,12 @@ pub struct AuctionConfig {
     pub taostats_cache_ttl_secs: u64,
     /// Miner emission share of subnet emissions (0.0-1.0)
     pub miner_emission_share: f64,
+    /// Health check interval in seconds (returned to miners in RegisterBidResponse)
+    pub health_check_interval_secs: u64,
+    /// Number of missed health checks before node is filtered from auction
+    pub health_check_miss_threshold: u32,
+    /// Validator's SSH public key (for miner nodes to deploy)
+    pub validator_ssh_public_key: Option<String>,
 }
 
 impl Default for AuctionConfig {
@@ -38,11 +44,19 @@ impl Default for AuctionConfig {
             taostats_api_url: "https://api.taostats.io".to_string(),
             taostats_cache_ttl_secs: 300,
             miner_emission_share: 0.41,
+            health_check_interval_secs: 60,
+            health_check_miss_threshold: 3,
+            validator_ssh_public_key: None,
         }
     }
 }
 
 impl AuctionConfig {
+    /// Get the maximum age in seconds for a health check before a node is filtered from auction
+    pub fn health_check_ttl_secs(&self) -> u64 {
+        self.health_check_interval_secs * self.health_check_miss_threshold as u64
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.price_api_endpoint.trim().is_empty() {
             return Err(anyhow!("price_api_endpoint cannot be empty"));
@@ -79,6 +93,14 @@ impl AuctionConfig {
             || !(0.0..=1.0).contains(&self.miner_emission_share)
         {
             return Err(anyhow!("miner_emission_share must be between 0.0 and 1.0"));
+        }
+        if self.health_check_interval_secs == 0 {
+            return Err(anyhow!("health_check_interval_secs must be greater than 0"));
+        }
+        if self.health_check_miss_threshold == 0 {
+            return Err(anyhow!(
+                "health_check_miss_threshold must be greater than 0"
+            ));
         }
         Ok(())
     }
@@ -137,5 +159,33 @@ mod tests {
             ..AuctionConfig::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_health_check_interval_zero_invalid() {
+        let config = AuctionConfig {
+            health_check_interval_secs: 0,
+            ..AuctionConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_health_check_miss_threshold_zero_invalid() {
+        let config = AuctionConfig {
+            health_check_miss_threshold: 0,
+            ..AuctionConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_health_check_ttl_secs() {
+        let config = AuctionConfig {
+            health_check_interval_secs: 60,
+            health_check_miss_threshold: 3,
+            ..AuctionConfig::default()
+        };
+        assert_eq!(config.health_check_ttl_secs(), 180);
     }
 }

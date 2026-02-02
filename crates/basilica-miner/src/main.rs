@@ -25,7 +25,7 @@ mod config;
 mod metrics;
 mod node_manager;
 mod persistence;
-mod validator_comms;
+mod registration_client;
 mod validator_discovery;
 
 use bidding::AutoBidder;
@@ -33,7 +33,7 @@ use bittensor_core::ChainRegistration;
 use config::MinerConfig;
 use node_manager::{NodeManager, RegisteredNode};
 use persistence::RegistrationDb;
-use validator_comms::ValidatorCommsServer;
+use registration_client::RegistrationClient;
 
 use crate::cli::{Args, Commands};
 
@@ -42,11 +42,12 @@ pub struct MinerState {
     pub config: MinerConfig,
     pub miner_uid: MinerUid,
     pub chain_registration: ChainRegistration,
-    pub validator_comms: ValidatorCommsServer,
+    pub registration_client: Arc<RegistrationClient>,
     pub registration_db: RegistrationDb,
     pub metrics: Option<metrics::MinerMetrics>,
     pub validator_discovery: Arc<validator_discovery::ValidatorDiscovery>,
     pub auto_bidder: Arc<AutoBidder>,
+    pub node_manager: Arc<NodeManager>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -175,21 +176,19 @@ impl MinerState {
             config.bittensor.common.netuid,
         ));
 
-        // Initialize validator communications server
+        // Initialize registration client for miner→validator communication
         let bittensor_service = chain_registration.get_bittensor_service();
-        let validator_comms = ValidatorCommsServer::new(
+        let registration_client = Arc::new(RegistrationClient::new(
             config.validator_comms.clone(),
-            config.security.clone(),
             node_manager.clone(),
-            validator_discovery.clone(),
             bittensor_service,
-        )
-        .await?;
+        ));
 
-        // Initialize auto-bidder
+        // Initialize auto-bidder (owns registration lifecycle)
         let auto_bidder = Arc::new(AutoBidder::new(
             config.bidding.clone(),
             node_manager.clone(),
+            registration_client.clone(),
         ));
 
         // Use a placeholder UID that will be updated after chain registration
@@ -199,11 +198,12 @@ impl MinerState {
             config,
             miner_uid,
             chain_registration,
-            validator_comms,
+            registration_client,
             registration_db,
             metrics,
             validator_discovery,
             auto_bidder,
+            node_manager,
         })
     }
 
@@ -238,16 +238,6 @@ impl MinerState {
             warn!("No UID discovered - miner may not be registered on chain");
         }
 
-        // Start validator communications server
-        let validator_handle = {
-            let validator_comms = self.validator_comms.clone();
-            tokio::spawn(async move {
-                if let Err(e) = validator_comms.start().await {
-                    error!("Validator comms server error: {}", e);
-                }
-            })
-        };
-
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Start validator discovery service
@@ -263,18 +253,19 @@ impl MinerState {
             }
         });
 
-        // Start auto-bidder if enabled
-        let bidder = self.auto_bidder.clone();
-        let validator_comms_for_bidder = self.validator_comms.clone();
-        let bidder_shutdown_rx = shutdown_rx.clone();
-        let bidder_handle = tokio::spawn(async move {
-            // Give the validator comms a chance to initialize first
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            bidder.set_validator_comms(validator_comms_for_bidder).await;
-            if let Err(e) = bidder.run(bidder_shutdown_rx.clone()).await {
-                error!("Auto-bidder error: {}", e);
-            }
-        });
+        // Start auto-bidder (owns registration lifecycle: register, health checks, price updates)
+        let bidder_handle = if self.registration_client.has_registration_endpoint() {
+            let bidder = self.auto_bidder.clone();
+            let bidder_shutdown_rx = shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = bidder.run(bidder_shutdown_rx).await {
+                    error!("AutoBidder error: {}", e);
+                }
+            }))
+        } else {
+            info!("validator_registration_endpoint not configured, skipping registration");
+            None
+        };
 
         info!("All miner services started successfully");
 
@@ -283,11 +274,12 @@ impl MinerState {
             _ = signal::ctrl_c() => {
                 info!("Received shutdown signal, stopping miner...");
             }
-            _ = validator_handle => {
-                error!("Validator comms server stopped unexpectedly");
-            }
-            _ = bidder_handle => {
-                error!("Auto-bidder stopped unexpectedly");
+            _ = async {
+                if let Some(handle) = bidder_handle {
+                    handle.await.ok();
+                }
+            } => {
+                error!("AutoBidder stopped unexpectedly");
             }
             _ = discovery_handle => {
                 error!("Validator discovery service stopped unexpectedly");
