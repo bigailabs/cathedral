@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `health_check` parameter on `deploy()`, `deploy_async()`, `deploy_vllm()`, `deploy_sglang()`, `create_deployment()`, `create_deployment_async()`
+- `HealthCheckConfig` and `ProbeConfig` types for configuring startup, liveness, and readiness probes
+- Default health checks for `deploy_vllm()` (port 8000) and `deploy_sglang()` (port 30000) with 10-minute startup tolerance
+- `health_check` support in `@deployment` decorator and `DeploymentSpec`
+- `deploy_sglang_health_check.py` example demonstrating custom health probes for large model deployments
+
 ## [0.16.0] - 2026-02-02
 ### Added
 - OpenClaw summon template support and provider preset defaults.
