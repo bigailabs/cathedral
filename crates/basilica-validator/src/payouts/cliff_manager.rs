@@ -16,10 +16,10 @@ use crate::billing::api_client::{
 };
 use crate::billing::BillingApiClient;
 use crate::collateral::manager::CollateralManager;
-use crate::collateral::price_oracle::PriceOracle;
 use crate::collateral::CollateralState;
 use crate::config::{BillingConfig, CliffConfig};
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
+use crate::pricing::TokenPriceClient;
 
 const MINUTES_PER_DAY: i32 = 24 * 60;
 
@@ -27,9 +27,10 @@ const MINUTES_PER_DAY: i32 = 24 * 60;
 pub struct CliffManager {
     billing_api: BillingApiClient,
     collateral_manager: Option<Arc<CollateralManager>>,
-    price_oracle: Arc<PriceOracle>,
+    price_client: Arc<TokenPriceClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     config: CliffConfig,
+    netuid: u16,
 }
 
 impl CliffManager {
@@ -38,8 +39,9 @@ impl CliffManager {
         config: CliffConfig,
         signer: Arc<dyn ValidatorSigner>,
         collateral_manager: Option<Arc<CollateralManager>>,
-        price_oracle: Arc<PriceOracle>,
+        price_client: Arc<TokenPriceClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
+        netuid: u16,
     ) -> Result<Self> {
         Ok(Self {
             billing_api: BillingApiClient::new_with_signer(
@@ -48,9 +50,10 @@ impl CliffManager {
                 billing_config.timeout_secs,
             )?,
             collateral_manager,
-            price_oracle,
+            price_client,
             gpu_profile_repo,
             config,
+            netuid,
         })
     }
 
@@ -317,12 +320,10 @@ impl CliffManager {
     }
 
     async fn fetch_alpha_price_usd(&self) -> Result<Decimal> {
-        let snapshot = self
-            .price_oracle
-            .get_alpha_usd_price()
+        self.price_client
+            .get_alpha_price_usd(self.netuid)
             .await
-            .context("Failed to fetch Alpha price")?;
-        Ok(snapshot.alpha_usd)
+            .context("Failed to fetch Alpha price")
     }
 
     async fn get_gpu_count_for_category(&self, miner_uid: u32, gpu_category: &str) -> Result<u32> {
@@ -408,14 +409,15 @@ mod tests {
     use crate::collateral::manager::{hotkey_ss58_to_hex, node_id_to_hex, CollateralManager};
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
+    use crate::pricing::TokenPriceClient;
+    use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
     use axum::extract::{Query, State};
     use axum::routing::{get, post};
     use axum::{Json, Router};
     use std::net::SocketAddr;
+    use std::time::Duration as StdDuration;
     use tokio::net::TcpListener;
     use uuid::Uuid;
-    use wiremock::matchers::path;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[derive(Default)]
     struct PendingState {
@@ -441,6 +443,27 @@ mod tests {
 
         fn sign(&self, _message: &[u8]) -> Result<String> {
             Ok("test-signature".to_string())
+        }
+    }
+
+    struct TestPriceFetcher;
+
+    #[async_trait::async_trait]
+    impl TokenPriceFetcher for TestPriceFetcher {
+        async fn fetch(
+            &self,
+            _api_endpoint: &str,
+            _netuid: u16,
+            _signer: &dyn ValidatorSigner,
+        ) -> Result<TokenPriceSnapshot> {
+            Ok(TokenPriceSnapshot {
+                tao_price_usd: Decimal::ONE,
+                alpha_price_usd: Decimal::ONE,
+                alpha_price_tao: Decimal::ONE,
+                tao_reserve: Decimal::ONE,
+                alpha_reserve: Decimal::ONE,
+                fetched_at: "2024-01-01T00:00:00Z".to_string(),
+            })
         }
     }
 
@@ -564,19 +587,13 @@ mod tests {
         Ok(addr)
     }
 
-    async fn build_price_oracle() -> Result<Arc<PriceOracle>> {
-        let server = MockServer::start().await;
-        Mock::given(path("/price"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "price": 1.0
-            })))
-            .mount(&server)
-            .await;
-        Ok(Arc::new(PriceOracle::new(
-            server.uri(),
-            "/price".to_string(),
-            chrono::Duration::minutes(60),
-            chrono::Duration::hours(1),
+    async fn build_price_client() -> Result<Arc<TokenPriceClient>> {
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(TestSigner);
+        Ok(Arc::new(TokenPriceClient::new_with_fetcher(
+            "http://localhost".to_string(),
+            StdDuration::from_secs(60),
+            signer,
+            Arc::new(TestPriceFetcher),
         )))
     }
 
@@ -603,7 +620,7 @@ mod tests {
 
         let persistence = SimplePersistence::for_testing().await?;
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let oracle = build_price_oracle().await?;
+        let price_client = build_price_client().await?;
 
         let billing_config = BillingConfig {
             enabled: true,
@@ -621,8 +638,9 @@ mod tests {
             cliff_config,
             signer,
             None,
-            oracle,
+            price_client,
             gpu_repo,
+            1,
         )?;
 
         let delivery = build_delivery("node-1");
@@ -645,7 +663,7 @@ mod tests {
         let addr = start_mock_server(state.clone()).await?;
         let persistence = SimplePersistence::for_testing().await?;
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let oracle = build_price_oracle().await?;
+        let price_client = build_price_client().await?;
 
         let billing_config = BillingConfig {
             enabled: true,
@@ -663,8 +681,9 @@ mod tests {
             cliff_config,
             signer,
             None,
-            oracle,
+            price_client,
             gpu_repo,
+            1,
         )?;
 
         let delivery = build_delivery("node-2");
@@ -682,7 +701,7 @@ mod tests {
 
         let persistence = SimplePersistence::for_testing().await?;
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let oracle = build_price_oracle().await?;
+        let price_client = build_price_client().await?;
 
         let collateral_config = CollateralConfig {
             enabled: true,
@@ -698,10 +717,11 @@ mod tests {
         ));
         let collateral_manager = Arc::new(CollateralManager::new(
             Arc::new(persistence.clone()),
-            oracle.clone(),
+            price_client.clone(),
             evaluator,
             grace_tracker,
             collateral_config,
+            1,
             None,
         ));
 
@@ -738,8 +758,9 @@ mod tests {
             },
             signer,
             Some(collateral_manager),
-            oracle,
+            price_client,
             gpu_repo,
+            1,
         )?;
 
         let delivery = MinerDelivery {

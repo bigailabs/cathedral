@@ -1,8 +1,7 @@
 use crate::collateral::grace_tracker::GracePeriodTracker;
-use crate::collateral::price_oracle::PriceSnapshot;
 use crate::config::collateral::CollateralConfig;
 use anyhow::Result;
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use rust_decimal::Decimal;
 use std::sync::Arc;
 
@@ -75,7 +74,7 @@ impl CollateralEvaluator {
         gpu_category: &str,
         gpu_count: u32,
         collateral_alpha: Decimal,
-        price_snapshot: Option<PriceSnapshot>,
+        alpha_price_usd: Option<Decimal>,
     ) -> Result<(CollateralState, CollateralStatus)> {
         let minimum_usd = self.get_minimum_usd(gpu_category, gpu_count);
 
@@ -98,18 +97,10 @@ impl CollateralEvaluator {
             ));
         }
 
-        let (current_usd, price_stale, alpha_usd_price) = match price_snapshot {
-            Some(snapshot) if snapshot.alpha_usd > Decimal::ZERO => {
-                let age = Utc::now() - snapshot.fetched_at;
-                let prolonged =
-                    age > self.config.price_stale_after() + self.config.price_stale_after();
-                if self.config.exclude_on_prolonged_price_failure && prolonged {
-                    return self
-                        .handle_price_unavailable(hotkey, node_id, minimum_usd, collateral_alpha)
-                        .await;
-                }
-                let usd = collateral_alpha * snapshot.alpha_usd;
-                (usd, snapshot.is_stale, Some(snapshot.alpha_usd))
+        let (current_usd, price_stale, alpha_usd_price) = match alpha_price_usd {
+            Some(price) if price > Decimal::ZERO => {
+                let usd = collateral_alpha * price;
+                (usd, false, Some(price))
             }
             _ => {
                 if self.config.exclude_on_prolonged_price_failure {
@@ -374,14 +365,6 @@ mod tests {
     use crate::persistence::SimplePersistence;
     use rust_decimal::Decimal;
 
-    fn make_snapshot(price: Decimal) -> PriceSnapshot {
-        PriceSnapshot {
-            alpha_usd: price,
-            fetched_at: chrono::Utc::now(),
-            is_stale: false,
-        }
-    }
-
     #[tokio::test]
     async fn test_evaluator_sufficient() {
         let persistence = Arc::new(SimplePersistence::for_testing().await.unwrap());
@@ -394,7 +377,7 @@ mod tests {
                 "H100",
                 2,
                 Decimal::from(200),
-                Some(make_snapshot(Decimal::ONE)),
+                Some(Decimal::ONE),
             )
             .await
             .unwrap();
@@ -415,7 +398,7 @@ mod tests {
                 "H100",
                 1,
                 Decimal::ONE,
-                Some(make_snapshot(Decimal::ONE)),
+                Some(Decimal::ONE),
             )
             .await
             .unwrap();

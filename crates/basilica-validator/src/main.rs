@@ -30,7 +30,6 @@ mod pricing;
 mod rental;
 mod service;
 mod ssh;
-mod taostats;
 
 use cli::Args;
 

@@ -1,6 +1,7 @@
 pub mod auction;
 pub mod collateral;
 pub mod emission;
+pub mod pricing;
 
 #[cfg(test)]
 mod emission_tests;

@@ -17,10 +17,6 @@ pub struct AuctionConfig {
     pub bid_reservation_secs: u64,
     /// Auction epoch duration in blocks
     pub auction_epoch_blocks: u64,
-    /// TaoStats API base URL
-    pub taostats_api_url: String,
-    /// TaoStats cache TTL in seconds
-    pub taostats_cache_ttl_secs: u64,
     /// Miner emission share of subnet emissions (0.0-1.0)
     pub miner_emission_share: f64,
     /// Health check interval in seconds (returned to miners in RegisterBidResponse)
@@ -41,8 +37,6 @@ impl Default for AuctionConfig {
             bid_node_freshness_secs: 300,
             bid_reservation_secs: 60,
             auction_epoch_blocks: 360,
-            taostats_api_url: "https://api.taostats.io".to_string(),
-            taostats_cache_ttl_secs: 300,
             miner_emission_share: 0.41,
             health_check_interval_secs: 60,
             health_check_miss_threshold: 3,
@@ -83,12 +77,6 @@ impl AuctionConfig {
         if self.auction_epoch_blocks == 0 {
             return Err(anyhow!("auction_epoch_blocks must be greater than 0"));
         }
-        if self.taostats_api_url.trim().is_empty() {
-            return Err(anyhow!("taostats_api_url cannot be empty"));
-        }
-        if self.taostats_cache_ttl_secs == 0 {
-            return Err(anyhow!("taostats_cache_ttl_secs must be greater than 0"));
-        }
         if !self.miner_emission_share.is_finite()
             || !(0.0..=1.0).contains(&self.miner_emission_share)
         {
@@ -120,7 +108,6 @@ mod tests {
     fn test_valid_config() {
         let config = AuctionConfig {
             price_api_endpoint: "http://localhost:50071".to_string(),
-            taostats_api_url: "https://api.taostats.io".to_string(),
             ..AuctionConfig::default()
         };
         assert!(config.validate().is_ok());
@@ -145,7 +132,6 @@ mod tests {
             bid_node_freshness_secs: 0,
             bid_reservation_secs: 0,
             auction_epoch_blocks: 0,
-            taostats_cache_ttl_secs: 0,
             ..AuctionConfig::default()
         };
         assert!(config.validate().is_err());

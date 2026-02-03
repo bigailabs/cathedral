@@ -27,7 +27,6 @@ pub mod rental;
 pub mod rental_adapter;
 pub mod service;
 pub mod ssh;
-pub mod taostats;
 
 // Main public API exports
 #[cfg(feature = "client")]

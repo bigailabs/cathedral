@@ -12,7 +12,7 @@ use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
-use crate::taostats::TaoStatsClient;
+use crate::pricing::TokenPriceClient;
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
@@ -62,7 +62,7 @@ pub struct WeightSetter {
     emission_config: EmissionConfig,
     auction_config: AuctionConfig,
     delivery_repository: Arc<MinerDeliveryRepository>,
-    taostats_client: Arc<TaoStatsClient>,
+    token_price_client: Arc<TokenPriceClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
     collateral_grace_period: Option<chrono::Duration>,
@@ -81,6 +81,7 @@ impl WeightSetter {
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
         auction_config: AuctionConfig,
+        token_price_client: Arc<TokenPriceClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
         collateral_grace_period: Option<chrono::Duration>,
@@ -90,11 +91,6 @@ impl WeightSetter {
             emission_config.clone(),
             min_score_threshold,
         ));
-        let taostats_client = Arc::new(TaoStatsClient::new(
-            auction_config.taostats_api_url.clone(),
-            Duration::from_secs(auction_config.taostats_cache_ttl_secs),
-        ));
-
         let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
 
         Ok(Self {
@@ -110,7 +106,7 @@ impl WeightSetter {
             emission_config,
             auction_config,
             delivery_repository,
-            taostats_client,
+            token_price_client,
             gpu_profile_repo,
             metrics,
             collateral_grace_period,
@@ -416,10 +412,14 @@ impl WeightSetter {
     }
 
     async fn log_tao_price(&self) {
-        match self.taostats_client.get_tao_price().await {
+        match self
+            .token_price_client
+            .get_tao_price_usd(self.config.netuid)
+            .await
+        {
             Ok(tao_price) => {
                 info!(
-                    tao_price_usd = tao_price,
+                    tao_price_usd = %tao_price,
                     miner_emission_share = self.auction_config.miner_emission_share,
                     burn_percentage = self.emission_config.burn_percentage,
                     "Fetched TAO price for weight context"
