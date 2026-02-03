@@ -203,6 +203,88 @@ def serve():
     pass
 ```
 
+### Health Checks
+
+Large model deployments (vLLM, SGLang) can take minutes to download and load
+into GPU memory. Configure custom health check probes to prevent Kubernetes
+from killing pods before models are ready:
+
+```python
+from basilica import BasilicaClient, HealthCheckConfig, ProbeConfig
+
+client = BasilicaClient()
+
+# Deploy SGLang with a 20-minute startup tolerance
+deployment = client.deploy_sglang(
+    model="Qwen/Qwen2.5-3B-Instruct",
+    health_check=HealthCheckConfig(
+        startup=ProbeConfig(
+            path="/health",
+            port=30000,
+            initial_delay_seconds=0,
+            period_seconds=10,
+            timeout_seconds=5,
+            failure_threshold=120,  # 120 * 10s = 20 minutes
+        ),
+        liveness=ProbeConfig(
+            path="/health",
+            port=30000,
+            initial_delay_seconds=120,
+            period_seconds=30,
+            timeout_seconds=10,
+            failure_threshold=5,
+        ),
+        readiness=ProbeConfig(
+            path="/health",
+            port=30000,
+            initial_delay_seconds=60,
+            period_seconds=15,
+            timeout_seconds=10,
+            failure_threshold=5,
+        ),
+    ),
+    timeout=1200,
+)
+```
+
+`deploy_vllm()` and `deploy_sglang()` include sensible defaults (10-minute startup
+tolerance) when no `health_check` is provided. For very large models, pass your own
+`HealthCheckConfig` to extend the startup window.
+
+Health checks work with any deployment method:
+
+```python
+# Generic deploy()
+deployment = client.deploy(
+    name="my-gpu-app",
+    source="app.py",
+    port=8000,
+    gpu_count=1,
+    health_check=HealthCheckConfig(
+        startup=ProbeConfig(path="/ready", port=8000, failure_threshold=60),
+    ),
+)
+
+# Decorator API
+@basilica.deployment(
+    name="my-service",
+    port=8000,
+    health_check=HealthCheckConfig(
+        startup=ProbeConfig(path="/health", port=8000, failure_threshold=60),
+    ),
+)
+def serve():
+    ...
+```
+
+`ProbeConfig` fields:
+- `path`: HTTP endpoint to probe (e.g. `"/health"`)
+- `port`: Port to probe (defaults to container port if `None`)
+- `initial_delay_seconds`: Seconds before first probe (default: 30)
+- `period_seconds`: Interval between probes (default: 10)
+- `timeout_seconds`: Probe timeout (default: 5)
+- `failure_threshold`: Consecutive failures before action (default: 3)
+
 ### Pre-built Container Images
 
 Deploy any Docker image:
@@ -254,6 +336,7 @@ def deploy(
     public: bool = True,                    # Create public URL
     timeout: int = 300,                     # Deployment timeout
     pip_packages: Optional[List[str]] = None,  # pip dependencies
+    health_check: Optional[HealthCheckConfig] = None,  # Custom health probes
 ) -> Deployment
 ```
 
@@ -407,6 +490,7 @@ For complete working examples, see the [examples directory](https://github.com/o
 | `12_lobe_chat.py` | Self-hosted chat UI |
 | `13_lobe_chat_vllm.py` | Full AI stack (LobeChat + vLLM) |
 | `14_streamlit.py` | Interactive Streamlit app |
+| `deploy_sglang_health_check.py` | SGLang with custom health check probes |
 
 ## Development
 
