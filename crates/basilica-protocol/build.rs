@@ -69,7 +69,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "proto/payments.proto",
                 "proto/rental.proto",
                 "proto/miner_payouts.proto",
-                "proto/prices.proto",
             ],
             &["proto"],
         )?;

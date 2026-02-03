@@ -239,14 +239,6 @@ impl ValidatorPrometheusMetrics {
             "Current Alpha/USD price used for collateral evaluation"
         );
         describe_gauge!(
-            "basilica_validator_collateral_price_stale",
-            "Whether collateral price is stale (1=true, 0=false)"
-        );
-        describe_gauge!(
-            "basilica_validator_collateral_price_staleness_seconds",
-            "Age of Alpha/USD price snapshot in seconds"
-        );
-        describe_gauge!(
             "basilica_validator_collateral_node_status",
             "Node collateral status (-1=unknown,0=excluded,1=undercollateralized,2=warning,3=sufficient)"
         );
@@ -786,13 +778,8 @@ impl ValidatorPrometheusMetrics {
             .record(latency.as_secs_f64());
     }
 
-    pub fn record_collateral_price(&self, alpha_usd: f64, is_stale: bool) {
+    pub fn record_collateral_price(&self, alpha_usd: f64) {
         gauge!("basilica_validator_collateral_alpha_usd_price").set(alpha_usd);
-        gauge!("basilica_validator_collateral_price_stale").set(if is_stale { 1.0 } else { 0.0 });
-    }
-
-    pub fn record_collateral_price_staleness_seconds(&self, seconds: f64) {
-        gauge!("basilica_validator_collateral_price_staleness_seconds").set(seconds.max(0.0));
     }
 
     pub fn record_collateral_node_status(

@@ -19,14 +19,6 @@ pub struct CollateralConfig {
     pub enabled: bool,
     #[serde(default = "default_shadow_mode")]
     pub shadow_mode: bool,
-    #[serde(default = "default_taostats_base_url")]
-    pub taostats_base_url: String,
-    #[serde(default = "default_alpha_price_path")]
-    pub alpha_price_path: String,
-    #[serde(default = "default_price_refresh_interval_secs")]
-    pub price_refresh_interval_secs: u64,
-    #[serde(default = "default_price_stale_after_secs")]
-    pub price_stale_after_secs: u64,
     #[serde(default = "default_warning_threshold_multiplier")]
     pub warning_threshold_multiplier: Decimal,
     #[serde(default = "default_grace_period_hours")]
@@ -82,10 +74,6 @@ impl Default for CollateralConfig {
         Self {
             enabled: default_collateral_enabled(),
             shadow_mode: default_shadow_mode(),
-            taostats_base_url: default_taostats_base_url(),
-            alpha_price_path: default_alpha_price_path(),
-            price_refresh_interval_secs: default_price_refresh_interval_secs(),
-            price_stale_after_secs: default_price_stale_after_secs(),
             warning_threshold_multiplier: default_warning_threshold_multiplier(),
             grace_period_hours: default_grace_period_hours(),
             exclude_on_prolonged_price_failure: default_exclude_on_prolonged_price_failure(),
@@ -115,14 +103,6 @@ impl Default for CollateralConfig {
 }
 
 impl CollateralConfig {
-    pub fn price_refresh_interval(&self) -> Duration {
-        Duration::seconds(self.price_refresh_interval_secs as i64)
-    }
-
-    pub fn price_stale_after(&self) -> Duration {
-        Duration::seconds(self.price_stale_after_secs as i64)
-    }
-
     pub fn grace_period(&self) -> Duration {
         Duration::hours(self.grace_period_hours as i64)
     }
@@ -130,18 +110,6 @@ impl CollateralConfig {
     pub fn validate(&self) -> Result<()> {
         if !self.enabled {
             return Ok(());
-        }
-        if self.taostats_base_url.trim().is_empty() {
-            anyhow::bail!("collateral.taostats_base_url cannot be empty");
-        }
-        if self.alpha_price_path.trim().is_empty() {
-            anyhow::bail!("collateral.alpha_price_path cannot be empty");
-        }
-        if self.price_refresh_interval_secs == 0 {
-            anyhow::bail!("collateral.price_refresh_interval_secs must be > 0");
-        }
-        if self.price_stale_after_secs == 0 {
-            anyhow::bail!("collateral.price_stale_after_secs must be > 0");
         }
         if self.warning_threshold_multiplier < Decimal::ONE {
             anyhow::bail!("collateral.warning_threshold_multiplier must be >= 1.0");
@@ -246,22 +214,6 @@ fn default_shadow_mode() -> bool {
 
 fn default_trustee_key_source() -> TrusteeKeySource {
     TrusteeKeySource::File
-}
-
-fn default_taostats_base_url() -> String {
-    "https://api.taostats.io".to_string()
-}
-
-fn default_alpha_price_path() -> String {
-    "/alpha/price".to_string()
-}
-
-fn default_price_refresh_interval_secs() -> u64 {
-    900
-}
-
-fn default_price_stale_after_secs() -> u64 {
-    3600
 }
 
 fn default_warning_threshold_multiplier() -> Decimal {

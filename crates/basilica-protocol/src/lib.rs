@@ -85,12 +85,6 @@ pub mod basilca {
             include!("gen/basilica.payments.v1.rs");
         }
     }
-
-    pub mod pricing {
-        pub mod v1 {
-            include!("gen/basilca.pricing.v1.rs");
-        }
-    }
 }
 
 // Structured re-exports for better organization
@@ -143,11 +137,6 @@ pub mod payments {
     //! - Automatic credit conversion based on configured rates
     //! - Integration with billing service for credit application
     pub use crate::basilca::payments::v1::*;
-}
-
-pub mod pricing {
-    //! Pricing service for dynamic baseline prices
-    pub use crate::basilca::pricing::v1::*;
 }
 
 // Re-export common types at crate root for convenience

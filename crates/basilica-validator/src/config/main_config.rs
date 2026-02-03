@@ -78,6 +78,9 @@ pub struct ValidatorConfig {
     /// Auction configuration (dynamic baseline pricing)
     #[serde(default)]
     pub auction: super::auction::AuctionConfig,
+    /// Token pricing configuration (TAO/Alpha)
+    #[serde(default)]
+    pub pricing: super::pricing::PricingConfig,
 
     /// Database cleanup configuration
     #[serde(default)]
@@ -932,6 +935,7 @@ impl Default for ValidatorConfig {
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
             auction: super::auction::AuctionConfig::default(),
+            pricing: super::pricing::PricingConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             billing: BillingConfig::default(),
             cliff: CliffConfig::default(),
@@ -965,14 +969,14 @@ impl ConfigValidation for ValidatorConfig {
             });
         }
 
-        if self.billing.enabled && self.billing.api_endpoint.trim().is_empty() {
+        if self.billing.api_endpoint.trim().is_empty() {
             return Err(ConfigurationError::InvalidValue {
                 key: "billing.api_endpoint".to_string(),
                 value: self.billing.api_endpoint.clone(),
-                reason: "API endpoint must be set for delivery sync".to_string(),
+                reason: "API endpoint must be set for pricing".to_string(),
             });
         }
-        if self.billing.enabled && self.billing.api_endpoint == self.billing.billing_endpoint {
+        if self.billing.api_endpoint == self.billing.billing_endpoint {
             return Err(ConfigurationError::InvalidValue {
                 key: "billing.api_endpoint".to_string(),
                 value: self.billing.api_endpoint.clone(),
@@ -1038,6 +1042,15 @@ impl ConfigValidation for ValidatorConfig {
             return Err(ConfigurationError::InvalidValue {
                 key: "auction".to_string(),
                 value: "auction_config".to_string(),
+                reason: e.to_string(),
+            });
+        }
+
+        // Validate pricing configuration
+        if let Err(e) = self.pricing.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "pricing".to_string(),
+                value: "pricing_config".to_string(),
                 reason: e.to_string(),
             });
         }

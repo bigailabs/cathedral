@@ -15,11 +15,6 @@ pub mod basilca {
             include!("basilca.miner.v1.rs");
         }
     }
-    pub mod pricing {
-        pub mod v1 {
-            include!("basilca.pricing.v1.rs");
-        }
-    }
     pub mod validator {
         pub mod v1 {
             include!("basilca.validator.v1.rs");

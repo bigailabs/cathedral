@@ -6,7 +6,6 @@ use crate::collateral::evaluator::CollateralEvaluator;
 use crate::collateral::evidence::EvidenceStore;
 use crate::collateral::grace_tracker::GracePeriodTracker;
 use crate::collateral::manager::CollateralManager;
-use crate::collateral::price_oracle::PriceOracle;
 use crate::collateral::SlashExecutor;
 use crate::config::ValidatorConfig;
 use crate::gpu::GpuScoringEngine;
@@ -18,6 +17,7 @@ use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
+use crate::pricing::TokenPriceClient;
 
 use anyhow::{Context, Result};
 use basilica_common::MemoryStorage;
@@ -72,6 +72,15 @@ impl ValidatorService {
         let validator_metrics = self.init_metrics(persistence_arc.clone()).await?;
         let bittensor_service = self.init_bittensor_service().await?;
 
+        let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> =
+            bittensor_service.clone();
+        let token_price_client = Arc::new(TokenPriceClient::new(
+            self.config.billing.api_endpoint.clone(),
+            self.config.pricing.cache_ttl(),
+            signer,
+            self.config.billing.timeout_secs,
+        )?);
+
         let chain_registration = self
             .init_chain_registration(bittensor_service.clone())
             .await?;
@@ -82,6 +91,7 @@ impl ValidatorService {
             storage.clone(),
             persistence_arc.clone(),
             gpu_profile_repo.clone(),
+            token_price_client.clone(),
             validator_metrics.as_ref(),
         )?;
         let validator_hotkey = self.build_validator_hotkey(&bittensor_service)?;
@@ -94,18 +104,19 @@ impl ValidatorService {
         );
 
         let collateral_metrics = validator_metrics.as_ref().map(|m| m.prometheus());
-        let (collateral_manager, slash_executor, collateral_refresh_interval) = self
+        let (collateral_manager, slash_executor) = self
             .init_collateral_components(
                 persistence_arc.clone(),
                 collateral_metrics.clone(),
                 bittensor_service.clone(),
+                token_price_client.clone(),
             )
             .await?;
-        self.spawn_collateral_refresh(collateral_manager.clone(), collateral_refresh_interval);
 
         let cliff_manager = self.init_cliff_manager(
             bittensor_service.clone(),
             collateral_manager.clone(),
+            token_price_client.clone(),
             gpu_profile_repo.clone(),
         )?;
 
@@ -247,6 +258,7 @@ impl ValidatorService {
         storage: MemoryStorage,
         persistence: Arc<SimplePersistence>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
+        token_price_client: Arc<TokenPriceClient>,
         validator_metrics: Option<&ValidatorMetrics>,
     ) -> Result<Arc<WeightSetter>> {
         let gpu_scoring_engine = if let Some(metrics) = validator_metrics {
@@ -274,6 +286,7 @@ impl ValidatorService {
             gpu_scoring_engine,
             self.config.emission.clone(),
             self.config.auction.clone(),
+            token_price_client,
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),
             if self.config.collateral.enabled {
@@ -317,20 +330,16 @@ impl ValidatorService {
         persistence: Arc<SimplePersistence>,
         collateral_metrics: Option<Arc<ValidatorPrometheusMetrics>>,
         signer: Arc<BittensorService>,
-    ) -> Result<(
-        Option<Arc<CollateralManager>>,
-        Option<Arc<SlashExecutor>>,
-        Option<chrono::Duration>,
-    )> {
+        token_price_client: Arc<TokenPriceClient>,
+    ) -> Result<(Option<Arc<CollateralManager>>, Option<Arc<SlashExecutor>>)> {
         if !self.config.collateral.enabled {
-            return Ok((None, None, None));
+            return Ok((None, None));
         }
 
         let collateral_config = self.config.collateral.clone();
         if collateral_config.shadow_mode {
             warn!("Collateral shadow_mode is enabled; on-chain slashing is disabled");
         }
-        let refresh_interval = collateral_config.price_refresh_interval();
         let grace_tracker = Arc::new(GracePeriodTracker::new(
             persistence.clone(),
             collateral_config.grace_period(),
@@ -339,18 +348,13 @@ impl ValidatorService {
             collateral_config.clone(),
             grace_tracker.clone(),
         ));
-        let price_oracle = Arc::new(PriceOracle::new(
-            collateral_config.taostats_base_url.clone(),
-            collateral_config.alpha_price_path.clone(),
-            collateral_config.price_refresh_interval(),
-            collateral_config.price_stale_after(),
-        ));
         let collateral_manager = Arc::new(CollateralManager::new(
             persistence.clone(),
-            price_oracle,
+            token_price_client,
             evaluator,
             grace_tracker.clone(),
             collateral_config.clone(),
+            self.config.bittensor.common.netuid,
             collateral_metrics.clone(),
         ));
         let evidence_store = EvidenceStore::from_config(&collateral_config).await?;
@@ -361,53 +365,28 @@ impl ValidatorService {
             collateral_metrics,
             Some(signer),
         ));
-        Ok((
-            Some(collateral_manager),
-            Some(slash_executor),
-            Some(refresh_interval),
-        ))
-    }
-
-    fn spawn_collateral_refresh(
-        &self,
-        collateral_manager: Option<Arc<CollateralManager>>,
-        refresh_interval: Option<chrono::Duration>,
-    ) {
-        if let (Some(manager), Some(interval)) = (collateral_manager, refresh_interval) {
-            let refresh_secs = interval.num_seconds().max(1) as u64;
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(StdDuration::from_secs(refresh_secs));
-                loop {
-                    interval.tick().await;
-                    manager.refresh_price_cache().await;
-                }
-            });
-        }
+        Ok((Some(collateral_manager), Some(slash_executor)))
     }
 
     fn init_cliff_manager(
         &self,
         bittensor_service: Arc<BittensorService>,
         collateral_manager: Option<Arc<CollateralManager>>,
+        token_price_client: Arc<TokenPriceClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
     ) -> Result<Option<Arc<CliffManager>>> {
         if !self.config.billing.enabled || !self.config.cliff.enabled {
             return Ok(None);
         }
-        let price_oracle = Arc::new(PriceOracle::new(
-            self.config.collateral.taostats_base_url.clone(),
-            self.config.collateral.alpha_price_path.clone(),
-            self.config.collateral.price_refresh_interval(),
-            self.config.collateral.price_stale_after(),
-        ));
         let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> = bittensor_service;
         let cliff_manager = CliffManager::new(
             &self.config.billing,
             self.config.cliff.clone(),
             signer,
             collateral_manager,
-            price_oracle,
+            token_price_client,
             gpu_profile_repo,
+            self.config.bittensor.common.netuid,
         )?;
         Ok(Some(Arc::new(cliff_manager)))
     }

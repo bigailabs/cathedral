@@ -1,12 +1,11 @@
 use crate::collateral::evaluator::{CollateralEvaluator, CollateralState, CollateralStatus};
 use crate::collateral::grace_tracker::GracePeriodTracker;
-use crate::collateral::price_oracle::PriceOracle;
 use crate::config::collateral::CollateralConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::SimplePersistence;
+use crate::pricing::TokenPriceClient;
 use anyhow::Result;
 use basilica_common::identity::Hotkey;
-use chrono::Utc;
 use hex::encode;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -25,28 +24,31 @@ pub enum CollateralPreference {
 #[derive(Clone)]
 pub struct CollateralManager {
     persistence: Arc<SimplePersistence>,
-    price_oracle: Arc<PriceOracle>,
+    price_client: Arc<TokenPriceClient>,
     evaluator: Arc<CollateralEvaluator>,
     grace_tracker: Arc<GracePeriodTracker>,
     config: CollateralConfig,
+    netuid: u16,
     metrics: Option<Arc<ValidatorPrometheusMetrics>>,
 }
 
 impl CollateralManager {
     pub fn new(
         persistence: Arc<SimplePersistence>,
-        price_oracle: Arc<PriceOracle>,
+        price_client: Arc<TokenPriceClient>,
         evaluator: Arc<CollateralEvaluator>,
         grace_tracker: Arc<GracePeriodTracker>,
         config: CollateralConfig,
+        netuid: u16,
         metrics: Option<Arc<ValidatorPrometheusMetrics>>,
     ) -> Self {
         Self {
             persistence,
-            price_oracle,
+            price_client,
             evaluator,
             grace_tracker,
             config,
+            netuid,
             metrics,
         }
     }
@@ -76,8 +78,8 @@ impl CollateralManager {
             ));
         }
 
-        let price_snapshot = match self.price_oracle.get_alpha_usd_price().await {
-            Ok(snapshot) => Some(snapshot),
+        let alpha_price_usd = match self.price_client.get_alpha_price_usd(self.netuid).await {
+            Ok(price) => Some(price),
             Err(err) => {
                 warn!("Alpha price unavailable: {}", err);
                 None
@@ -85,12 +87,9 @@ impl CollateralManager {
         };
 
         if let Some(metrics) = &self.metrics {
-            if let Some(snapshot) = &price_snapshot {
-                let alpha_usd = snapshot.alpha_usd.to_f64().unwrap_or_default();
-                metrics.record_collateral_price(alpha_usd, snapshot.is_stale);
-                let staleness_seconds =
-                    (Utc::now() - snapshot.fetched_at).num_seconds().max(0) as f64;
-                metrics.record_collateral_price_staleness_seconds(staleness_seconds);
+            if let Some(alpha_usd) = &alpha_price_usd {
+                let alpha_usd = alpha_usd.to_f64().unwrap_or_default();
+                metrics.record_collateral_price(alpha_usd);
             }
         }
 
@@ -107,7 +106,7 @@ impl CollateralManager {
                 gpu_category,
                 gpu_count,
                 collateral_alpha,
-                price_snapshot,
+                alpha_price_usd,
             )
             .await?;
         if let Some(metrics) = &self.metrics {
@@ -141,23 +140,7 @@ impl CollateralManager {
     }
 
     pub async fn refresh_price_cache(&self) {
-        if !self.config.enabled {
-            return;
-        }
-        match self.price_oracle.get_alpha_usd_price().await {
-            Ok(snapshot) => {
-                if let Some(metrics) = self.metrics.as_ref() {
-                    let alpha_usd = snapshot.alpha_usd.to_f64().unwrap_or_default();
-                    metrics.record_collateral_price(alpha_usd, snapshot.is_stale);
-                    let staleness_seconds =
-                        (Utc::now() - snapshot.fetched_at).num_seconds().max(0) as f64;
-                    metrics.record_collateral_price_staleness_seconds(staleness_seconds);
-                }
-            }
-            Err(err) => {
-                warn!("Failed to refresh Alpha/USD price: {}", err);
-            }
-        }
+        // TTL-only pricing: no background refresh loop
     }
 
     pub async fn is_eligible_for_bids(
@@ -238,11 +221,39 @@ fn u256_to_alpha(amount: alloy_primitives::U256) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::collateral::price_oracle::PriceOracle;
+    use crate::billing::api_client::ValidatorSigner;
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
+    use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
+    use crate::pricing::TokenPriceClient;
     use chrono::Duration;
     use rust_decimal::Decimal;
+
+    struct TestSigner;
+
+    impl ValidatorSigner for TestSigner {
+        fn hotkey(&self) -> String {
+            "test_hotkey".to_string()
+        }
+
+        fn sign(&self, _message: &[u8]) -> Result<String> {
+            Ok("deadbeef".to_string())
+        }
+    }
+
+    struct TestFetcher;
+
+    #[async_trait::async_trait]
+    impl TokenPriceFetcher for TestFetcher {
+        async fn fetch(
+            &self,
+            _api_endpoint: &str,
+            _netuid: u16,
+            _signer: &dyn ValidatorSigner,
+        ) -> Result<TokenPriceSnapshot> {
+            anyhow::bail!("unused")
+        }
+    }
 
     #[tokio::test]
     async fn test_node_id_to_hex() {
@@ -263,18 +274,20 @@ mod tests {
             config.clone(),
             grace_tracker.clone(),
         ));
-        let price_oracle = Arc::new(PriceOracle::new(
-            config.taostats_base_url.clone(),
-            config.alpha_price_path.clone(),
-            config.price_refresh_interval(),
-            config.price_stale_after(),
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(TestSigner);
+        let price_client = Arc::new(TokenPriceClient::new_with_fetcher(
+            "http://localhost".to_string(),
+            std::time::Duration::from_secs(60),
+            signer,
+            Arc::new(TestFetcher),
         ));
         let manager = CollateralManager::new(
             persistence.clone(),
-            price_oracle,
+            price_client,
             evaluator,
             grace_tracker,
             config,
+            1,
             None,
         );
         let alpha = manager
