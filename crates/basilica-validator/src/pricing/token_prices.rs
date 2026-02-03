@@ -37,7 +37,10 @@ impl CachedPrices {
 
     #[cfg(test)]
     fn with_timestamp(snapshot: TokenPriceSnapshot, cached_at: Instant) -> Self {
-        Self { snapshot, cached_at }
+        Self {
+            snapshot,
+            cached_at,
+        }
     }
 
     fn is_valid(&self, ttl: Duration) -> bool {
@@ -97,10 +100,7 @@ impl TokenPriceFetcher for HttpTokenPriceFetcher {
         };
         let (signature, timestamp, hotkey) = signed_headers(&query, signer)?;
 
-        let url = format!(
-            "{}/v1/prices/tokens",
-            api_endpoint.trim_end_matches('/')
-        );
+        let url = format!("{}/v1/prices/tokens", api_endpoint.trim_end_matches('/'));
 
         let response = self
             .client
@@ -313,11 +313,10 @@ mod tests {
         );
 
         let snap = snapshot("1.0", "2.0");
-        client
-            .cache
-            .write()
-            .await
-            .insert(1, CachedPrices::with_timestamp(snap.clone(), Instant::now()));
+        client.cache.write().await.insert(
+            1,
+            CachedPrices::with_timestamp(snap.clone(), Instant::now()),
+        );
 
         let result = client.get_prices(1).await.unwrap();
         assert_eq!(result.tao_price_usd, snap.tao_price_usd);

@@ -331,10 +331,7 @@ impl ValidatorService {
         collateral_metrics: Option<Arc<ValidatorPrometheusMetrics>>,
         signer: Arc<BittensorService>,
         token_price_client: Arc<TokenPriceClient>,
-    ) -> Result<(
-        Option<Arc<CollateralManager>>,
-        Option<Arc<SlashExecutor>>,
-    )> {
+    ) -> Result<(Option<Arc<CollateralManager>>, Option<Arc<SlashExecutor>>)> {
         if !self.config.collateral.enabled {
             return Ok((None, None));
         }

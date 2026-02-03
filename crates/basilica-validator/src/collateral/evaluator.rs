@@ -392,14 +392,7 @@ mod tests {
         let tracker = Arc::new(GracePeriodTracker::new(persistence, Duration::hours(24)));
         let evaluator = CollateralEvaluator::new(CollateralConfig::default(), tracker);
         let (_state, status) = evaluator
-            .evaluate(
-                "hk",
-                "node",
-                "H100",
-                1,
-                Decimal::ONE,
-                Some(Decimal::ONE),
-            )
+            .evaluate("hk", "node", "H100", 1, Decimal::ONE, Some(Decimal::ONE))
             .await
             .unwrap();
         assert_eq!(status.status, "undercollateralized");

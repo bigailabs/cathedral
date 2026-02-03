@@ -221,11 +221,11 @@ fn u256_to_alpha(amount: alloy_primitives::U256) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::TokenPriceClient;
-    use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
     use crate::billing::api_client::ValidatorSigner;
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
+    use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
+    use crate::pricing::TokenPriceClient;
     use chrono::Duration;
     use rust_decimal::Decimal;
 

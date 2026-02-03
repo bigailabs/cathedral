@@ -409,8 +409,8 @@ mod tests {
     use crate::collateral::manager::{hotkey_ss58_to_hex, node_id_to_hex, CollateralManager};
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
-    use crate::pricing::TokenPriceClient;
     use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
+    use crate::pricing::TokenPriceClient;
     use axum::extract::{Query, State};
     use axum::routing::{get, post};
     use axum::{Json, Router};
