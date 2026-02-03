@@ -61,6 +61,7 @@ Using `@basilica.deployment` decorator:
 | `24_clawdbot.py` | Clawdbot AI agent platform | `python3 24_clawdbot.py` |
 | `25_kimi_k2_5.py` | Kimi-K2-Instruct 1T MoE (8x H200) | `python3 25_kimi_k2_5.py` |
 | `28_openclaw.py` | OpenClaw gateway | `python3 28_openclaw.py` |
+| `29_deploy_sglang_health_check.py` | SGLang with custom health check probes | `python3 29_deploy_sglang_health_check.py` |
 
 ## Large Model Deployment Notes
 
