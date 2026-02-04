@@ -199,7 +199,7 @@ impl FromStr for GpuCategory {
 #[serde(rename_all = "snake_case")]
 pub enum ComputeCategory {
     /// The Citadel - Datacenter providers (aggregator service)
-    /// Examples: DataCrunch, Hyperstack, Lambda Labs, HydraHost
+    /// Examples: Verda, Hyperstack, Lambda Labs, HydraHost
     SecureCloud,
     /// The Bourse - Miner-provided GPUs (validator-mediated)
     /// Bittensor subnet miners providing compute resources
@@ -576,11 +576,11 @@ mod tests {
 
         assert_eq!(
             ComputeCategory::SecureCloud.description(),
-            "Datacenter providers"
+            "The Citadel - Datacenter providers"
         );
         assert_eq!(
             ComputeCategory::CommunityCloud.description(),
-            "Miner-provided GPUs"
+            "The Bourse - Miner-provided GPUs"
         );
     }
 }
@@ -589,10 +589,11 @@ mod tests {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloudProvider {
-    DataCrunch,
     Hyperstack,
     Lambda,
     HydraHost,
+    /// Verda cloud provider (replacement for DataCrunch)
+    Verda,
     /// The Priory - VIP managed machines (not a real cloud provider, but uses Deployment model)
     Vip,
 }
@@ -600,10 +601,10 @@ pub enum CloudProvider {
 impl CloudProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CloudProvider::DataCrunch => "datacrunch",
             CloudProvider::Hyperstack => "hyperstack",
             CloudProvider::Lambda => "lambda",
             CloudProvider::HydraHost => "hydrahost",
+            CloudProvider::Verda => "verda",
             CloudProvider::Vip => "vip",
         }
     }
@@ -620,10 +621,11 @@ impl FromStr for CloudProvider {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "datacrunch" => Ok(CloudProvider::DataCrunch),
+            "datacrunch" => Ok(CloudProvider::Verda), // DataCrunch replaced by Verda
             "hyperstack" => Ok(CloudProvider::Hyperstack),
             "lambda" => Ok(CloudProvider::Lambda),
             "hydrahost" => Ok(CloudProvider::HydraHost),
+            "verda" => Ok(CloudProvider::Verda),
             "vip" => Ok(CloudProvider::Vip),
             _ => Err(format!("Unknown provider: {}", s)),
         }
