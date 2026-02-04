@@ -170,7 +170,7 @@ pub struct MinerAdvertisedAddresses {
 /// All GPU categories in your nodes MUST have prices defined in the static strategy.
 ///
 /// TODO: Add floor_prices when dynamic bidding strategies are implemented.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BiddingConfig {
     /// Active bidding strategy (single enum variant)
     #[serde(default)]
@@ -191,7 +191,7 @@ pub enum BiddingStrategy {
             rename = "static_prices",
             deserialize_with = "deserialize_dollars_to_cents"
         )]
-        pub static_prices_cents: std::collections::HashMap<String, u32>,
+        static_prices_cents: std::collections::HashMap<String, u32>,
     },
 }
 
@@ -213,14 +213,6 @@ where
         .into_iter()
         .map(|(k, v)| (k, dollars_to_cents(v)))
         .collect())
-}
-
-impl Default for BiddingConfig {
-    fn default() -> Self {
-        Self {
-            strategy: BiddingStrategy::default(),
-        }
-    }
 }
 
 impl Default for BiddingStrategy {
