@@ -810,7 +810,7 @@ mod tests {
             .baseline_cache
             .write()
             .await
-            .update_with_timestamp(make_prices(), Instant::now() - Duration::from_secs(10));
+            .update_with_timestamp(make_prices(), Instant::now() - Duration::from_secs(61));
 
         let prices = client.get_baseline_prices().await.unwrap();
         assert_eq!(prices.get("H100"), Some(&2.0));
@@ -859,7 +859,7 @@ mod tests {
         let stale = snapshot("1.0", "2.0");
         client.token_cache.write().await.insert(
             1,
-            CachedTokenPrices::with_timestamp(stale, Instant::now() - Duration::from_secs(10)),
+            CachedTokenPrices::with_timestamp(stale, Instant::now() - Duration::from_secs(61)),
         );
 
         let result = client.get_token_prices(1).await.unwrap();
@@ -889,7 +889,7 @@ mod tests {
             1,
             CachedTokenPrices::with_timestamp(
                 stale.clone(),
-                Instant::now() - Duration::from_secs(10),
+                Instant::now() - Duration::from_secs(61),
             ),
         );
 
