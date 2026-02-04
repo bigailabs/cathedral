@@ -167,33 +167,32 @@ pub struct MinerAdvertisedAddresses {
 /// which are converted to cents internally on load.
 ///
 /// AutoBidder always runs when a validator_registration_endpoint is configured.
-/// All GPU categories in your nodes MUST have prices defined in static_prices.
-#[serde_as]
+/// All GPU categories in your nodes MUST have prices defined in the static strategy.
+///
+/// TODO: Add floor_prices when dynamic bidding strategies are implemented.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiddingConfig {
-    /// Static prices by GPU category in CENTS (converted from dollars in config)
-    /// Config accepts dollars (e.g., 2.50), stored as cents (250)
-    /// Every GPU category in your nodes MUST have a price here.
-    #[serde(
-        default,
-        rename = "static_prices",
-        deserialize_with = "deserialize_dollars_to_cents"
-    )]
-    pub static_prices_cents: std::collections::HashMap<String, u32>,
+    /// Active bidding strategy (single enum variant)
+    #[serde(default)]
+    pub strategy: BiddingStrategy,
+}
 
-    /// How often to submit price updates
-    #[serde_as(as = "DurationSeconds<u64>")]
-    #[serde(default = "default_bid_interval")]
-    pub bid_interval: Duration,
-
-    /// Floor prices in CENTS (converted from dollars in config)
-    /// If not set for a category, uses static_price as floor
-    #[serde(
-        default,
-        rename = "floor_prices",
-        deserialize_with = "deserialize_dollars_to_cents"
-    )]
-    pub floor_prices_cents: std::collections::HashMap<String, u32>,
+/// Bidding strategy configuration (one active variant)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BiddingStrategy {
+    /// Fixed prices by GPU category (in cents)
+    Static {
+        /// Static prices by GPU category in CENTS (converted from dollars in config)
+        /// Config accepts dollars (e.g., 2.50), stored as cents (250)
+        /// Every GPU category in your nodes MUST have a price here.
+        #[serde(
+            default,
+            rename = "static_prices",
+            deserialize_with = "deserialize_dollars_to_cents"
+        )]
+        pub static_prices_cents: std::collections::HashMap<String, u32>,
+    },
 }
 
 /// Convert dollars (f64) to cents (u32)
@@ -216,16 +215,18 @@ where
         .collect())
 }
 
-fn default_bid_interval() -> Duration {
-    Duration::from_secs(300) // 5 minutes
-}
-
 impl Default for BiddingConfig {
     fn default() -> Self {
         Self {
+            strategy: BiddingStrategy::default(),
+        }
+    }
+}
+
+impl Default for BiddingStrategy {
+    fn default() -> Self {
+        Self::Static {
             static_prices_cents: std::collections::HashMap::new(),
-            bid_interval: default_bid_interval(),
-            floor_prices_cents: std::collections::HashMap::new(),
         }
     }
 }

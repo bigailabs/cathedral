@@ -86,17 +86,8 @@ strategy = "highest_stake"
 # AutoBidder runs automatically when validator_registration_endpoint is set.
 # All GPU categories in your nodes MUST have prices defined here.
 [bidding]
-# How often to submit price updates (seconds)
-bid_interval = 300
-
 # Static prices by GPU category (in dollars per GPU-hour)
 # Example: A100 = 1.20 means $1.20/hour per GPU
-[bidding.static_prices]
+[bidding.strategy.static.static_prices]
 H100 = 2.50
 A100 = 1.20
-
-# Optional: Floor prices (minimum prices, in dollars per GPU-hour)
-# If not set, static_prices are used as the floor
-# [bidding.floor_prices]
-# H100 = 2.00
-# A100 = 1.00

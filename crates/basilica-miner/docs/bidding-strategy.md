@@ -14,13 +14,13 @@ Miners submit bids to validators specifying the price per GPU-hour they're willi
    - Bids include: `gpu_category`, `bid_per_hour`, `gpu_count`, `nonce`, `signature`
 
 2. **Auto-bidder** (`bidding.rs`):
-   - `AutoBidder` background task submits bids periodically
+   - `AutoBidder` registers nodes once and sends periodic health checks
    - Reads available GPU capacity from `NodeManager`
-   - Uses static prices configured per GPU category
-   - Supports floor prices (never bid below a minimum)
+   - Uses static prices configured per GPU category (static strategy)
 
 3. **Configuration** (`config.rs`):
-   - `BiddingConfig` with `enabled`, `static_prices`, `bid_interval`, `floor_prices`
+   - `BiddingConfig` with a single `strategy` enum (currently `static` only)
+   - Static strategy defines GPU prices per category
    - `NodeConfig` includes `gpu_category` and `gpu_count` for each node
 
 ### ❌ Not Yet Implemented
@@ -69,12 +69,9 @@ Miners submit bids to validators specifying the price per GPU-hour they're willi
 Miner sets fixed prices per GPU category in config file.
 
 ```toml
-[bidding]
+[bidding.strategy.static]
 # Fixed prices per GPU-hour by category
-prices = { H100 = 2.50, A100 = 1.20, RTX4090 = 0.80 }
-
-# How often to resubmit bids (seconds)
-bid_interval_secs = 300
+static_prices = { H100 = 2.50, A100 = 1.20, RTX4090 = 0.80 }
 ```
 
 **Pros:**
@@ -95,7 +92,7 @@ bid_interval_secs = 300
 Base prices on actual costs plus desired margin.
 
 ```toml
-[bidding.cost_basis]
+[bidding.strategy.cost_basis]
 # Electricity cost per kWh
 electricity_cost_kwh = 0.10
 
@@ -147,7 +144,7 @@ fn calculate_bid(category: &str, config: &CostBasisConfig) -> f64 {
 Adjust bids based on current node utilization.
 
 ```toml
-[bidding.utilization]
+[bidding.strategy.utilization]
 # Base price when fully idle
 idle_price = { H100 = 1.50, A100 = 0.80 }
 
@@ -205,7 +202,7 @@ fn calculate_utilization_bid(
 Adjust for electricity cost variations throughout the day.
 
 ```toml
-[bidding.time_of_day]
+[bidding.strategy.time_of_day]
 # Base prices
 base_price = { H100 = 2.00, A100 = 1.00 }
 
@@ -240,7 +237,7 @@ Combine multiple factors into a unified bidding strategy.
 [bidding]
 strategy = "hybrid"
 
-[bidding.hybrid]
+[bidding.strategy.hybrid]
 # Floor price (never bid below this)
 floor_price = { H100 = 1.00, A100 = 0.50 }
 
@@ -315,23 +312,20 @@ Add bidding configuration to `MinerConfig`:
 // config.rs - IMPLEMENTED
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BiddingConfig {
-    /// Enable automatic bidding
-    pub enabled: bool,
-    
+    /// Active bidding strategy (single enum variant)
+    pub strategy: BiddingStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BiddingStrategy {
     /// Static prices by GPU category ($/GPU-hour)
-    pub static_prices: HashMap<String, f64>,
-    
-    /// How often to submit bids
-    pub bid_interval: Duration,
-    
-    /// Floor prices - never bid below this
-    pub floor_prices: HashMap<String, f64>,
+    Static { static_prices: HashMap<String, f64> },
 }
 ```
 
-### Phase 2: Automated Bid Submission ✅ IMPLEMENTED
+### Phase 2: Automated Registration + Health Checks ✅ IMPLEMENTED
 
-The `AutoBidder` background task periodically submits bids:
+The `AutoBidder` background task registers nodes once and sends health checks:
 
 ```rust
 // bidding.rs - IMPLEMENTED
@@ -343,25 +337,26 @@ pub struct AutoBidder {
 
 impl AutoBidder {
     pub async fn run(&self) -> Result<()> {
-        let mut interval = tokio::time::interval(self.config.bid_interval);
-        
+        self.validate_node_prices(&nodes)?;
+        self.registration_client
+            .register_nodes_with_registrations(node_registrations)
+            .await?;
+
+        let mut health_ticker = tokio::time::interval(health_interval);
+
         loop {
-            interval.tick().await;
-            
-            // Get available capacity by category from registered nodes
-            let capacity = self.get_available_capacity().await?;
-            
-            for (category, gpu_count) in capacity {
-                let price = match self.get_bid_price(&category) {
-                    Some(p) => p,
-                    None => continue, // No price configured
-                };
-                
-                // Create and submit signed bid
-                let bid = validator_comms.create_signed_bid(category, price, gpu_count, ...)?;
-                validator_comms.forward_bid_to_validator(bid).await?;
+            tokio::select! {
+                _ = health_ticker.tick() => {
+                    self.registration_client.send_health_check().await?;
+                }
+                changed = shutdown_rx.changed() => {
+                    if changed.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
             }
         }
+        Ok(())
     }
 }
 ```
@@ -455,7 +450,7 @@ Expected Revenue = P(win) × Revenue(bid)
 
 If all miners use aggressive utilization-based bidding, prices can spiral down. Mitigations:
 
-1. **Floor price**: Never bid below cost
+1. **Floor price (future strategy)**: Never bid below cost
 2. **Collateral**: Miners with stake have skin in the game
 3. **Reputation**: Long-term miners optimize for sustainable pricing
 4. **Category caps**: Emission caps prevent single miner domination
@@ -478,20 +473,11 @@ New miners face a cold-start problem: no track record → validators may prefer 
 ```toml
 # config.toml - Add this section to enable auto-bidding
 
-[bidding]
-enabled = true
-bid_interval_secs = 300  # Submit bids every 5 minutes
-
 # Set your prices per GPU-hour for each category
-[bidding.static_prices]
+[bidding.strategy.static.static_prices]
 H100 = 2.50
 A100 = 1.20
 RTX4090 = 0.80
-
-# Optional: Set floor prices (never bid below these)
-[bidding.floor_prices]
-H100 = 1.00
-A100 = 0.50
 ```
 
 ### Node Configuration with GPU Info
@@ -504,7 +490,7 @@ host = "192.168.1.100"
 port = 22
 username = "basilica"
 hourly_rate_per_gpu = 2.50  # Fallback rate
-gpu_category = "H100"        # Must match bidding.static_prices key
+gpu_category = "H100"        # Must match bidding.strategy.static.static_prices key
 gpu_count = 8
 
 [[node_management.nodes]]
@@ -519,12 +505,7 @@ gpu_count = 4
 ### Future: Cost-Plus Strategy (Not Yet Implemented)
 
 ```toml
-[bidding]
-enabled = true
-strategy = "cost_plus"
-bid_interval_secs = 600
-
-[bidding.cost_plus]
+[bidding.strategy.cost_plus]
 electricity_cost_kwh = 0.12
 gpu_power_watts = { H100 = 700 }
 depreciation_per_hour = { H100 = 0.60 }
@@ -535,12 +516,7 @@ target_margin_pct = 25
 ### Future: Hybrid Strategy (Not Yet Implemented)
 
 ```toml
-[bidding]
-enabled = true
-strategy = "hybrid"
-bid_interval_secs = 300
-
-[bidding.hybrid]
+[bidding.strategy.hybrid]
 floor_price = { H100 = 1.00 }
 target_price = { H100 = 2.20 }
 ceiling_price = { H100 = 4.00 }
@@ -585,5 +561,4 @@ struct BiddingMetrics {
 | Time-of-Day | Low | Medium | Timezone complexity | ToU electricity |
 | Hybrid | High | High | Configuration complexity | Sophisticated miners |
 
-**Recommended starting point**: Static config with floor prices based on cost, then graduate to hybrid as you understand market dynamics.
-
+**Recommended starting point**: Static config with clear per-GPU pricing, then add floor prices when dynamic strategies land.
