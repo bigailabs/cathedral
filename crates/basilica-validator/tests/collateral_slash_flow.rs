@@ -1,5 +1,5 @@
 use anyhow::Result;
-use basilica_validator::billing::api_client::ValidatorSigner;
+use basilica_validator::basilica_api::ValidatorSigner;
 use basilica_validator::collateral::evidence::EvidenceStore;
 use basilica_validator::collateral::grace_tracker::GracePeriodTracker;
 use basilica_validator::collateral::SlashExecutor;

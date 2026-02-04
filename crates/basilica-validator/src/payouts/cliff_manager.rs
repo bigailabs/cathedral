@@ -9,25 +9,22 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use crate::billing::api_client::{
-    AccumulateRewardsRequestBody, PendingRewardsQuery, PendingStatusResponseBody,
-    ProcessThresholdRequestBody, ProcessValidationFailureRequestBody, UpdateUptimeRequestBody,
-    ValidatorSigner,
+use crate::basilica_api::{
+    AccumulateRewardsRequestBody, BasilicaApiClient, PendingRewardsQuery,
+    PendingStatusResponseBody, ProcessThresholdRequestBody, ProcessValidationFailureRequestBody,
+    UpdateUptimeRequestBody,
 };
-use crate::billing::BillingApiClient;
 use crate::collateral::manager::CollateralManager;
 use crate::collateral::CollateralState;
-use crate::config::{BillingConfig, CliffConfig};
+use crate::config::CliffConfig;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::pricing::TokenPriceClient;
 
 const MINUTES_PER_DAY: i32 = 24 * 60;
 
 #[derive(Clone)]
 pub struct CliffManager {
-    billing_api: BillingApiClient,
+    api_client: Arc<BasilicaApiClient>,
     collateral_manager: Option<Arc<CollateralManager>>,
-    price_client: Arc<TokenPriceClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     config: CliffConfig,
     netuid: u16,
@@ -35,22 +32,15 @@ pub struct CliffManager {
 
 impl CliffManager {
     pub fn new(
-        billing_config: &BillingConfig,
         config: CliffConfig,
-        signer: Arc<dyn ValidatorSigner>,
+        api_client: Arc<BasilicaApiClient>,
         collateral_manager: Option<Arc<CollateralManager>>,
-        price_client: Arc<TokenPriceClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         netuid: u16,
     ) -> Result<Self> {
         Ok(Self {
-            billing_api: BillingApiClient::new_with_signer(
-                billing_config.api_endpoint.clone(),
-                signer,
-                billing_config.timeout_secs,
-            )?,
+            api_client,
             collateral_manager,
-            price_client,
             gpu_profile_repo,
             config,
             netuid,
@@ -138,7 +128,7 @@ impl CliffManager {
         &self,
         delivery: &MinerDelivery,
     ) -> Result<PendingStatusResponseBody> {
-        self.billing_api
+        self.api_client
             .get_pending_rewards_status(PendingRewardsQuery {
                 miner_hotkey: delivery.miner_hotkey.clone(),
                 node_id: delivery.node_id.clone(),
@@ -166,7 +156,7 @@ impl CliffManager {
         }
 
         let backpay = self
-            .billing_api
+            .api_client
             .process_threshold_reached(ProcessThresholdRequestBody {
                 miner_hotkey: delivery.miner_hotkey.clone(),
                 node_id: delivery.node_id.clone(),
@@ -204,7 +194,7 @@ impl CliffManager {
             .ok_or_else(|| anyhow::anyhow!("Invalid miner_payment_usd"))?;
 
         let accumulate = self
-            .billing_api
+            .api_client
             .accumulate_miner_rewards(AccumulateRewardsRequestBody {
                 miner_hotkey: delivery.miner_hotkey.clone(),
                 node_id: delivery.node_id.clone(),
@@ -262,7 +252,7 @@ impl CliffManager {
         }
 
         let response = self
-            .billing_api
+            .api_client
             .update_miner_uptime(UpdateUptimeRequestBody {
                 miner_hotkey: miner_hotkey.to_string(),
                 node_id: node_id.to_string(),
@@ -285,7 +275,7 @@ impl CliffManager {
             return Ok(());
         }
 
-        self.billing_api
+        self.api_client
             .process_validation_failure(ProcessValidationFailureRequestBody {
                 miner_hotkey: miner_hotkey.to_string(),
                 node_id: node_id.to_string(),
@@ -320,7 +310,7 @@ impl CliffManager {
     }
 
     async fn fetch_alpha_price_usd(&self) -> Result<Decimal> {
-        self.price_client
+        self.api_client
             .get_alpha_price_usd(self.netuid)
             .await
             .context("Failed to fetch Alpha price")
@@ -400,20 +390,23 @@ impl MinerDeliveryExt for MinerDelivery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::billing::api_client::{
-        AccumulateRewardsRequestBody, PendingRewardsQuery, ProcessThresholdRequestBody,
-        ProcessValidationFailureRequestBody, UpdateUptimeRequestBody,
+    use crate::basilica_api::{
+        AccumulateRewardsRequestBody, AccumulateRewardsResponseBody, BaselinePriceFetcher,
+        BasilicaApiClient, PendingRewardsQuery, PendingStatusResponseBody,
+        ProcessThresholdRequestBody, ProcessThresholdResponseBody,
+        ProcessValidationFailureRequestBody, ProcessValidationFailureResponseBody,
+        TokenPriceFetcher, TokenPriceSnapshot, UpdateUptimeRequestBody, UpdateUptimeResponseBody,
+        ValidatorSigner,
     };
     use crate::collateral::evaluator::CollateralEvaluator;
     use crate::collateral::grace_tracker::GracePeriodTracker;
     use crate::collateral::manager::{hotkey_ss58_to_hex, node_id_to_hex, CollateralManager};
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
-    use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
-    use crate::pricing::TokenPriceClient;
     use axum::extract::{Query, State};
     use axum::routing::{get, post};
     use axum::{Json, Router};
+    use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::time::Duration as StdDuration;
     use tokio::net::TcpListener;
@@ -452,9 +445,8 @@ mod tests {
     impl TokenPriceFetcher for TestPriceFetcher {
         async fn fetch(
             &self,
-            _api_endpoint: &str,
+            _client: &BasilicaApiClient,
             _netuid: u16,
-            _signer: &dyn ValidatorSigner,
         ) -> Result<TokenPriceSnapshot> {
             Ok(TokenPriceSnapshot {
                 tao_price_usd: Decimal::ONE,
@@ -467,12 +459,21 @@ mod tests {
         }
     }
 
+    struct TestBaselineFetcher;
+
+    #[async_trait::async_trait]
+    impl BaselinePriceFetcher for TestBaselineFetcher {
+        async fn fetch(&self, _client: &BasilicaApiClient) -> Result<HashMap<String, f64>> {
+            Ok(HashMap::new())
+        }
+    }
+
     async fn handle_pending_status(
         State(state): State<MockBillingService>,
         Query(_query): Query<PendingRewardsQuery>,
-    ) -> Json<crate::billing::api_client::PendingStatusResponseBody> {
+    ) -> Json<PendingStatusResponseBody> {
         let pending = state.pending.lock().await;
-        Json(crate::billing::api_client::PendingStatusResponseBody {
+        Json(PendingStatusResponseBody {
             exists: true,
             pending_alpha: pending.pending_alpha.to_string(),
             pending_usd: pending.pending_usd.to_string(),
@@ -487,14 +488,14 @@ mod tests {
     async fn handle_accumulate(
         State(state): State<MockBillingService>,
         Json(body): Json<AccumulateRewardsRequestBody>,
-    ) -> Json<crate::billing::api_client::AccumulateRewardsResponseBody> {
+    ) -> Json<AccumulateRewardsResponseBody> {
         let epoch_usd = Decimal::from_str(&body.epoch_earnings_usd).unwrap_or(Decimal::ZERO);
         let alpha_price = Decimal::from_str(&body.alpha_price_usd).unwrap_or(Decimal::ONE);
         let epoch_alpha = epoch_usd / alpha_price;
 
         let mut pending = state.pending.lock().await;
         if pending.threshold_reached {
-            return Json(crate::billing::api_client::AccumulateRewardsResponseBody {
+            return Json(AccumulateRewardsResponseBody {
                 result: AccumulationType::ImmediatePayout as i32,
                 pending_alpha: "0".to_string(),
                 pending_usd: "0".to_string(),
@@ -507,7 +508,7 @@ mod tests {
         pending.pending_alpha += epoch_alpha;
         pending.pending_usd += epoch_usd;
         pending.epochs_accumulated += 1;
-        Json(crate::billing::api_client::AccumulateRewardsResponseBody {
+        Json(AccumulateRewardsResponseBody {
             result: AccumulationType::Accumulated as i32,
             pending_alpha: pending.pending_alpha.to_string(),
             pending_usd: pending.pending_usd.to_string(),
@@ -520,9 +521,9 @@ mod tests {
     async fn handle_threshold(
         State(state): State<MockBillingService>,
         Json(_body): Json<ProcessThresholdRequestBody>,
-    ) -> Json<crate::billing::api_client::ProcessThresholdResponseBody> {
+    ) -> Json<ProcessThresholdResponseBody> {
         let mut pending = state.pending.lock().await;
-        let response = crate::billing::api_client::ProcessThresholdResponseBody {
+        let response = ProcessThresholdResponseBody {
             backpay_alpha: pending.pending_alpha.to_string(),
             backpay_usd: pending.pending_usd.to_string(),
             epochs_paid: pending.epochs_accumulated,
@@ -537,10 +538,10 @@ mod tests {
     async fn handle_uptime(
         State(state): State<MockBillingService>,
         Json(body): Json<UpdateUptimeRequestBody>,
-    ) -> Json<crate::billing::api_client::UpdateUptimeResponseBody> {
+    ) -> Json<UpdateUptimeResponseBody> {
         let mut pending = state.pending.lock().await;
         pending.continuous_uptime_minutes = body.uptime_minutes;
-        Json(crate::billing::api_client::UpdateUptimeResponseBody {
+        Json(UpdateUptimeResponseBody {
             threshold_reached: false,
         })
     }
@@ -548,9 +549,9 @@ mod tests {
     async fn handle_failure(
         State(state): State<MockBillingService>,
         Json(_body): Json<ProcessValidationFailureRequestBody>,
-    ) -> Json<crate::billing::api_client::ProcessValidationFailureResponseBody> {
+    ) -> Json<ProcessValidationFailureResponseBody> {
         let mut pending = state.pending.lock().await;
-        let response = crate::billing::api_client::ProcessValidationFailureResponseBody {
+        let response = ProcessValidationFailureResponseBody {
             forfeited_alpha: pending.pending_alpha.to_string(),
             forfeited_usd: pending.pending_usd.to_string(),
             epochs_lost: pending.epochs_accumulated,
@@ -587,12 +588,15 @@ mod tests {
         Ok(addr)
     }
 
-    async fn build_price_client() -> Result<Arc<TokenPriceClient>> {
+    async fn build_api_client(api_endpoint: String) -> Result<Arc<BasilicaApiClient>> {
         let signer: Arc<dyn ValidatorSigner> = Arc::new(TestSigner);
-        Ok(Arc::new(TokenPriceClient::new_with_fetcher(
-            "http://localhost".to_string(),
-            StdDuration::from_secs(60),
+        Ok(Arc::new(BasilicaApiClient::new_with_fetchers(
+            api_endpoint,
             signer,
+            reqwest::Client::new(),
+            StdDuration::from_secs(60),
+            StdDuration::from_secs(60),
+            Arc::new(TestBaselineFetcher),
             Arc::new(TestPriceFetcher),
         )))
     }
@@ -620,28 +624,13 @@ mod tests {
 
         let persistence = SimplePersistence::for_testing().await?;
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let price_client = build_price_client().await?;
-
-        let billing_config = BillingConfig {
-            enabled: true,
-            api_endpoint: format!("http://{}", addr),
-            ..Default::default()
-        };
+        let api_client = build_api_client(format!("http://{}", addr)).await?;
 
         let cliff_config = CliffConfig {
             enabled: true,
             ..Default::default()
         };
-        let signer = Arc::new(TestSigner);
-        let cliff_manager = CliffManager::new(
-            &billing_config,
-            cliff_config,
-            signer,
-            None,
-            price_client,
-            gpu_repo,
-            1,
-        )?;
+        let cliff_manager = CliffManager::new(cliff_config, api_client, None, gpu_repo, 1)?;
 
         let delivery = build_delivery("node-1");
         let outputs = cliff_manager.process_delivery(delivery).await?;
@@ -663,28 +652,13 @@ mod tests {
         let addr = start_mock_server(state.clone()).await?;
         let persistence = SimplePersistence::for_testing().await?;
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let price_client = build_price_client().await?;
-
-        let billing_config = BillingConfig {
-            enabled: true,
-            api_endpoint: format!("http://{}", addr),
-            ..Default::default()
-        };
+        let api_client = build_api_client(format!("http://{}", addr)).await?;
 
         let cliff_config = CliffConfig {
             enabled: true,
             ..Default::default()
         };
-        let signer = Arc::new(TestSigner);
-        let cliff_manager = CliffManager::new(
-            &billing_config,
-            cliff_config,
-            signer,
-            None,
-            price_client,
-            gpu_repo,
-            1,
-        )?;
+        let cliff_manager = CliffManager::new(cliff_config, api_client, None, gpu_repo, 1)?;
 
         let delivery = build_delivery("node-2");
         let outputs = cliff_manager.process_delivery(delivery).await?;
@@ -701,7 +675,7 @@ mod tests {
 
         let persistence = SimplePersistence::for_testing().await?;
         let gpu_repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let price_client = build_price_client().await?;
+        let api_client = build_api_client(format!("http://{}", addr)).await?;
 
         let collateral_config = CollateralConfig {
             enabled: true,
@@ -717,7 +691,7 @@ mod tests {
         ));
         let collateral_manager = Arc::new(CollateralManager::new(
             Arc::new(persistence.clone()),
-            price_client.clone(),
+            api_client.clone(),
             evaluator,
             grace_tracker,
             collateral_config,
@@ -741,24 +715,15 @@ mod tests {
         .execute(persistence.pool())
         .await?;
 
-        let billing_config = BillingConfig {
-            enabled: true,
-            api_endpoint: format!("http://{}", addr),
-            ..Default::default()
-        };
-
-        let signer = Arc::new(TestSigner);
         let cliff_manager = CliffManager::new(
-            &billing_config,
             CliffConfig {
                 enabled: true,
                 duration_days: 14,
                 forfeit_on_failure: true,
                 collateral_bypasses_cliff: true,
             },
-            signer,
+            api_client,
             Some(collateral_manager),
-            price_client,
             gpu_repo,
             1,
         )?;

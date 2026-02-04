@@ -1,5 +1,6 @@
 use crate::api::ApiHandler;
-use crate::billing::{BillingApiClient, DeliverySyncTask};
+use crate::basilica_api::{BasilicaApiClient, ValidatorSigner};
+use crate::billing::DeliverySyncTask;
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::collateral::collateral_scan::Collateral;
 use crate::collateral::evaluator::CollateralEvaluator;
@@ -17,7 +18,6 @@ use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
-use crate::pricing::TokenPriceClient;
 
 use anyhow::{Context, Result};
 use basilica_common::MemoryStorage;
@@ -72,13 +72,13 @@ impl ValidatorService {
         let validator_metrics = self.init_metrics(persistence_arc.clone()).await?;
         let bittensor_service = self.init_bittensor_service().await?;
 
-        let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> =
-            bittensor_service.clone();
-        let token_price_client = Arc::new(TokenPriceClient::new(
+        let signer: Arc<dyn ValidatorSigner> = bittensor_service.clone();
+        let api_client = Arc::new(BasilicaApiClient::new(
             self.config.billing.api_endpoint.clone(),
-            self.config.pricing.cache_ttl(),
             signer,
             self.config.billing.timeout_secs,
+            StdDuration::from_secs(self.config.auction.price_cache_ttl_secs),
+            self.config.pricing.cache_ttl(),
         )?);
 
         let chain_registration = self
@@ -91,7 +91,7 @@ impl ValidatorService {
             storage.clone(),
             persistence_arc.clone(),
             gpu_profile_repo.clone(),
-            token_price_client.clone(),
+            api_client.clone(),
             validator_metrics.as_ref(),
         )?;
         let validator_hotkey = self.build_validator_hotkey(&bittensor_service)?;
@@ -109,14 +109,13 @@ impl ValidatorService {
                 persistence_arc.clone(),
                 collateral_metrics.clone(),
                 bittensor_service.clone(),
-                token_price_client.clone(),
+                api_client.clone(),
             )
             .await?;
 
         let cliff_manager = self.init_cliff_manager(
-            bittensor_service.clone(),
             collateral_manager.clone(),
-            token_price_client.clone(),
+            api_client.clone(),
             gpu_profile_repo.clone(),
         )?;
 
@@ -129,7 +128,7 @@ impl ValidatorService {
 
         let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
         let delivery_sync_task = self.init_delivery_sync_task(
-            bittensor_service.clone(),
+            api_client.clone(),
             delivery_repo.clone(),
             cliff_manager.clone(),
         )?;
@@ -258,7 +257,7 @@ impl ValidatorService {
         storage: MemoryStorage,
         persistence: Arc<SimplePersistence>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
-        token_price_client: Arc<TokenPriceClient>,
+        api_client: Arc<BasilicaApiClient>,
         validator_metrics: Option<&ValidatorMetrics>,
     ) -> Result<Arc<WeightSetter>> {
         let gpu_scoring_engine = if let Some(metrics) = validator_metrics {
@@ -286,7 +285,7 @@ impl ValidatorService {
             gpu_scoring_engine,
             self.config.emission.clone(),
             self.config.auction.clone(),
-            token_price_client,
+            api_client,
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),
             if self.config.collateral.enabled {
@@ -330,7 +329,7 @@ impl ValidatorService {
         persistence: Arc<SimplePersistence>,
         collateral_metrics: Option<Arc<ValidatorPrometheusMetrics>>,
         signer: Arc<BittensorService>,
-        token_price_client: Arc<TokenPriceClient>,
+        api_client: Arc<BasilicaApiClient>,
     ) -> Result<(Option<Arc<CollateralManager>>, Option<Arc<SlashExecutor>>)> {
         if !self.config.collateral.enabled {
             return Ok((None, None));
@@ -350,7 +349,7 @@ impl ValidatorService {
         ));
         let collateral_manager = Arc::new(CollateralManager::new(
             persistence.clone(),
-            token_price_client,
+            api_client,
             evaluator,
             grace_tracker.clone(),
             collateral_config.clone(),
@@ -370,21 +369,17 @@ impl ValidatorService {
 
     fn init_cliff_manager(
         &self,
-        bittensor_service: Arc<BittensorService>,
         collateral_manager: Option<Arc<CollateralManager>>,
-        token_price_client: Arc<TokenPriceClient>,
+        api_client: Arc<BasilicaApiClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
     ) -> Result<Option<Arc<CliffManager>>> {
         if !self.config.billing.enabled || !self.config.cliff.enabled {
             return Ok(None);
         }
-        let signer: Arc<dyn crate::billing::api_client::ValidatorSigner> = bittensor_service;
         let cliff_manager = CliffManager::new(
-            &self.config.billing,
             self.config.cliff.clone(),
-            signer,
+            api_client,
             collateral_manager,
-            token_price_client,
             gpu_profile_repo,
             self.config.bittensor.common.netuid,
         )?;
@@ -412,18 +407,13 @@ impl ValidatorService {
 
     fn init_delivery_sync_task(
         &self,
-        bittensor_service: Arc<BittensorService>,
+        api_client: Arc<BasilicaApiClient>,
         delivery_repo: Arc<MinerDeliveryRepository>,
         cliff_manager: Option<Arc<CliffManager>>,
     ) -> Result<Option<DeliverySyncTask>> {
         if !self.config.billing.enabled {
             return Ok(None);
         }
-        let api_client = Arc::new(BillingApiClient::new(
-            self.config.billing.api_endpoint.clone(),
-            bittensor_service,
-            self.config.billing.timeout_secs,
-        )?);
         Ok(Some(DeliverySyncTask::new(
             api_client,
             delivery_repo,

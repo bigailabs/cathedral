@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
 
+use crate::basilica_api::BasilicaApiClient;
 use crate::config::auction::AuctionConfig;
-use crate::pricing::PriceClient;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedBid {
@@ -28,16 +28,13 @@ pub struct AuctionResult {
 }
 
 pub struct AuctionEngine {
-    price_client: Arc<PriceClient>,
+    api_client: Arc<BasilicaApiClient>,
     config: AuctionConfig,
 }
 
 impl AuctionEngine {
-    pub fn new(price_client: Arc<PriceClient>, config: AuctionConfig) -> Self {
-        Self {
-            price_client,
-            config,
-        }
+    pub fn new(api_client: Arc<BasilicaApiClient>, config: AuctionConfig) -> Self {
+        Self { api_client, config }
     }
 
     pub async fn clear_auction(
@@ -45,8 +42,8 @@ impl AuctionEngine {
         category: &str,
         bids: &[ValidatedBid],
     ) -> Result<AuctionResult> {
-        let prices = self.price_client.get_baseline_prices().await?;
-        // PriceClient returns dollars, convert to cents
+        let prices = self.api_client.get_baseline_prices().await?;
+        // Baseline prices are in dollars, convert to cents
         let baseline_dollars = prices
             .get(category)
             .copied()
@@ -83,20 +80,56 @@ impl AuctionEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pricing::client::{PriceClient, PriceFetcher};
+    use crate::basilica_api::{
+        BaselinePriceFetcher, BasilicaApiClient, TokenPriceFetcher, TokenPriceSnapshot,
+        ValidatorSigner,
+    };
     use async_trait::async_trait;
+    use reqwest::Client;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
 
-    struct TestFetcher {
+    struct TestBaselineFetcher {
         prices: HashMap<String, f64>,
     }
 
     #[async_trait]
-    impl PriceFetcher for TestFetcher {
-        async fn fetch(&self, _endpoint: &str) -> Result<HashMap<String, f64>> {
+    impl BaselinePriceFetcher for TestBaselineFetcher {
+        async fn fetch(&self, _client: &BasilicaApiClient) -> Result<HashMap<String, f64>> {
             Ok(self.prices.clone())
+        }
+    }
+
+    struct TestTokenFetcher;
+
+    #[async_trait]
+    impl TokenPriceFetcher for TestTokenFetcher {
+        async fn fetch(
+            &self,
+            _client: &BasilicaApiClient,
+            _netuid: u16,
+        ) -> Result<TokenPriceSnapshot> {
+            Ok(TokenPriceSnapshot {
+                tao_price_usd: rust_decimal::Decimal::ONE,
+                alpha_price_usd: rust_decimal::Decimal::ONE,
+                alpha_price_tao: rust_decimal::Decimal::ONE,
+                tao_reserve: rust_decimal::Decimal::ONE,
+                alpha_reserve: rust_decimal::Decimal::ONE,
+                fetched_at: "2024-01-01T00:00:00Z".to_string(),
+            })
+        }
+    }
+
+    struct TestSigner;
+
+    impl ValidatorSigner for TestSigner {
+        fn hotkey(&self) -> String {
+            "test_hotkey".to_string()
+        }
+
+        fn sign(&self, _message: &[u8]) -> Result<String> {
+            Ok("deadbeef".to_string())
         }
     }
 
@@ -105,11 +138,17 @@ mod tests {
     }
 
     fn make_engine_with_floor(prices: HashMap<String, f64>, floor: f64) -> AuctionEngine {
-        let fetcher: Arc<dyn PriceFetcher> = Arc::new(TestFetcher { prices });
-        let client = Arc::new(PriceClient::new_with_fetcher(
+        let fetcher: Arc<dyn BaselinePriceFetcher> = Arc::new(TestBaselineFetcher { prices });
+        let token_fetcher: Arc<dyn TokenPriceFetcher> = Arc::new(TestTokenFetcher);
+        let signer: Arc<dyn ValidatorSigner> = Arc::new(TestSigner);
+        let client = Arc::new(BasilicaApiClient::new_with_fetchers(
             "http://localhost".to_string(),
+            signer,
+            Client::new(),
+            Duration::from_secs(60),
             Duration::from_secs(60),
             fetcher,
+            token_fetcher,
         ));
         let config = AuctionConfig {
             price_api_endpoint: "http://localhost".to_string(),
