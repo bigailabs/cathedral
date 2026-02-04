@@ -3,12 +3,12 @@ use chrono::{Duration, Utc};
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use crate::billing::api_client::BillingApiClient;
+use crate::basilica_api::BasilicaApiClient;
 use crate::payouts::CliffManager;
 use crate::persistence::MinerDeliveryRepository;
 
 pub struct DeliverySyncTask {
-    api_client: Arc<BillingApiClient>,
+    api_client: Arc<BasilicaApiClient>,
     delivery_repo: Arc<MinerDeliveryRepository>,
     sync_interval_secs: u64,
     lookback_hours: u64,
@@ -17,7 +17,7 @@ pub struct DeliverySyncTask {
 
 impl DeliverySyncTask {
     pub fn new(
-        api_client: Arc<BillingApiClient>,
+        api_client: Arc<BasilicaApiClient>,
         delivery_repo: Arc<MinerDeliveryRepository>,
         sync_interval_secs: u64,
         lookback_hours: u64,

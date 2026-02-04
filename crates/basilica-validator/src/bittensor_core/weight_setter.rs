@@ -3,6 +3,7 @@
 //! Manages Bittensor weight setting operations for the Validator.
 //! Sets weights every N blocks based on miner scores from node validations.
 
+use crate::basilica_api::BasilicaApiClient;
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
 use crate::config::auction::AuctionConfig;
 use crate::config::emission::EmissionConfig;
@@ -12,7 +13,6 @@ use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
-use crate::pricing::TokenPriceClient;
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
@@ -62,7 +62,7 @@ pub struct WeightSetter {
     emission_config: EmissionConfig,
     auction_config: AuctionConfig,
     delivery_repository: Arc<MinerDeliveryRepository>,
-    token_price_client: Arc<TokenPriceClient>,
+    api_client: Arc<BasilicaApiClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
     collateral_grace_period: Option<chrono::Duration>,
@@ -81,7 +81,7 @@ impl WeightSetter {
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
         auction_config: AuctionConfig,
-        token_price_client: Arc<TokenPriceClient>,
+        api_client: Arc<BasilicaApiClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
         collateral_grace_period: Option<chrono::Duration>,
@@ -106,7 +106,7 @@ impl WeightSetter {
             emission_config,
             auction_config,
             delivery_repository,
-            token_price_client,
+            api_client,
             gpu_profile_repo,
             metrics,
             collateral_grace_period,
@@ -412,11 +412,7 @@ impl WeightSetter {
     }
 
     async fn log_tao_price(&self) {
-        match self
-            .token_price_client
-            .get_tao_price_usd(self.config.netuid)
-            .await
-        {
+        match self.api_client.get_tao_price_usd(self.config.netuid).await {
             Ok(tao_price) => {
                 info!(
                     tao_price_usd = %tao_price,

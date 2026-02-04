@@ -1,9 +1,9 @@
+use crate::basilica_api::BasilicaApiClient;
 use crate::collateral::evaluator::{CollateralEvaluator, CollateralState, CollateralStatus};
 use crate::collateral::grace_tracker::GracePeriodTracker;
 use crate::config::collateral::CollateralConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::SimplePersistence;
-use crate::pricing::TokenPriceClient;
 use anyhow::Result;
 use basilica_common::identity::Hotkey;
 use hex::encode;
@@ -24,7 +24,7 @@ pub enum CollateralPreference {
 #[derive(Clone)]
 pub struct CollateralManager {
     persistence: Arc<SimplePersistence>,
-    price_client: Arc<TokenPriceClient>,
+    api_client: Arc<BasilicaApiClient>,
     evaluator: Arc<CollateralEvaluator>,
     grace_tracker: Arc<GracePeriodTracker>,
     config: CollateralConfig,
@@ -35,7 +35,7 @@ pub struct CollateralManager {
 impl CollateralManager {
     pub fn new(
         persistence: Arc<SimplePersistence>,
-        price_client: Arc<TokenPriceClient>,
+        api_client: Arc<BasilicaApiClient>,
         evaluator: Arc<CollateralEvaluator>,
         grace_tracker: Arc<GracePeriodTracker>,
         config: CollateralConfig,
@@ -44,7 +44,7 @@ impl CollateralManager {
     ) -> Self {
         Self {
             persistence,
-            price_client,
+            api_client,
             evaluator,
             grace_tracker,
             config,
@@ -78,7 +78,7 @@ impl CollateralManager {
             ));
         }
 
-        let alpha_price_usd = match self.price_client.get_alpha_price_usd(self.netuid).await {
+        let alpha_price_usd = match self.api_client.get_alpha_price_usd(self.netuid).await {
             Ok(price) => Some(price),
             Err(err) => {
                 warn!("Alpha price unavailable: {}", err);
@@ -221,13 +221,15 @@ fn u256_to_alpha(amount: alloy_primitives::U256) -> Decimal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::billing::api_client::ValidatorSigner;
+    use crate::basilica_api::{
+        BaselinePriceFetcher, BasilicaApiClient, TokenPriceFetcher, TokenPriceSnapshot,
+        ValidatorSigner,
+    };
     use crate::config::collateral::CollateralConfig;
     use crate::persistence::SimplePersistence;
-    use crate::pricing::token_prices::{TokenPriceFetcher, TokenPriceSnapshot};
-    use crate::pricing::TokenPriceClient;
     use chrono::Duration;
     use rust_decimal::Decimal;
+    use std::collections::HashMap;
 
     struct TestSigner;
 
@@ -247,11 +249,19 @@ mod tests {
     impl TokenPriceFetcher for TestFetcher {
         async fn fetch(
             &self,
-            _api_endpoint: &str,
+            _client: &BasilicaApiClient,
             _netuid: u16,
-            _signer: &dyn ValidatorSigner,
         ) -> Result<TokenPriceSnapshot> {
             anyhow::bail!("unused")
+        }
+    }
+
+    struct TestBaselineFetcher;
+
+    #[async_trait::async_trait]
+    impl BaselinePriceFetcher for TestBaselineFetcher {
+        async fn fetch(&self, _client: &BasilicaApiClient) -> Result<HashMap<String, f64>> {
+            Ok(HashMap::new())
         }
     }
 
@@ -275,15 +285,18 @@ mod tests {
             grace_tracker.clone(),
         ));
         let signer: Arc<dyn ValidatorSigner> = Arc::new(TestSigner);
-        let price_client = Arc::new(TokenPriceClient::new_with_fetcher(
+        let api_client = Arc::new(BasilicaApiClient::new_with_fetchers(
             "http://localhost".to_string(),
-            std::time::Duration::from_secs(60),
             signer,
+            reqwest::Client::new(),
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(60),
+            Arc::new(TestBaselineFetcher),
             Arc::new(TestFetcher),
         ));
         let manager = CollateralManager::new(
             persistence.clone(),
-            price_client,
+            api_client,
             evaluator,
             grace_tracker,
             config,

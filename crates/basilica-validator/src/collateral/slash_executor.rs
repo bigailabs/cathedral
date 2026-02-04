@@ -1,4 +1,4 @@
-use crate::billing::api_client::ValidatorSigner;
+use crate::basilica_api::ValidatorSigner;
 use crate::collateral::evidence::{EvidenceStore, SlashEvidence};
 use crate::collateral::grace_tracker::GracePeriodTracker;
 use crate::collateral::manager::{hotkey_ss58_to_hex, node_id_to_hex};
