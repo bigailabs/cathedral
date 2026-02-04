@@ -13,8 +13,8 @@ Miners submit bids to validators specifying the price per GPU-hour they're willi
    - `forward_bid_to_validator()` sends the bid to the validator's gRPC endpoint
    - Bids include: `gpu_category`, `bid_per_hour`, `gpu_count`, `nonce`, `signature`
 
-2. **Auto-bidder** (`bidding.rs`):
-   - `AutoBidder` registers nodes once and sends periodic health checks
+2. **Bid manager** (`bidding.rs`):
+   - `BidManager` registers nodes once and sends periodic health checks
    - Reads available GPU capacity from `NodeManager`
    - Uses static prices configured per GPU category (static strategy)
 
@@ -325,17 +325,17 @@ pub enum BiddingStrategy {
 
 ### Phase 2: Automated Registration + Health Checks ✅ IMPLEMENTED
 
-The `AutoBidder` background task registers nodes once and sends health checks:
+The `BidManager` background task registers nodes once and sends health checks:
 
 ```rust
 // bidding.rs - IMPLEMENTED
-pub struct AutoBidder {
+pub struct BidManager {
     config: BiddingConfig,
     node_manager: Arc<NodeManager>,
     validator_comms: Arc<RwLock<Option<ValidatorCommsServer>>>,
 }
 
-impl AutoBidder {
+impl BidManager {
     pub async fn run(&self) -> Result<()> {
         self.validate_node_prices(&nodes)?;
         self.registration_client

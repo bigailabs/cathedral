@@ -4,7 +4,7 @@
 //! - Initial registration with validator (RegisterBid)
 //! - Periodic health checks
 //!
-//! AutoBidder is the single source of truth for GPU pricing.
+//! BidManager is the single source of truth for GPU pricing.
 //! All prices come from the static bidding strategy.
 
 use anyhow::Result;
@@ -21,15 +21,15 @@ use crate::config::{BiddingConfig, BiddingStrategy};
 use crate::node_manager::{NodeManager, RegisteredNode};
 use crate::registration_client::RegistrationClient;
 
-/// Automatic bidder that owns the complete registration lifecycle
-pub struct AutoBidder {
+/// Bid manager that owns the complete registration lifecycle
+pub struct BidManager {
     config: BiddingConfig,
     node_manager: Arc<NodeManager>,
     registration_client: Arc<RegistrationClient>,
 }
 
-impl AutoBidder {
-    /// Create a new auto-bidder with registration client
+impl BidManager {
+    /// Create a new bid manager with registration client
     pub fn new(
         config: BiddingConfig,
         node_manager: Arc<NodeManager>,
@@ -88,7 +88,7 @@ impl AutoBidder {
             .collect()
     }
 
-    /// Run the auto-bidder lifecycle:
+    /// Run the bid manager lifecycle:
     /// 1. Validate all nodes have prices
     /// 2. Register with validator
     /// 3. Deploy SSH keys if provided
@@ -102,7 +102,7 @@ impl AutoBidder {
             // Still wait for shutdown so we don't cause crash-loop
             loop {
                 if shutdown_rx.changed().await.is_err() || *shutdown_rx.borrow() {
-                    info!("AutoBidder shutdown requested (no nodes)");
+                    info!("BidManager shutdown requested (no nodes)");
                     return Ok(());
                 }
             }
@@ -111,12 +111,12 @@ impl AutoBidder {
         self.validate_node_prices(&nodes)?;
 
         info!(
-            "Starting AutoBidder with {} nodes, {} GPU categories configured",
+            "Starting BidManager with {} nodes, {} GPU categories configured",
             nodes.len(),
             self.static_prices().len()
         );
 
-        // 1. Register nodes with auto-bidder prices
+        // 1. Register nodes with bid manager prices
         let node_registrations = self.build_node_registrations(&nodes);
         let state = self
             .registration_client
@@ -158,7 +158,7 @@ impl AutoBidder {
                 }
                 changed = shutdown_rx.changed() => {
                     if changed.is_err() || *shutdown_rx.borrow() {
-                        info!("AutoBidder shutdown requested");
+                        info!("BidManager shutdown requested");
                         break;
                     }
                 }

@@ -83,7 +83,7 @@ strategy = "highest_stake"
 # =============================================================================
 # Bidding Configuration (GPU Pricing)
 # =============================================================================
-# AutoBidder runs automatically when validator_registration_endpoint is set.
+# BidManager runs automatically when validator_registration_endpoint is set.
 # All GPU categories in your nodes MUST have prices defined here.
 [bidding]
 # Static prices by GPU category (in dollars per GPU-hour)

@@ -166,7 +166,7 @@ pub struct MinerAdvertisedAddresses {
 /// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
 /// which are converted to cents internally on load.
 ///
-/// AutoBidder always runs when a validator_registration_endpoint is configured.
+/// BidManager always runs when a validator_registration_endpoint is configured.
 /// All GPU categories in your nodes MUST have prices defined in the static strategy.
 ///
 /// TODO: Add floor_prices when dynamic bidding strategies are implemented.

@@ -8,7 +8,7 @@
 //! - SSH key deployment to nodes
 //!
 //! Note: The registration lifecycle (registration, health checks, price updates)
-//! is orchestrated by AutoBidder. This module provides the underlying gRPC calls.
+//! is orchestrated by BidManager. This module provides the underlying gRPC calls.
 
 use std::sync::Arc;
 
@@ -184,7 +184,7 @@ impl RegistrationClient {
     }
 
     /// Register nodes with the validator using pre-built registrations.
-    /// This is the primary registration method - AutoBidder builds the registrations
+    /// This is the primary registration method - BidManager builds the registrations
     /// with prices from BiddingConfig.
     pub async fn register_nodes_with_registrations(
         &self,

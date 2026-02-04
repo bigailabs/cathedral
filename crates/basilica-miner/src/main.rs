@@ -28,7 +28,7 @@ mod persistence;
 mod registration_client;
 mod validator_discovery;
 
-use bidding::AutoBidder;
+use bidding::BidManager;
 use bittensor_core::ChainRegistration;
 use config::MinerConfig;
 use node_manager::{NodeManager, RegisteredNode};
@@ -46,7 +46,7 @@ pub struct MinerState {
     pub registration_db: RegistrationDb,
     pub metrics: Option<metrics::MinerMetrics>,
     pub validator_discovery: Arc<validator_discovery::ValidatorDiscovery>,
-    pub auto_bidder: Arc<AutoBidder>,
+    pub bid_manager: Arc<BidManager>,
     pub node_manager: Arc<NodeManager>,
 }
 
@@ -184,8 +184,8 @@ impl MinerState {
             bittensor_service,
         ));
 
-        // Initialize auto-bidder (owns registration lifecycle)
-        let auto_bidder = Arc::new(AutoBidder::new(
+        // Initialize bid manager (owns registration lifecycle)
+        let bid_manager = Arc::new(BidManager::new(
             config.bidding.clone(),
             node_manager.clone(),
             registration_client.clone(),
@@ -202,7 +202,7 @@ impl MinerState {
             registration_db,
             metrics,
             validator_discovery,
-            auto_bidder,
+            bid_manager,
             node_manager,
         })
     }
@@ -253,13 +253,13 @@ impl MinerState {
             }
         });
 
-        // Start auto-bidder (owns registration lifecycle: register, health checks, price updates)
-        let bidder_handle = if self.registration_client.has_registration_endpoint() {
-            let bidder = self.auto_bidder.clone();
-            let bidder_shutdown_rx = shutdown_rx.clone();
+        // Start bid manager (owns registration lifecycle: register, health checks)
+        let bid_manager_handle = if self.registration_client.has_registration_endpoint() {
+            let bid_manager = self.bid_manager.clone();
+            let bid_manager_shutdown_rx = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                if let Err(e) = bidder.run(bidder_shutdown_rx).await {
-                    error!("AutoBidder error: {}", e);
+                if let Err(e) = bid_manager.run(bid_manager_shutdown_rx).await {
+                    error!("BidManager error: {}", e);
                 }
             }))
         } else {
@@ -275,11 +275,11 @@ impl MinerState {
                 info!("Received shutdown signal, stopping miner...");
             }
             _ = async {
-                if let Some(handle) = bidder_handle {
+                if let Some(handle) = bid_manager_handle {
                     handle.await.ok();
                 }
             } => {
-                error!("AutoBidder stopped unexpectedly");
+                error!("BidManager stopped unexpectedly");
             }
             _ = discovery_handle => {
                 error!("Validator discovery service stopped unexpectedly");
