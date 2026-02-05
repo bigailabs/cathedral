@@ -89,9 +89,6 @@ pub struct ValidatorConfig {
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
-    /// Cliff + backpay configuration for miner rewards
-    #[serde(default)]
-    pub cliff: CliffConfig,
     /// Collateral enforcement configuration
     #[serde(default)]
     pub collateral: super::collateral::CollateralConfig,
@@ -623,33 +620,6 @@ pub struct BillingConfig {
     pub circuit_window_duration_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CliffConfig {
-    /// Enable cliff + backpay reward accumulation
-    #[serde(default = "default_cliff_enabled")]
-    pub enabled: bool,
-    /// Number of days to accumulate before backpay
-    #[serde(default = "default_cliff_duration_days")]
-    pub duration_days: u32,
-    /// Whether to forfeit pending rewards on validation failure
-    #[serde(default = "default_cliff_forfeit_on_failure")]
-    pub forfeit_on_failure: bool,
-    /// Whether collateral bypasses the cliff
-    #[serde(default = "default_collateral_bypasses_cliff")]
-    pub collateral_bypasses_cliff: bool,
-}
-
-impl Default for CliffConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_cliff_enabled(),
-            duration_days: default_cliff_duration_days(),
-            forfeit_on_failure: default_cliff_forfeit_on_failure(),
-            collateral_bypasses_cliff: default_collateral_bypasses_cliff(),
-        }
-    }
-}
-
 fn default_billing_enabled() -> bool {
     false
 }
@@ -704,22 +674,6 @@ fn default_billing_circuit_recovery_timeout_secs() -> u64 {
 
 fn default_billing_circuit_window_duration_secs() -> u64 {
     60
-}
-
-fn default_cliff_enabled() -> bool {
-    false
-}
-
-fn default_cliff_duration_days() -> u32 {
-    14
-}
-
-fn default_cliff_forfeit_on_failure() -> bool {
-    true
-}
-
-fn default_collateral_bypasses_cliff() -> bool {
-    true
 }
 
 impl Default for BillingConfig {
@@ -938,7 +892,6 @@ impl Default for ValidatorConfig {
             pricing: super::pricing::PricingConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             billing: BillingConfig::default(),
-            cliff: CliffConfig::default(),
             collateral: super::collateral::CollateralConfig::default(),
         }
     }
@@ -981,14 +934,6 @@ impl ConfigValidation for ValidatorConfig {
                 key: "billing.api_endpoint".to_string(),
                 value: self.billing.api_endpoint.clone(),
                 reason: "API endpoint must route through API Gateway, not billing gRPC".to_string(),
-            });
-        }
-
-        if self.cliff.enabled && self.cliff.duration_days == 0 {
-            return Err(ConfigurationError::InvalidValue {
-                key: "cliff.duration_days".to_string(),
-                value: self.cliff.duration_days.to_string(),
-                reason: "duration_days must be greater than 0".to_string(),
             });
         }
 

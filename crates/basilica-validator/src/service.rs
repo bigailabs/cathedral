@@ -13,7 +13,6 @@ use crate::gpu::GpuScoringEngine;
 use crate::grpc::start_registration_server;
 use crate::metrics::{ValidatorMetrics, ValidatorPrometheusMetrics};
 use crate::miner_prover::{MinerProver, MinerProverParams};
-use crate::payouts::CliffManager;
 use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
@@ -113,25 +112,15 @@ impl ValidatorService {
             )
             .await?;
 
-        let cliff_manager = self.init_cliff_manager(
-            collateral_manager.clone(),
-            api_client.clone(),
-            gpu_profile_repo.clone(),
-        )?;
-
         let miner_prover = self.init_miner_prover(
             bittensor_service.clone(),
             persistence_arc.clone(),
             validator_metrics.as_ref(),
-            cliff_manager.clone(),
         )?;
 
         let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
-        let delivery_sync_task = self.init_delivery_sync_task(
-            api_client.clone(),
-            delivery_repo.clone(),
-            cliff_manager.clone(),
-        )?;
+        let delivery_sync_task =
+            self.init_delivery_sync_task(api_client.clone(), delivery_repo.clone())?;
 
         let rental_manager = self
             .init_rental_manager(
@@ -139,7 +128,6 @@ impl ValidatorService {
                 validator_metrics.as_ref(),
                 collateral_manager.clone(),
                 slash_executor.clone(),
-                cliff_manager.clone(),
                 &validator_hotkey,
             )
             .await?;
@@ -367,31 +355,11 @@ impl ValidatorService {
         Ok((Some(collateral_manager), Some(slash_executor)))
     }
 
-    fn init_cliff_manager(
-        &self,
-        collateral_manager: Option<Arc<CollateralManager>>,
-        api_client: Arc<BasilicaApiClient>,
-        gpu_profile_repo: Arc<GpuProfileRepository>,
-    ) -> Result<Option<Arc<CliffManager>>> {
-        if !self.config.billing.enabled || !self.config.cliff.enabled {
-            return Ok(None);
-        }
-        let cliff_manager = CliffManager::new(
-            self.config.cliff.clone(),
-            api_client,
-            collateral_manager,
-            gpu_profile_repo,
-            self.config.bittensor.common.netuid,
-        )?;
-        Ok(Some(Arc::new(cliff_manager)))
-    }
-
     fn init_miner_prover(
         &self,
         bittensor_service: Arc<BittensorService>,
         persistence: Arc<SimplePersistence>,
         validator_metrics: Option<&ValidatorMetrics>,
-        cliff_manager: Option<Arc<CliffManager>>,
     ) -> Result<MinerProver> {
         MinerProver::new(MinerProverParams {
             config: self.config.verification.clone(),
@@ -401,7 +369,6 @@ impl ValidatorService {
             persistence,
             metrics: validator_metrics.map(|m| Arc::new(m.clone())),
             netuid: self.config.bittensor.common.netuid,
-            cliff_manager,
         })
     }
 
@@ -409,7 +376,6 @@ impl ValidatorService {
         &self,
         api_client: Arc<BasilicaApiClient>,
         delivery_repo: Arc<MinerDeliveryRepository>,
-        cliff_manager: Option<Arc<CliffManager>>,
     ) -> Result<Option<DeliverySyncTask>> {
         if !self.config.billing.enabled {
             return Ok(None);
@@ -419,7 +385,6 @@ impl ValidatorService {
             delivery_repo,
             self.config.billing.sync_interval_secs,
             self.config.billing.lookback_hours,
-            cliff_manager,
         )))
     }
 
@@ -429,7 +394,6 @@ impl ValidatorService {
         validator_metrics: Option<&ValidatorMetrics>,
         collateral_manager: Option<Arc<CollateralManager>>,
         slash_executor: Option<Arc<SlashExecutor>>,
-        cliff_manager: Option<Arc<CliffManager>>,
         validator_hotkey: &basilica_common::identity::Hotkey,
     ) -> Result<Option<crate::rental::RentalManager>> {
         let Some(metrics) = validator_metrics else {
@@ -442,7 +406,6 @@ impl ValidatorService {
             metrics.prometheus(),
             collateral_manager,
             slash_executor,
-            cliff_manager,
             Some(validator_hotkey.as_str().to_string()),
         )
         .await?;

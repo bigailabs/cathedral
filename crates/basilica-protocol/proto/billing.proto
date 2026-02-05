@@ -26,13 +26,6 @@ service BillingService {
     rpc GetMinerRevenueSummary(GetMinerRevenueSummaryRequest) returns (GetMinerRevenueSummaryResponse);
     rpc GetMinerDelivery(GetMinerDeliveryRequest) returns (GetMinerDeliveryResponse);
 
-    // Cliff + backpay operations
-    rpc AccumulateMinerRewards(AccumulateRewardsRequest) returns (AccumulateRewardsResponse);
-    rpc GetPendingRewardsStatus(GetPendingStatusRequest) returns (GetPendingStatusResponse);
-    rpc ProcessThresholdReached(ProcessThresholdRequest) returns (ProcessThresholdResponse);
-    rpc UpdateMinerUptime(UpdateUptimeRequest) returns (UpdateUptimeResponse);
-    rpc ProcessValidationFailure(ProcessValidationFailureRequest) returns (ProcessValidationFailureResponse);
-
     // Miner payment operations
     rpc GetUnpaidMinerRevenueSummary(GetUnpaidMinerRevenueSummaryRequest) returns (GetUnpaidMinerRevenueSummaryResponse);
     rpc MarkMinerRevenuePaid(MarkMinerRevenuePaidRequest) returns (MarkMinerRevenuePaidResponse);
@@ -410,88 +403,12 @@ message MinerDelivery {
     double user_revenue_usd = 4;
     string gpu_category = 5;
     double miner_payment_usd = 6;
-    bool has_collateral = 7;
-    string payout_type = 8;
-    int32 cliff_days_remaining = 9;
-    double pending_alpha = 10;
+    reserved 7, 8, 9, 10;
     string node_id = 11;
 }
 
 message GetMinerDeliveryResponse {
     repeated MinerDelivery deliveries = 1;
-}
-
-// Cliff + Backpay Messages
-
-message AccumulateRewardsRequest {
-    string miner_hotkey = 1;
-    string node_id = 2;
-    string epoch_earnings_usd = 3; // Decimal string
-    string alpha_price_usd = 4; // Decimal string
-}
-
-message AccumulateRewardsResponse {
-    enum AccumulationType {
-        ACCUMULATION_TYPE_UNSPECIFIED = 0;
-        ACCUMULATED = 1;
-        IMMEDIATE_PAYOUT = 2;
-    }
-    AccumulationType result = 1;
-    string pending_alpha = 2; // Decimal string
-    string pending_usd = 3; // Decimal string
-    int32 epochs_accumulated = 4;
-    string immediate_alpha = 5; // Decimal string
-    string immediate_usd = 6; // Decimal string
-}
-
-message GetPendingStatusRequest {
-    string miner_hotkey = 1;
-    string node_id = 2;
-}
-
-message GetPendingStatusResponse {
-    bool exists = 1;
-    string pending_alpha = 2; // Decimal string
-    string pending_usd = 3; // Decimal string
-    int32 epochs_accumulated = 4;
-    bool threshold_reached = 5;
-    int32 continuous_uptime_minutes = 6;
-    google.protobuf.Timestamp ramp_start_time = 7;
-    google.protobuf.Timestamp threshold_reached_at = 8;
-}
-
-message ProcessThresholdRequest {
-    string miner_hotkey = 1;
-    string node_id = 2;
-}
-
-message ProcessThresholdResponse {
-    string backpay_alpha = 1; // Decimal string
-    string backpay_usd = 2; // Decimal string
-    int32 epochs_paid = 3;
-}
-
-message UpdateUptimeRequest {
-    string miner_hotkey = 1;
-    string node_id = 2;
-    int32 uptime_minutes = 3;
-}
-
-message UpdateUptimeResponse {
-    bool threshold_reached = 1;
-}
-
-message ProcessValidationFailureRequest {
-    string miner_hotkey = 1;
-    string node_id = 2;
-    string failure_reason = 3;
-    string failure_type = 4;
-}
-
-message ProcessValidationFailureResponse {
-    string forfeited_alpha = 1; // Decimal string
-    string forfeited_usd = 2; // Decimal string
-    int32 epochs_lost = 3;
 }
 
 // Miner Payment Messages

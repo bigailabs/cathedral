@@ -7,7 +7,6 @@ use super::verification::VerificationEngine;
 use crate::config::{AutomaticVerificationConfig, SshSessionConfig, VerificationConfig};
 use crate::k8s_profile_publisher::NodeProfilePublisher;
 use crate::metrics::ValidatorMetrics;
-use crate::payouts::CliffManager;
 use crate::persistence::SimplePersistence;
 use crate::ssh::{SshAutomationComponents, ValidatorSshClient};
 use anyhow::{Context, Result};
@@ -26,7 +25,6 @@ pub struct VerificationEngineBuilder {
     ssh_client: Option<Arc<ValidatorSshClient>>,
     metrics: Option<Arc<ValidatorMetrics>>,
     node_profile_publisher: Option<Arc<dyn NodeProfilePublisher + Send + Sync>>,
-    cliff_manager: Option<Arc<CliffManager>>,
 }
 
 impl VerificationEngineBuilder {
@@ -49,7 +47,6 @@ impl VerificationEngineBuilder {
             ssh_client: None,
             metrics,
             node_profile_publisher: None,
-            cliff_manager: None,
         }
     }
 
@@ -62,11 +59,6 @@ impl VerificationEngineBuilder {
     /// Set custom SSH client
     pub fn with_ssh_client(mut self, ssh_client: Arc<ValidatorSshClient>) -> Self {
         self.ssh_client = Some(ssh_client);
-        self
-    }
-
-    pub fn with_cliff_manager(mut self, cliff_manager: Arc<CliffManager>) -> Self {
-        self.cliff_manager = Some(cliff_manager);
         self
     }
 
@@ -86,7 +78,6 @@ impl VerificationEngineBuilder {
             self.bittensor_service,
             self.metrics,
             self.node_profile_publisher.clone(),
-            self.cliff_manager,
         )?;
 
         Ok(verification_engine)
@@ -135,7 +126,6 @@ impl VerificationEngineBuilder {
             self.bittensor_service,
             self.metrics,
             self.node_profile_publisher.clone(),
-            self.cliff_manager,
         )?;
 
         info!(
@@ -416,7 +406,6 @@ mod tests {
             None, // no bittensor service
             None, // no metrics
             None, // no node_profile_publisher
-            None, // no cliff manager
         );
         assert!(result.is_err());
 
@@ -431,7 +420,6 @@ mod tests {
             None,  // no bittensor service
             None,  // no metrics
             None,  // no node_profile_publisher
-            None,  // no cliff manager
         );
         assert!(result.is_ok());
 

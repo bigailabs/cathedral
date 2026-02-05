@@ -33,13 +33,7 @@ impl Misbehaviour {
         metrics: Option<Arc<ValidatorPrometheusMetrics>>,
     ) -> Self {
         Self {
-            ban_manager: Arc::new(BanManager::new(
-                persistence.clone(),
-                metrics,
-                None,
-                None,
-                None,
-            )),
+            ban_manager: Arc::new(BanManager::new(persistence.clone(), metrics, None, None)),
             persistence,
         }
     }

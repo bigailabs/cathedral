@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::basilica_api::BasilicaApiClient;
-use crate::payouts::CliffManager;
 use crate::persistence::MinerDeliveryRepository;
 
 pub struct DeliverySyncTask {
@@ -12,7 +11,6 @@ pub struct DeliverySyncTask {
     delivery_repo: Arc<MinerDeliveryRepository>,
     sync_interval_secs: u64,
     lookback_hours: u64,
-    cliff_manager: Option<Arc<CliffManager>>,
 }
 
 impl DeliverySyncTask {
@@ -21,14 +19,12 @@ impl DeliverySyncTask {
         delivery_repo: Arc<MinerDeliveryRepository>,
         sync_interval_secs: u64,
         lookback_hours: u64,
-        cliff_manager: Option<Arc<CliffManager>>,
     ) -> Self {
         Self {
             api_client,
             delivery_repo,
             sync_interval_secs,
             lookback_hours,
-            cliff_manager,
         }
     }
 
@@ -53,24 +49,13 @@ impl DeliverySyncTask {
             .get_miner_delivery(since, until, Vec::new())
             .await?;
 
-        let filtered = if let Some(cliff_manager) = &self.cliff_manager {
-            let mut results: Vec<basilica_protocol::billing::MinerDelivery> = Vec::new();
-            for delivery in deliveries {
-                let decisions = cliff_manager.process_delivery(delivery).await?;
-                results.extend(decisions);
-            }
-            results
-        } else {
-            deliveries
-        };
-
         self.delivery_repo
-            .store_deliveries(since, until, &filtered)
+            .store_deliveries(since, until, &deliveries)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store deliveries: {e}"))?;
 
         info!(
-            count = filtered.len(),
+            count = deliveries.len(),
             "Synced miner delivery data from API"
         );
         Ok(())

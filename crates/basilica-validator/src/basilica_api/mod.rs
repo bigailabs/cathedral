@@ -343,73 +343,9 @@ impl BasilicaApiClient {
                 user_revenue_usd: delivery.user_revenue_usd,
                 gpu_category: delivery.gpu_category,
                 miner_payment_usd: delivery.miner_payment_usd,
-                has_collateral: delivery.has_collateral,
-                payout_type: delivery.payout_type,
-                cliff_days_remaining: delivery.cliff_days_remaining,
-                pending_alpha: delivery.pending_alpha,
                 node_id: delivery.node_id,
             })
             .collect())
-    }
-
-    pub async fn get_pending_rewards_status(
-        &self,
-        query: PendingRewardsQuery,
-    ) -> Result<PendingStatusResponseBody> {
-        let url = format!(
-            "{}/v1/weights/pending-rewards/status",
-            self.api_endpoint.trim_end_matches('/')
-        );
-        let response = self.signed_get(&url, &query).await?;
-        self.read_json_response(response).await
-    }
-
-    pub async fn accumulate_miner_rewards(
-        &self,
-        body: AccumulateRewardsRequestBody,
-    ) -> Result<AccumulateRewardsResponseBody> {
-        let url = format!(
-            "{}/v1/weights/pending-rewards/accumulate",
-            self.api_endpoint.trim_end_matches('/')
-        );
-        let response = self.signed_post(&url, &body).await?;
-        self.read_json_response(response).await
-    }
-
-    pub async fn process_threshold_reached(
-        &self,
-        body: ProcessThresholdRequestBody,
-    ) -> Result<ProcessThresholdResponseBody> {
-        let url = format!(
-            "{}/v1/weights/pending-rewards/threshold",
-            self.api_endpoint.trim_end_matches('/')
-        );
-        let response = self.signed_post(&url, &body).await?;
-        self.read_json_response(response).await
-    }
-
-    pub async fn update_miner_uptime(
-        &self,
-        body: UpdateUptimeRequestBody,
-    ) -> Result<UpdateUptimeResponseBody> {
-        let url = format!(
-            "{}/v1/weights/pending-rewards/uptime",
-            self.api_endpoint.trim_end_matches('/')
-        );
-        let response = self.signed_post(&url, &body).await?;
-        self.read_json_response(response).await
-    }
-
-    pub async fn process_validation_failure(
-        &self,
-        body: ProcessValidationFailureRequestBody,
-    ) -> Result<ProcessValidationFailureResponseBody> {
-        let url = format!(
-            "{}/v1/weights/pending-rewards/failure",
-            self.api_endpoint.trim_end_matches('/')
-        );
-        let response = self.signed_post(&url, &body).await?;
-        self.read_json_response(response).await
     }
 
     async fn signed_get<Q: Serialize>(&self, url: &str, query: &Q) -> Result<reqwest::Response> {
@@ -419,18 +355,6 @@ impl BasilicaApiClient {
             .header("X-Validator-Signature", signature)
             .header("X-Timestamp", timestamp)
             .query(query)
-            .send()
-            .await
-            .context("API request failed")
-    }
-
-    async fn signed_post<T: Serialize>(&self, url: &str, body: &T) -> Result<reqwest::Response> {
-        let (signature, timestamp) = self.signed_headers(body)?;
-        self.http_client
-            .post(url)
-            .header("X-Validator-Signature", signature)
-            .header("X-Timestamp", timestamp)
-            .json(body)
             .send()
             .await
             .context("API request failed")
@@ -495,96 +419,7 @@ struct MinerDeliveryItem {
     gpu_category: String,
     miner_payment_usd: f64,
     #[serde(default)]
-    has_collateral: bool,
-    #[serde(default)]
-    payout_type: String,
-    #[serde(default)]
-    cliff_days_remaining: i32,
-    #[serde(default)]
-    pending_alpha: f64,
-    #[serde(default)]
     node_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PendingRewardsQuery {
-    pub miner_hotkey: String,
-    pub node_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AccumulateRewardsRequestBody {
-    pub miner_hotkey: String,
-    pub node_id: String,
-    pub epoch_earnings_usd: String,
-    pub alpha_price_usd: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[allow(dead_code)]
-pub struct AccumulateRewardsResponseBody {
-    pub result: i32,
-    pub pending_alpha: String,
-    pub pending_usd: String,
-    pub epochs_accumulated: i32,
-    pub immediate_alpha: String,
-    pub immediate_usd: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[allow(dead_code)]
-pub struct PendingStatusResponseBody {
-    pub exists: bool,
-    pub pending_alpha: String,
-    pub pending_usd: String,
-    pub epochs_accumulated: i32,
-    pub threshold_reached: bool,
-    pub continuous_uptime_minutes: i32,
-    pub ramp_start_time: Option<i64>,
-    pub threshold_reached_at: Option<i64>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct UpdateUptimeRequestBody {
-    pub miner_hotkey: String,
-    pub node_id: String,
-    pub uptime_minutes: i32,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[allow(dead_code)]
-pub struct UpdateUptimeResponseBody {
-    pub threshold_reached: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ProcessThresholdRequestBody {
-    pub miner_hotkey: String,
-    pub node_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[allow(dead_code)]
-pub struct ProcessThresholdResponseBody {
-    pub backpay_alpha: String,
-    pub backpay_usd: String,
-    pub epochs_paid: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ProcessValidationFailureRequestBody {
-    pub miner_hotkey: String,
-    pub node_id: String,
-    pub failure_reason: String,
-    pub failure_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[allow(dead_code)]
-pub struct ProcessValidationFailureResponseBody {
-    pub forfeited_alpha: String,
-    pub forfeited_usd: String,
-    pub epochs_lost: i32,
 }
 
 #[derive(Debug, Deserialize)]

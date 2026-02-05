@@ -24,7 +24,6 @@ use crate::billing::BillingClient;
 use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::config::auction::AuctionConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
-use crate::payouts::CliffManager;
 use crate::persistence::bids::{BidRepository, MinerBidRecord};
 use crate::persistence::entities::MisbehaviourType;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
@@ -173,7 +172,6 @@ impl RentalManager {
             Some(metrics.clone()),
             None,
             None,
-            None,
         ));
 
         // Create health monitor with SSH key manager, metrics, and ban manager
@@ -208,7 +206,6 @@ impl RentalManager {
         metrics: Arc<ValidatorPrometheusMetrics>,
         collateral_manager: Option<Arc<CollateralManager>>,
         slash_executor: Option<Arc<crate::collateral::SlashExecutor>>,
-        cliff_manager: Option<Arc<CliffManager>>,
         validator_hotkey: Option<String>,
     ) -> Result<Self> {
         // Create SSH key manager
@@ -225,7 +222,6 @@ impl RentalManager {
             Some(metrics.clone()),
             slash_executor,
             validator_hotkey,
-            cliff_manager,
         ));
 
         // Create health monitor
