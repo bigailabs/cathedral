@@ -47,7 +47,7 @@ impl MinerDeliveryRepository {
                     received_at,
                     node_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(miner_hotkey, period_start, period_end)
+                ON CONFLICT(miner_hotkey, node_id, gpu_category, period_start, period_end)
                 DO UPDATE SET
                     miner_uid = excluded.miner_uid,
                     gpu_category = excluded.gpu_category,
@@ -102,6 +102,60 @@ impl MinerDeliveryRepository {
         qb.push_bind(since_ts);
         qb.push(" AND period_start <= ");
         qb.push_bind(until_ts);
+
+        if let Some(hotkeys) = miner_hotkeys {
+            if !hotkeys.is_empty() {
+                qb.push(" AND miner_hotkey IN (");
+                let mut separated = qb.separated(", ");
+                for hotkey in hotkeys {
+                    separated.push_bind(hotkey);
+                }
+                qb.push(")");
+            }
+        }
+
+        let rows = qb.build().fetch_all(self.persistence.pool()).await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| MinerDelivery {
+                miner_hotkey: row.get("miner_hotkey"),
+                miner_uid: row.get::<i64, _>("miner_uid") as u32,
+                total_hours: row.get("total_hours"),
+                user_revenue_usd: row.get("user_revenue_usd"),
+                gpu_category: row.get("gpu_category"),
+                miner_payment_usd: row.get("miner_payment_usd"),
+                node_id: row.get("node_id"),
+            })
+            .collect())
+    }
+
+    pub async fn get_deliveries_for_window(
+        &self,
+        period_start: DateTime<Utc>,
+        period_end: DateTime<Utc>,
+        miner_hotkeys: Option<Vec<String>>,
+    ) -> Result<Vec<MinerDelivery>> {
+        let period_start_ts = period_start.timestamp();
+        let period_end_ts = period_end.timestamp();
+
+        let mut qb = QueryBuilder::<Sqlite>::new(
+            r#"
+            SELECT
+                miner_hotkey,
+                miner_uid,
+                total_hours,
+                user_revenue_usd,
+                gpu_category,
+                miner_payment_usd,
+                node_id
+            FROM miner_delivery_cache
+            WHERE period_start = 
+            "#,
+        );
+        qb.push_bind(period_start_ts);
+        qb.push(" AND period_end = ");
+        qb.push_bind(period_end_ts);
 
         if let Some(hotkeys) = miner_hotkeys {
             if !hotkeys.is_empty() {

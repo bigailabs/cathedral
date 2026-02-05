@@ -1,1 +1,1 @@
-ALTER TABLE miner_delivery_cache ADD COLUMN node_id TEXT DEFAULT '';
+-- No-op: node_id column is included in 007_miner_delivery_cache.sql (pre-deploy change)

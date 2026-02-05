@@ -20,8 +20,10 @@ pub mod types;
 pub mod validator_persistence;
 pub mod verification;
 pub mod verification_logs;
+pub mod weight_set_epochs;
 
 pub use miner_delivery::MinerDeliveryRepository;
 pub use simple_persistence::*;
 pub use types::*;
 pub use validator_persistence::ValidatorPersistence;
+pub use weight_set_epochs::{WeightSetEpoch, WeightSetEpochRepository};

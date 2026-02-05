@@ -1,6 +1,5 @@
 use crate::api::ApiHandler;
 use crate::basilica_api::{BasilicaApiClient, ValidatorSigner};
-use crate::billing::DeliverySyncTask;
 use crate::bittensor_core::{ChainRegistration, WeightSetter};
 use crate::collateral::collateral_scan::Collateral;
 use crate::collateral::evaluator::CollateralEvaluator;
@@ -16,7 +15,7 @@ use crate::miner_prover::{MinerProver, MinerProverParams};
 use crate::persistence::bids::BidRepository;
 use crate::persistence::cleanup_task::CleanupTask;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
+use crate::persistence::SimplePersistence;
 
 use anyhow::{Context, Result};
 use basilica_common::MemoryStorage;
@@ -38,7 +37,6 @@ pub struct ValidatorService {
 struct RuntimeHandles {
     scoring_task: JoinHandle<()>,
     weight_setter_task: JoinHandle<()>,
-    delivery_sync_task: Option<JoinHandle<()>>,
     miner_prover_task: JoinHandle<()>,
     api_handler_task: JoinHandle<()>,
     registration_server_task: JoinHandle<()>,
@@ -50,7 +48,6 @@ struct TaskInputs {
     weight_setter: Arc<WeightSetter>,
     miner_prover: MinerProver,
     api_handler: ApiHandler,
-    delivery_sync_task: Option<DeliverySyncTask>,
     persistence: Arc<SimplePersistence>,
     collateral_manager: Option<Arc<CollateralManager>>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
@@ -118,10 +115,6 @@ impl ValidatorService {
             validator_metrics.as_ref(),
         )?;
 
-        let delivery_repo = Arc::new(MinerDeliveryRepository::new(persistence_arc.clone()));
-        let delivery_sync_task =
-            self.init_delivery_sync_task(api_client.clone(), delivery_repo.clone())?;
-
         let rental_manager = self
             .init_rental_manager(
                 persistence_arc.clone(),
@@ -153,7 +146,6 @@ impl ValidatorService {
                 weight_setter,
                 miner_prover,
                 api_handler,
-                delivery_sync_task,
                 persistence: persistence_arc.clone(),
                 collateral_manager: collateral_manager.clone(),
                 gpu_profile_repo: gpu_profile_repo.clone(),
@@ -372,22 +364,6 @@ impl ValidatorService {
         })
     }
 
-    fn init_delivery_sync_task(
-        &self,
-        api_client: Arc<BasilicaApiClient>,
-        delivery_repo: Arc<MinerDeliveryRepository>,
-    ) -> Result<Option<DeliverySyncTask>> {
-        if !self.config.billing.enabled {
-            return Ok(None);
-        }
-        Ok(Some(DeliverySyncTask::new(
-            api_client,
-            delivery_repo,
-            self.config.billing.sync_interval_secs,
-            self.config.billing.lookback_hours,
-        )))
-    }
-
     async fn init_rental_manager(
         &self,
         persistence: Arc<SimplePersistence>,
@@ -438,12 +414,6 @@ impl ValidatorService {
             if let Err(e) = inputs.weight_setter.start().await {
                 error!("Weight setter task failed: {}", e);
             }
-        });
-
-        let delivery_sync_handle = inputs.delivery_sync_task.map(|delivery_sync_task| {
-            tokio::spawn(async move {
-                delivery_sync_task.run().await;
-            })
         });
 
         let miner_prover_task = tokio::spawn(async move {
@@ -506,7 +476,6 @@ impl ValidatorService {
         RuntimeHandles {
             scoring_task,
             weight_setter_task,
-            delivery_sync_task: delivery_sync_handle,
             miner_prover_task,
             api_handler_task,
             registration_server_task,
@@ -518,9 +487,6 @@ impl ValidatorService {
     fn shutdown(&self, handles: RuntimeHandles) {
         handles.scoring_task.abort();
         handles.weight_setter_task.abort();
-        if let Some(handle) = handles.delivery_sync_task {
-            handle.abort();
-        }
         handles.miner_prover_task.abort();
         if let Some(handle) = handles.cleanup_task {
             handle.abort();

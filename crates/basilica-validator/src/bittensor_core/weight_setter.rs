@@ -12,7 +12,9 @@ use crate::gpu::GpuScoringEngine;
 use crate::metrics::ValidatorMetrics;
 use crate::persistence::entities::VerificationLog;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
-use crate::persistence::{MinerDeliveryRepository, SimplePersistence};
+use crate::persistence::{
+    MinerDeliveryRepository, SimplePersistence, WeightSetEpoch, WeightSetEpochRepository,
+};
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
@@ -62,6 +64,7 @@ pub struct WeightSetter {
     emission_config: EmissionConfig,
     auction_config: AuctionConfig,
     delivery_repository: Arc<MinerDeliveryRepository>,
+    epoch_repository: Arc<WeightSetEpochRepository>,
     api_client: Arc<BasilicaApiClient>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     metrics: Option<Arc<ValidatorMetrics>>,
@@ -92,6 +95,7 @@ impl WeightSetter {
             min_score_threshold,
         ));
         let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
+        let epoch_repository = Arc::new(WeightSetEpochRepository::new(persistence.clone()));
 
         Ok(Self {
             config,
@@ -106,6 +110,7 @@ impl WeightSetter {
             emission_config,
             auction_config,
             delivery_repository,
+            epoch_repository,
             api_client,
             gpu_profile_repo,
             metrics,
@@ -240,8 +245,15 @@ impl WeightSetter {
         );
 
         let metagraph = self.fetch_metagraph_with_logging().await?;
-        let (since, now) = self.determine_delivery_window().await?;
-        let deliveries = self.fetch_deliveries(since, now).await?;
+        let attempt_start = Utc::now();
+        let epoch = self.get_or_create_epoch_window(attempt_start).await?;
+        self.epoch_repository.increment_attempts(epoch.id).await?;
+
+        self.sync_deliveries_for_epoch(&epoch).await?;
+        let deliveries = self
+            .delivery_repository
+            .get_deliveries_for_window(epoch.period_start, epoch.period_end, None)
+            .await?;
         let hotkey_to_uid = self.build_hotkey_to_uid_map(&metagraph);
         let excluded_nodes = self.fetch_excluded_nodes().await?;
         let miners_by_category =
@@ -261,6 +273,7 @@ impl WeightSetter {
         self.submit_weights_to_chain_with_retry(normalized_weights, version_key)
             .await?;
         self.store_weight_results(&weight_distribution).await?;
+        self.epoch_repository.mark_success(epoch.id).await?;
 
         Ok(())
     }
@@ -274,46 +287,66 @@ impl WeightSetter {
         Ok(metagraph)
     }
 
-    async fn determine_delivery_window(&self) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-        let last_weight_timestamp = self.get_last_weight_set_timestamp().await?;
-        info!(
-            "Fetching miner delivery from billing, epoch: {:?}",
-            last_weight_timestamp
-        );
-
-        let now = Utc::now();
-        let since = last_weight_timestamp.unwrap_or_else(|| {
-            warn!(
-                "No last_weight_set_timestamp found - using 7-day lookback for cold start. \
-                 This may indicate first run, storage corruption, or validator restart."
+    async fn get_or_create_epoch_window(
+        &self,
+        attempt_start: DateTime<Utc>,
+    ) -> Result<WeightSetEpoch> {
+        if let Some(epoch) = self
+            .epoch_repository
+            .get_pending_epoch(self.config.netuid)
+            .await?
+        {
+            info!(
+                period_start = %epoch.period_start,
+                period_end = %epoch.period_end,
+                attempts = epoch.attempts,
+                "Reusing pending weight-set epoch window"
             );
-            now - chrono::Duration::days(7)
-        });
-
-        if let Some(last_ts) = last_weight_timestamp {
-            let hours_since_last = (now - last_ts).num_hours();
-            if hours_since_last > 48 {
-                warn!(
-                    hours_since_last = hours_since_last,
-                    last_weight_timestamp = %last_ts,
-                    "Weight setting is stale - last successful run was {} hours ago. \
-                     Check for weight setting failures or network issues.",
-                    hours_since_last
-                );
-            }
+            return Ok(epoch);
         }
 
-        Ok((since, now))
+        let last_success_end = self
+            .epoch_repository
+            .get_last_success_end(self.config.netuid)
+            .await?;
+        let mut period_start = match last_success_end {
+            Some(last_end) => last_end + chrono::Duration::seconds(1),
+            None => attempt_start,
+        };
+
+        let period_end = attempt_start;
+        if period_start > period_end {
+            warn!(
+                period_start = %period_start,
+                period_end = %period_end,
+                "Computed period_start after period_end; clamping to period_end"
+            );
+            period_start = period_end;
+        }
+
+        let epoch = self
+            .epoch_repository
+            .create_epoch(self.config.netuid, period_start, period_end)
+            .await?;
+        info!(
+            period_start = %epoch.period_start,
+            period_end = %epoch.period_end,
+            "Created new weight-set epoch window"
+        );
+        Ok(epoch)
     }
 
-    async fn fetch_deliveries(
-        &self,
-        since: DateTime<Utc>,
-        until: DateTime<Utc>,
-    ) -> Result<Vec<MinerDelivery>> {
+    async fn sync_deliveries_for_epoch(&self, epoch: &WeightSetEpoch) -> Result<()> {
+        let deliveries = self
+            .api_client
+            .get_miner_delivery(epoch.period_start, epoch.period_end, Vec::new())
+            .await?;
+
         self.delivery_repository
-            .get_deliveries(since, until, None)
-            .await
+            .store_deliveries(epoch.period_start, epoch.period_end, &deliveries)
+            .await?;
+
+        Ok(())
     }
 
     fn build_hotkey_to_uid_map(&self, metagraph: &Metagraph) -> HashMap<String, u16> {
