@@ -7,6 +7,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+show_help() {
+    echo "Basilica Localnet - Health Check"
+    echo ""
+    echo "Usage: ./test.sh [-h|--help]"
+    echo ""
+    echo "Checks connectivity and health of all localnet services."
+    echo ""
+    echo "Services checked:"
+    echo "  1. Subtensor    - HTTP health + WebSocket port (9944)"
+    echo "  2. PostgreSQL   - pg_isready via Docker"
+    echo "  3. Validator    - HTTP health (8080), metrics (9090)"
+    echo "  4. Miner        - Metrics (9091), gRPC (8092), Axon (8091)"
+    echo "  5. Monitoring   - Prometheus (9099), Grafana (3000)"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help   Show this help"
+    echo ""
+    echo "Exit codes:"
+    echo "  0  All services healthy"
+    echo "  1  One or more services unhealthy"
+    echo ""
+    echo "See also: ./start.sh, ./restart.sh"
+}
+
+[[ "${1:-}" =~ ^(-h|--help)$ ]] && show_help && exit 0
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

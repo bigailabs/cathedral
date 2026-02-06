@@ -7,6 +7,35 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+show_help() {
+    echo "Basilica Localnet - One-time Setup"
+    echo ""
+    echo "Usage: ./setup.sh [-h|--help]"
+    echo ""
+    echo "Creates SSH keys and pulls Docker images needed for the localnet."
+    echo "Run this once before starting services for the first time."
+    echo ""
+    echo "Prerequisites:"
+    echo "  - Docker and Docker Compose installed"
+    echo "  - uv (optional, needed later for init-subnet.sh)"
+    echo ""
+    echo "What it does:"
+    echo "  1. Checks prerequisites (Docker, Docker Compose, uv)"
+    echo "  2. Generates SSH keys for miner and validator"
+    echo "  3. Pulls required Docker images"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help   Show this help"
+    echo ""
+    echo "Next steps after setup:"
+    echo "  1. ./start.sh network    Start Subtensor"
+    echo "  2. ./init-subnet.sh      Create wallets and register neurons"
+    echo "  3. ./start.sh miner      Start all services"
+    echo "  4. ./test.sh             Check health"
+}
+
+[[ "${1:-}" =~ ^(-h|--help)$ ]] && show_help && exit 0
+
 echo "========================================"
 echo "  Basilica Localnet Setup"
 echo "========================================"

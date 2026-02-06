@@ -14,18 +14,58 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+show_help() {
+    echo "Basilica Localnet - Start Services"
+    echo ""
+    echo "Usage: ./start.sh [profile] [--build] [-h|--help]"
+    echo ""
+    echo "Starts localnet services using Docker Compose profiles."
+    echo "Automatically initializes the subnet (wallets, funding, registration)"
+    echo "after Subtensor is ready."
+    echo ""
+    echo "Profiles:"
+    echo "  network     Subtensor only"
+    echo "  validator   Subtensor + PostgreSQL + Validator"
+    echo "  miner       Above + Miner"
+    echo "  monitoring  All + Prometheus + Grafana"
+    echo "  all         Everything (default)"
+    echo ""
+    echo "Options:"
+    echo "  --build      Rebuild Docker images before starting"
+    echo "  -h, --help   Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  ./start.sh                  # Start all services"
+    echo "  ./start.sh network          # Start Subtensor only"
+    echo "  ./start.sh miner --build    # Rebuild and start up to miner"
+    echo ""
+    echo "Endpoints (when fully started):"
+    echo "  Subtensor:   ws://localhost:9944"
+    echo "  Validator:   http://localhost:8080 (API), :9090/metrics"
+    echo "  Miner:       localhost:8092 (gRPC), :9091/metrics"
+    echo "  Prometheus:  http://localhost:9099"
+    echo "  Grafana:     http://localhost:3000 (admin/admin)"
+    echo ""
+    echo "See also: ./stop.sh, ./restart.sh, ./test.sh"
+}
+
 # Parse arguments
 PROFILE="${1:-all}"
 BUILD_FLAG=""
 
 for arg in "$@"; do
     case $arg in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
         --build)
             BUILD_FLAG="--build"
             shift
             ;;
         -*)
             echo "Unknown option: $arg"
+            echo "Run './start.sh --help' for usage"
             exit 1
             ;;
     esac
