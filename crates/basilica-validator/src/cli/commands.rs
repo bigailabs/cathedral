@@ -133,9 +133,9 @@ pub enum RentalAction {
         #[arg(long)]
         min_memory_gb: Option<u32>,
 
-        /// Maximum hourly rate per GPU in USD (optional)
+        /// Maximum hourly rate per GPU in cents
         #[arg(long)]
-        max_hourly_rate: Option<f64>,
+        max_hourly_rate_cents: u32,
 
         /// Docker image to deploy (e.g., ubuntu:22.04, nginx:alpine)
         #[arg(long)]

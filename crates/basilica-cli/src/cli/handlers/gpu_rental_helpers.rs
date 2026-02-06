@@ -404,6 +404,8 @@ pub struct CommunityCloudSelection {
     pub gpu_count: u32,
     /// Min GPU memory in GB (optional)
     pub min_memory_gb: Option<u32>,
+    /// Selected node's per-GPU hourly rate in cents, if available
+    pub derived_max_hourly_rate_cents: Option<u32>,
 }
 
 /// Represents a selected offering from either cloud type
@@ -816,11 +818,16 @@ pub async fn resolve_offering_unified(
 
             let gpu_count = node.node.gpu_specs.len() as u32;
             let min_memory_gb = node.node.gpu_specs.first().map(|gpu| gpu.memory_gb);
+            let derived_max_hourly_rate_cents = node
+                .node
+                .hourly_rate_cents
+                .and_then(|rate_cents| u32::try_from(rate_cents).ok());
 
             Ok(SelectedOffering::CommunityCloud(CommunityCloudSelection {
                 gpu_category,
                 gpu_count,
                 min_memory_gb,
+                derived_max_hourly_rate_cents,
             }))
         }
     }

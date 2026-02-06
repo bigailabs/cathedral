@@ -394,6 +394,10 @@ pub struct UpOptions {
     #[arg(long)]
     pub gpu_count: Option<u32>,
 
+    /// Maximum USD per GPU-hour for community cloud rentals
+    #[arg(long)]
+    pub max_hourly_rate: Option<f64>,
+
     /// Docker image to run (Bourse only)
     #[arg(long)]
     pub image: Option<String>,

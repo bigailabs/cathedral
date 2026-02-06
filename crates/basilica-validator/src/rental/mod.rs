@@ -479,17 +479,11 @@ impl RentalManager {
             )
             .await?;
 
-        // Apply max_hourly_rate filter if specified
-        // Convert max_rate from dollars to cents for comparison with bid_per_hour_cents
-        let candidates: Vec<_> = if let Some(max_rate) = request.max_hourly_rate {
-            let max_rate_cents = (max_rate * 100.0).round() as u32;
-            candidates
-                .into_iter()
-                .filter(|(bid, _)| bid.bid_per_hour_cents <= max_rate_cents)
-                .collect()
-        } else {
-            candidates
-        };
+        // Apply max_hourly_rate_cents filter for comparison with bid_per_hour_cents.
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(|(bid, _)| bid.bid_per_hour_cents <= request.max_hourly_rate_cents)
+            .collect();
 
         // Apply min_memory_gb filter if specified
         let candidates = self
@@ -882,10 +876,7 @@ impl RentalManager {
         container_info: &ContainerInfo,
     ) -> Result<RentalInfo> {
         let container_id = container_info.container_id.clone();
-        let mut metadata = request.metadata.clone();
-        if let Some(rate_cents) = selection.miner_bid_rate_cents {
-            metadata.insert("miner_bid_rate_cents".to_string(), rate_cents.to_string());
-        }
+        let metadata = request.metadata.clone();
 
         let now = chrono::Utc::now();
         let rental_info = RentalInfo {

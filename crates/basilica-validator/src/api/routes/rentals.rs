@@ -39,9 +39,8 @@ pub struct StartRentalRequest {
     /// Minimum GPU memory in GB (e.g., 80 for 80GB)
     #[serde(default)]
     pub min_memory_gb: Option<u32>,
-    /// Maximum acceptable $/GPU-hour
-    #[serde(default)]
-    pub max_hourly_rate: Option<f64>,
+    /// Maximum acceptable cents/GPU-hour
+    pub max_hourly_rate_cents: u32,
 
     // Container config
     pub container_image: String,
@@ -68,7 +67,7 @@ impl Default for StartRentalRequest {
             gpu_category: String::new(),
             gpu_count: 1,
             min_memory_gb: None,
-            max_hourly_rate: None,
+            max_hourly_rate_cents: 0,
             container_image: "nvidia/cuda:12.2.0-base-ubuntu22.04".to_string(),
             ssh_public_key: String::new(),
             environment: std::collections::HashMap::new(),
@@ -279,7 +278,7 @@ pub async fn start_rental(
         gpu_category: gpu_category.to_string(),
         gpu_count: request.gpu_count,
         min_memory_gb: request.min_memory_gb,
-        max_hourly_rate: request.max_hourly_rate,
+        max_hourly_rate_cents: request.max_hourly_rate_cents,
         container_spec: crate::rental::ContainerSpec {
             image: request.container_image,
             environment: request.environment,
@@ -365,8 +364,30 @@ pub async fn get_rental_status(
     // Convert RentalStatus to RentalStatusResponse
     use crate::api::types::{RentalStatus as ApiRentalStatus, RentalStatusResponse};
 
-    // Use node details from rental info directly
-    let node = rental_info.node_details.clone();
+    let mut node = rental_info.node_details.clone();
+    if node.hourly_rate_cents.is_none() {
+        node.hourly_rate_cents = state
+            .persistence
+            .get_node_hourly_rate(&rental_info.node_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to get node hourly rate for node {}: {}",
+                    rental_info.node_id,
+                    e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .map(|cents| cents as i32);
+    }
+    if node.hourly_rate_cents.is_none() {
+        tracing::error!(
+            "Node hourly_rate_cents missing for rental {} on node {}",
+            rental_id,
+            rental_info.node_id
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     // Extract miner_uid from miner_id (format: "miner_{uid}")
     let miner_uid = rental_info
@@ -412,10 +433,6 @@ pub async fn get_rental_status(
         node,
         miner_uid,
         miner_hotkey,
-        miner_bid_rate_cents: rental_info
-            .metadata
-            .get("miner_bid_rate_cents")
-            .and_then(|value| value.parse::<u32>().ok()),
         created_at: status.created_at,
         updated_at: status.created_at, // Use created_at for now
     };

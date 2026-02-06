@@ -72,7 +72,6 @@ from basilica._basilica import (
     ListRentalsQuery,
     ListSecureCloudRentalsResponse,
     NodeDetails,
-    NodeSelection,
     PersistentStorageSpec,
     PodInfo,
     PortMappingRequest,
@@ -97,8 +96,6 @@ from basilica._basilica import (
     StorageSpec,
     TopologySpreadConfig,
     VolumeMountRequest,
-    node_by_gpu,
-    node_by_id,
 )
 
 # GpuRequirementsSpec may not be available in older binaries
@@ -189,9 +186,6 @@ __all__ = [
     "NetworkError",
     "RateLimitError",
     "SourceError",
-    # Helper functions
-    "node_by_id",
-    "node_by_gpu",
     # Response types
     "HealthCheckResponse",
     "RentalResponse",
@@ -205,7 +199,6 @@ __all__ = [
     "AvailabilityInfo",
     # Request types
     "StartRentalApiRequest",
-    "NodeSelection",
     "GpuRequirements",
     "PortMappingRequest",
     "ListAvailableNodesQuery",
@@ -917,8 +910,8 @@ class BasilicaClient:
     def start_rental(
         self,
         container_image: Optional[str] = None,
-        node_id: Optional[str] = None,
         gpu_type: Optional[str] = None,
+        max_hourly_rate: Optional[float] = None,
         ssh_pubkey_path: Optional[str] = None,
         environment: Optional[Dict[str, str]] = None,
         ports: Optional[List[Dict[str, Any]]] = None,
@@ -931,8 +924,8 @@ class BasilicaClient:
 
         Args:
             container_image: Docker image to run
-            node_id: Specific node to use (optional)
             gpu_type: GPU type to request
+            max_hourly_rate: Maximum USD per GPU-hour (rounded to nearest cent)
             ssh_pubkey_path: Path to SSH public key file
             environment: Environment variables
             ports: Port mappings
@@ -946,6 +939,9 @@ class BasilicaClient:
 
         if gpu_type is None:
             gpu_type = DEFAULT_GPU_TYPE
+
+        if max_hourly_rate is None:
+            raise ValueError("max_hourly_rate is required and must be provided")
 
         ssh_public_key = None
         if ssh_pubkey_path is not None:
@@ -969,16 +965,6 @@ class BasilicaClient:
             "storage_mb": DEFAULT_STORAGE_MB,
         }
 
-        if node_id:
-            node_selection = node_by_id(node_id)
-        else:
-            gpu_requirements = GpuRequirements(
-                gpu_count=DEFAULT_GPU_COUNT,
-                min_memory_gb=DEFAULT_GPU_MIN_MEMORY_GB,
-                gpu_type=gpu_type,
-            )
-            node_selection = node_by_gpu(gpu_requirements)
-
         port_mappings = []
         if ports:
             for port in ports:
@@ -999,7 +985,10 @@ class BasilicaClient:
         )
 
         request = StartRentalApiRequest(
-            node_selection=node_selection,
+            gpu_category=gpu_type,
+            gpu_count=DEFAULT_GPU_COUNT,
+            min_memory_gb=DEFAULT_GPU_MIN_MEMORY_GB,
+            max_hourly_rate=max_hourly_rate,
             container_image=container_image,
             ssh_public_key=ssh_public_key if ssh_public_key else "",
             environment=environment or {},

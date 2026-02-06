@@ -162,9 +162,8 @@ pub struct StartRentalApiRequest {
     #[serde(default)]
     pub min_memory_gb: Option<u32>,
 
-    /// Maximum acceptable $/GPU-hour
-    #[serde(default)]
-    pub max_hourly_rate: Option<f64>,
+    /// Maximum acceptable cents/GPU-hour
+    pub max_hourly_rate_cents: u32,
 
     /// Container image to run
     pub container_image: String,

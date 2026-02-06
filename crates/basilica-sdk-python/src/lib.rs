@@ -138,7 +138,8 @@ impl BasilicaClient {
         let client = Arc::clone(&self.inner);
 
         // Convert Python request to SDK request
-        let request = request.into();
+        let request = basilica_sdk::types::StartRentalApiRequest::try_from(request)
+            .map_err(PyValueError::new_err)?;
 
         let response = py
             .detach(|| {

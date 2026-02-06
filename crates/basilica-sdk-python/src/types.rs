@@ -473,7 +473,7 @@ pub struct StartRentalApiRequest {
     #[pyo3(get, set)]
     pub min_memory_gb: Option<u32>,
     #[pyo3(get, set)]
-    pub max_hourly_rate: Option<f64>,
+    pub max_hourly_rate: f64,
     #[pyo3(get, set)]
     pub container_image: String,
     #[pyo3(get, set)]
@@ -494,15 +494,15 @@ pub struct StartRentalApiRequest {
 #[pymethods]
 impl StartRentalApiRequest {
     #[new]
-    #[pyo3(signature = (gpu_category, container_image, ssh_public_key, gpu_count=1, min_memory_gb=None, max_hourly_rate=None, environment=None, ports=None, resources=None, command=None, volumes=None))]
+    #[pyo3(signature = (gpu_category, container_image, ssh_public_key, max_hourly_rate, gpu_count=1, min_memory_gb=None, environment=None, ports=None, resources=None, command=None, volumes=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         gpu_category: String,
         container_image: String,
         ssh_public_key: String,
+        max_hourly_rate: f64,
         gpu_count: u32,
         min_memory_gb: Option<u32>,
-        max_hourly_rate: Option<f64>,
         environment: Option<HashMap<String, String>>,
         ports: Option<Vec<PortMappingRequest>>,
         resources: Option<ResourceRequirementsRequest>,
@@ -525,13 +525,31 @@ impl StartRentalApiRequest {
     }
 }
 
-impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
-    fn from(req: StartRentalApiRequest) -> Self {
-        Self {
+fn usd_per_gpu_hour_to_cents(value: f64) -> Result<u32, String> {
+    if !value.is_finite() {
+        return Err("max_hourly_rate must be a finite number".to_string());
+    }
+    if value < 0.0 {
+        return Err("max_hourly_rate must be non-negative".to_string());
+    }
+
+    let cents = (value * 100.0).round();
+    if cents < 0.0 || cents > u32::MAX as f64 {
+        return Err("max_hourly_rate is out of supported range".to_string());
+    }
+
+    Ok(cents as u32)
+}
+
+impl TryFrom<StartRentalApiRequest> for SdkStartRentalApiRequest {
+    type Error = String;
+
+    fn try_from(req: StartRentalApiRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
             gpu_category: req.gpu_category,
             gpu_count: req.gpu_count,
             min_memory_gb: req.min_memory_gb,
-            max_hourly_rate: req.max_hourly_rate,
+            max_hourly_rate_cents: usd_per_gpu_hour_to_cents(req.max_hourly_rate)?,
             container_image: req.container_image,
             ssh_public_key: req.ssh_public_key,
             environment: req.environment,
@@ -539,7 +557,26 @@ impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
             resources: req.resources.into(),
             command: req.command,
             volumes: req.volumes.into_iter().map(Into::into).collect(),
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::usd_per_gpu_hour_to_cents;
+
+    #[test]
+    fn rounds_to_nearest_cent() {
+        assert_eq!(usd_per_gpu_hour_to_cents(2.50).unwrap(), 250);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.234).unwrap(), 123);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.235).unwrap(), 124);
+    }
+
+    #[test]
+    fn rejects_invalid_values() {
+        assert!(usd_per_gpu_hour_to_cents(f64::NAN).is_err());
+        assert!(usd_per_gpu_hour_to_cents(f64::NEG_INFINITY).is_err());
+        assert!(usd_per_gpu_hour_to_cents(-0.01).is_err());
     }
 }
 

@@ -17,8 +17,8 @@ pub struct RentalRequest {
     pub gpu_count: u32,
     /// Minimum GPU memory in GB (e.g., 80 for 80GB)
     pub min_memory_gb: Option<u32>,
-    /// Maximum acceptable $/GPU-hour
-    pub max_hourly_rate: Option<f64>,
+    /// Maximum acceptable cents/GPU-hour
+    pub max_hourly_rate_cents: u32,
 
     // Container config
     pub container_spec: ContainerSpec,

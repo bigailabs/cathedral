@@ -39,6 +39,47 @@ use tracing::{debug, warn};
 /// Maximum time to wait for rental to become active and SSH to be ready
 const RENTAL_READY_TIMEOUT: Duration = Duration::from_secs(300);
 
+fn usd_per_gpu_hour_to_cents(value: f64) -> Result<u32, CliError> {
+    if !value.is_finite() {
+        return Err(CliError::Internal(eyre!(
+            "Invalid --max-hourly-rate: value must be a finite number"
+        )));
+    }
+    if value < 0.0 {
+        return Err(CliError::Internal(eyre!(
+            "Invalid --max-hourly-rate: value must be non-negative"
+        )));
+    }
+
+    let cents = (value * 100.0).round();
+    if cents < 0.0 || cents > u32::MAX as f64 {
+        return Err(CliError::Internal(eyre!(
+            "Invalid --max-hourly-rate: value is out of supported range"
+        )));
+    }
+
+    Ok(cents as u32)
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::usd_per_gpu_hour_to_cents;
+
+    #[test]
+    fn rounds_to_nearest_cent() {
+        assert_eq!(usd_per_gpu_hour_to_cents(2.50).unwrap(), 250);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.234).unwrap(), 123);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.235).unwrap(), 124);
+    }
+
+    #[test]
+    fn rejects_invalid_values() {
+        assert!(usd_per_gpu_hour_to_cents(f64::NAN).is_err());
+        assert!(usd_per_gpu_hour_to_cents(f64::INFINITY).is_err());
+        assert!(usd_per_gpu_hour_to_cents(-0.01).is_err());
+    }
+}
+
 /// Enum representing the type of rental offering (GPU or CPU-only)
 enum RentalOffering {
     SecureCloud(basilica_common::types::GpuOffering),
@@ -853,6 +894,20 @@ async fn handle_community_cloud_rental_with_selection(
 ) -> Result<(), CliError> {
     let spinner = create_spinner("Preparing rental request...");
 
+    let user_max_hourly_rate_cents = options
+        .max_hourly_rate
+        .map(usd_per_gpu_hour_to_cents)
+        .transpose()?;
+    let effective_max_hourly_rate_cents = user_max_hourly_rate_cents
+        .or(selection.derived_max_hourly_rate_cents)
+        .ok_or_else(|| {
+            complete_spinner_error(spinner.clone(), "Missing max hourly rate");
+            CliError::Internal(
+                eyre!("Selected Bourse offering does not include pricing information")
+                    .suggestion("Retry with --max-hourly-rate <USD_PER_GPU_HOUR>"),
+            )
+        })?;
+
     // Build rental request
     let container_image = options.image.unwrap_or_else(|| config.image.name.clone());
 
@@ -898,7 +953,7 @@ async fn handle_community_cloud_rental_with_selection(
         gpu_category: selection.gpu_category,
         gpu_count: selection.gpu_count,
         min_memory_gb: selection.min_memory_gb,
-        max_hourly_rate: None, // Could be added as CLI option in the future
+        max_hourly_rate_cents: effective_max_hourly_rate_cents,
         container_image,
         ssh_public_key: ssh_key.public_key,
         environment: env_vars,
@@ -1030,6 +1085,9 @@ fn validate_no_community_cloud_options(options: &UpOptions) -> Result<(), CliErr
     }
     if options.storage_mb.is_some() {
         invalid_args.push("--storage-mb");
+    }
+    if options.max_hourly_rate.is_some() {
+        invalid_args.push("--max-hourly-rate");
     }
 
     if !invalid_args.is_empty() {
