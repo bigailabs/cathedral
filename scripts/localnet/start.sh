@@ -172,6 +172,10 @@ init_subnet() {
     "${SCRIPT_DIR}/init-subnet.sh"
 }
 
+# Create shared network if it doesn't exist
+docker network create basilica-localnet --subnet 172.28.0.0/16 2>/dev/null && \
+    echo "Created shared network: basilica-localnet" || true
+
 # Two-phase startup: Start subtensor first, init wallets, then start remaining services
 # This prevents race conditions where validator starts before wallets exist
 
