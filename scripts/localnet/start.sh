@@ -6,7 +6,6 @@
 #   network     - Subtensor only
 #   validator   - Subtensor + Validator
 #   miner       - Above + Miner
-#   monitoring  - All + Prometheus + Grafana
 #   all         - Everything (default)
 
 set -euo pipefail
@@ -25,9 +24,8 @@ show_help() {
     echo ""
     echo "Profiles:"
     echo "  network     Subtensor only"
-    echo "  validator   Subtensor + PostgreSQL + Validator"
+    echo "  validator   Subtensor + Validator"
     echo "  miner       Above + Miner"
-    echo "  monitoring  All + Prometheus + Grafana"
     echo "  all         Everything (default)"
     echo ""
     echo "Options:"
@@ -43,8 +41,6 @@ show_help() {
     echo "  Subtensor:   ws://localhost:9944"
     echo "  Validator:   http://localhost:8080 (API), :9090/metrics"
     echo "  Miner:       localhost:8092 (gRPC), :9091/metrics"
-    echo "  Prometheus:  http://localhost:9099"
-    echo "  Grafana:     http://localhost:3000 (admin/admin)"
     echo ""
     echo "See also: ./stop.sh, ./restart.sh, ./test.sh"
 }
@@ -79,14 +75,8 @@ case "${PROFILE}" in
     validator|val)
         PROFILE="validator"
         ;;
-    miner|min)
+    miner|min|all|"")
         PROFILE="miner"
-        ;;
-    monitoring|monitor|mon)
-        PROFILE="monitoring"
-        ;;
-    all|"")
-        PROFILE="all"
         ;;
     *)
         echo "Unknown profile: ${PROFILE}"
@@ -95,7 +85,6 @@ case "${PROFILE}" in
         echo "  network     - Subtensor only"
         echo "  validator   - Subtensor + Validator"
         echo "  miner       - Above + Miner"
-        echo "  monitoring  - All + Prometheus + Grafana"
         echo "  all         - Everything (default)"
         exit 1
         ;;
@@ -238,13 +227,7 @@ else
     echo ""
     echo "[4/4] Starting remaining services for profile: ${PROFILE}..."
 
-    # Start the remaining services for the requested profile
-    # Note: "all" uses monitoring profile since it includes all services
-    if [ "${PROFILE}" = "all" ]; then
-        docker compose --profile monitoring up -d ${BUILD_FLAG}
-    else
-        docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
-    fi
+    docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
 
     echo ""
     echo "Waiting for services..."
@@ -257,12 +240,6 @@ else
         miner)
             wait_for_service "Validator" "http://localhost:8080/health" 60
             wait_for_port "Miner" "localhost" 8092 60
-            ;;
-        monitoring|all)
-            wait_for_service "Validator" "http://localhost:8080/health" 60
-            wait_for_port "Miner" "localhost" 8092 60
-            wait_for_service "Prometheus" "http://localhost:9099/-/healthy"
-            wait_for_service "Grafana" "http://localhost:3000/api/health"
             ;;
     esac
 fi
@@ -294,15 +271,6 @@ case "${PROFILE}" in
         echo "               http://localhost:9090/metrics"
         echo "  Miner:       localhost:8092 (gRPC)"
         echo "               http://localhost:9091/metrics"
-        ;;
-    monitoring|all)
-        echo "  Subtensor:   ws://localhost:9944"
-        echo "  Validator:   http://localhost:8080 (API)"
-        echo "               http://localhost:9090/metrics"
-        echo "  Miner:       localhost:8092 (gRPC)"
-        echo "               http://localhost:9091/metrics"
-        echo "  Prometheus:  http://localhost:9099"
-        echo "  Grafana:     http://localhost:3000 (admin/admin)"
         ;;
 esac
 

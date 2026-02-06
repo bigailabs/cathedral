@@ -4,10 +4,10 @@
 #
 # Arguments:
 #   services     Service names to restart (default: all)
-#                Available: subtensor, validator, miner, prometheus, grafana
+#                Available: subtensor, validator, miner
 #
 # Options:
-#   --profile    Restart services by profile (network, validator, miner, monitoring)
+#   --profile    Restart services by profile (network, validator, miner)
 #   -f, --logs   Follow logs after restart
 #   -h, --help   Show help
 
@@ -28,11 +28,11 @@ show_help() {
     echo ""
     echo "Arguments:"
     echo "  services       Service names to restart (default: all running)"
-    echo "                 Available: subtensor, validator, miner, prometheus, grafana"
+    echo "                 Available: subtensor, validator, miner"
     echo ""
     echo "Options:"
     echo "  --profile NAME Restart services by profile"
-    echo "                 Profiles: network, validator, miner, monitoring"
+    echo "                 Profiles: network, validator, miner"
     echo "  -f, --logs     Follow logs after restart"
     echo "  -h, --help     Show this help"
     echo ""
@@ -84,11 +84,8 @@ if [[ -n "${PROFILE}" ]]; then
         validator|val)
             PROFILE="validator"
             ;;
-        miner|min)
+        miner|min|all)
             PROFILE="miner"
-            ;;
-        monitoring|monitor|mon|all)
-            PROFILE="monitoring"
             ;;
         *)
             echo "Unknown profile: ${PROFILE}"
@@ -96,8 +93,7 @@ if [[ -n "${PROFILE}" ]]; then
             echo "Available profiles:"
             echo "  network     - Subtensor only"
             echo "  validator   - Subtensor + Validator"
-            echo "  miner       - Above + Miner"
-            echo "  monitoring  - All services"
+            echo "  miner       - All services"
             exit 1
             ;;
     esac

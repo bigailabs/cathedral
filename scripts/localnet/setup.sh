@@ -111,7 +111,7 @@ echo ""
 echo "[3/3] Pulling Docker images..."
 
 cd "${SCRIPT_DIR}"
-docker compose pull subtensor postgres prometheus grafana 2>/dev/null || true
+docker compose pull subtensor 2>/dev/null || true
 
 echo ""
 echo "========================================"
@@ -126,8 +126,7 @@ echo "  4. Check health:        ./test.sh"
 echo ""
 echo "Available profiles:"
 echo "  network     - Subtensor only"
-echo "  validator   - Subtensor + Postgres + Validator"
+echo "  validator   - Subtensor + Validator"
 echo "  miner       - Above + Miner"
-echo "  monitoring  - All + Prometheus + Grafana"
 echo "  all         - Everything (default)"
 echo ""
