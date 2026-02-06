@@ -232,6 +232,32 @@ fi
 echo ""
 
 # =============================================================================
+# Stake TAO to Validator (required for validator permit)
+# =============================================================================
+echo "[4.5/5] Staking TAO to validator hotkey for validator permit..."
+
+stake_out=$(uvx --from bittensor-cli btcli stake add \
+    --wallet.name "validator" \
+    --wallet.hotkey "default" \
+    --wallet.path "${WALLETS_DIR}" \
+    --netuid "${NETUID}" \
+    --amount 1000 \
+    --no-safe-staking \
+    --no-mev-protection \
+    --network local \
+    --no-prompt 2>&1)
+stake_exit=$?
+
+if [ $stake_exit -ne 0 ]; then
+    echo "  WARNING: Staking failed (may already be staked)"
+    echo "$stake_out"
+else
+    echo "  Staked 1000 TAO to validator hotkey"
+fi
+
+echo ""
+
+# =============================================================================
 # Register Miner
 # =============================================================================
 echo "[5/5] Registering miner on netuid=${NETUID}..."
