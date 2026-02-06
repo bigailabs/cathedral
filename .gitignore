@@ -108,10 +108,6 @@ temp/
 *.s.md
 
 *.s.md
-
-scripts/localnet/ssh-keys
-scripts/localnet/wallets
-scripts/localnet/keys
 scripts/localnet/configs/validator.toml
 scripts/localnet/configs/miner.toml
 terraform.tfstate
