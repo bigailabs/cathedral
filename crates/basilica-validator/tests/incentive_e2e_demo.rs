@@ -3,9 +3,9 @@
 //! This test demonstrates the complete incentive mechanism flow:
 //! 1. Miners submit signed bids
 //! 2. User requests rental → validator selects lowest bidder
-//! 3. Rental runs, telemetry processed → billing calculates miner_payment
+//! 3. Rental runs, telemetry processed → billing calculates revenue
 //! 4. Weight setter fetches deliveries
-//! 5. Weights calculated proportional to miner_payment_usd
+//! 5. Weights calculated proportional to revenue_usd
 //! 6. Hotkey→UID resolution protects against deregistration attacks
 //!
 //! Run with: cargo test --test incentive_e2e_demo -- --nocapture
@@ -33,8 +33,7 @@ struct Rental {
     gpu_category: String,
     gpu_count: u32,
     hours_used: f64,
-    user_rate_cents: u32,      // What user paid per GPU-hour (cents)
-    miner_bid_rate_cents: u32, // What miner bid (what they get paid, cents)
+    bid_rate_cents: u32, // Miner's bid rate per GPU-hour (cents)
 }
 
 /// Simulates a delivery record (output of billing)
@@ -44,8 +43,7 @@ struct MinerDelivery {
     miner_uid: u16, // UID at rental time
     gpu_category: String,
     total_hours: f64,
-    user_revenue_usd: f64,
-    miner_payment_usd: f64, // CRITICAL: This is what weights are based on
+    revenue_usd: f64, // net miner revenue -- weights based on this
 }
 
 /// Simulates metagraph state
@@ -127,20 +125,20 @@ fn calculate_weights(
                 skipped_deregistered += 1;
                 println!(
                     "  🚫 Miner {} (UID {}) deregistered - clearing ${:.2} pending revenue",
-                    delivery.miner_hotkey, delivery.miner_uid, delivery.miner_payment_usd
+                    delivery.miner_hotkey, delivery.miner_uid, delivery.revenue_usd
                 );
                 continue;
             }
         };
 
-        if delivery.miner_payment_usd <= 0.0 {
+        if delivery.revenue_usd <= 0.0 {
             continue;
         }
 
         miners_by_category
             .entry(delivery.gpu_category.clone())
             .or_default()
-            .push((current_uid, delivery.miner_payment_usd));
+            .push((current_uid, delivery.revenue_usd));
     }
 
     if skipped_deregistered > 0 {
@@ -260,7 +258,6 @@ fn demo_full_incentive_flow() {
 
     let user_request_category = "H100";
     let user_request_gpus = 8;
-    let user_rate_cents: u32 = 350; // User pays $3.50/hr (platform markup)
 
     let winner = select_winning_bidder(&bids, user_request_category, user_request_gpus)
         .expect("Should find a winning bidder");
@@ -268,10 +265,6 @@ fn demo_full_incentive_flow() {
     println!(
         "  User wants: {} x{} GPUs",
         user_request_category, user_request_gpus
-    );
-    println!(
-        "  User rate: ${:.2}/GPU-hour",
-        user_rate_cents as f64 / 100.0
     );
     println!();
     println!(
@@ -281,10 +274,6 @@ fn demo_full_incentive_flow() {
     println!(
         "     Bid: ${:.2}/GPU-hour",
         winner.bid_per_hour_cents as f64 / 100.0
-    );
-    println!(
-        "     Platform margin: ${:.2}/GPU-hour",
-        (user_rate_cents - winner.bid_per_hour_cents) as f64 / 100.0
     );
     println!();
 
@@ -303,8 +292,7 @@ fn demo_full_incentive_flow() {
             gpu_category: "H100".to_string(),
             gpu_count: 8,
             hours_used: 10.0, // 10 hours
-            user_rate_cents: 350,
-            miner_bid_rate_cents: winner.bid_per_hour_cents,
+            bid_rate_cents: winner.bid_per_hour_cents,
         },
         // Dave had an A100 rental
         Rental {
@@ -314,8 +302,7 @@ fn demo_full_incentive_flow() {
             gpu_category: "A100".to_string(),
             gpu_count: 4,
             hours_used: 20.0, // 20 hours
-            user_rate_cents: 200,
-            miner_bid_rate_cents: 120,
+            bid_rate_cents: 120,
         },
         // Bob also got a smaller H100 rental later
         Rental {
@@ -325,16 +312,13 @@ fn demo_full_incentive_flow() {
             gpu_category: "H100".to_string(),
             gpu_count: 4,
             hours_used: 5.0,
-            user_rate_cents: 350,
-            miner_bid_rate_cents: 250,
+            bid_rate_cents: 250,
         },
     ];
 
     for rental in &rentals {
         let gpu_hours = rental.gpu_count as f64 * rental.hours_used;
-        // Use u64 for intermediate calculations to prevent overflow
-        let user_revenue_cents = (gpu_hours * rental.user_rate_cents as f64).round() as u64;
-        let miner_payment_cents = (gpu_hours * rental.miner_bid_rate_cents as f64).round() as u64;
+        let revenue_cents = (gpu_hours * rental.bid_rate_cents as f64).round() as u64;
 
         println!(
             "  📦 {}: {} (UID {})",
@@ -346,14 +330,9 @@ fn demo_full_incentive_flow() {
         );
         println!("     GPU-hours: {:.1}", gpu_hours);
         println!(
-            "     User paid: ${:.2} (@ ${:.2}/GPU-hr)",
-            user_revenue_cents as f64 / 100.0,
-            rental.user_rate_cents as f64 / 100.0
-        );
-        println!(
-            "     Miner gets: ${:.2} (@ ${:.2}/GPU-hr)",
-            miner_payment_cents as f64 / 100.0,
-            rental.miner_bid_rate_cents as f64 / 100.0
+            "     Revenue: ${:.2} (@ ${:.2}/GPU-hr)",
+            revenue_cents as f64 / 100.0,
+            rental.bid_rate_cents as f64 / 100.0
         );
         println!();
     }
@@ -371,21 +350,18 @@ fn demo_full_incentive_flow() {
         let key = (rental.miner_hotkey.clone(), rental.gpu_category.clone());
         let gpu_hours = rental.gpu_count as f64 * rental.hours_used;
         // Calculate in cents, convert to dollars for MinerDelivery (which uses f64 USD)
-        let user_revenue_usd = (gpu_hours * rental.user_rate_cents as f64) / 100.0;
-        let miner_payment_usd = (gpu_hours * rental.miner_bid_rate_cents as f64) / 100.0;
+        let revenue_usd = (gpu_hours * rental.bid_rate_cents as f64) / 100.0;
 
         let entry = delivery_map.entry(key).or_insert(MinerDelivery {
             miner_hotkey: rental.miner_hotkey.clone(),
             miner_uid: rental.miner_uid,
             gpu_category: rental.gpu_category.clone(),
             total_hours: 0.0,
-            user_revenue_usd: 0.0,
-            miner_payment_usd: 0.0,
+            revenue_usd: 0.0,
         });
 
         entry.total_hours += gpu_hours;
-        entry.user_revenue_usd += user_revenue_usd;
-        entry.miner_payment_usd += miner_payment_usd;
+        entry.revenue_usd += revenue_usd;
     }
 
     let deliveries: Vec<MinerDelivery> = delivery_map.into_values().collect();
@@ -396,10 +372,9 @@ fn demo_full_incentive_flow() {
             d.miner_hotkey, d.miner_uid, d.gpu_category
         );
         println!("     GPU-hours: {:.1}", d.total_hours);
-        println!("     User revenue: ${:.2}", d.user_revenue_usd);
         println!(
-            "     Miner payment: ${:.2} ← WEIGHTS BASED ON THIS",
-            d.miner_payment_usd
+            "     Revenue: ${:.2} ← WEIGHTS BASED ON THIS",
+            d.revenue_usd
         );
         println!();
     }
@@ -447,19 +422,19 @@ fn demo_full_incentive_flow() {
     let charlie_payment: f64 = deliveries
         .iter()
         .filter(|d| d.miner_hotkey.contains("Charlie"))
-        .map(|d| d.miner_payment_usd)
+        .map(|d| d.revenue_usd)
         .sum();
 
     let bob_payment: f64 = deliveries
         .iter()
         .filter(|d| d.miner_hotkey.contains("Bob"))
-        .map(|d| d.miner_payment_usd)
+        .map(|d| d.revenue_usd)
         .sum();
 
     let dave_payment: f64 = deliveries
         .iter()
         .filter(|d| d.miner_hotkey.contains("Dave"))
-        .map(|d| d.miner_payment_usd)
+        .map(|d| d.revenue_usd)
         .sum();
 
     println!("  Miner payments:");
@@ -630,7 +605,6 @@ fn demo_bid_economics() {
     println!("{}\n", separator());
 
     // Scenario: Three miners bid on same GPU category
-    let user_rate_cents: u32 = 400; // Platform charges $4/GPU-hour
     let hours = 100.0;
     let gpus = 8;
     let gpu_hours = hours * gpus as f64;
@@ -639,10 +613,9 @@ fn demo_bid_economics() {
     let scenarios: Vec<(&str, u32, &str)> = vec![
         ("Alice", 350, "High bid - less likely to win"),
         ("Bob", 250, "Medium bid"),
-        ("Charlie", 150, "Low bid - wins but lower margin"),
+        ("Charlie", 150, "Low bid - most likely to win"),
     ];
 
-    println!("User rate: ${:.2}/GPU-hour", user_rate_cents as f64 / 100.0);
     println!(
         "Rental: {} GPUs for {} hours = {} GPU-hours",
         gpus, hours, gpu_hours
@@ -650,10 +623,7 @@ fn demo_bid_economics() {
     println!();
 
     for (name, bid_cents, note) in &scenarios {
-        let user_revenue_usd = (gpu_hours * user_rate_cents as f64) / 100.0;
-        let miner_payment_usd = (gpu_hours * *bid_cents as f64) / 100.0;
-        let platform_margin = user_revenue_usd - miner_payment_usd;
-        let miner_margin_pct = (miner_payment_usd / user_revenue_usd) * 100.0;
+        let revenue_usd = (gpu_hours * *bid_cents as f64) / 100.0;
 
         println!(
             "  {} bids ${:.2}/GPU-hr ({})",
@@ -661,29 +631,25 @@ fn demo_bid_economics() {
             *bid_cents as f64 / 100.0,
             note
         );
-        println!(
-            "    If wins: Miner gets ${:.2} ({:.0}% of user payment)",
-            miner_payment_usd, miner_margin_pct
-        );
-        println!("    Platform keeps: ${:.2}", platform_margin);
+        println!("    If wins: Revenue = ${:.2}", revenue_usd);
         println!();
     }
 
     // Show weight implications
     println!("  Weight implications (if all three win equal rentals):");
 
-    let total_payments_usd: f64 = scenarios
+    let total_revenue_usd: f64 = scenarios
         .iter()
         .map(|(_, bid_cents, _)| (gpu_hours * *bid_cents as f64) / 100.0)
         .sum();
 
     for (name, bid_cents, _) in &scenarios {
-        let payment_usd = (gpu_hours * *bid_cents as f64) / 100.0;
-        let weight_share = payment_usd / total_payments_usd;
+        let revenue_usd = (gpu_hours * *bid_cents as f64) / 100.0;
+        let weight_share = revenue_usd / total_revenue_usd;
         println!(
-            "    {}: ${:.2} payment → {:.1}% of category weight",
+            "    {}: ${:.2} revenue → {:.1}% of category weight",
             name,
-            payment_usd,
+            revenue_usd,
             weight_share * 100.0
         );
     }
@@ -724,32 +690,28 @@ fn demo_category_caps() {
             miner_uid: 0,
             gpu_category: "H100".to_string(),
             total_hours: 1000.0,
-            user_revenue_usd: 3500.0,
-            miner_payment_usd: 2500.0, // 90% of H100 payments
+            revenue_usd: 2500.0,
         },
         MinerDelivery {
             miner_hotkey: "DominantMiner".to_string(),
             miner_uid: 0,
             gpu_category: "A100".to_string(),
             total_hours: 800.0,
-            user_revenue_usd: 1600.0,
-            miner_payment_usd: 1200.0, // 80% of A100 payments
+            revenue_usd: 1200.0,
         },
         MinerDelivery {
             miner_hotkey: "SmallH100Miner".to_string(),
             miner_uid: 1,
             gpu_category: "H100".to_string(),
             total_hours: 100.0,
-            user_revenue_usd: 350.0,
-            miner_payment_usd: 278.0, // 10% of H100 payments
+            revenue_usd: 278.0,
         },
         MinerDelivery {
             miner_hotkey: "SmallA100Miner".to_string(),
             miner_uid: 2,
             gpu_category: "A100".to_string(),
             total_hours: 200.0,
-            user_revenue_usd: 400.0,
-            miner_payment_usd: 300.0, // 20% of A100 payments
+            revenue_usd: 300.0,
         },
     ];
 
@@ -767,7 +729,7 @@ fn demo_category_caps() {
     for d in &deliveries {
         println!(
             "    {} ({}) ${:.0}",
-            d.miner_hotkey, d.gpu_category, d.miner_payment_usd
+            d.miner_hotkey, d.gpu_category, d.revenue_usd
         );
     }
     println!();
@@ -789,12 +751,33 @@ fn demo_category_caps() {
         .unwrap_or(0.0);
     let dominant_pct = (dominant_weight / total) * 100.0;
 
-    // They dominated 90% of H100 (50% pool) + 80% of A100 (30% pool)
-    // Expected: 0.9 * 50% + 0.8 * 30% = 45% + 24% = 69%
-    let expected_pct = 0.9 * 50.0 + 0.8 * 30.0;
+    // Compute DominantMiner's share in each category from the data
+    let h100_total: f64 = deliveries
+        .iter()
+        .filter(|d| d.gpu_category == "H100")
+        .map(|d| d.revenue_usd)
+        .sum();
+    let a100_total: f64 = deliveries
+        .iter()
+        .filter(|d| d.gpu_category == "A100")
+        .map(|d| d.revenue_usd)
+        .sum();
+    let dominant_h100: f64 = deliveries
+        .iter()
+        .filter(|d| d.miner_hotkey == "DominantMiner" && d.gpu_category == "H100")
+        .map(|d| d.revenue_usd)
+        .sum();
+    let dominant_a100: f64 = deliveries
+        .iter()
+        .filter(|d| d.miner_hotkey == "DominantMiner" && d.gpu_category == "A100")
+        .map(|d| d.revenue_usd)
+        .sum();
+
+    let h100_share = dominant_h100 / h100_total;
+    let a100_share = dominant_a100 / a100_total;
+    let expected_pct = h100_share * 50.0 + a100_share * 30.0;
 
     println!("  DominantMiner analysis:");
-    println!("    Dominated: 90% of H100 (50% pool) + 80% of A100 (30% pool)");
     println!("    Expected weight: {:.0}%", expected_pct);
     println!("    Actual weight: {:.1}%", dominant_pct);
     println!();

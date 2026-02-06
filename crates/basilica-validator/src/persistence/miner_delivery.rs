@@ -42,18 +42,16 @@ impl MinerDeliveryRepository {
                     period_start,
                     period_end,
                     total_hours,
-                    user_revenue_usd,
-                    miner_payment_usd,
+                    revenue_usd,
                     received_at,
                     node_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(miner_hotkey, node_id, gpu_category, period_start, period_end)
                 DO UPDATE SET
                     miner_uid = excluded.miner_uid,
                     gpu_category = excluded.gpu_category,
                     total_hours = excluded.total_hours,
-                    user_revenue_usd = excluded.user_revenue_usd,
-                    miner_payment_usd = excluded.miner_payment_usd,
+                    revenue_usd = excluded.revenue_usd,
                     received_at = excluded.received_at,
                     node_id = excluded.node_id
                 "#,
@@ -64,8 +62,7 @@ impl MinerDeliveryRepository {
             .bind(period_start_ts)
             .bind(period_end_ts)
             .bind(delivery.total_hours)
-            .bind(delivery.user_revenue_usd)
-            .bind(delivery.miner_payment_usd)
+            .bind(delivery.revenue_usd)
             .bind(received_at)
             .bind(&delivery.node_id)
             .execute(&mut *tx)
@@ -91,9 +88,8 @@ impl MinerDeliveryRepository {
                 miner_hotkey,
                 miner_uid,
                 total_hours,
-                user_revenue_usd,
+                revenue_usd,
                 gpu_category,
-                miner_payment_usd,
                 node_id
             FROM miner_delivery_cache
             WHERE period_end >=
@@ -122,9 +118,8 @@ impl MinerDeliveryRepository {
                 miner_hotkey: row.get("miner_hotkey"),
                 miner_uid: row.get::<i64, _>("miner_uid") as u32,
                 total_hours: row.get("total_hours"),
-                user_revenue_usd: row.get("user_revenue_usd"),
+                revenue_usd: row.get("revenue_usd"),
                 gpu_category: row.get("gpu_category"),
-                miner_payment_usd: row.get("miner_payment_usd"),
                 node_id: row.get("node_id"),
             })
             .collect())
@@ -145,12 +140,11 @@ impl MinerDeliveryRepository {
                 miner_hotkey,
                 miner_uid,
                 total_hours,
-                user_revenue_usd,
+                revenue_usd,
                 gpu_category,
-                miner_payment_usd,
                 node_id
             FROM miner_delivery_cache
-            WHERE period_start = 
+            WHERE period_start =
             "#,
         );
         qb.push_bind(period_start_ts);
@@ -176,9 +170,8 @@ impl MinerDeliveryRepository {
                 miner_hotkey: row.get("miner_hotkey"),
                 miner_uid: row.get::<i64, _>("miner_uid") as u32,
                 total_hours: row.get("total_hours"),
-                user_revenue_usd: row.get("user_revenue_usd"),
+                revenue_usd: row.get("revenue_usd"),
                 gpu_category: row.get("gpu_category"),
-                miner_payment_usd: row.get("miner_payment_usd"),
                 node_id: row.get("node_id"),
             })
             .collect())

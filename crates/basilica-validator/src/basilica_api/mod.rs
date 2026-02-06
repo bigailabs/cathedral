@@ -340,9 +340,8 @@ impl BasilicaApiClient {
                 miner_hotkey: delivery.miner_hotkey,
                 miner_uid: delivery.miner_uid,
                 total_hours: delivery.total_hours,
-                user_revenue_usd: delivery.user_revenue_usd,
+                revenue_usd: delivery.revenue_usd,
                 gpu_category: delivery.gpu_category,
-                miner_payment_usd: delivery.miner_payment_usd,
                 node_id: delivery.node_id,
             })
             .collect())
@@ -415,9 +414,8 @@ struct MinerDeliveryItem {
     miner_hotkey: String,
     miner_uid: u32,
     total_hours: f64,
-    user_revenue_usd: f64,
+    revenue_usd: f64,
     gpu_category: String,
-    miner_payment_usd: f64,
     #[serde(default)]
     node_id: String,
 }

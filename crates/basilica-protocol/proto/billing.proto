@@ -82,6 +82,7 @@ message CommunityCloudData {
     uint32 gpu_count = 4;          // Number of GPUs in this rental
     uint32 miner_uid = 5;          // Bittensor miner UID for payment reconciliation
     string miner_hotkey = 6;       // Bittensor miner hotkey for payment reconciliation
+    double markup_percent = 7;
 }
 
 // Secure cloud rental data (direct provider API)
@@ -98,6 +99,7 @@ message SecureCloudData {
     uint32 ram_gb = 9;                // Amount of RAM in GB
     double base_price_per_storage = 10; // Price per GB storage per hour (0 for GPU rentals)
     uint32 storage_gb = 11;             // Amount of storage in GB
+    double markup_percent = 12;
 }
 
 // Orchestrator cloud rental data (K3s UserDeployment billing)
@@ -324,9 +326,9 @@ message MinerDelivery {
     string miner_hotkey = 1;
     uint32 miner_uid = 2;
     double total_hours = 3;
-    double user_revenue_usd = 4;
+    double revenue_usd = 4;
     string gpu_category = 5;
-    double miner_payment_usd = 6;
+    reserved 6;
     reserved 7, 8, 9, 10;
     string node_id = 11;
 }

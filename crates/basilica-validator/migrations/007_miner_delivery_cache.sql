@@ -7,8 +7,7 @@ CREATE TABLE IF NOT EXISTS miner_delivery_cache (
     period_start INTEGER NOT NULL,
     period_end INTEGER NOT NULL,
     total_hours REAL NOT NULL,
-    user_revenue_usd REAL NOT NULL,
-    miner_payment_usd REAL NOT NULL,
+    revenue_usd REAL NOT NULL,
     received_at INTEGER NOT NULL,
     UNIQUE(miner_hotkey, node_id, gpu_category, period_start, period_end)
 );

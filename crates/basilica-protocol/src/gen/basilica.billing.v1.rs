@@ -106,6 +106,8 @@ pub struct CommunityCloudData {
     /// Bittensor miner hotkey for payment reconciliation
     #[prost(string, tag = "6")]
     pub miner_hotkey: ::prost::alloc::string::String,
+    #[prost(double, tag = "7")]
+    pub markup_percent: f64,
 }
 /// Secure cloud rental data (direct provider API)
 /// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost + storage_cost)
@@ -145,6 +147,8 @@ pub struct SecureCloudData {
     /// Amount of storage in GB
     #[prost(uint32, tag = "11")]
     pub storage_gb: u32,
+    #[prost(double, tag = "12")]
+    pub markup_percent: f64,
 }
 /// Orchestrator cloud rental data (K3s UserDeployment billing)
 /// Uses additive pricing: total_cost = hours × (gpu_cost + cpu_cost + ram_cost + storage_cost)
@@ -531,11 +535,9 @@ pub struct MinerDelivery {
     #[prost(double, tag = "3")]
     pub total_hours: f64,
     #[prost(double, tag = "4")]
-    pub user_revenue_usd: f64,
+    pub revenue_usd: f64,
     #[prost(string, tag = "5")]
     pub gpu_category: ::prost::alloc::string::String,
-    #[prost(double, tag = "6")]
-    pub miner_payment_usd: f64,
     #[prost(string, tag = "11")]
     pub node_id: ::prost::alloc::string::String,
 }

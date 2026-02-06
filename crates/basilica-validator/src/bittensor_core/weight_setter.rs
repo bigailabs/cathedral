@@ -384,7 +384,7 @@ impl WeightSetter {
                     warn!(
                         miner_hotkey = %delivery.miner_hotkey,
                         stored_uid = delivery.miner_uid,
-                        miner_payment_usd = delivery.miner_payment_usd,
+                        revenue_usd = delivery.revenue_usd,
                         gpu_category = %delivery.gpu_category,
                         "Miner deregistered - clearing pending revenue (hotkey not in metagraph)"
                     );
@@ -397,7 +397,7 @@ impl WeightSetter {
                     miner_hotkey = %delivery.miner_hotkey,
                     stored_uid = delivery.miner_uid,
                     current_uid = current_uid,
-                    miner_payment_usd = delivery.miner_payment_usd,
+                    revenue_usd = delivery.revenue_usd,
                     "Miner UID changed - using current UID from metagraph"
                 );
             }
@@ -407,8 +407,8 @@ impl WeightSetter {
             } else {
                 delivery.gpu_category
             };
-            let miner_payment_usd = delivery.miner_payment_usd;
-            if !miner_payment_usd.is_finite() || miner_payment_usd <= 0.0 {
+            let revenue_usd = delivery.revenue_usd;
+            if !revenue_usd.is_finite() || revenue_usd <= 0.0 {
                 debug!(
                     miner_hotkey = %delivery.miner_hotkey,
                     node_id = %delivery.node_id,
@@ -421,7 +421,7 @@ impl WeightSetter {
             miners_by_category
                 .entry(category)
                 .or_default()
-                .push((MinerUid::new(current_uid), miner_payment_usd));
+                .push((MinerUid::new(current_uid), revenue_usd));
         }
 
         if miners_by_category.is_empty() {
