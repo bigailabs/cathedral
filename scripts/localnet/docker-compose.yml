@@ -39,6 +39,7 @@ services:
   # =============================================================================
   validator:
     image: basilica-localnet-validator
+    pull_policy: never
     platform: linux/amd64  # Required for validator-binary (x86-64 ELF)
     build:
       context: ../..
@@ -79,6 +80,7 @@ services:
   # =============================================================================
   miner:
     image: basilica-localnet-miner
+    pull_policy: never
     build:
       context: ../..
       dockerfile: scripts/miner/Dockerfile
