@@ -21,8 +21,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
 
 # Fetch dependencies with cache mount
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=basilica-cargo-git \
     cargo fetch
 
 # Build arguments
@@ -46,9 +46,9 @@ ENV CARGO_HTTP_TIMEOUT=120
 # Build the validator directly (workspace should resolve dependencies)
 # Set explicit endpoint if network is specified but endpoint is not
 # Use cache mounts for cargo registry and target to speed up rebuilds
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
-    --mount=type=cache,target=/tmp/target,id=cargo-target-validator \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=basilica-cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=basilica-cargo-git \
+    --mount=type=cache,target=/tmp/target,id=basilica-cargo-target \
     if [ -n "$BITTENSOR_NETWORK" ] && [ -z "$METADATA_CHAIN_ENDPOINT" ]; then \
         case "$BITTENSOR_NETWORK" in \
             test) export METADATA_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443" ;; \
