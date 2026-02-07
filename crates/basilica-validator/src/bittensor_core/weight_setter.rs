@@ -18,6 +18,7 @@ use crate::persistence::{
 use anyhow::Result;
 use basilica_common::config::BittensorConfig;
 use basilica_common::identity::{Hotkey, MinerUid, NodeId};
+use basilica_common::types::GpuCategory;
 use basilica_common::{KeyValueStorage, MemoryStorage};
 use basilica_protocol::billing::MinerDelivery;
 use bittensor::{Metagraph, NormalizedWeight, Service as BittensorService};
@@ -405,7 +406,7 @@ impl WeightSetter {
             let category = if delivery.gpu_category.trim().is_empty() {
                 "UNKNOWN".to_string()
             } else {
-                delivery.gpu_category
+                delivery.gpu_category.parse::<GpuCategory>().unwrap().to_string()
             };
             let revenue_usd = delivery.revenue_usd;
             if !revenue_usd.is_finite() || revenue_usd <= 0.0 {
