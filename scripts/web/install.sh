@@ -82,6 +82,21 @@ setup_install_dir() {
     mkdir -p "$INSTALL_DIR"
 }
 
+# Remove binaries left by the old install layout (pre-~/.basilica era).
+# Old locations: ~/.local/bin or /usr/local/bin.
+# Does NOT modify shell profiles — the new env file appended by setup_shells()
+# naturally overrides the old PATH/completion lines.
+migrate_from_old_install() {
+    for old_dir in "$HOME/.local/bin" "/usr/local/bin"; do
+        if [ -f "$old_dir/basilica" ]; then
+            print_step "Removing old binary from $old_dir..."
+            rm -f "$old_dir/basilica" 2>/dev/null || true
+            rm -f "$old_dir/bs" 2>/dev/null || true
+            print_info "Cleaned up old install location"
+        fi
+    done
+}
+
 # Detect all installed shells on the system
 detect_installed_shells() {
     local shells=""
@@ -448,14 +463,23 @@ verify_binary() {
 
 # Check if binary already exists and prompt user
 check_existing_installation() {
-    if [ -f "$INSTALL_DIR/$BINARY_NAME" ]; then
+    # Find existing binary: check new location first, then old locations
+    local existing_binary=""
+    for candidate in "$INSTALL_DIR/$BINARY_NAME" "$HOME/.local/bin/$BINARY_NAME" "/usr/local/bin/$BINARY_NAME"; do
+        if [ -f "$candidate" ]; then
+            existing_binary="$candidate"
+            break
+        fi
+    done
+
+    if [ -n "$existing_binary" ]; then
         echo
-        print_warning "Basilica CLI is already installed at $INSTALL_DIR/$BINARY_NAME"
+        print_warning "Basilica CLI is already installed at $existing_binary"
 
         # Try to get current version
         local current_version
         local current_version_clean
-        if current_version=$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null | head -n1); then
+        if current_version=$("$existing_binary" --version 2>/dev/null | head -n1); then
             # Extract just the version number (e.g., "basilica 0.1.0" -> "0.1.0")
             current_version_clean="${current_version#"${current_version%%[0-9]*}"}"
             current_version_clean="${current_version_clean%%[!0-9.]*}"
@@ -618,6 +642,7 @@ main() {
     echo
 
     setup_install_dir
+    migrate_from_old_install
     check_existing_installation
     check_dependencies
     cleanup_old_backups
