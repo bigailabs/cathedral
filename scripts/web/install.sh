@@ -322,7 +322,7 @@ download_binary() {
 
     # Extract version number for display
     local version
-    version=$(echo "$latest_tag" | sed 's/basilica-cli-v//')
+    version="${latest_tag#basilica-cli-v}"
     print_info "Found latest version: v$version"
 
     # Detect platform
@@ -431,7 +431,8 @@ check_existing_installation() {
         local current_version_clean
         if current_version=$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null | head -n1); then
             # Extract just the version number (e.g., "basilica 0.1.0" -> "0.1.0")
-            current_version_clean=$(echo "$current_version" | sed 's/^[^0-9]*\([0-9.]*\).*/\1/')
+            current_version_clean="${current_version#"${current_version%%[0-9]*}"}"
+            current_version_clean="${current_version_clean%%[!0-9.]*}"
         else
             current_version_clean="unknown"
         fi
@@ -446,7 +447,7 @@ check_existing_installation() {
 
         if [ -n "$latest_tag" ]; then
             # Extract version from tag (e.g., "basilica-cli-v0.2.0" -> "0.2.0")
-            latest_version_clean=$(echo "$latest_tag" | sed 's/basilica-cli-v//')
+            latest_version_clean="${latest_tag#basilica-cli-v}"
         else
             latest_version_clean="unable to fetch"
         fi
@@ -619,7 +620,8 @@ setup_path() {
 
 # Show completion message
 show_completion() {
-    local profile_file="$(detect_shell_profile)"
+    local profile_file
+    profile_file="$(detect_shell_profile)"
 
     echo
     print_info "Basilica CLI installed successfully!"
