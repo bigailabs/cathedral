@@ -89,20 +89,8 @@ setup_install_dir() {
 
 # Detect user's shell type
 detect_shell_type() {
-    # Prefer the currently running shell over SHELL environment variable
-    local shell_path
     local shell_name
-
-    # Try to detect the current running shell first
-    shell_path="$(ps -p $$ -o comm= 2>/dev/null || echo "")"
-
-    # If ps command fails or returns empty, fall back to SHELL env var
-    if [ -z "$shell_path" ]; then
-        shell_path="${SHELL:-/bin/bash}"
-    fi
-
-    # Extract just the shell name
-    shell_name="$(basename "$shell_path")"
+    shell_name="$(basename "${SHELL:-/bin/bash}")"
 
     case "$shell_name" in
         bash) echo "bash" ;;
