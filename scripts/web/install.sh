@@ -96,10 +96,24 @@ detect_shell_type() {
     esac
 }
 
-# Detect user's shell profile file
-detect_shell_profile() {
-    local shell_type
-    shell_type="$(detect_shell_type)"
+# Detect all installed shells on the system
+detect_installed_shells() {
+    local shells=""
+    if command -v bash >/dev/null 2>&1; then
+        shells="bash"
+    fi
+    if command -v zsh >/dev/null 2>&1; then
+        shells="${shells:+$shells }zsh"
+    fi
+    if command -v fish >/dev/null 2>&1; then
+        shells="${shells:+$shells }fish"
+    fi
+    echo "$shells"
+}
+
+# Get profile file for a given shell type
+get_profile_for_shell() {
+    local shell_type="$1"
 
     case "$shell_type" in
         zsh)
@@ -120,13 +134,19 @@ detect_shell_profile() {
     esac
 }
 
-# Add directory to PATH in shell profile
-add_to_path() {
+# Detect user's shell profile file (for the login shell)
+detect_shell_profile() {
+    get_profile_for_shell "$(detect_shell_type)"
+}
+
+# Add directory to PATH in a specific shell's profile
+add_to_path_for_shell() {
     local dir="$1"
-    local shell_type
-    shell_type=$(detect_shell_type)
-    local profile_file
-    profile_file=$(detect_shell_profile)
+    local shell_type="$2"
+    local profile_file="$3"
+
+    # Ensure profile directory exists (important for fish where ~/.config/fish/ may not exist)
+    mkdir -p "$(dirname "$profile_file")" 2>/dev/null || true
 
     if [ "$shell_type" = "fish" ]; then
         # Check if fish_add_path already exists for this dir
@@ -134,14 +154,9 @@ add_to_path() {
             return 0
         fi
 
-        # Check if directory is already in current PATH
-        if echo "$PATH" | grep -q "$dir"; then
-            return 0
-        fi
-
         # Add fish_add_path to config
         if echo "fish_add_path $dir" >> "$profile_file" 2>/dev/null; then
-            print_info "Added $dir to PATH"
+            print_info "Added $dir to PATH in $profile_file"
         else
             print_warning "Could not add to PATH automatically"
             print_info "Please add this to your $profile_file: fish_add_path $dir"
@@ -152,17 +167,12 @@ add_to_path() {
             return 0
         fi
 
-        # Check if directory is already in current PATH
-        if echo "$PATH" | grep -q "$dir"; then
-            return 0
-        fi
-
         # Add PATH export to profile
         if echo "export PATH=\"$dir:\$PATH\"" >> "$profile_file" 2>/dev/null; then
-            print_info "Added $dir to PATH"
+            print_info "Added $dir to PATH in $profile_file"
         else
             print_warning "Could not add to PATH automatically"
-            print_info "Please add this to your shell profile: export PATH=\"$dir:\$PATH\""
+            print_info "Please add this to your $profile_file: export PATH=\"$dir:\$PATH\""
         fi
     fi
     return 0
@@ -542,31 +552,19 @@ install_binary() {
     fi
 }
 
-# Setup shell completions
-setup_shell_completions() {
-    # Separate declarations from assignments to avoid SC2155
-    local shell_type
-    local profile_file
-    local profile_dir
-    shell_type="$(detect_shell_type)"
-    profile_file="$(detect_shell_profile)"
+# Setup completions for a single shell
+setup_completions_for_shell() {
+    local shell_type="$1"
+    local profile_file="$2"
     local completion_marker="# Basilica CLI completions"
-
-    print_step "Setting up shell completions for $shell_type..."
 
     # Check if completions are already configured
     if [ -f "$profile_file" ] && grep -q "$completion_marker" "$profile_file" 2>/dev/null; then
-        print_info "Shell completions already configured"
         return 0
     fi
 
     # Ensure profile file and its directory exist
-    profile_dir="$(dirname "$profile_file")"
-    if [ ! -d "$profile_dir" ]; then
-        mkdir -p "$profile_dir" 2>/dev/null || true
-    fi
-
-    # Touch the profile file to ensure it exists
+    mkdir -p "$(dirname "$profile_file")" 2>/dev/null || true
     if [ ! -f "$profile_file" ]; then
         touch "$profile_file" 2>/dev/null || true
     fi
@@ -584,13 +582,10 @@ setup_shell_completions() {
             completion_cmd='COMPLETE=fish basilica | source'
             ;;
         *)
-            print_warning "Unknown shell type: $shell_type"
-            print_info "Please add shell completions manually for your shell"
             return 1
             ;;
     esac
 
-    # Add completion to profile using direct conditional (fixes SC2320)
     if {
         echo ""
         echo "$completion_marker"
@@ -599,29 +594,44 @@ setup_shell_completions() {
         print_info "Added shell completions to $profile_file"
         return 0
     else
-        print_warning "Could not add completions automatically"
+        print_warning "Could not add completions to $profile_file"
         print_info "Please add this to your $profile_file:"
         echo "  $completion_cmd"
         return 1
     fi
 }
 
-# Setup PATH if needed
+# Setup shell completions for all installed shells
+setup_shell_completions() {
+    local installed_shells
+    installed_shells="$(detect_installed_shells)"
+
+    print_step "Setting up shell completions for: $installed_shells"
+
+    for shell in $installed_shells; do
+        local profile
+        profile="$(get_profile_for_shell "$shell")"
+        setup_completions_for_shell "$shell" "$profile"
+    done
+}
+
+# Setup PATH for all installed shells
 setup_path() {
-    if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
-        if add_to_path "$INSTALL_DIR"; then
-            print_info "PATH updated in $(detect_shell_profile)"
-        else
-            print_warning "Manually add $INSTALL_DIR to your PATH"
-        fi
-        echo
-    fi
+    local installed_shells
+    installed_shells="$(detect_installed_shells)"
+    for shell in $installed_shells; do
+        local profile
+        profile="$(get_profile_for_shell "$shell")"
+        add_to_path_for_shell "$INSTALL_DIR" "$shell" "$profile"
+    done
 }
 
 # Show completion message
 show_completion() {
     local profile_file
     profile_file="$(detect_shell_profile)"
+    local installed_shells
+    installed_shells="$(detect_installed_shells)"
 
     echo
     print_info "Basilica CLI installed successfully!"
@@ -629,16 +639,9 @@ show_completion() {
     echo
 
     # Inform about shell completions
-    print_info "Shell completions have been configured for tab support"
+    print_info "PATH and completions configured for: $installed_shells"
     print_info "Please restart your terminal or run:"
     echo -e "  ${CYAN}source $profile_file${NC}"
-    echo
-
-    # Show manual completion setup instructions
-    print_info "For other shells, add the appropriate completion command to your shell config:"
-    echo "  Bash:  eval \"\$(COMPLETE=bash basilica)\""
-    echo "  Zsh:   eval \"\$(COMPLETE=zsh basilica)\""
-    echo "  Fish:  COMPLETE=fish basilica | source"
     echo
 
     echo "Get started:"
