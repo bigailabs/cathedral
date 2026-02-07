@@ -123,13 +123,27 @@ fi
 
 # Copy example configs if local configs don't exist
 CONFIG_DIR="$SCRIPT_DIR/configs"
+NEW_CONFIGS=()
 if [ ! -f "$CONFIG_DIR/validator.toml" ]; then
     echo "Creating validator.toml from example..."
     cp "$CONFIG_DIR/validator.example.toml" "$CONFIG_DIR/validator.toml"
+    NEW_CONFIGS+=("$CONFIG_DIR/validator.toml")
 fi
 if [ ! -f "$CONFIG_DIR/miner.toml" ]; then
     echo "Creating miner.toml from example..."
     cp "$CONFIG_DIR/miner.example.toml" "$CONFIG_DIR/miner.toml"
+    NEW_CONFIGS+=("$CONFIG_DIR/miner.toml")
+fi
+
+if [ ${#NEW_CONFIGS[@]} -gt 0 ]; then
+    echo ""
+    echo "New config files created:"
+    for f in "${NEW_CONFIGS[@]}"; do
+        echo "  - $(basename "$f")"
+    done
+    echo ""
+    echo "Please review and edit them if needed, then press Enter to continue."
+    read -r
 fi
 
 # Function to wait for a service
