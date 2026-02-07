@@ -1,1 +1,0 @@
--- No-op: node_id column is included in 007_miner_delivery_cache.sql (pre-deploy change)

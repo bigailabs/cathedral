@@ -18,4 +18,3 @@ CREATE INDEX IF NOT EXISTS idx_delivery_cache_hotkey
     ON miner_delivery_cache(miner_hotkey);
 CREATE INDEX IF NOT EXISTS idx_delivery_cache_node
     ON miner_delivery_cache(node_id);
-

@@ -6,4 +6,3 @@ CREATE TABLE IF NOT EXISTS collateral_grace_periods (
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (hotkey, node_id)
 );
-
