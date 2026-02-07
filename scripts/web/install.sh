@@ -141,8 +141,10 @@ esac
 # basilica completions
 if [ -n "$BASH_VERSION" ]; then
     eval "$(COMPLETE=bash basilica)" 2>/dev/null
+    eval "$(complete -p basilica 2>/dev/null | sed 's/ basilica$/ bs/')" 2>/dev/null
 elif [ -n "$ZSH_VERSION" ]; then
     eval "$(COMPLETE=zsh basilica)" 2>/dev/null
+    compdef bs=basilica 2>/dev/null
 fi
 ENVEOF
 
@@ -157,6 +159,7 @@ end
 
 # basilica completions
 COMPLETE=fish basilica | source 2>/dev/null
+complete -c bs -w basilica 2>/dev/null
 FISHEOF
 
     print_info "Created shell env files in $BASILICA_DIR"
