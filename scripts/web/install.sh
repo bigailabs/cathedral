@@ -25,14 +25,9 @@ done
 TEMP_DIR=$(mktemp -d)
 TEMP_BINARY="$TEMP_DIR/$BINARY_NAME"
 
-# Determine install directory based on permissions
-if [ "$EUID" -eq 0 ] || [ -w "/usr/local/bin" ]; then
-    INSTALL_DIR="/usr/local/bin"
-    SYSTEM_INSTALL=true
-else
-    INSTALL_DIR="$HOME/.local/bin"
-    SYSTEM_INSTALL=false
-fi
+# Determine install directory
+BASILICA_DIR="${BASILICA_DIR:-$HOME/.basilica}"
+INSTALL_DIR="$BASILICA_DIR/bin"
 
 # Colors for output
 RED='\033[0;31m'
@@ -128,25 +123,47 @@ detect_shell_profile() {
 # Add directory to PATH in shell profile
 add_to_path() {
     local dir="$1"
+    local shell_type
+    shell_type=$(detect_shell_type)
     local profile_file
     profile_file=$(detect_shell_profile)
 
-    # Check if PATH export already exists
-    if [ -f "$profile_file" ] && grep -q "export PATH.*$dir" "$profile_file" 2>/dev/null; then
-        return 0
-    fi
+    if [ "$shell_type" = "fish" ]; then
+        # Check if fish_add_path already exists for this dir
+        if [ -f "$profile_file" ] && grep -q "fish_add_path.*$dir" "$profile_file" 2>/dev/null; then
+            return 0
+        fi
 
-    # Check if directory is already in current PATH
-    if echo "$PATH" | grep -q "$dir"; then
-        return 0
-    fi
+        # Check if directory is already in current PATH
+        if echo "$PATH" | grep -q "$dir"; then
+            return 0
+        fi
 
-    # Add PATH export to profile
-    if echo "export PATH=\"$dir:\$PATH\"" >> "$profile_file" 2>/dev/null; then
-        print_info "Added $dir to PATH"
+        # Add fish_add_path to config
+        if echo "fish_add_path $dir" >> "$profile_file" 2>/dev/null; then
+            print_info "Added $dir to PATH"
+        else
+            print_warning "Could not add to PATH automatically"
+            print_info "Please add this to your $profile_file: fish_add_path $dir"
+        fi
     else
-        print_warning "Could not add to PATH automatically"
-        print_info "Please add this to your shell profile: export PATH=\"$dir:\$PATH\""
+        # Check if PATH export already exists
+        if [ -f "$profile_file" ] && grep -q "export PATH.*$dir" "$profile_file" 2>/dev/null; then
+            return 0
+        fi
+
+        # Check if directory is already in current PATH
+        if echo "$PATH" | grep -q "$dir"; then
+            return 0
+        fi
+
+        # Add PATH export to profile
+        if echo "export PATH=\"$dir:\$PATH\"" >> "$profile_file" 2>/dev/null; then
+            print_info "Added $dir to PATH"
+        else
+            print_warning "Could not add to PATH automatically"
+            print_info "Please add this to your shell profile: export PATH=\"$dir:\$PATH\""
+        fi
     fi
     return 0
 }
@@ -590,12 +607,11 @@ setup_shell_completions() {
 
 # Setup PATH if needed
 setup_path() {
-    if [ "$SYSTEM_INSTALL" = false ] && ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
-        if add_to_path "$HOME/.local/bin"; then
+    if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+        if add_to_path "$INSTALL_DIR"; then
             print_info "PATH updated in $(detect_shell_profile)"
         else
-            print_warning "Manually add ~/.local/bin to your PATH:"
-            echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+            print_warning "Manually add $INSTALL_DIR to your PATH"
         fi
         echo
     fi
