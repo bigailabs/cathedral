@@ -4,10 +4,11 @@ Deployment specification dataclass.
 Immutable configuration for deployments extracted from decorator parameters.
 """
 from dataclasses import dataclass
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .volume import Volume
+    from basilica._basilica import HealthCheckConfig
 
 
 @dataclass(frozen=True)
@@ -31,3 +32,4 @@ class DeploymentSpec:
     ttl_seconds: Optional[int] = None
     public: bool = True
     timeout: int = 300
+    health_check: Optional["HealthCheckConfig"] = None

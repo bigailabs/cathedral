@@ -60,6 +60,9 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
             common,
             sglang,
         }) => templates::handle_sglang_deploy(&client, model, common, sglang).await,
+        Some(DeployAction::Openclaw { common, openclaw }) => {
+            templates::handle_openclaw_deploy(&client, common, openclaw).await
+        }
         None => {
             if let Some(source) = cmd.source.clone() {
                 create::handle_create(&client, &source, cmd).await
