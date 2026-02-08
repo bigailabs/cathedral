@@ -28,7 +28,7 @@ async fn test_collateral_slash_flow_writes_signed_evidence() {
     let config = CollateralConfig {
         shadow_mode: true,
         network: "local".to_string(),
-        contract_address: Some("0x0000000000000000000000000000000000000001".to_string()),
+        contract_address: "0x0000000000000000000000000000000000000001".to_string(),
         evidence_storage_path: temp.path().to_path_buf(),
         evidence_base_url: "https://validator.example.com/evidence".to_string(),
         ..Default::default()

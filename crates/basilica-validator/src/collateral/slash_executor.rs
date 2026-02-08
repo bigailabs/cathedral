@@ -604,7 +604,7 @@ fn to_network_config(config: &CollateralConfig) -> Result<CollateralNetworkConfi
             anyhow::bail!("Unsupported collateral network: {}", other);
         }
     };
-    CollateralNetworkConfig::from_network(&network, config.contract_address.clone())
+    CollateralNetworkConfig::from_network(&network, Some(config.contract_address.clone()))
 }
 
 fn hotkey_ss58_to_bytes(hotkey: &str) -> Result<[u8; 32]> {
@@ -671,6 +671,8 @@ mod tests {
             shadow_mode: true,
             evidence_storage_path: temp.path().to_path_buf(),
             evidence_base_url: "https://validator.example.com/evidence".to_string(),
+            network: "local".to_string(),
+            contract_address: "0x0000000000000000000000000000000000000001".to_string(),
             ..CollateralConfig::default()
         };
         let store = EvidenceStore::new_local(
@@ -705,6 +707,7 @@ mod tests {
         let config = CollateralConfig {
             slash_fraction: Decimal::new(5, 1),
             evidence_storage_path: temp.path().to_path_buf(),
+            contract_address: "0x0000000000000000000000000000000000000001".to_string(),
             ..CollateralConfig::default()
         };
         let store = EvidenceStore::new_local(

@@ -1,7 +1,6 @@
 use crate::basilica_api::BasilicaApiClient;
 use crate::collateral::evaluator::{CollateralEvaluator, CollateralState, CollateralStatus};
 use crate::collateral::grace_tracker::GracePeriodTracker;
-use crate::config::collateral::CollateralConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
@@ -27,7 +26,6 @@ pub struct CollateralManager {
     api_client: Arc<BasilicaApiClient>,
     evaluator: Arc<CollateralEvaluator>,
     grace_tracker: Arc<GracePeriodTracker>,
-    config: CollateralConfig,
     netuid: u16,
     metrics: Option<Arc<ValidatorPrometheusMetrics>>,
 }
@@ -38,7 +36,6 @@ impl CollateralManager {
         api_client: Arc<BasilicaApiClient>,
         evaluator: Arc<CollateralEvaluator>,
         grace_tracker: Arc<GracePeriodTracker>,
-        config: CollateralConfig,
         netuid: u16,
         metrics: Option<Arc<ValidatorPrometheusMetrics>>,
     ) -> Self {
@@ -47,7 +44,6 @@ impl CollateralManager {
             api_client,
             evaluator,
             grace_tracker,
-            config,
             netuid,
             metrics,
         }
@@ -60,24 +56,6 @@ impl CollateralManager {
         gpu_category: &str,
         gpu_count: u32,
     ) -> Result<(CollateralState, CollateralStatus)> {
-        if !self.config.enabled {
-            return Ok((
-                CollateralState::Unknown {
-                    reason: "collateral disabled".to_string(),
-                },
-                CollateralStatus {
-                    current_alpha: Decimal::ZERO,
-                    current_usd_value: Decimal::ZERO,
-                    minimum_usd_required: Decimal::ZERO,
-                    status: "unknown".to_string(),
-                    grace_period_remaining: None,
-                    action_required: None,
-                    alpha_usd_price: None,
-                    price_stale: true,
-                },
-            ));
-        }
-
         let alpha_price_usd = match self.api_client.get_alpha_price_usd(self.netuid).await {
             Ok(price) => Some(price),
             Err(err) => {
@@ -299,7 +277,6 @@ mod tests {
             api_client,
             evaluator,
             grace_tracker,
-            config,
             1,
             None,
         );

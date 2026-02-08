@@ -15,8 +15,6 @@ pub enum TrusteeKeySource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollateralConfig {
-    #[serde(default = "default_collateral_enabled")]
-    pub enabled: bool,
     #[serde(default = "default_shadow_mode")]
     pub shadow_mode: bool,
     #[serde(default = "default_warning_threshold_multiplier")]
@@ -27,8 +25,7 @@ pub struct CollateralConfig {
     pub exclude_on_prolonged_price_failure: bool,
     #[serde(default = "default_minimum_usd_per_gpu")]
     pub minimum_usd_per_gpu: HashMap<String, Decimal>,
-    #[serde(default)]
-    pub contract_address: Option<String>,
+    pub contract_address: String,
     #[serde(default = "default_collateral_network")]
     pub network: String,
     #[serde(default = "default_slash_fraction")]
@@ -72,13 +69,12 @@ pub struct CollateralConfig {
 impl Default for CollateralConfig {
     fn default() -> Self {
         Self {
-            enabled: default_collateral_enabled(),
             shadow_mode: default_shadow_mode(),
             warning_threshold_multiplier: default_warning_threshold_multiplier(),
             grace_period_hours: default_grace_period_hours(),
             exclude_on_prolonged_price_failure: default_exclude_on_prolonged_price_failure(),
             minimum_usd_per_gpu: default_minimum_usd_per_gpu(),
-            contract_address: None,
+            contract_address: String::new(),
             network: default_collateral_network(),
             slash_fraction: default_slash_fraction(),
             slash_cooldown_secs: default_slash_cooldown_secs(),
@@ -108,8 +104,8 @@ impl CollateralConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !self.enabled {
-            return Ok(());
+        if self.contract_address.trim().is_empty() {
+            anyhow::bail!("collateral.contract_address is required when collateral is configured");
         }
         if self.warning_threshold_multiplier < Decimal::ONE {
             anyhow::bail!("collateral.warning_threshold_multiplier must be >= 1.0");
@@ -202,10 +198,6 @@ impl CollateralConfig {
         }
         Ok(())
     }
-}
-
-fn default_collateral_enabled() -> bool {
-    false
 }
 
 fn default_shadow_mode() -> bool {

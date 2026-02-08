@@ -89,9 +89,9 @@ pub struct ValidatorConfig {
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
-    /// Collateral enforcement configuration
+    /// Collateral enforcement configuration (presence = enabled)
     #[serde(default)]
-    pub collateral: super::collateral::CollateralConfig,
+    pub collateral: Option<super::collateral::CollateralConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -892,7 +892,7 @@ impl Default for ValidatorConfig {
             pricing: super::pricing::PricingConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             billing: BillingConfig::default(),
-            collateral: super::collateral::CollateralConfig::default(),
+            collateral: None,
         }
     }
 }
@@ -1073,13 +1073,15 @@ impl ConfigValidation for ValidatorConfig {
             }
         }
 
-        // Validate collateral configuration
-        if let Err(e) = self.collateral.validate() {
-            return Err(ConfigurationError::InvalidValue {
-                key: "collateral".to_string(),
-                value: "collateral_config".to_string(),
-                reason: e.to_string(),
-            });
+        // Validate collateral configuration if present
+        if let Some(ref collateral) = self.collateral {
+            if let Err(e) = collateral.validate() {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "collateral".to_string(),
+                    value: "collateral_config".to_string(),
+                    reason: e.to_string(),
+                });
+            }
         }
 
         Ok(())

@@ -51,7 +51,7 @@ impl Collateral {
         };
         let network_config = CollateralNetworkConfig::from_network(
             &network,
-            self.collateral_config.contract_address.clone(),
+            Some(self.collateral_config.contract_address.clone()),
         )?;
         let (to_block, events_map) =
             collateral_contract::scan_events(from_block, &network_config).await?;

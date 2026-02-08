@@ -122,7 +122,7 @@ async fn build_executor(
     config.evidence_storage_path = temp_path.to_path_buf();
     config.evidence_base_url = "https://validator.example.com/evidence".to_string();
     config.network = "local".to_string();
-    config.contract_address = Some("0x0000000000000000000000000000000000000001".to_string());
+    config.contract_address = "0x0000000000000000000000000000000000000001".to_string();
 
     let store = EvidenceStore::new_local(
         config.evidence_base_url.clone(),

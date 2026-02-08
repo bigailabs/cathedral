@@ -47,7 +47,11 @@ impl ApiState {
         validator_config: crate::config::ValidatorConfig,
         validator_hotkey: basilica_common::identity::Hotkey,
     ) -> Self {
-        let evidence_storage_path = validator_config.collateral.evidence_storage_path.clone();
+        let evidence_storage_path = validator_config
+            .collateral
+            .as_ref()
+            .map(|c| c.evidence_storage_path.clone())
+            .unwrap_or_else(|| PathBuf::from("./evidence"));
         Self {
             config,
             persistence,

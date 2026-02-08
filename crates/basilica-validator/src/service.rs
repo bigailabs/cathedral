@@ -267,11 +267,7 @@ impl ValidatorService {
             api_client,
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),
-            if self.config.collateral.enabled {
-                Some(self.config.collateral.grace_period())
-            } else {
-                None
-            },
+            self.config.collateral.as_ref().map(|c| c.grace_period()),
         )?;
         Ok(Arc::new(weight_setter))
     }
@@ -310,11 +306,9 @@ impl ValidatorService {
         signer: Arc<BittensorService>,
         api_client: Arc<BasilicaApiClient>,
     ) -> Result<(Option<Arc<CollateralManager>>, Option<Arc<SlashExecutor>>)> {
-        if !self.config.collateral.enabled {
+        let Some(collateral_config) = self.config.collateral.clone() else {
             return Ok((None, None));
-        }
-
-        let collateral_config = self.config.collateral.clone();
+        };
         if collateral_config.shadow_mode {
             warn!("Collateral shadow_mode is enabled; on-chain slashing is disabled");
         }
@@ -331,7 +325,6 @@ impl ValidatorService {
             api_client,
             evaluator,
             grace_tracker.clone(),
-            collateral_config.clone(),
             self.config.bittensor.common.netuid,
             collateral_metrics.clone(),
         ));
@@ -459,16 +452,19 @@ impl ValidatorService {
             None
         };
 
-        let mut collateral_scan = Collateral::new(
-            self.config.verification.clone(),
-            self.config.collateral.clone(),
-            inputs.persistence.clone(),
-        );
-        let collateral_scan_task = tokio::spawn(async move {
-            if let Err(e) = collateral_scan.start().await {
-                error!("Collateral scan task failed: {}", e);
-            }
-        });
+        let collateral_scan_task = if let Some(collateral_config) = self.config.collateral.clone() {
+            let verification_config = self.config.verification.clone();
+            let persistence = inputs.persistence.clone();
+            tokio::spawn(async move {
+                let mut collateral_scan =
+                    Collateral::new(verification_config, collateral_config, persistence);
+                if let Err(e) = collateral_scan.start().await {
+                    error!("Collateral scan task failed: {}", e);
+                }
+            })
+        } else {
+            tokio::spawn(async { info!("Collateral scan disabled (no collateral config)") })
+        };
 
         RuntimeHandles {
             scoring_task,
