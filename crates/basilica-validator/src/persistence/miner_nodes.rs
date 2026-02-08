@@ -13,6 +13,17 @@ use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+/// A bid candidate sourced directly from `miner_nodes` (epoch-free).
+#[derive(Debug, Clone)]
+pub struct NodeBidCandidate {
+    pub node_id: String,
+    pub miner_id: String,
+    pub miner_hotkey: String,
+    pub miner_uid: i64,
+    pub hourly_rate_cents: u32,
+    pub gpu_count: i64,
+}
+
 fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
     use regex::Regex;
     let re = Regex::new(r"(\d+)GB").unwrap();
@@ -864,6 +875,89 @@ impl SimplePersistence {
         }
 
         Ok(nodes)
+    }
+
+    /// Get bid candidates across all miners, filtered by GPU category/count and freshness.
+    /// Returns nodes ordered by hourly_rate_cents ASC (cheapest first).
+    pub async fn get_node_bid_candidates(
+        &self,
+        gpu_category: &str,
+        min_gpu_count: u32,
+        freshness_secs: u64,
+        max_hourly_rate_cents: u32,
+        limit: u32,
+    ) -> Result<Vec<NodeBidCandidate>, anyhow::Error> {
+        let query = format!(
+            r#"
+            SELECT
+                me.node_id,
+                me.miner_id,
+                m.hotkey  AS miner_hotkey,
+                m.uid     AS miner_uid,
+                me.hourly_rate_cents,
+                COUNT(DISTINCT gua.gpu_uuid) AS gpu_count,
+                GROUP_CONCAT(gua.gpu_name) AS gpu_names
+            FROM miner_nodes me
+            JOIN miners m ON me.miner_id = m.id
+            LEFT JOIN gpu_uuid_assignments gua
+                ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+            LEFT JOIN rentals r
+                ON me.node_id = r.node_id
+                AND r.miner_id = me.miner_id
+                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
+            LEFT JOIN node_reservations nr
+                ON me.node_id = nr.node_id
+                AND datetime(nr.expires_at) > datetime('now')
+            WHERE r.id IS NULL
+                AND nr.id IS NULL
+                AND (me.status IS NULL OR me.status != 'offline')
+                AND me.last_health_check IS NOT NULL
+                AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
+                AND me.hourly_rate_cents IS NOT NULL
+                AND me.hourly_rate_cents <= ?
+            GROUP BY me.node_id, me.miner_id, m.hotkey, m.uid, me.hourly_rate_cents
+            HAVING COUNT(DISTINCT gua.gpu_uuid) >= ?
+            ORDER BY me.hourly_rate_cents ASC
+            LIMIT ?
+            "#
+        );
+
+        let rows = sqlx::query(&query)
+            .bind(max_hourly_rate_cents as i64)
+            .bind(min_gpu_count as i64)
+            .bind(limit as i64)
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let gpu_names: Option<String> = row.get("gpu_names");
+            if let Some(names) = &gpu_names {
+                if !names.is_empty() {
+                    let matches_type = names
+                        .split(',')
+                        .any(|name| name.to_lowercase().contains(&gpu_category.to_lowercase()));
+                    if !matches_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            candidates.push(NodeBidCandidate {
+                node_id: row.get("node_id"),
+                miner_id: row.get("miner_id"),
+                miner_hotkey: row.get("miner_hotkey"),
+                miner_uid: row.get("miner_uid"),
+                hourly_rate_cents: row.get::<i64, _>("hourly_rate_cents") as u32,
+                gpu_count: row.get("gpu_count"),
+            });
+        }
+
+        Ok(candidates)
     }
 
     /// Reserve a node for a short window to avoid race conditions during rental creation.

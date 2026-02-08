@@ -15,8 +15,6 @@ pub struct AuctionConfig {
     pub bid_node_freshness_secs: u64,
     /// Reservation TTL in seconds for selected nodes
     pub bid_reservation_secs: u64,
-    /// Auction epoch duration in blocks
-    pub auction_epoch_blocks: u64,
     /// Miner emission share of subnet emissions (0.0-1.0)
     pub miner_emission_share: f64,
     /// Health check interval in seconds (returned to miners in RegisterBidResponse)
@@ -36,7 +34,6 @@ impl Default for AuctionConfig {
             bid_validity_secs: 300,
             bid_node_freshness_secs: 300,
             bid_reservation_secs: 60,
-            auction_epoch_blocks: 360,
             miner_emission_share: 0.41,
             health_check_interval_secs: 60,
             health_check_miss_threshold: 3,
@@ -73,9 +70,6 @@ impl AuctionConfig {
         }
         if self.bid_reservation_secs == 0 {
             return Err(anyhow!("bid_reservation_secs must be greater than 0"));
-        }
-        if self.auction_epoch_blocks == 0 {
-            return Err(anyhow!("auction_epoch_blocks must be greater than 0"));
         }
         if !self.miner_emission_share.is_finite()
             || !(0.0..=1.0).contains(&self.miner_emission_share)
@@ -131,7 +125,6 @@ mod tests {
             bid_validity_secs: 0,
             bid_node_freshness_secs: 0,
             bid_reservation_secs: 0,
-            auction_epoch_blocks: 0,
             ..AuctionConfig::default()
         };
         assert!(config.validate().is_err());

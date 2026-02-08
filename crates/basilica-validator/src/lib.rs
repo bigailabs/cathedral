@@ -5,7 +5,6 @@
 
 pub mod agent_installer;
 pub mod api;
-pub mod auction;
 pub mod ban_system;
 pub mod basilica_api;
 pub mod billing;

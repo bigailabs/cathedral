@@ -3,12 +3,10 @@
 //! Removes old GPU profiles and emission metrics to prevent database bloat
 
 use anyhow::Result;
-use chrono::{Duration as ChronoDuration, Utc};
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tracing::{error, info};
 
-use crate::persistence::bids::BidRepository;
 use crate::persistence::gpu_profile_repository::GpuProfileRepository;
 
 /// Configuration for cleanup tasks
@@ -23,15 +21,6 @@ pub struct CleanupConfig {
     /// Delete emission metrics older than this many days
     pub emission_retention_days: i64,
 
-    /// Delete bids older than this many days
-    pub bid_retention_days: i64,
-
-    /// Delete closed epochs older than this many days
-    pub epoch_retention_days: i64,
-
-    /// Delete clearing results older than this many days
-    pub clearing_retention_days: i64,
-
     /// How often to run stale node cleanup (in minutes)
     pub stale_node_cleanup_cadence_minutes: u64,
 
@@ -45,9 +34,6 @@ impl Default for CleanupConfig {
             run_interval_hours: 24,
             profile_retention_days: 30,
             emission_retention_days: 90,
-            bid_retention_days: 7,
-            epoch_retention_days: 30,
-            clearing_retention_days: 30,
             stale_node_cleanup_cadence_minutes: 30,
             enabled: true,
         }
@@ -58,21 +44,12 @@ impl Default for CleanupConfig {
 pub struct CleanupTask {
     config: CleanupConfig,
     gpu_repo: Arc<GpuProfileRepository>,
-    bid_repo: Arc<BidRepository>,
 }
 
 impl CleanupTask {
     /// Create a new cleanup task
-    pub fn new(
-        config: CleanupConfig,
-        gpu_repo: Arc<GpuProfileRepository>,
-        bid_repo: Arc<BidRepository>,
-    ) -> Self {
-        Self {
-            config,
-            gpu_repo,
-            bid_repo,
-        }
+    pub fn new(config: CleanupConfig, gpu_repo: Arc<GpuProfileRepository>) -> Self {
+        Self { config, gpu_repo }
     }
 
     /// Start the cleanup task loop
@@ -148,28 +125,6 @@ impl CleanupTask {
             info!("Cleaned up {} old emission metrics", metrics_count);
         }
 
-        let bid_cutoff = Utc::now() - ChronoDuration::days(self.config.bid_retention_days);
-        let bids_deleted = self.bid_repo.delete_bids_before(bid_cutoff).await?;
-        if bids_deleted > 0 {
-            info!("Cleaned up {} old auction bids", bids_deleted);
-        }
-
-        let clearing_cutoff =
-            Utc::now() - ChronoDuration::days(self.config.clearing_retention_days);
-        let clearing_deleted = self
-            .bid_repo
-            .delete_clearing_results_before(clearing_cutoff)
-            .await?;
-        if clearing_deleted > 0 {
-            info!("Cleaned up {} old clearing results", clearing_deleted);
-        }
-
-        let epoch_cutoff = Utc::now() - ChronoDuration::days(self.config.epoch_retention_days);
-        let epochs_deleted = self.bid_repo.delete_epochs_before(epoch_cutoff).await?;
-        if epochs_deleted > 0 {
-            info!("Cleaned up {} old auction epochs", epochs_deleted);
-        }
-
         info!("Database cleanup completed");
         Ok(())
     }
@@ -200,27 +155,24 @@ impl CleanupTask {
 mod tests {
     use super::*;
     use crate::gpu::MinerGpuProfile;
-    use crate::persistence::bids::BidRepository;
     use crate::persistence::SimplePersistence;
     use basilica_common::identity::MinerUid;
     use chrono::Utc;
     use std::collections::HashMap;
     use tempfile::NamedTempFile;
 
-    async fn create_test_repo(
-    ) -> Result<(Arc<GpuProfileRepository>, Arc<BidRepository>, NamedTempFile)> {
+    async fn create_test_repo() -> Result<(Arc<GpuProfileRepository>, NamedTempFile)> {
         let temp_file = NamedTempFile::new()?;
         let db_path = temp_file.path().to_str().unwrap();
         let persistence = SimplePersistence::new(db_path, "test".to_string()).await?;
         persistence.run_migrations().await?;
         let repo = Arc::new(GpuProfileRepository::new(persistence.pool().clone()));
-        let bid_repo = Arc::new(BidRepository::new(persistence.pool().clone()));
-        Ok((repo, bid_repo, temp_file))
+        Ok((repo, temp_file))
     }
 
     #[tokio::test]
     async fn test_cleanup_old_profiles() {
-        let (repo, bid_repo, _temp_file) = create_test_repo().await.unwrap();
+        let (repo, _temp_file) = create_test_repo().await.unwrap();
 
         // Create old and new profiles
         let mut gpu_counts = HashMap::new();
@@ -276,14 +228,11 @@ mod tests {
             run_interval_hours: 24,
             profile_retention_days: 30,
             emission_retention_days: 90,
-            bid_retention_days: 7,
-            epoch_retention_days: 30,
-            clearing_retention_days: 30,
             stale_node_cleanup_cadence_minutes: 30,
             enabled: true,
         };
 
-        let cleanup_task = CleanupTask::new(config, repo.clone(), bid_repo.clone());
+        let cleanup_task = CleanupTask::new(config, repo.clone());
         cleanup_task.run_cleanup().await.unwrap();
 
         // Verify only recent profile remains in the database
@@ -307,22 +256,19 @@ mod tests {
         assert_eq!(config.run_interval_hours, 24);
         assert_eq!(config.profile_retention_days, 30);
         assert_eq!(config.emission_retention_days, 90);
-        assert_eq!(config.bid_retention_days, 7);
-        assert_eq!(config.epoch_retention_days, 30);
-        assert_eq!(config.clearing_retention_days, 30);
         assert!(config.enabled);
     }
 
     #[tokio::test]
     async fn test_cleanup_disabled() {
-        let (repo, bid_repo, _temp_file) = create_test_repo().await.unwrap();
+        let (repo, _temp_file) = create_test_repo().await.unwrap();
 
         let config = CleanupConfig {
             enabled: false,
             ..Default::default()
         };
 
-        let cleanup_task = CleanupTask::new(config, repo, bid_repo);
+        let cleanup_task = CleanupTask::new(config, repo);
         let result = cleanup_task.start().await;
         assert!(result.is_ok());
     }

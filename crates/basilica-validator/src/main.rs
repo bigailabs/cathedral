@@ -9,7 +9,6 @@ use clap::Parser;
 
 mod agent_installer;
 mod api;
-mod auction;
 mod ban_system;
 mod basilica_api;
 mod billing;

@@ -24,8 +24,8 @@ use crate::billing::BillingClient;
 use crate::collateral::{CollateralManager, CollateralPreference};
 use crate::config::auction::AuctionConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
-use crate::persistence::bids::{BidRepository, MinerBidRecord};
 use crate::persistence::entities::MisbehaviourType;
+use crate::persistence::miner_nodes::NodeBidCandidate;
 use crate::persistence::{SimplePersistence, ValidatorPersistence};
 use crate::ssh::ValidatorSshKeyManager;
 
@@ -457,33 +457,17 @@ impl RentalManager {
         request: &RentalRequest,
         rental_id: &str,
     ) -> Result<RentalSelection> {
-        let bid_repo = BidRepository::new(self.persistence.pool().clone());
-
-        let epoch = bid_repo
-            .get_active_epoch()
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("No active auction epoch"))?;
-
-        let cutoff = chrono::Utc::now()
-            - chrono::Duration::seconds(self.auction_config.bid_validity_secs as i64);
-
-        // Query bids matching criteria
-        let candidates = bid_repo
-            .get_bid_candidates_with_available_nodes(
-                &epoch.id,
+        // Query candidates directly from miner_nodes (no epoch lookup needed)
+        let candidates = self
+            .persistence
+            .get_node_bid_candidates(
                 &request.gpu_category,
                 request.gpu_count,
-                cutoff,
                 self.auction_config.bid_node_freshness_secs,
+                request.max_hourly_rate_cents,
                 50,
             )
             .await?;
-
-        // Apply max_hourly_rate_cents filter for comparison with bid_per_hour_cents.
-        let candidates: Vec<_> = candidates
-            .into_iter()
-            .filter(|(bid, _)| bid.bid_per_hour_cents <= request.max_hourly_rate_cents)
-            .collect();
 
         // Apply min_memory_gb filter if specified
         let candidates = self
@@ -505,23 +489,28 @@ impl RentalManager {
 
         // Try to reserve nodes
         const MAX_RESERVATION_ATTEMPTS: usize = 3;
-        for (candidate, node_id) in ordered.into_iter().take(MAX_RESERVATION_ATTEMPTS) {
-            let miner_id = format!("miner_{}", candidate.miner_uid);
+        for candidate in ordered.into_iter().take(MAX_RESERVATION_ATTEMPTS) {
             let reservation_id = format!("reserve-{}", Uuid::new_v4());
             let expires_at = chrono::Utc::now()
                 + chrono::Duration::seconds(self.auction_config.bid_reservation_secs as i64);
 
             if self
                 .persistence
-                .reserve_node(&reservation_id, &node_id, &miner_id, rental_id, expires_at)
+                .reserve_node(
+                    &reservation_id,
+                    &candidate.node_id,
+                    &candidate.miner_id,
+                    rental_id,
+                    expires_at,
+                )
                 .await?
             {
                 return Ok(RentalSelection {
-                    node_id,
-                    miner_id,
+                    node_id: candidate.node_id,
+                    miner_id: candidate.miner_id,
                     miner_uid: Some(candidate.miner_uid as u16),
                     reservation_id: Some(reservation_id),
-                    miner_bid_rate_cents: Some(candidate.bid_per_hour_cents),
+                    miner_bid_rate_cents: Some(candidate.hourly_rate_cents),
                 });
             }
         }
@@ -541,9 +530,9 @@ impl RentalManager {
     /// Filter candidates by minimum GPU memory requirement
     async fn filter_by_min_memory(
         &self,
-        candidates: Vec<(MinerBidRecord, String)>,
+        candidates: Vec<NodeBidCandidate>,
         min_memory_gb: Option<u32>,
-    ) -> Vec<(MinerBidRecord, String)> {
+    ) -> Vec<NodeBidCandidate> {
         let Some(min_memory) = min_memory_gb else {
             return candidates;
         };
@@ -553,20 +542,19 @@ impl RentalManager {
         }
 
         let mut filtered = Vec::new();
-        for (bid, node_id) in candidates {
-            let miner_id = format!("miner_{}", bid.miner_uid);
+        for candidate in candidates {
             match self
                 .persistence
-                .get_node_first_gpu_memory_gb(&miner_id, &node_id)
+                .get_node_first_gpu_memory_gb(&candidate.miner_id, &candidate.node_id)
                 .await
             {
                 Ok(memory_gb) if memory_gb >= min_memory as f64 => {
-                    filtered.push((bid, node_id));
+                    filtered.push(candidate);
                 }
                 Ok(memory_gb) => {
                     tracing::debug!(
-                        node_id = %node_id,
-                        miner_uid = bid.miner_uid,
+                        node_id = %candidate.node_id,
+                        miner_uid = candidate.miner_uid,
                         gpu_memory_gb = memory_gb,
                         min_memory_gb = min_memory,
                         "Skipping node - GPU memory below minimum requirement"
@@ -574,8 +562,8 @@ impl RentalManager {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        node_id = %node_id,
-                        miner_uid = bid.miner_uid,
+                        node_id = %candidate.node_id,
+                        miner_uid = candidate.miner_uid,
                         error = %e,
                         "Failed to get GPU memory for node, excluding from candidates"
                     );
@@ -587,20 +575,20 @@ impl RentalManager {
 
     async fn rank_bid_candidates(
         &self,
-        candidates: Vec<(MinerBidRecord, String)>,
+        candidates: Vec<NodeBidCandidate>,
         gpu_category: &str,
         gpu_count: u32,
-    ) -> Vec<(MinerBidRecord, String)> {
+    ) -> Vec<NodeBidCandidate> {
         let mut preferred = Vec::new();
         let mut fallback = Vec::new();
 
-        for (candidate, candidate_node_id) in candidates {
+        for candidate in candidates {
             let preference = match &self.collateral_manager {
                 Some(collateral) => {
                     collateral
                         .get_preference(
                             &candidate.miner_hotkey,
-                            &candidate_node_id,
+                            &candidate.node_id,
                             gpu_category,
                             gpu_count,
                         )
@@ -609,11 +597,11 @@ impl RentalManager {
                 None => CollateralPreference::Fallback,
             };
             match preference {
-                CollateralPreference::Preferred => preferred.push((candidate, candidate_node_id)),
-                CollateralPreference::Fallback => fallback.push((candidate, candidate_node_id)),
+                CollateralPreference::Preferred => preferred.push(candidate),
+                CollateralPreference::Fallback => fallback.push(candidate),
                 CollateralPreference::Excluded => {
                     tracing::info!(
-                        node_id = %candidate_node_id,
+                        node_id = %candidate.node_id,
                         miner_uid = candidate.miner_uid,
                         "Skipping excluded node due to insufficient collateral"
                     );
