@@ -264,8 +264,6 @@ pub struct BinaryValidationConfig {
     pub execution_timeout_secs: u64,
     /// Output format for binary execution
     pub output_format: String,
-    /// Binary validation weight in final score calculation
-    pub score_weight: f64,
     /// Default node port for SSH tunnel cleanup
     #[serde(default = "default_node_port")]
     pub node_port: u16,
@@ -440,7 +438,6 @@ impl Default for BinaryValidationConfig {
             executor_binary_path: PathBuf::from("./executor-binary"),
             execution_timeout_secs: 1200,
             output_format: "json".to_string(),
-            score_weight: 0.8,
             node_port: default_node_port(),
             server_mode: ValidationServerConfig::default(),
         }

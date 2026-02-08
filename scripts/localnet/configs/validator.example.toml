@@ -45,7 +45,6 @@ enable_worker_queue = false
 # executor_binary_path = "/opt/basilica/bin/executor-binary/executor-binary"
 # execution_timeout_secs = 1200
 # output_format = "json"
-# score_weight = 0.8
 
 # Storage validation - reduced for localnet (0.1TB instead of default 1TB)
 [verification.storage_validation]
