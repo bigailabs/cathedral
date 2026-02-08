@@ -167,7 +167,7 @@ async fn test_slash_flow_executes_and_emits_metrics() -> Result<()> {
         .execute_slash(
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
             &node_id,
-            "bid_won_deployment_failed",
+            "deployment_failed",
             "{}",
             "validator_hotkey",
             "rental-1",
@@ -230,7 +230,7 @@ async fn test_rate_limiter_blocks_repeat_slash() -> Result<()> {
         .execute_slash(
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
             &node_id,
-            "bid_won_deployment_failed",
+            "deployment_failed",
             "{}",
             "validator_hotkey",
             "rental-1",
@@ -241,7 +241,7 @@ async fn test_rate_limiter_blocks_repeat_slash() -> Result<()> {
         .execute_slash(
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
             &node_id,
-            "bid_won_deployment_failed",
+            "deployment_failed",
             "{}",
             "validator_hotkey",
             "rental-2",
@@ -280,7 +280,7 @@ async fn test_circuit_breaker_trips_on_burst() -> Result<()> {
         .execute_slash(
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
             &Uuid::new_v4().to_string(),
-            "bid_won_deployment_failed",
+            "deployment_failed",
             "{}",
             "validator_hotkey",
             "rental-1",
@@ -291,7 +291,7 @@ async fn test_circuit_breaker_trips_on_burst() -> Result<()> {
         .execute_slash(
             "5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy",
             &Uuid::new_v4().to_string(),
-            "bid_won_deployment_failed",
+            "deployment_failed",
             "{}",
             "validator_hotkey",
             "rental-2",

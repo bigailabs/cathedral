@@ -6,14 +6,10 @@ use std::str::FromStr;
 /// Type of misbehaviour that can trigger a ban
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MisbehaviourType {
-    /// Failed rental request
-    BadRental,
-    /// Rejected rental request
-    RejectedRental,
+    /// Deployment failed (covers bid-won-deployment-failed and bad-rental)
+    DeploymentFailed,
     /// Rental halted unexpectedly
     HaltedRental,
-    /// Bid won but deployment failed (bid-and-bail)
-    BidWonDeploymentFailed,
     /// Rental interrupted (machine yanked / interruptible)
     InterruptedRental,
     /// Provided malicious or incorrect results
@@ -24,10 +20,8 @@ impl MisbehaviourType {
     /// Convert to database string representation
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::BadRental => "bad_rental",
-            Self::RejectedRental => "rejected_rental",
+            Self::DeploymentFailed => "deployment_failed",
             Self::HaltedRental => "halted_rental",
-            Self::BidWonDeploymentFailed => "bid_won_deployment_failed",
             Self::InterruptedRental => "interrupted_rental",
             Self::MaliciousResult => "malicious_result",
         }
@@ -39,10 +33,11 @@ impl FromStr for MisbehaviourType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "bad_rental" => Ok(Self::BadRental),
-            "rejected_rental" => Ok(Self::RejectedRental),
+            "deployment_failed"
+            | "bad_rental"
+            | "bid_won_deployment_failed"
+            | "rejected_rental" => Ok(Self::DeploymentFailed),
             "halted_rental" => Ok(Self::HaltedRental),
-            "bid_won_deployment_failed" => Ok(Self::BidWonDeploymentFailed),
             "interrupted_rental" => Ok(Self::InterruptedRental),
             "malicious_result" => Ok(Self::MaliciousResult),
             _ => Err(format!("Unknown misbehaviour type: {}", s)),
@@ -63,7 +58,7 @@ mod tests {
     #[test]
     fn test_new_misbehaviour_types_roundtrip() {
         let types = vec![
-            MisbehaviourType::BidWonDeploymentFailed,
+            MisbehaviourType::DeploymentFailed,
             MisbehaviourType::InterruptedRental,
         ];
         for t in types {

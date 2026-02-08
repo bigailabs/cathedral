@@ -51,7 +51,7 @@ async fn test_collateral_slash_flow_writes_signed_evidence() {
         .execute_slash(
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
             &node_id,
-            "bid_won_deployment_failed",
+            "deployment_failed",
             "{}",
             "validator_hotkey",
             "rental-1",
@@ -76,6 +76,6 @@ async fn test_collateral_slash_flow_writes_signed_evidence() {
     assert_eq!(signature, Some("test-signature"));
     assert_eq!(
         value.get("misbehaviour_type").and_then(|v| v.as_str()),
-        Some("bid_won_deployment_failed")
+        Some("deployment_failed")
     );
 }

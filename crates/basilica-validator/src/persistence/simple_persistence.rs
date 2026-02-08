@@ -239,7 +239,7 @@ impl SimplePersistence {
                 .unwrap_or_else(|_| Utc::now());
 
             let type_of_misbehaviour =
-                MisbehaviourType::from_str(&type_str).unwrap_or(MisbehaviourType::BadRental);
+                MisbehaviourType::from_str(&type_str).unwrap_or(MisbehaviourType::DeploymentFailed);
 
             logs.push(MisbehaviourLog {
                 miner_uid: miner_uid as u16,

@@ -176,7 +176,7 @@ mod tests {
         );
         let evidence = SlashEvidence {
             rental_id: "rental-1".to_string(),
-            misbehaviour_type: "bid_won_deployment_failed".to_string(),
+            misbehaviour_type: "deployment_failed".to_string(),
             timestamp: Utc::now(),
             details: "{}".to_string(),
             miner_hotkey: "hk".to_string(),

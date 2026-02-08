@@ -98,8 +98,6 @@ struct RentalSelection {
     node_id: String,
     miner_id: String,
     miner_uid: Option<u16>,
-    /// Miner bid rate in cents per GPU per hour
-    miner_bid_rate_cents: Option<u32>,
 }
 
 impl RentalManager {
@@ -498,7 +496,6 @@ impl RentalManager {
                     node_id: candidate.node_id,
                     miner_id: candidate.miner_id,
                     miner_uid: Some(candidate.miner_uid as u16),
-                    miner_bid_rate_cents: Some(candidate.hourly_rate_cents),
                 });
             }
         }
@@ -796,7 +793,6 @@ impl RentalManager {
                         &e.to_string(),
                         Some(ssh_credentials),
                     );
-                    let miner_attributable = is_miner_attributable_failure(&e);
 
                     if let Err(log_err) = tokio::task::block_in_place(|| {
                         tokio::runtime::Handle::current().block_on(async {
@@ -804,13 +800,7 @@ impl RentalManager {
                                 .log_misbehaviour(
                                     miner_uid,
                                     &selection.node_id,
-                                    if selection.miner_bid_rate_cents.is_some()
-                                        && miner_attributable
-                                    {
-                                        MisbehaviourType::BidWonDeploymentFailed
-                                    } else {
-                                        MisbehaviourType::BadRental
-                                    },
+                                    MisbehaviourType::DeploymentFailed,
                                     &details,
                                 )
                                 .await
@@ -1131,15 +1121,6 @@ impl RentalManager {
 
         Ok(available_rentals)
     }
-}
-
-fn is_miner_attributable_failure(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_lowercase();
-    // TODO: Replace string matching with structured error codes from deployment manager.
-    message.contains("container_already_exists")
-        || message.contains("gpu_not_available")
-        || message.contains("rejected")
-        || message.contains("refused")
 }
 
 impl Drop for RentalManager {

@@ -98,12 +98,7 @@ impl BanManager {
             );
         }
 
-        let should_slash = match type_of_misbehaviour {
-            MisbehaviourType::BidWonDeploymentFailed
-            | MisbehaviourType::InterruptedRental
-            | MisbehaviourType::HaltedRental => true,
-            _ => should_ban,
-        };
+        let should_slash = should_ban;
 
         if should_slash {
             if let Err(err) = self
@@ -263,11 +258,11 @@ impl BanManager {
     async fn check_ban_trigger(&self, miner_uid: u16, executor_id: &str) -> Result<bool> {
         let logs = self
             .persistence
-            .get_misbehaviour_logs(miner_uid, executor_id, Duration::hours(1))
+            .get_misbehaviour_logs(miner_uid, executor_id, Duration::days(1))
             .await?;
 
-        // Trigger ban if 2 or more misbehaviours within 1 hour
-        Ok(logs.len() >= 2)
+        // Trigger ban if 3 or more misbehaviours within 1 day
+        Ok(logs.len() >= 3)
     }
 
     /// Get recent misbehaviours within a time window
@@ -284,10 +279,10 @@ impl BanManager {
 
     /// Find the latest timestamp where a ban was triggered
     ///
-    /// A ban is triggered when there are 2+ misbehaviours within any 1-hour sliding window.
+    /// A ban is triggered when there are 3+ misbehaviours within any 1-day sliding window.
     /// Returns the timestamp of the later misbehaviour that triggered the ban.
     fn find_ban_trigger_timestamp(&self, logs: &[MisbehaviourLog]) -> Option<DateTime<Utc>> {
-        if logs.len() < 2 {
+        if logs.len() < 3 {
             return None;
         }
 
@@ -298,20 +293,20 @@ impl BanManager {
         let mut latest_trigger: Option<DateTime<Utc>> = None;
 
         // Check each log as a potential trigger point
-        for i in 1..sorted_logs.len() {
+        for i in 2..sorted_logs.len() {
             let current_log = sorted_logs[i];
-            let one_hour_before = current_log.recorded_at - Duration::hours(1);
+            let one_day_before = current_log.recorded_at - Duration::days(1);
 
-            // Count how many logs fall within the 1-hour window before this log
+            // Count how many logs fall within the 1-day window before this log
             let failures_in_window = sorted_logs
                 .iter()
                 .filter(|log| {
-                    log.recorded_at >= one_hour_before && log.recorded_at <= current_log.recorded_at
+                    log.recorded_at >= one_day_before && log.recorded_at <= current_log.recorded_at
                 })
                 .count();
 
-            // If this timestamp triggers a ban (2+ failures in window), update latest trigger
-            if failures_in_window >= 2 {
+            // If this timestamp triggers a ban (3+ failures in window), update latest trigger
+            if failures_in_window >= 3 {
                 latest_trigger = Some(current_log.recorded_at);
             }
         }
@@ -441,7 +436,7 @@ mod tests {
             executor_id: executor_id.to_string(),
             gpu_uuid: "test-gpu-uuid".to_string(),
             endpoint_executor: "test-endpoint".to_string(),
-            type_of_misbehaviour: MisbehaviourType::BadRental,
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
             details: "test details".to_string(),
             recorded_at,
             created_at: now,
@@ -451,7 +446,7 @@ mod tests {
 
     // Helper function to test ban trigger logic without needing persistence
     fn test_find_ban_trigger(logs: &[MisbehaviourLog]) -> Option<DateTime<Utc>> {
-        if logs.len() < 2 {
+        if logs.len() < 3 {
             return None;
         }
 
@@ -460,18 +455,18 @@ mod tests {
 
         let mut latest_trigger: Option<DateTime<Utc>> = None;
 
-        for i in 1..sorted_logs.len() {
+        for i in 2..sorted_logs.len() {
             let current_log = sorted_logs[i];
-            let one_hour_before = current_log.recorded_at - Duration::hours(1);
+            let one_day_before = current_log.recorded_at - Duration::days(1);
 
             let failures_in_window = sorted_logs
                 .iter()
                 .filter(|log| {
-                    log.recorded_at >= one_hour_before && log.recorded_at <= current_log.recorded_at
+                    log.recorded_at >= one_day_before && log.recorded_at <= current_log.recorded_at
                 })
                 .count();
 
-            if failures_in_window >= 2 {
+            if failures_in_window >= 3 {
                 latest_trigger = Some(current_log.recorded_at);
             }
         }
@@ -505,24 +500,37 @@ mod tests {
     }
 
     #[test]
-    fn test_find_ban_trigger_two_logs_within_hour() {
+    fn test_find_ban_trigger_two_logs_within_day() {
         let now = Utc::now();
         let logs = vec![
-            create_test_log(1, "executor1", now - Duration::minutes(30)),
+            create_test_log(1, "executor1", now - Duration::hours(6)),
             create_test_log(1, "executor1", now),
         ];
-        // Should trigger ban at the second log timestamp
+        // Should NOT trigger ban — need 3+ within 1 day
+        assert_eq!(test_find_ban_trigger(&logs), None);
+    }
+
+    #[test]
+    fn test_find_ban_trigger_three_logs_within_day() {
+        let now = Utc::now();
+        let logs = vec![
+            create_test_log(1, "executor1", now - Duration::hours(12)),
+            create_test_log(1, "executor1", now - Duration::hours(6)),
+            create_test_log(1, "executor1", now),
+        ];
+        // Should trigger ban at the third log timestamp
         assert_eq!(test_find_ban_trigger(&logs), Some(now));
     }
 
     #[test]
-    fn test_find_ban_trigger_two_logs_outside_hour() {
+    fn test_find_ban_trigger_three_logs_outside_day() {
         let now = Utc::now();
         let logs = vec![
-            create_test_log(1, "executor1", now - Duration::hours(2)),
+            create_test_log(1, "executor1", now - Duration::days(3)),
+            create_test_log(1, "executor1", now - Duration::days(2)),
             create_test_log(1, "executor1", now),
         ];
-        // Should not trigger ban as logs are more than 1 hour apart
+        // Should not trigger ban as only 1 log in the 1-day window ending at `now`
         assert_eq!(test_find_ban_trigger(&logs), None);
     }
 
@@ -530,32 +538,26 @@ mod tests {
     fn test_find_ban_trigger_multiple_triggers() {
         let now = Utc::now();
         let logs = vec![
-            create_test_log(1, "executor1", now - Duration::hours(3)),
-            create_test_log(
-                1,
-                "executor1",
-                now - Duration::hours(3) + Duration::minutes(30),
-            ),
-            create_test_log(1, "executor1", now - Duration::minutes(40)),
-            create_test_log(1, "executor1", now - Duration::minutes(20)),
+            create_test_log(1, "executor1", now - Duration::hours(20)),
+            create_test_log(1, "executor1", now - Duration::hours(10)),
+            create_test_log(1, "executor1", now - Duration::hours(5)),
+            create_test_log(1, "executor1", now - Duration::hours(1)),
         ];
-        // Should return the latest trigger (now - 20 minutes)
-        assert_eq!(
-            test_find_ban_trigger(&logs),
-            Some(now - Duration::minutes(20))
-        );
+        // Should return the latest trigger (now - 1 hour)
+        assert_eq!(test_find_ban_trigger(&logs), Some(now - Duration::hours(1)));
     }
 
     #[test]
     fn test_find_ban_trigger_sliding_window() {
         let now = Utc::now();
-        // Three logs: first two trigger a ban, third is outside the window
+        // Four logs spread across time; last three within 1 day
         let logs = vec![
-            create_test_log(1, "executor1", now - Duration::minutes(90)),
-            create_test_log(1, "executor1", now - Duration::minutes(50)), // Triggers ban
+            create_test_log(1, "executor1", now - Duration::days(2)),
+            create_test_log(1, "executor1", now - Duration::hours(20)),
+            create_test_log(1, "executor1", now - Duration::hours(10)),
             create_test_log(1, "executor1", now),
         ];
-        // The last two logs also form a trigger (50 mins apart)
+        // The last three logs form a trigger (all within 1 day)
         assert_eq!(test_find_ban_trigger(&logs), Some(now));
     }
 
@@ -571,10 +573,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ban_persists_after_hour_window() {
-        // This is the critical test that verifies the fix
-        // It simulates the scenario where a ban should persist even after
-        // the 1-hour window no longer contains 2 failures
+    async fn test_ban_persists_after_day_window() {
+        // This test verifies the ban persists even after the 1-day window
+        // no longer contains 3 failures.
 
         use crate::persistence::SimplePersistence;
         use std::sync::Arc;
@@ -591,16 +592,16 @@ mod tests {
         let miner_uid = 1;
         let executor_id = "executor1";
 
-        // Insert two misbehaviours within 1 hour (triggers ban)
+        // Insert three misbehaviours within 1 day (triggers ban)
         let now = Utc::now();
         let log1 = MisbehaviourLog {
             miner_uid,
             executor_id: executor_id.to_string(),
             gpu_uuid: "gpu1".to_string(),
             endpoint_executor: "endpoint1".to_string(),
-            type_of_misbehaviour: MisbehaviourType::BadRental,
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
             details: "failure 1".to_string(),
-            recorded_at: now - Duration::minutes(90),
+            recorded_at: now - Duration::hours(20),
             created_at: now,
             updated_at: now,
         };
@@ -609,36 +610,41 @@ mod tests {
             executor_id: executor_id.to_string(),
             gpu_uuid: "gpu1".to_string(),
             endpoint_executor: "endpoint1".to_string(),
-            type_of_misbehaviour: MisbehaviourType::BadRental,
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
             details: "failure 2".to_string(),
-            recorded_at: now - Duration::minutes(85),
+            recorded_at: now - Duration::hours(10),
+            created_at: now,
+            updated_at: now,
+        };
+        let log3 = MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "gpu1".to_string(),
+            endpoint_executor: "endpoint1".to_string(),
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
+            details: "failure 3".to_string(),
+            recorded_at: now - Duration::hours(2),
             created_at: now,
             updated_at: now,
         };
 
         persistence.insert_misbehaviour_log(&log1).await.unwrap();
         persistence.insert_misbehaviour_log(&log2).await.unwrap();
+        persistence.insert_misbehaviour_log(&log3).await.unwrap();
 
-        // Mock current time as 85 minutes after the second failure
-        // At this point, the 1-hour window contains 0 failures
-        // But the ban (2 hours for 2nd offense) should still be active
-
-        // Since we have 2 offenses, ban duration is 2 hours
-        // Ban was triggered at log2.recorded_at
-        // Ban should expire at log2.recorded_at + 2 hours
-        // Current time is log2.recorded_at + 85 minutes
-        // Ban should still be active (85 minutes < 120 minutes)
+        // Since we have 3 offenses, ban duration is 4 hours
+        // Ban was triggered at log3.recorded_at (2 hours ago)
+        // Ban should expire at log3.recorded_at + 4 hours = now + 2 hours
+        // Ban should still be active
 
         let is_banned = ban_manager
             .is_executor_banned(miner_uid, executor_id)
             .await
             .unwrap();
 
-        // This assertion would fail with the old implementation
-        // but passes with the fixed implementation
         assert!(
             is_banned,
-            "Executor should still be banned after 85 minutes (ban duration is 2 hours)"
+            "Executor should still be banned (ban duration is 4 hours, only 2 hours elapsed)"
         );
 
         // Check ban expiry is correct
@@ -648,14 +654,14 @@ mod tests {
             .unwrap();
         assert!(ban_expiry.is_some(), "Ban expiry should be set");
 
-        let expected_expiry = log2.recorded_at + Duration::hours(2);
+        let expected_expiry = log3.recorded_at + Duration::hours(4);
         let actual_expiry = ban_expiry.unwrap();
 
         // Allow small time difference for test execution
         let diff = (expected_expiry - actual_expiry).num_seconds().abs();
         assert!(
             diff < 5,
-            "Ban expiry should be approximately 2 hours from trigger time"
+            "Ban expiry should be approximately 4 hours from trigger time"
         );
     }
 
@@ -675,16 +681,16 @@ mod tests {
         let miner_uid = 1;
         let executor_id = "executor1";
 
-        // Insert two old misbehaviours that should have expired
+        // Insert three old misbehaviours that should have expired
         let now = Utc::now();
         let log1 = MisbehaviourLog {
             miner_uid,
             executor_id: executor_id.to_string(),
             gpu_uuid: "gpu1".to_string(),
             endpoint_executor: "endpoint1".to_string(),
-            type_of_misbehaviour: MisbehaviourType::BadRental,
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
             details: "failure 1".to_string(),
-            recorded_at: now - Duration::hours(3),
+            recorded_at: now - Duration::hours(6),
             created_at: now,
             updated_at: now,
         };
@@ -693,24 +699,36 @@ mod tests {
             executor_id: executor_id.to_string(),
             gpu_uuid: "gpu1".to_string(),
             endpoint_executor: "endpoint1".to_string(),
-            type_of_misbehaviour: MisbehaviourType::BadRental,
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
             details: "failure 2".to_string(),
-            recorded_at: now - Duration::hours(3) + Duration::minutes(10),
+            recorded_at: now - Duration::hours(5) + Duration::minutes(30),
+            created_at: now,
+            updated_at: now,
+        };
+        let log3 = MisbehaviourLog {
+            miner_uid,
+            executor_id: executor_id.to_string(),
+            gpu_uuid: "gpu1".to_string(),
+            endpoint_executor: "endpoint1".to_string(),
+            type_of_misbehaviour: MisbehaviourType::DeploymentFailed,
+            details: "failure 3".to_string(),
+            recorded_at: now - Duration::hours(5),
             created_at: now,
             updated_at: now,
         };
 
         persistence.insert_misbehaviour_log(&log1).await.unwrap();
         persistence.insert_misbehaviour_log(&log2).await.unwrap();
+        persistence.insert_misbehaviour_log(&log3).await.unwrap();
 
-        // Ban duration for 2 offenses is 2 hours
-        // Ban was triggered 2h50m ago, so it should have expired
+        // Ban duration for 3 offenses is 4 hours
+        // Ban was triggered 5 hours ago, so it should have expired
 
         let is_banned = ban_manager
             .is_executor_banned(miner_uid, executor_id)
             .await
             .unwrap();
-        assert!(!is_banned, "Ban should have expired after 2 hours");
+        assert!(!is_banned, "Ban should have expired after 4 hours");
 
         let ban_expiry = ban_manager
             .get_ban_expiry(miner_uid, executor_id)
@@ -738,24 +756,14 @@ mod tests {
         let miner_uid = 1;
         let executor_id = "executor1";
 
-        // Insert 5 misbehaviours over time to test progressive bans
+        // Insert 5 misbehaviours over 7 days, but no 3 in a single 1-day window yet
         let now = Utc::now();
         let logs = vec![
-            // First pair triggers 1st ban
             create_test_log(miner_uid, executor_id, now - Duration::days(6)),
-            create_test_log(
-                miner_uid,
-                executor_id,
-                now - Duration::days(6) + Duration::minutes(10),
-            ),
-            // Second pair triggers 2nd ban
+            create_test_log(miner_uid, executor_id, now - Duration::days(5)),
             create_test_log(miner_uid, executor_id, now - Duration::days(3)),
-            create_test_log(
-                miner_uid,
-                executor_id,
-                now - Duration::days(3) + Duration::minutes(10),
-            ),
-            // Recent trigger
+            create_test_log(miner_uid, executor_id, now - Duration::days(2)),
+            // Recent log, but only 1 within the last day
             create_test_log(miner_uid, executor_id, now - Duration::minutes(30)),
         ];
 
@@ -763,20 +771,22 @@ mod tests {
             persistence.insert_misbehaviour_log(log).await.unwrap();
         }
 
-        // With 5 offenses in 7 days, ban duration should be 24 hours (max)
+        // With 5 offenses but none forming 3-in-1-day, should not be banned
         let is_banned = ban_manager
             .is_executor_banned(miner_uid, executor_id)
             .await
             .unwrap();
-        assert!(
-            !is_banned,
-            "Should not be banned as no trigger in last logs"
-        );
+        assert!(!is_banned, "Should not be banned as no 3-in-1-day trigger");
 
-        // Add another log to trigger ban
-        let trigger_log = create_test_log(miner_uid, executor_id, now);
+        // Add two more logs within 1 day to trigger ban (3 in last day)
+        let trigger_log1 = create_test_log(miner_uid, executor_id, now - Duration::minutes(10));
+        let trigger_log2 = create_test_log(miner_uid, executor_id, now);
         persistence
-            .insert_misbehaviour_log(&trigger_log)
+            .insert_misbehaviour_log(&trigger_log1)
+            .await
+            .unwrap();
+        persistence
+            .insert_misbehaviour_log(&trigger_log2)
             .await
             .unwrap();
 
@@ -786,7 +796,7 @@ mod tests {
             .unwrap();
         assert!(
             is_banned,
-            "Should be banned with 6 offenses and recent trigger"
+            "Should be banned with 7 offenses and recent trigger"
         );
 
         let ban_expiry = ban_manager
@@ -795,10 +805,10 @@ mod tests {
             .unwrap();
         assert!(ban_expiry.is_some());
 
-        // With 6 offenses, duration should be 24 hours (max)
+        // With 7 offenses, duration should be 24 hours (max)
         let expected_expiry = now + Duration::hours(24);
         let actual_expiry = ban_expiry.unwrap();
         let diff = (expected_expiry - actual_expiry).num_seconds().abs();
-        assert!(diff < 5, "Ban should be 24 hours for 6 offenses");
+        assert!(diff < 5, "Ban should be 24 hours for 7 offenses");
     }
 }

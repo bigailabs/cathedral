@@ -692,7 +692,7 @@ mod tests {
             .execute_slash(
                 "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
                 &Uuid::new_v4().to_string(),
-                "bid_won_deployment_failed",
+                "deployment_failed",
                 "{}",
                 "validator-hotkey",
                 "rental-1",
