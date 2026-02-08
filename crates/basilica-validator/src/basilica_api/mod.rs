@@ -317,12 +317,10 @@ impl BasilicaApiClient {
         &self,
         since: DateTime<Utc>,
         until: DateTime<Utc>,
-        miner_hotkeys: Vec<String>,
     ) -> Result<Vec<MinerDelivery>> {
         let query = MinerDeliveryQuery {
             since_epoch_seconds: since.timestamp(),
             until_epoch_seconds: until.timestamp(),
-            miner_hotkeys,
         };
 
         let url = format!(
@@ -404,8 +402,6 @@ impl BasilicaApiClient {
 struct MinerDeliveryQuery {
     since_epoch_seconds: i64,
     until_epoch_seconds: i64,
-    #[serde(default)]
-    miner_hotkeys: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

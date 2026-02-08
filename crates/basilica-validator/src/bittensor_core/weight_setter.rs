@@ -329,7 +329,7 @@ impl WeightSetter {
     async fn sync_deliveries_for_epoch(&self, epoch: &WeightSetEpoch) -> Result<()> {
         let deliveries = self
             .api_client
-            .get_miner_delivery(epoch.period_start, epoch.period_end, Vec::new())
+            .get_miner_delivery(epoch.period_start, epoch.period_end)
             .await?;
 
         self.delivery_repository
