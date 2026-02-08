@@ -315,6 +315,13 @@ impl MinerRegistration for RegistrationService {
             }
         }
 
+        // Deactivate bids for nodes NOT in this RegisterBid request
+        let active_node_ids: Vec<String> = req.nodes.iter().map(|n| n.node_id.clone()).collect();
+        self.persistence
+            .deactivate_missing_bids(&miner_id, &active_node_ids)
+            .await
+            .map_err(|e| Status::internal(format!("failed to deactivate missing bids: {e}")))?;
+
         info!(
             miner_hotkey = %req.miner_hotkey,
             miner_id = %miner_id,

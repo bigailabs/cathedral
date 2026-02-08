@@ -827,6 +827,7 @@ impl SimplePersistence {
             WHERE me.active_rental_id IS NULL
                 AND me.miner_id = ?
                 AND (me.status IS NULL OR me.status != 'offline')
+                AND me.bid_active = 1
                 AND me.last_health_check IS NOT NULL
                 AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
             GROUP BY me.node_id
@@ -891,6 +892,7 @@ impl SimplePersistence {
                 ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
             WHERE me.active_rental_id IS NULL
                 AND (me.status IS NULL OR me.status != 'offline')
+                AND me.bid_active = 1
                 AND me.last_health_check IS NOT NULL
                 AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
                 AND me.hourly_rate_cents IS NOT NULL
@@ -1503,8 +1505,8 @@ impl SimplePersistence {
                 r#"
                 INSERT INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, gpu_count,
-                    hourly_rate_cents, status, last_health_check, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'online', datetime('now'), datetime('now'), datetime('now'))
+                    hourly_rate_cents, status, bid_active, last_health_check, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'), datetime('now'))
                 "#,
             )
             .bind(&relationship_id)
@@ -1535,6 +1537,7 @@ impl SimplePersistence {
                     gpu_count = ?,
                     hourly_rate_cents = ?,
                     status = 'online',
+                    bid_active = 1,
                     last_health_check = datetime('now'),
                     updated_at = datetime('now')
                 WHERE miner_id = ? AND node_id = ?
@@ -1648,11 +1651,12 @@ impl SimplePersistence {
         node_ids: &[String],
     ) -> Result<u32> {
         let result = if node_ids.is_empty() {
-            // Mark all nodes for this miner as offline
+            // Mark all nodes for this miner as offline and bid-inactive
             sqlx::query(
                 r#"
                 UPDATE miner_nodes
                 SET status = 'offline',
+                    bid_active = 0,
                     updated_at = datetime('now')
                 WHERE miner_id = ?
                 "#,
@@ -1661,13 +1665,14 @@ impl SimplePersistence {
             .execute(self.pool())
             .await?
         } else {
-            // Mark specific nodes as offline
+            // Mark specific nodes as offline and bid-inactive
             let mut count = 0u64;
             for node_id in node_ids {
                 let r = sqlx::query(
                     r#"
                     UPDATE miner_nodes
                     SET status = 'offline',
+                        bid_active = 0,
                         updated_at = datetime('now')
                     WHERE miner_id = ? AND node_id = ?
                     "#,
@@ -1705,6 +1710,7 @@ impl SimplePersistence {
             FROM miner_nodes
             WHERE miner_id = ?
               AND status IN ('online', 'verified')
+              AND bid_active = 1
               AND last_health_check IS NOT NULL
               AND datetime(last_health_check) >= datetime('now', '-{} seconds')
             "#,
@@ -1727,6 +1733,71 @@ impl SimplePersistence {
             .fetch_one(self.pool())
             .await?;
         Ok(count > 0)
+    }
+
+    /// Deactivate bids for nodes not included in the latest RegisterBid.
+    /// Sets bid_active = false for nodes belonging to this miner that are
+    /// NOT in the provided active_node_ids list.
+    /// Active rentals are NOT affected — only future auction eligibility changes.
+    pub async fn deactivate_missing_bids(
+        &self,
+        miner_id: &str,
+        active_node_ids: &[String],
+    ) -> Result<u32> {
+        if active_node_ids.is_empty() {
+            // No nodes in the request — deactivate all for this miner
+            let result = sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET bid_active = 0, updated_at = datetime('now')
+                WHERE miner_id = ?
+                "#,
+            )
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?;
+
+            let deactivated = result.rows_affected() as u32;
+            if deactivated > 0 {
+                info!(
+                    miner_id = miner_id,
+                    deactivated = deactivated,
+                    "Deactivated all bids for miner (empty node list)"
+                );
+            }
+            return Ok(deactivated);
+        }
+
+        // Deactivate nodes NOT in the active list
+        // Build a parameterized NOT IN query
+        let placeholders: Vec<&str> = active_node_ids.iter().map(|_| "?").collect();
+        let in_clause = placeholders.join(", ");
+        let query = format!(
+            r#"
+            UPDATE miner_nodes
+            SET bid_active = 0, updated_at = datetime('now')
+            WHERE miner_id = ? AND node_id NOT IN ({})
+            "#,
+            in_clause
+        );
+
+        let mut q = sqlx::query(&query).bind(miner_id);
+        for node_id in active_node_ids {
+            q = q.bind(node_id);
+        }
+        let result = q.execute(self.pool()).await?;
+        let count = result.rows_affected();
+
+        if count > 0 {
+            info!(
+                miner_id = miner_id,
+                deactivated = count,
+                active_count = active_node_ids.len(),
+                "Deactivated bids for nodes not in RegisterBid"
+            );
+        }
+
+        Ok(count as u32)
     }
 
     /// Get count of nodes with stale health checks for a miner.
