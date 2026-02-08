@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuctionConfig {
+pub struct BiddingConfig {
     /// Price API endpoint (required, no fallback)
     pub price_api_endpoint: String,
     /// Price cache TTL in seconds
@@ -17,13 +17,13 @@ pub struct AuctionConfig {
     pub miner_emission_share: f64,
     /// Health check interval in seconds (returned to miners in RegisterBidResponse)
     pub health_check_interval_secs: u64,
-    /// Number of missed health checks before node is filtered from auction
+    /// Number of missed health checks before node is filtered from bid selection
     pub health_check_miss_threshold: u32,
     /// Validator's SSH public key (for miner nodes to deploy)
     pub validator_ssh_public_key: Option<String>,
 }
 
-impl Default for AuctionConfig {
+impl Default for BiddingConfig {
     fn default() -> Self {
         Self {
             price_api_endpoint: "http://basilica-api:8080/v1/prices/baseline".to_string(),
@@ -39,8 +39,8 @@ impl Default for AuctionConfig {
     }
 }
 
-impl AuctionConfig {
-    /// Get the maximum age in seconds for a health check before a node is filtered from auction
+impl BiddingConfig {
+    /// Get the maximum age in seconds for a health check before a node is filtered from bid selection
     pub fn health_check_ttl_secs(&self) -> u64 {
         self.health_check_interval_secs * self.health_check_miss_threshold as u64
     }
@@ -90,75 +90,75 @@ mod tests {
 
     #[test]
     fn test_default_valid_endpoint() {
-        let config = AuctionConfig::default();
+        let config = BiddingConfig::default();
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_valid_config() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             price_api_endpoint: "http://localhost:50071".to_string(),
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert!(config.validate().is_ok());
     }
 
     #[test]
     fn test_invalid_floor_fraction() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             price_api_endpoint: "http://localhost:50071".to_string(),
             min_bid_floor_fraction: 1.5,
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_zero_durations_invalid() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             price_api_endpoint: "http://localhost:50071".to_string(),
             price_cache_ttl_secs: 0,
             rpc_timestamp_tolerance_secs: 0,
             bid_node_freshness_secs: 0,
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_invalid_miner_emission_share() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             price_api_endpoint: "http://localhost:50071".to_string(),
             miner_emission_share: 1.5,
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_health_check_interval_zero_invalid() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             health_check_interval_secs: 0,
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_health_check_miss_threshold_zero_invalid() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             health_check_miss_threshold: 0,
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert!(config.validate().is_err());
     }
 
     #[test]
     fn test_health_check_ttl_secs() {
-        let config = AuctionConfig {
+        let config = BiddingConfig {
             health_check_interval_secs: 60,
             health_check_miss_threshold: 3,
-            ..AuctionConfig::default()
+            ..BiddingConfig::default()
         };
         assert_eq!(config.health_check_ttl_secs(), 180);
     }

@@ -72,7 +72,7 @@ impl ValidatorService {
             self.config.billing.api_endpoint.clone(),
             signer,
             self.config.billing.timeout_secs,
-            StdDuration::from_secs(self.config.auction.price_cache_ttl_secs),
+            StdDuration::from_secs(self.config.bidding.price_cache_ttl_secs),
             self.config.pricing.cache_ttl(),
         )?);
 
@@ -263,7 +263,7 @@ impl ValidatorService {
             self.config.emission.weight_set_interval_blocks,
             gpu_scoring_engine,
             self.config.emission.clone(),
-            self.config.auction.clone(),
+            self.config.bidding.clone(),
             api_client,
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),
@@ -422,14 +422,14 @@ impl ValidatorService {
 
         let registration_grpc_config = self.config.bid_grpc.clone();
         let registration_persistence = inputs.persistence.clone();
-        let registration_auction_config = self.config.auction.clone();
+        let registration_bidding_config = self.config.bidding.clone();
         let registration_collateral_manager = inputs.collateral_manager.clone();
         let validator_ssh_public_key = inputs.validator_ssh_public_key.clone();
         let registration_server_task = tokio::spawn(async move {
             if let Err(e) = start_registration_server(
                 registration_grpc_config,
                 registration_persistence,
-                registration_auction_config,
+                registration_bidding_config,
                 registration_collateral_manager,
                 validator_ssh_public_key,
             )

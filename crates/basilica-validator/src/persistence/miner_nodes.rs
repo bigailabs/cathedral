@@ -1698,7 +1698,7 @@ impl SimplePersistence {
     }
 
     /// Get nodes with fresh health checks for a miner.
-    /// Used by auction to filter available nodes.
+    /// Used by bid selection to filter available nodes.
     pub async fn get_healthy_nodes_for_miner(
         &self,
         miner_id: &str,
@@ -1738,7 +1738,7 @@ impl SimplePersistence {
     /// Deactivate bids for nodes not included in the latest RegisterBid.
     /// Sets bid_active = false for nodes belonging to this miner that are
     /// NOT in the provided active_node_ids list.
-    /// Active rentals are NOT affected — only future auction eligibility changes.
+    /// Active rentals are NOT affected — only future bid eligibility changes.
     pub async fn deactivate_missing_bids(
         &self,
         miner_id: &str,

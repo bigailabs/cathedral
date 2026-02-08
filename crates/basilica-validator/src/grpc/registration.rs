@@ -25,7 +25,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::collateral::{CollateralManager, CollateralState, CollateralStatus};
-use crate::config::auction::AuctionConfig;
+use crate::config::bidding::BiddingConfig;
 use crate::persistence::SimplePersistence;
 
 /// Convert internal CollateralStatus to proto CollateralStatus
@@ -104,7 +104,7 @@ use rust_decimal::prelude::ToPrimitive;
 #[derive(Clone)]
 pub struct RegistrationService {
     persistence: Arc<SimplePersistence>,
-    auction_config: AuctionConfig,
+    bidding_config: BiddingConfig,
     collateral_manager: Option<Arc<CollateralManager>>,
     validator_ssh_public_key: String,
 }
@@ -113,13 +113,13 @@ pub struct RegistrationService {
 impl RegistrationService {
     pub fn new(
         persistence: Arc<SimplePersistence>,
-        auction_config: AuctionConfig,
+        bidding_config: BiddingConfig,
         collateral_manager: Option<Arc<CollateralManager>>,
         validator_ssh_public_key: String,
     ) -> Self {
         Self {
             persistence,
-            auction_config,
+            bidding_config,
             collateral_manager,
             validator_ssh_public_key,
         }
@@ -129,7 +129,7 @@ impl RegistrationService {
     fn ensure_timestamp_freshness(&self, timestamp: i64) -> Result<(), Status> {
         let submitted_at = self.parse_timestamp(timestamp)?;
         let now = Utc::now();
-        let max_skew_secs = self.auction_config.rpc_timestamp_tolerance_secs as i64;
+        let max_skew_secs = self.bidding_config.rpc_timestamp_tolerance_secs as i64;
         if (now - submitted_at).num_seconds().abs() > max_skew_secs {
             return Err(Status::invalid_argument("timestamp outside allowed window"));
         }
@@ -337,7 +337,7 @@ impl MinerRegistration for RegistrationService {
             accepted: true,
             registration_id,
             validator_ssh_public_key,
-            health_check_interval_secs: self.auction_config.health_check_interval_secs as u32,
+            health_check_interval_secs: self.bidding_config.health_check_interval_secs as u32,
             error_message: String::new(),
             collateral_status: worst_collateral_status.map(status_to_proto),
         }))
@@ -486,13 +486,13 @@ impl MinerRegistration for RegistrationService {
 pub async fn start_registration_server(
     config: GrpcServerConfig,
     persistence: Arc<SimplePersistence>,
-    auction_config: AuctionConfig,
+    bidding_config: BiddingConfig,
     collateral_manager: Option<Arc<CollateralManager>>,
     validator_ssh_public_key: String,
 ) -> Result<()> {
     let service = RegistrationService::new(
         persistence,
-        auction_config,
+        bidding_config,
         collateral_manager,
         validator_ssh_public_key,
     );
@@ -526,7 +526,7 @@ mod tests {
         let persistence = SimplePersistence::for_testing().await.unwrap();
         RegistrationService::new(
             Arc::new(persistence),
-            AuctionConfig::default(),
+            BiddingConfig::default(),
             None,
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPublicKey test@validator".to_string(),
         )

@@ -23,7 +23,3 @@ WHERE EXISTS (
 -- Index for fast availability checks (WHERE active_rental_id IS NULL).
 CREATE INDEX IF NOT EXISTS idx_miner_nodes_active_rental ON miner_nodes(active_rental_id);
 
--- Drop the now-redundant reservations table and its indexes.
-DROP INDEX IF EXISTS idx_node_reservations_node;
-DROP INDEX IF EXISTS idx_node_reservations_expires;
-DROP TABLE IF EXISTS node_reservations;

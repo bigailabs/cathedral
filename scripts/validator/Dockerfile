@@ -105,7 +105,7 @@ RUN chmod +x /usr/local/bin/basilica-validator && \
 RUN mkdir -p /var/lib/basilica/basilica-validator && \
     chmod 755 /var/lib/basilica/basilica-validator
 
-EXPOSE 8080 9090
+EXPOSE 8080 9090 50052
 
 # Default command
 ENTRYPOINT ["/usr/local/bin/basilica-validator"]

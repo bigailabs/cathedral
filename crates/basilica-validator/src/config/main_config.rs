@@ -75,9 +75,9 @@ pub struct ValidatorConfig {
     #[serde(default)]
     pub emission: super::emission::EmissionConfig,
 
-    /// Auction configuration (dynamic baseline pricing)
+    /// Bidding configuration (bid registration, health checks, pricing)
     #[serde(default)]
-    pub auction: super::auction::AuctionConfig,
+    pub bidding: super::bidding::BiddingConfig,
     /// Token pricing configuration (TAO/Alpha)
     #[serde(default)]
     pub pricing: super::pricing::PricingConfig,
@@ -888,7 +888,7 @@ impl Default for ValidatorConfig {
             },
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
-            auction: super::auction::AuctionConfig::default(),
+            bidding: super::bidding::BiddingConfig::default(),
             pricing: super::pricing::PricingConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
             billing: BillingConfig::default(),
@@ -982,11 +982,11 @@ impl ConfigValidation for ValidatorConfig {
             });
         }
 
-        // Validate auction configuration
-        if let Err(e) = self.auction.validate() {
+        // Validate bidding configuration
+        if let Err(e) = self.bidding.validate() {
             return Err(ConfigurationError::InvalidValue {
-                key: "auction".to_string(),
-                value: "auction_config".to_string(),
+                key: "bidding".to_string(),
+                value: "bidding_config".to_string(),
                 reason: e.to_string(),
             });
         }
