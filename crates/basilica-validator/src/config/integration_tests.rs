@@ -42,7 +42,6 @@ mod tests {
             .insert("H100".to_string(), GpuAllocation::new(50.0));
         // Disable binary validation since we don't have the binaries in test
         config.verification.binary_validation = None;
-        config.bidding.price_api_endpoint = "http://localhost:50071".to_string();
         assert!(config.validate().is_ok());
     }
 
@@ -51,7 +50,6 @@ mod tests {
         let mut config = ValidatorConfig::default();
         // Disable binary validation since we don't have the binaries in test (None = disabled)
         config.verification.binary_validation = None;
-        config.bidding.price_api_endpoint = "http://localhost:50071".to_string();
 
         // Add valid GPU allocations for testing
         config.emission.burn_percentage = 10.0;
@@ -96,8 +94,6 @@ mod tests {
     fn test_billing_api_endpoint_requires_gateway() {
         let mut config = ValidatorConfig::default();
         config.verification.binary_validation = None;
-        config.bidding.price_api_endpoint =
-            "http://basilica-api:8080/v1/prices/baseline".to_string();
         config.emission.burn_percentage = 10.0;
         config
             .emission
@@ -109,7 +105,7 @@ mod tests {
             .insert("H100".to_string(), GpuAllocation::new(50.0));
 
         config.billing.enabled = true;
-        config.billing.api_endpoint = config.billing.billing_endpoint.clone();
+        config.api_endpoint = config.billing.billing_endpoint.clone();
 
         assert!(config.validate().is_err());
     }
@@ -117,11 +113,7 @@ mod tests {
     #[test]
     fn test_default_endpoints_use_api_gateway() {
         let config = ValidatorConfig::default();
-        assert_ne!(config.billing.api_endpoint, config.billing.billing_endpoint);
-        assert!(config.billing.api_endpoint.contains("basilica-api"));
-        assert!(config
-            .bidding
-            .price_api_endpoint
-            .contains("/v1/prices/baseline"));
+        assert_ne!(config.api_endpoint, config.billing.billing_endpoint);
+        assert!(config.api_endpoint.contains("basilica"));
     }
 }

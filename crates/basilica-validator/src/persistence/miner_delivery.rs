@@ -176,14 +176,4 @@ impl MinerDeliveryRepository {
             })
             .collect())
     }
-
-    pub async fn cleanup_old_deliveries(&self, older_than: DateTime<Utc>) -> Result<u64> {
-        let older_than_ts = older_than.timestamp();
-        let result = sqlx::query("DELETE FROM miner_delivery_cache WHERE received_at < ?")
-            .bind(older_than_ts)
-            .execute(self.persistence.pool())
-            .await?;
-
-        Ok(result.rows_affected())
-    }
 }

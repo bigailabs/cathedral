@@ -5,7 +5,6 @@
 
 use crate::basilica_api::BasilicaApiClient;
 use crate::bittensor_core::weight_allocation::WeightAllocationEngine;
-use crate::config::bidding::BiddingConfig;
 use crate::config::emission::EmissionConfig;
 use crate::gpu::categorization;
 use crate::gpu::GpuScoringEngine;
@@ -63,7 +62,6 @@ pub struct WeightSetter {
     gpu_scoring_engine: Arc<GpuScoringEngine>,
     weight_allocation_engine: Arc<WeightAllocationEngine>,
     emission_config: EmissionConfig,
-    bidding_config: BiddingConfig,
     delivery_repository: Arc<MinerDeliveryRepository>,
     epoch_repository: Arc<WeightSetEpochRepository>,
     api_client: Arc<BasilicaApiClient>,
@@ -84,7 +82,6 @@ impl WeightSetter {
         blocks_per_weight_set: u64,
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
-        bidding_config: BiddingConfig,
         api_client: Arc<BasilicaApiClient>,
         gpu_profile_repo: Arc<GpuProfileRepository>,
         metrics: Option<Arc<ValidatorMetrics>>,
@@ -109,7 +106,6 @@ impl WeightSetter {
             gpu_scoring_engine,
             weight_allocation_engine,
             emission_config,
-            bidding_config,
             delivery_repository,
             epoch_repository,
             api_client,
@@ -454,7 +450,6 @@ impl WeightSetter {
             Ok(tao_price) => {
                 info!(
                     tao_price_usd = %tao_price,
-                    miner_emission_share = self.bidding_config.miner_emission_share,
                     burn_percentage = self.emission_config.burn_percentage,
                     "Fetched TAO price for weight context"
                 );

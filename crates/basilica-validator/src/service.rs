@@ -69,7 +69,7 @@ impl ValidatorService {
 
         let signer: Arc<dyn ValidatorSigner> = bittensor_service.clone();
         let api_client = Arc::new(BasilicaApiClient::new(
-            self.config.billing.api_endpoint.clone(),
+            self.config.api_endpoint.clone(),
             signer,
             self.config.billing.timeout_secs,
             StdDuration::from_secs(self.config.bidding.price_cache_ttl_secs),
@@ -263,7 +263,6 @@ impl ValidatorService {
             self.config.emission.weight_set_interval_blocks,
             gpu_scoring_engine,
             self.config.emission.clone(),
-            self.config.bidding.clone(),
             api_client,
             gpu_profile_repo,
             validator_metrics.map(|m| Arc::new(m.clone())),

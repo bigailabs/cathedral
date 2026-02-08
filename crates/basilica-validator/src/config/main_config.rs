@@ -86,6 +86,10 @@ pub struct ValidatorConfig {
     #[serde(default)]
     pub cleanup: crate::persistence::cleanup_task::CleanupConfig,
 
+    /// Basilica API endpoint (used for pricing, delivery, and token data)
+    #[serde(default = "default_api_endpoint")]
+    pub api_endpoint: String,
+
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
@@ -561,6 +565,10 @@ fn default_rental_session_duration() -> u64 {
     0
 }
 
+fn default_api_endpoint() -> String {
+    "https://api.basilica.ai".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingConfig {
     /// Enable billing telemetry streaming
@@ -570,10 +578,6 @@ pub struct BillingConfig {
     /// Billing service gRPC endpoint
     #[serde(default = "default_billing_endpoint")]
     pub billing_endpoint: String,
-
-    /// API endpoint for miner delivery reads
-    #[serde(default = "default_billing_api_endpoint")]
-    pub api_endpoint: String,
 
     /// Sync interval for miner delivery cache (seconds)
     #[serde(default = "default_billing_sync_interval_secs")]
@@ -628,10 +632,6 @@ fn default_billing_endpoint() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 
-fn default_billing_api_endpoint() -> String {
-    "http://basilica-api:8080".to_string()
-}
-
 fn default_billing_sync_interval_secs() -> u64 {
     300
 }
@@ -681,7 +681,6 @@ impl Default for BillingConfig {
         Self {
             enabled: default_billing_enabled(),
             billing_endpoint: default_billing_endpoint(),
-            api_endpoint: default_billing_api_endpoint(),
             sync_interval_secs: default_billing_sync_interval_secs(),
             lookback_hours: default_billing_lookback_hours(),
             timeout_secs: default_billing_timeout_secs(),
@@ -891,6 +890,7 @@ impl Default for ValidatorConfig {
             bidding: super::bidding::BiddingConfig::default(),
             pricing: super::pricing::PricingConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
+            api_endpoint: default_api_endpoint(),
             billing: BillingConfig::default(),
             collateral: None,
         }
@@ -922,17 +922,17 @@ impl ConfigValidation for ValidatorConfig {
             });
         }
 
-        if self.billing.api_endpoint.trim().is_empty() {
+        if self.api_endpoint.trim().is_empty() {
             return Err(ConfigurationError::InvalidValue {
-                key: "billing.api_endpoint".to_string(),
-                value: self.billing.api_endpoint.clone(),
+                key: "api_endpoint".to_string(),
+                value: self.api_endpoint.clone(),
                 reason: "API endpoint must be set for pricing".to_string(),
             });
         }
-        if self.billing.api_endpoint == self.billing.billing_endpoint {
+        if self.api_endpoint == self.billing.billing_endpoint {
             return Err(ConfigurationError::InvalidValue {
-                key: "billing.api_endpoint".to_string(),
-                value: self.billing.api_endpoint.clone(),
+                key: "api_endpoint".to_string(),
+                value: self.api_endpoint.clone(),
                 reason: "API endpoint must route through API Gateway, not billing gRPC".to_string(),
             });
         }
