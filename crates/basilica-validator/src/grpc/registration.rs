@@ -164,23 +164,17 @@ impl RegistrationService {
 
     /// Build the message to verify for RegisterBid signature
     fn build_register_bid_message(&self, req: &RegisterBidRequest) -> String {
-        format!(
-            "{}|{}|{}",
-            req.miner_hotkey.trim(),
-            req.timestamp,
-            req.nonce.trim()
-        )
+        format!("{}|{}", req.miner_hotkey.trim(), req.timestamp)
     }
 
     /// Build the message to verify for UpdateBid signature
     fn build_update_bid_message(&self, req: &UpdateBidRequest) -> String {
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}",
             req.miner_hotkey.trim(),
             req.node_id.trim(),
             req.hourly_rate_cents,
             req.timestamp,
-            req.nonce.trim()
         )
     }
 
@@ -188,11 +182,10 @@ impl RegistrationService {
     fn build_remove_bid_message(&self, req: &RemoveBidRequest) -> String {
         let node_ids_str = req.node_ids.join(",");
         format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}",
             req.miner_hotkey.trim(),
             node_ids_str,
             req.timestamp,
-            req.nonce.trim()
         )
     }
 
@@ -237,9 +230,6 @@ impl MinerRegistration for RegistrationService {
         }
         if req.nodes.is_empty() {
             return Err(Status::invalid_argument("at least one node is required"));
-        }
-        if req.nonce.trim().is_empty() {
-            return Err(Status::invalid_argument("nonce is required"));
         }
         if req.signature.is_empty() {
             return Err(Status::invalid_argument("signature is required"));
@@ -364,9 +354,6 @@ impl MinerRegistration for RegistrationService {
                 "hourly_rate_cents must be greater than 0",
             ));
         }
-        if req.nonce.trim().is_empty() {
-            return Err(Status::invalid_argument("nonce is required"));
-        }
         if req.signature.is_empty() {
             return Err(Status::invalid_argument("signature is required"));
         }
@@ -414,9 +401,6 @@ impl MinerRegistration for RegistrationService {
         // Validate required fields
         if req.miner_hotkey.trim().is_empty() {
             return Err(Status::invalid_argument("miner_hotkey is required"));
-        }
-        if req.nonce.trim().is_empty() {
-            return Err(Status::invalid_argument("nonce is required"));
         }
         if req.signature.is_empty() {
             return Err(Status::invalid_argument("signature is required"));
@@ -549,14 +533,13 @@ mod tests {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
             nodes: vec![],
             timestamp: 1234567890,
-            nonce: "abc123".to_string(),
             signature: vec![],
         };
 
         let message = service.build_register_bid_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|1234567890|abc123"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|1234567890"
         );
     }
 
@@ -569,14 +552,13 @@ mod tests {
             node_id: "node-1".to_string(),
             hourly_rate_cents: 250,
             timestamp: 1234567890,
-            nonce: "abc123".to_string(),
             signature: vec![],
         };
 
         let message = service.build_update_bid_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1|250|1234567890|abc123"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1|250|1234567890"
         );
     }
 
@@ -588,14 +570,13 @@ mod tests {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
             node_ids: vec!["node-1".to_string(), "node-2".to_string()],
             timestamp: 1234567890,
-            nonce: "abc123".to_string(),
             signature: vec![],
         };
 
         let message = service.build_remove_bid_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1,node-2|1234567890|abc123"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1,node-2|1234567890"
         );
     }
 

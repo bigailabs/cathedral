@@ -406,7 +406,11 @@ impl WeightSetter {
             let category = if delivery.gpu_category.trim().is_empty() {
                 "UNKNOWN".to_string()
             } else {
-                delivery.gpu_category.parse::<GpuCategory>().unwrap().to_string()
+                delivery
+                    .gpu_category
+                    .parse::<GpuCategory>()
+                    .unwrap()
+                    .to_string()
             };
             let revenue_usd = delivery.revenue_usd;
             if !revenue_usd.is_finite() || revenue_usd <= 0.0 {

@@ -52,8 +52,7 @@ message RegisterBidRequest {
   string miner_hotkey = 1;          // Miner's hotkey for identification
   repeated NodeRegistration nodes = 2;  // Nodes to register with SSH details
   int64 timestamp = 3;              // Unix timestamp (seconds or millis)
-  string nonce = 4;                 // Replay protection nonce
-  bytes signature = 5;              // Signature over miner_hotkey|timestamp|nonce
+  bytes signature = 4;              // Signature over miner_hotkey|timestamp
 }
 
 message RegisterBidResponse {
@@ -71,8 +70,7 @@ message UpdateBidRequest {
   string node_id = 2;               // Node to update
   uint32 hourly_rate_cents = 3;     // New price in cents per GPU per hour
   int64 timestamp = 4;              // Unix timestamp
-  string nonce = 5;                 // Replay protection nonce
-  bytes signature = 6;              // Signature over miner_hotkey|node_id|hourly_rate_cents|timestamp|nonce
+  bytes signature = 5;              // Signature over miner_hotkey|node_id|hourly_rate_cents|timestamp
 }
 
 message UpdateBidResponse {
@@ -85,8 +83,7 @@ message RemoveBidRequest {
   string miner_hotkey = 1;          // Miner's hotkey for identification
   repeated string node_ids = 2;     // Node IDs to remove (empty = remove all)
   int64 timestamp = 3;              // Unix timestamp
-  string nonce = 4;                 // Replay protection nonce
-  bytes signature = 5;              // Signature over miner_hotkey|node_ids|timestamp|nonce
+  bytes signature = 4;              // Signature over miner_hotkey|node_ids|timestamp
 }
 
 message RemoveBidResponse {

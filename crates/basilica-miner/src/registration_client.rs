@@ -117,13 +117,8 @@ impl RegistrationClient {
     }
 
     /// Build and sign the message for RegisterBid
-    fn build_register_bid_message(&self, timestamp: i64, nonce: &str) -> String {
-        format!(
-            "{}|{}|{}",
-            self.miner_hotkey.trim(),
-            timestamp,
-            nonce.trim()
-        )
+    fn build_register_bid_message(&self, timestamp: i64) -> String {
+        format!("{}|{}", self.miner_hotkey.trim(), timestamp)
     }
 
     /// Build and sign the message for UpdateBid
@@ -132,27 +127,24 @@ impl RegistrationClient {
         node_id: &str,
         hourly_rate_cents: u32,
         timestamp: i64,
-        nonce: &str,
     ) -> String {
         format!(
-            "{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}",
             self.miner_hotkey.trim(),
             node_id.trim(),
             hourly_rate_cents,
             timestamp,
-            nonce.trim()
         )
     }
 
     /// Build and sign the message for RemoveBid
-    fn build_remove_bid_message(&self, node_ids: &[String], timestamp: i64, nonce: &str) -> String {
+    fn build_remove_bid_message(&self, node_ids: &[String], timestamp: i64) -> String {
         let node_ids_str = node_ids.join(",");
         format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}",
             self.miner_hotkey.trim(),
             node_ids_str,
             timestamp,
-            nonce.trim()
         )
     }
 
@@ -178,11 +170,6 @@ impl RegistrationClient {
         Ok(signature_bytes)
     }
 
-    /// Generate a nonce for replay protection
-    fn generate_nonce() -> String {
-        uuid::Uuid::new_v4().to_string()
-    }
-
     /// Register nodes with the validator using pre-built registrations.
     /// This is the primary registration method - BidManager builds the registrations
     /// with prices from BiddingConfig.
@@ -205,8 +192,7 @@ impl RegistrationClient {
 
         // Build and sign request
         let timestamp = Utc::now().timestamp();
-        let nonce = Self::generate_nonce();
-        let message = self.build_register_bid_message(timestamp, &nonce);
+        let message = self.build_register_bid_message(timestamp);
         let signature = self.sign_message(&message)?;
 
         let node_count = node_registrations.len();
@@ -214,7 +200,6 @@ impl RegistrationClient {
             miner_hotkey: self.miner_hotkey.clone(),
             nodes: node_registrations,
             timestamp,
-            nonce,
             signature,
         };
 
@@ -363,8 +348,7 @@ impl RegistrationClient {
         let mut client = self.connect().await?;
 
         let timestamp = Utc::now().timestamp();
-        let nonce = Self::generate_nonce();
-        let message = self.build_update_bid_message(node_id, hourly_rate_cents, timestamp, &nonce);
+        let message = self.build_update_bid_message(node_id, hourly_rate_cents, timestamp);
         let signature = self.sign_message(&message)?;
 
         let request = UpdateBidRequest {
@@ -372,7 +356,6 @@ impl RegistrationClient {
             node_id: node_id.to_string(),
             hourly_rate_cents,
             timestamp,
-            nonce,
             signature,
         };
 
@@ -409,15 +392,13 @@ impl RegistrationClient {
         let mut client = self.connect().await?;
 
         let timestamp = Utc::now().timestamp();
-        let nonce = Self::generate_nonce();
-        let message = self.build_remove_bid_message(&node_ids, timestamp, &nonce);
+        let message = self.build_remove_bid_message(&node_ids, timestamp);
         let signature = self.sign_message(&message)?;
 
         let request = RemoveBidRequest {
             miner_hotkey: self.miner_hotkey.clone(),
             node_ids,
             timestamp,
-            nonce,
             signature,
         };
 
@@ -471,8 +452,8 @@ mod tests {
         });
 
         let client = RegistrationClient::new(config, node_manager, bittensor);
-        let message = client.build_register_bid_message(1234567890, "nonce123");
-        assert_eq!(message, "5GrwvaEF|1234567890|nonce123");
+        let message = client.build_register_bid_message(1234567890);
+        assert_eq!(message, "5GrwvaEF|1234567890");
     }
 
     #[test]
@@ -503,8 +484,8 @@ mod tests {
         });
 
         let client = RegistrationClient::new(config, node_manager, bittensor);
-        let message = client.build_update_bid_message("node-1", 250, 1234567890, "nonce123");
-        assert_eq!(message, "5GrwvaEF|node-1|250|1234567890|nonce123");
+        let message = client.build_update_bid_message("node-1", 250, 1234567890);
+        assert_eq!(message, "5GrwvaEF|node-1|250|1234567890");
     }
 
     #[test]
@@ -516,11 +497,8 @@ mod tests {
         });
 
         let client = RegistrationClient::new(config, node_manager, bittensor);
-        let message = client.build_remove_bid_message(
-            &["node-1".to_string(), "node-2".to_string()],
-            1234567890,
-            "nonce123",
-        );
-        assert_eq!(message, "5GrwvaEF|node-1,node-2|1234567890|nonce123");
+        let message = client
+            .build_remove_bid_message(&["node-1".to_string(), "node-2".to_string()], 1234567890);
+        assert_eq!(message, "5GrwvaEF|node-1,node-2|1234567890");
     }
 }

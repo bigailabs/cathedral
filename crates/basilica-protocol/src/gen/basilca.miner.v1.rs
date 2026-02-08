@@ -69,11 +69,8 @@ pub struct RegisterBidRequest {
     /// Unix timestamp (seconds or millis)
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
-    /// Replay protection nonce
-    #[prost(string, tag = "4")]
-    pub nonce: ::prost::alloc::string::String,
-    /// Signature over miner_hotkey|timestamp|nonce
-    #[prost(bytes = "vec", tag = "5")]
+    /// Signature over miner_hotkey|timestamp
+    #[prost(bytes = "vec", tag = "4")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -114,11 +111,8 @@ pub struct UpdateBidRequest {
     /// Unix timestamp
     #[prost(int64, tag = "4")]
     pub timestamp: i64,
-    /// Replay protection nonce
-    #[prost(string, tag = "5")]
-    pub nonce: ::prost::alloc::string::String,
-    /// Signature over miner_hotkey|node_id|hourly_rate_cents|timestamp|nonce
-    #[prost(bytes = "vec", tag = "6")]
+    /// Signature over miner_hotkey|node_id|hourly_rate_cents|timestamp
+    #[prost(bytes = "vec", tag = "5")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -142,11 +136,8 @@ pub struct RemoveBidRequest {
     /// Unix timestamp
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
-    /// Replay protection nonce
-    #[prost(string, tag = "4")]
-    pub nonce: ::prost::alloc::string::String,
-    /// Signature over miner_hotkey|node_ids|timestamp|nonce
-    #[prost(bytes = "vec", tag = "5")]
+    /// Signature over miner_hotkey|node_ids|timestamp
+    #[prost(bytes = "vec", tag = "4")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]

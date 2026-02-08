@@ -21,7 +21,6 @@ CREATE TABLE IF NOT EXISTS miner_bids (
     gpu_count INTEGER NOT NULL,
     attestation BLOB,
     signature BLOB NOT NULL,
-    nonce TEXT NOT NULL DEFAULT '',
     submitted_at TEXT NOT NULL,
     epoch_id TEXT NOT NULL,
     is_valid INTEGER DEFAULT 1
@@ -66,7 +65,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_miner_bids_unique_hotkey_category_epoch
     ON miner_bids(miner_hotkey, gpu_category, epoch_id);
 CREATE INDEX IF NOT EXISTS idx_miner_bids_epoch ON miner_bids(epoch_id);
 CREATE INDEX IF NOT EXISTS idx_miner_bids_category ON miner_bids(gpu_category);
-CREATE INDEX IF NOT EXISTS idx_miner_bids_hotkey_nonce ON miner_bids(miner_hotkey, nonce, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_miner_bids_valid ON miner_bids(epoch_id, gpu_category, is_valid, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_miner_bids_price ON miner_bids(epoch_id, gpu_category, is_valid, bid_per_hour_cents, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_clearing_results_epoch ON auction_clearing_results(epoch_id);

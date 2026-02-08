@@ -21,7 +21,6 @@ struct MinerBid {
     gpu_category: String,
     bid_per_hour_cents: u32, // cents/hr per GPU (e.g., 250 = $2.50)
     gpu_count: u32,
-    nonce: String,
 }
 
 /// Simulates a rental record
@@ -218,7 +217,6 @@ fn demo_full_incentive_flow() {
             gpu_category: "H100".to_string(),
             bid_per_hour_cents: 250, // Bob bids $2.50/hr
             gpu_count: 8,
-            nonce: "nonce_bob_1".to_string(),
         },
         MinerBid {
             miner_hotkey: "5FLSigC9...Charlie".to_string(),
@@ -226,7 +224,6 @@ fn demo_full_incentive_flow() {
             gpu_category: "H100".to_string(),
             bid_per_hour_cents: 200, // Charlie bids $2.00/hr (LOWEST!)
             gpu_count: 8,
-            nonce: "nonce_charlie_1".to_string(),
         },
         MinerBid {
             miner_hotkey: "5DAAnrj7...Dave".to_string(),
@@ -234,7 +231,6 @@ fn demo_full_incentive_flow() {
             gpu_category: "A100".to_string(),
             bid_per_hour_cents: 120, // Dave bids on A100s
             gpu_count: 4,
-            nonce: "nonce_dave_1".to_string(),
         },
     ];
 

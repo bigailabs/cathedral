@@ -12,7 +12,6 @@ pub struct MinerBidRecord {
     pub gpu_count: i64,
     pub attestation: Option<Vec<u8>>,
     pub signature: Vec<u8>,
-    pub nonce: String,
     pub submitted_at: DateTime<Utc>,
     pub epoch_id: String,
     pub is_valid: bool,
@@ -131,8 +130,8 @@ impl BidRepository {
         sqlx::query(
             r#"
             INSERT INTO miner_bids
-            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, submitted_at, epoch_id, is_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&bid.id)
@@ -143,7 +142,6 @@ impl BidRepository {
         .bind(bid.gpu_count)
         .bind(&bid.attestation)
         .bind(&bid.signature)
-        .bind(&bid.nonce)
         .bind(bid.submitted_at.to_rfc3339())
         .bind(&bid.epoch_id)
         .bind(bid.is_valid as i32)
@@ -160,8 +158,8 @@ impl BidRepository {
         sqlx::query(
             r#"
             INSERT INTO miner_bids
-            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, submitted_at, epoch_id, is_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&bid.id)
@@ -172,7 +170,6 @@ impl BidRepository {
         .bind(bid.gpu_count)
         .bind(&bid.attestation)
         .bind(&bid.signature)
-        .bind(&bid.nonce)
         .bind(bid.submitted_at.to_rfc3339())
         .bind(&bid.epoch_id)
         .bind(bid.is_valid as i32)
@@ -250,7 +247,7 @@ impl BidRepository {
     ) -> Result<Vec<MinerBidRecord>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
-            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, nonce, submitted_at, epoch_id, is_valid
+            SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count, attestation, signature, submitted_at, epoch_id, is_valid
             FROM miner_bids
             WHERE epoch_id = ? AND gpu_category = ?
             ORDER BY submitted_at ASC
@@ -277,7 +274,6 @@ impl BidRepository {
                     gpu_count: r.get("gpu_count"),
                     attestation: r.get("attestation"),
                     signature: r.get("signature"),
-                    nonce: r.get("nonce"),
                     submitted_at,
                     epoch_id: r.get("epoch_id"),
                     is_valid: r.get::<i32, _>("is_valid") != 0,
@@ -321,7 +317,7 @@ impl BidRepository {
         let row = sqlx::query(
             r#"
             SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count,
-                   attestation, signature, nonce, submitted_at, epoch_id, is_valid
+                   attestation, signature, submitted_at, epoch_id, is_valid
             FROM miner_bids
             WHERE epoch_id = ? AND gpu_category = ? AND is_valid = 1
               AND gpu_count >= ? AND submitted_at >= ?
@@ -351,7 +347,6 @@ impl BidRepository {
                     gpu_count: r.get("gpu_count"),
                     attestation: r.get("attestation"),
                     signature: r.get("signature"),
-                    nonce: r.get("nonce"),
                     submitted_at,
                     epoch_id: r.get("epoch_id"),
                     is_valid: r.get::<i32, _>("is_valid") != 0,
@@ -395,7 +390,7 @@ impl BidRepository {
         let query = format!(
             r#"
             SELECT b.id, b.miner_hotkey, b.miner_uid, b.gpu_category, b.bid_per_hour_cents, b.gpu_count,
-                   b.attestation, b.signature, b.nonce, b.submitted_at, b.epoch_id, b.is_valid,
+                   b.attestation, b.signature, b.submitted_at, b.epoch_id, b.is_valid,
                    bn.node_id
             FROM miner_bids b
             JOIN miner_bid_nodes bn ON b.id = bn.bid_id
@@ -440,7 +435,6 @@ impl BidRepository {
                 gpu_count: r.get("gpu_count"),
                 attestation: r.get("attestation"),
                 signature: r.get("signature"),
-                nonce: r.get("nonce"),
                 submitted_at,
                 epoch_id: r.get("epoch_id"),
                 is_valid: r.get::<i32, _>("is_valid") != 0,
@@ -520,53 +514,6 @@ impl BidRepository {
         Ok(result.rows_affected())
     }
 
-    pub async fn nonce_exists(
-        &self,
-        miner_hotkey: &str,
-        nonce: &str,
-        submitted_after: DateTime<Utc>,
-    ) -> Result<bool, sqlx::Error> {
-        let row = sqlx::query(
-            r#"
-            SELECT 1
-            FROM miner_bids
-            WHERE miner_hotkey = ? AND nonce = ? AND submitted_at >= ?
-            LIMIT 1
-            "#,
-        )
-        .bind(miner_hotkey)
-        .bind(nonce)
-        .bind(submitted_after.to_rfc3339())
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.is_some())
-    }
-
-    pub async fn nonce_exists_tx(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        miner_hotkey: &str,
-        nonce: &str,
-        submitted_after: DateTime<Utc>,
-    ) -> Result<bool, sqlx::Error> {
-        let row = sqlx::query(
-            r#"
-            SELECT 1
-            FROM miner_bids
-            WHERE miner_hotkey = ? AND nonce = ? AND submitted_at >= ?
-            LIMIT 1
-            "#,
-        )
-        .bind(miner_hotkey)
-        .bind(nonce)
-        .bind(submitted_after.to_rfc3339())
-        .fetch_optional(tx.as_mut())
-        .await?;
-
-        Ok(row.is_some())
-    }
-
     pub async fn get_lowest_bid_for_miner(
         &self,
         epoch_id: &str,
@@ -577,7 +524,7 @@ impl BidRepository {
         let row = sqlx::query(
             r#"
             SELECT id, miner_hotkey, miner_uid, gpu_category, bid_per_hour_cents, gpu_count,
-                   attestation, signature, nonce, submitted_at, epoch_id, is_valid
+                   attestation, signature, submitted_at, epoch_id, is_valid
             FROM miner_bids
             WHERE epoch_id = ? AND gpu_category = ? AND is_valid = 1
               AND miner_uid = ? AND submitted_at >= ?
@@ -607,7 +554,6 @@ impl BidRepository {
                     gpu_count: r.get("gpu_count"),
                     attestation: r.get("attestation"),
                     signature: r.get("signature"),
-                    nonce: r.get("nonce"),
                     submitted_at,
                     epoch_id: r.get("epoch_id"),
                     is_valid: r.get::<i32, _>("is_valid") != 0,
@@ -645,7 +591,6 @@ mod tests {
             gpu_count: 2,
             attestation: Some(vec![1, 2, 3]),
             signature: vec![9, 9, 9],
-            nonce: "nonce-1".to_string(),
             submitted_at: Utc::now(),
             epoch_id: epoch_id.to_string(),
             is_valid: true,
