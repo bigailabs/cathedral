@@ -71,6 +71,8 @@ impl MinerDiscovery {
         metagraph: &bittensor::Metagraph,
     ) -> Result<Vec<MinerInfo>> {
         let mut miners = Vec::new();
+        let mut no_axon_uids: Vec<u16> = Vec::new();
+        let mut invalid_axon_uids: Vec<u16> = Vec::new();
 
         for (uid, hotkey_account) in metagraph.hotkeys.iter().enumerate() {
             let uid = uid as u16;
@@ -92,9 +94,14 @@ impl MinerDiscovery {
                 .unwrap_or(0);
             let stake_tao = bittensor::rao_to_tao(total_stake);
 
+            if metagraph.axons.get(uid as usize).is_none() {
+                no_axon_uids.push(uid);
+                continue;
+            }
+
             let endpoint = self.extract_endpoint(metagraph, uid as usize)?;
             if endpoint.is_none() {
-                warn!("Miner {} has no axon info, skipping", uid);
+                invalid_axon_uids.push(uid);
                 continue;
             }
 
@@ -109,6 +116,13 @@ impl MinerDiscovery {
             };
 
             miners.push(miner);
+        }
+
+        if !no_axon_uids.is_empty() {
+            info!(count = no_axon_uids.len(), uids = ?no_axon_uids, "Miners with no axon info, skipping");
+        }
+        if !invalid_axon_uids.is_empty() {
+            info!(count = invalid_axon_uids.len(), uids = ?invalid_axon_uids, "Miners with invalid axon (unreachable), skipping");
         }
 
         Ok(miners)
