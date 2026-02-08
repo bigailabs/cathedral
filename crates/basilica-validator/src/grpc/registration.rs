@@ -21,9 +21,10 @@ use basilica_protocol::miner_discovery::{
 use chrono::{TimeZone, Utc};
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_health::server::health_reporter;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::basilica_api::BasilicaApiClient;
 use crate::collateral::{CollateralManager, CollateralState, CollateralStatus};
 use crate::config::bidding::BiddingConfig;
 use crate::persistence::SimplePersistence;
@@ -107,6 +108,7 @@ pub struct RegistrationService {
     bidding_config: BiddingConfig,
     collateral_manager: Option<Arc<CollateralManager>>,
     validator_ssh_public_key: String,
+    api_client: Option<Arc<BasilicaApiClient>>,
 }
 
 #[allow(clippy::result_large_err)]
@@ -116,12 +118,14 @@ impl RegistrationService {
         bidding_config: BiddingConfig,
         collateral_manager: Option<Arc<CollateralManager>>,
         validator_ssh_public_key: String,
+        api_client: Option<Arc<BasilicaApiClient>>,
     ) -> Self {
         Self {
             persistence,
             bidding_config,
             collateral_manager,
             validator_ssh_public_key,
+            api_client,
         }
     }
 
@@ -248,6 +252,23 @@ impl MinerRegistration for RegistrationService {
         // Generate registration ID
         let registration_id = format!("reg-{}", Uuid::new_v4());
 
+        // Fetch baseline prices for bid floor enforcement (best-effort)
+        let baseline_prices = if let Some(ref api_client) = self.api_client {
+            match api_client.get_baseline_prices().await {
+                Ok(prices) => Some(prices),
+                Err(e) => {
+                    warn!(
+                        miner_hotkey = %req.miner_hotkey,
+                        error = %e,
+                        "Failed to fetch baseline prices for bid floor check - allowing bids"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Upsert each node
         let mut worst_collateral_status: Option<CollateralStatus> = None;
         for node in &req.nodes {
@@ -282,6 +303,26 @@ impl MinerRegistration for RegistrationService {
                 return Err(Status::invalid_argument(
                     "hourly_rate_cents must be greater than 0",
                 ));
+            }
+
+            // Enforce bid floor: bid must be >= min_bid_floor_fraction * baseline price
+            if let Some(ref prices) = baseline_prices {
+                let category_key = gpu_cat.to_string();
+                if let Some(&baseline_dollars) = prices.get(&category_key) {
+                    let floor_cents =
+                        (baseline_dollars * 100.0 * self.bidding_config.min_bid_floor_fraction)
+                            .round() as u32;
+                    if floor_cents > 0 && node.hourly_rate_cents < floor_cents {
+                        return Err(Status::invalid_argument(format!(
+                            "hourly_rate_cents {} is below minimum floor {} ({:.0}% of baseline ${:.2}/hr) for {}",
+                            node.hourly_rate_cents,
+                            floor_cents,
+                            self.bidding_config.min_bid_floor_fraction * 100.0,
+                            baseline_dollars,
+                            category_key,
+                        )));
+                    }
+                }
             }
 
             // Upsert node
@@ -489,12 +530,14 @@ pub async fn start_registration_server(
     bidding_config: BiddingConfig,
     collateral_manager: Option<Arc<CollateralManager>>,
     validator_ssh_public_key: String,
+    api_client: Option<Arc<BasilicaApiClient>>,
 ) -> Result<()> {
     let service = RegistrationService::new(
         persistence,
         bidding_config,
         collateral_manager,
         validator_ssh_public_key,
+        api_client,
     );
     let addr = config
         .listen_address
@@ -529,6 +572,7 @@ mod tests {
             BiddingConfig::default(),
             None,
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestPublicKey test@validator".to_string(),
+            None,
         )
     }
 

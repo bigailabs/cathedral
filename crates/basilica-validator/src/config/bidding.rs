@@ -15,8 +15,6 @@ pub struct BiddingConfig {
     pub health_check_interval_secs: u64,
     /// Number of missed health checks before node is filtered from bid selection
     pub health_check_miss_threshold: u32,
-    /// Validator's SSH public key (for miner nodes to deploy)
-    pub validator_ssh_public_key: Option<String>,
 }
 
 impl Default for BiddingConfig {
@@ -28,7 +26,6 @@ impl Default for BiddingConfig {
             bid_node_freshness_secs: 300,
             health_check_interval_secs: 60,
             health_check_miss_threshold: 3,
-            validator_ssh_public_key: None,
         }
     }
 }

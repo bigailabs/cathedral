@@ -51,6 +51,7 @@ struct TaskInputs {
     collateral_manager: Option<Arc<CollateralManager>>,
     gpu_profile_repo: Arc<GpuProfileRepository>,
     validator_ssh_public_key: String,
+    api_client: Arc<BasilicaApiClient>,
 }
 
 impl ValidatorService {
@@ -149,6 +150,7 @@ impl ValidatorService {
                 collateral_manager: collateral_manager.clone(),
                 gpu_profile_repo: gpu_profile_repo.clone(),
                 validator_ssh_public_key,
+                api_client,
             })
             .await;
 
@@ -259,7 +261,6 @@ impl ValidatorService {
             bittensor_service,
             storage,
             persistence,
-            self.config.verification.min_score_threshold,
             self.config.emission.weight_set_interval_blocks,
             gpu_scoring_engine,
             self.config.emission.clone(),
@@ -424,6 +425,7 @@ impl ValidatorService {
         let registration_bidding_config = self.config.bidding.clone();
         let registration_collateral_manager = inputs.collateral_manager.clone();
         let validator_ssh_public_key = inputs.validator_ssh_public_key.clone();
+        let registration_api_client = inputs.api_client.clone();
         let registration_server_task = tokio::spawn(async move {
             if let Err(e) = start_registration_server(
                 registration_grpc_config,
@@ -431,6 +433,7 @@ impl ValidatorService {
                 registration_bidding_config,
                 registration_collateral_manager,
                 validator_ssh_public_key,
+                Some(registration_api_client),
             )
             .await
             {

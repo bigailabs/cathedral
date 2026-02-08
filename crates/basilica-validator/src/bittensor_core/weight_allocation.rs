@@ -7,19 +7,15 @@ use basilica_common::identity::MinerUid;
 
 pub struct WeightAllocationEngine {
     emission_config: EmissionConfig,
-    _min_score_threshold: f64,
 }
 
 impl WeightAllocationEngine {
-    pub fn new(emission_config: EmissionConfig, min_score_threshold: f64) -> Self {
+    pub fn new(emission_config: EmissionConfig) -> Self {
         info!(
             "WeightAllocationEngine initialized with burn_uid: {}, burn_percentage: {:.2}%",
             emission_config.burn_uid, emission_config.burn_percentage
         );
-        Self {
-            emission_config,
-            _min_score_threshold: min_score_threshold,
-        }
+        Self { emission_config }
     }
 
     /// Calculate weight distribution with burn and GPU allocation
@@ -436,7 +432,7 @@ mod tests {
     #[test]
     fn test_burn_allocation_calculation() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.5);
+        let engine = WeightAllocationEngine::new(config);
 
         // Test with burn enabled
         let burn_alloc = engine.calculate_burn_allocation(10000).unwrap();
@@ -450,7 +446,7 @@ mod tests {
         // Test with zero burn percentage
         let mut config_no_burn = create_test_config();
         config_no_burn.burn_percentage = 0.0;
-        let engine_no_burn = WeightAllocationEngine::new(config_no_burn, 0.5);
+        let engine_no_burn = WeightAllocationEngine::new(config_no_burn);
 
         let burn_alloc = engine_no_burn.calculate_burn_allocation(10000).unwrap();
         assert!(burn_alloc.is_none());
@@ -459,7 +455,7 @@ mod tests {
     #[test]
     fn test_within_category_distribution() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.5);
+        let engine = WeightAllocationEngine::new(config);
 
         let miners = vec![
             (MinerUid::new(1), 0.8),
@@ -487,7 +483,7 @@ mod tests {
     #[test]
     fn test_complete_weight_distribution() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.3);
+        let engine = WeightAllocationEngine::new(config);
 
         let miners = create_test_miners();
         let distribution = engine.calculate_weight_distribution(miners).unwrap();
@@ -516,7 +512,7 @@ mod tests {
     #[test]
     fn test_minimum_score_filtering() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.7); // High threshold
+        let engine = WeightAllocationEngine::new(config); // High threshold
 
         let miners = create_test_miners();
         let distribution = engine.calculate_weight_distribution(miners).unwrap();
@@ -528,7 +524,7 @@ mod tests {
     #[test]
     fn test_allocation_validation() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.5);
+        let engine = WeightAllocationEngine::new(config);
 
         // Test valid allocation
         let valid_weights = vec![
@@ -560,7 +556,7 @@ mod tests {
     #[test]
     fn test_edge_cases() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.5);
+        let engine = WeightAllocationEngine::new(config);
 
         // Test empty miners
         let empty_miners = HashMap::new();
@@ -586,7 +582,7 @@ mod tests {
     #[test]
     fn test_mathematical_accuracy() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         let miners = create_test_miners();
         let distribution = engine.calculate_weight_distribution(miners).unwrap();
@@ -606,7 +602,7 @@ mod tests {
     #[test]
     fn test_calculate_all_category_pools() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         let total_weight = 10000u64;
         let pools = engine.calculate_all_category_pools(total_weight).unwrap();
@@ -632,7 +628,7 @@ mod tests {
     #[test]
     fn test_empty_category_burn_both_categories_empty() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // No miners at all
         let empty_miners = HashMap::new();
@@ -665,7 +661,7 @@ mod tests {
             crate::config::emission::GpuAllocation::new(30.0),
         );
 
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // Only A100 has miners
         let mut miners = HashMap::new();
@@ -687,7 +683,7 @@ mod tests {
     fn test_min_miners_per_category() {
         let mut config: EmissionConfig = create_test_config();
         config.min_miners_per_category = 2; // Set minimum to 2 for testing
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // Create categories with different miner counts
         let mut miners = HashMap::new();
@@ -708,7 +704,7 @@ mod tests {
     #[test]
     fn test_multi_category_miner_aggregation() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // Create a miner that appears in both A100 and H100 categories
         let mut miners = HashMap::new();
@@ -764,7 +760,7 @@ mod tests {
     #[test]
     fn test_weight_aggregation_overflow_protection() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // Create scenario where weight aggregation could overflow u16
         let mut miners = HashMap::new();
@@ -793,7 +789,7 @@ mod tests {
     #[test]
     fn test_no_duplicate_uids_in_any_scenario() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // Test various scenarios that could potentially create duplicates
         let test_scenarios = vec![
@@ -848,7 +844,7 @@ mod tests {
     #[test]
     fn test_weight_conservation_with_aggregation() {
         let config = create_test_config();
-        let engine = WeightAllocationEngine::new(config, 0.0);
+        let engine = WeightAllocationEngine::new(config);
 
         // Create miners with significant overlap
         let mut miners = HashMap::new();

@@ -40,10 +40,8 @@ const GPU_CATEGORY_CUTOFF_HOURS: u32 = 3;
 pub struct NodeValidationResult {
     pub node_id: NodeId,
     pub is_valid: bool,
-    pub _hardware_score: f64,
     pub gpu_count: usize,
     pub gpu_memory_gb: f64,
-    pub _network_bandwidth_mbps: f64,
     pub attestation_valid: bool,
     pub validation_timestamp: chrono::DateTime<chrono::Utc>,
     pub gpu_model: String,
@@ -56,7 +54,6 @@ pub struct WeightSetter {
     bittensor_service: Arc<BittensorService>,
     storage: MemoryStorage,
     persistence: Arc<SimplePersistence>,
-    min_score_threshold: f64,
     blocks_per_weight_set: u64,
     last_weight_set_block: Arc<tokio::sync::Mutex<u64>>,
     gpu_scoring_engine: Arc<GpuScoringEngine>,
@@ -78,7 +75,6 @@ impl WeightSetter {
         bittensor_service: Arc<BittensorService>,
         storage: MemoryStorage,
         persistence: Arc<SimplePersistence>,
-        min_score_threshold: f64,
         blocks_per_weight_set: u64,
         gpu_scoring_engine: Arc<GpuScoringEngine>,
         emission_config: EmissionConfig,
@@ -88,10 +84,8 @@ impl WeightSetter {
         collateral_grace_period: Option<chrono::Duration>,
     ) -> Result<Self> {
         // Create weight allocation engine
-        let weight_allocation_engine = Arc::new(WeightAllocationEngine::new(
-            emission_config.clone(),
-            min_score_threshold,
-        ));
+        let weight_allocation_engine =
+            Arc::new(WeightAllocationEngine::new(emission_config.clone()));
         let delivery_repository = Arc::new(MinerDeliveryRepository::new(persistence.clone()));
         let epoch_repository = Arc::new(WeightSetEpochRepository::new(persistence.clone()));
 
@@ -100,7 +94,6 @@ impl WeightSetter {
             bittensor_service,
             storage,
             persistence,
-            min_score_threshold,
             blocks_per_weight_set,
             last_weight_set_block: Arc::new(tokio::sync::Mutex::new(0)),
             gpu_scoring_engine,
@@ -121,8 +114,8 @@ impl WeightSetter {
         let mut interval = interval(Duration::from_secs(12));
 
         info!(
-            "Starting weight setter - will set weights every {} blocks, min_score_threshold: {:.2}",
-            self.blocks_per_weight_set, self.min_score_threshold
+            "Starting weight setter - will set weights every {} blocks",
+            self.blocks_per_weight_set,
         );
 
         // Initialize last weight set block from storage or chain
@@ -399,15 +392,20 @@ impl WeightSetter {
                 );
             }
 
-            let category = if delivery.gpu_category.trim().is_empty() {
-                "UNKNOWN".to_string()
+            let gpu_cat: GpuCategory = if delivery.gpu_category.trim().is_empty() {
+                GpuCategory::Other("UNKNOWN".to_string())
             } else {
-                delivery
-                    .gpu_category
-                    .parse::<GpuCategory>()
-                    .unwrap()
-                    .to_string()
+                delivery.gpu_category.parse().unwrap() // Infallible
             };
+            if matches!(&gpu_cat, GpuCategory::Other(_)) {
+                warn!(
+                    raw_category = %delivery.gpu_category,
+                    miner_hotkey = %delivery.miner_hotkey,
+                    node_id = %delivery.node_id,
+                    "Delivery has unrecognized GPU category - will not receive weight allocation"
+                );
+            }
+            let category = gpu_cat.to_string();
             let revenue_usd = delivery.revenue_usd;
             if !revenue_usd.is_finite() || revenue_usd <= 0.0 {
                 debug!(
@@ -1153,156 +1151,141 @@ impl WeightSetter {
         };
 
         // Extract data from the verification log structure
-        let (hardware_score, gpu_count, gpu_memory_gb, network_bandwidth_mbps, gpu_model) =
-            if let Some(specs) = hardware_specs {
-                // Extract GPU model from node_result.gpu_name
-                let mut gpu_model = specs["node_result"]["gpu_name"]
-                    .as_str()
-                    .map(|s| s.to_string());
+        let (gpu_count, gpu_memory_gb, gpu_model) = if let Some(specs) = hardware_specs {
+            // Extract GPU model from node_result.gpu_name
+            let mut gpu_model = specs["node_result"]["gpu_name"]
+                .as_str()
+                .map(|s| s.to_string());
 
-                if gpu_model.is_none() || gpu_model.as_ref() == Some(&"UNKNOWN".to_string()) {
-                    debug!(
-                        node_id = %node_id,
-                        "GPU name not found in node_result for node {}, checking gpu_uuid_assignments",
-                        node_id
-                    );
-
-                    match self
-                        .persistence
-                        .get_node_gpu_name_from_assignments(miner_id, &node_id.to_string())
-                        .await
-                    {
-                        Ok(Some(name)) => {
-                            debug!(
-                                node_id = %node_id,
-                                "Retrieved GPU model from assignments for node {}: {}",
-                                node_id, name
-                            );
-                            gpu_model = Some(name);
-                        }
-                        Ok(None) => {
-                            warn!(
-                                node_id = %node_id,
-                                "No GPU assignments found for node {}",
-                                node_id
-                            );
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to get GPU model from assignments for node {}: {}",
-                                node_id, e
-                            );
-                        }
-                    }
-                }
-
-                let gpu_model = gpu_model.unwrap_or_else(|| "UNKNOWN".to_string());
-
-                let gpu_count = match self
-                    .persistence
-                    .get_node_gpu_count_from_assignments(miner_id, &node_id.to_string())
-                    .await
-                {
-                    Ok(count) => count as usize,
-                    Err(e) => {
-                        warn!(
-                            "Failed to get GPU count from assignments for node {}: {}, using 0",
-                            node_id, e
-                        );
-                        0
-                    }
-                };
-
-                let gpu_memory_gb = match self
-                    .persistence
-                    .get_node_first_gpu_memory_gb(miner_id, &node_id.to_string())
-                    .await
-                {
-                    Ok(mem) => mem,
-                    Err(e) => {
-                        warn!(
-                            "Failed to get GPU memory from assignments for node {}: {}, using 0.0",
-                            node_id, e
-                        );
-                        0.0
-                    }
-                };
-
-                // Extract memory bandwidth from node_result.memory_bandwidth_gbps
-                let bandwidth = specs["node_result"]["memory_bandwidth_gbps"]
-                    .as_f64()
-                    .unwrap_or(0.0);
-
-                let score = self.calculate_hardware_score(&specs);
-
+            if gpu_model.is_none() || gpu_model.as_ref() == Some(&"UNKNOWN".to_string()) {
                 debug!(
-                    "Node {}: Extracted GPU info - model: {}, count: {}, memory: {}GB, validation_success: {}",
-                    node_id, gpu_model, gpu_count, gpu_memory_gb, log.success
-                );
-
-                (score, gpu_count, gpu_memory_gb, bandwidth, gpu_model)
-            } else {
-                debug!(
-                    "Node {}: No hardware specs in verification log, checking gpu_uuid_assignments",
+                    node_id = %node_id,
+                    "GPU name not found in node_result for node {}, checking gpu_uuid_assignments",
                     node_id
                 );
 
-                let gpu_model = match self
+                match self
                     .persistence
                     .get_node_gpu_name_from_assignments(miner_id, &node_id.to_string())
                     .await
                 {
                     Ok(Some(name)) => {
                         debug!(
-                            "Retrieved GPU model from assignments for node {} (no specs): {}",
+                            node_id = %node_id,
+                            "Retrieved GPU model from assignments for node {}: {}",
                             node_id, name
                         );
-                        name
+                        gpu_model = Some(name);
                     }
-                    _ => "UNKNOWN".to_string(),
-                };
+                    Ok(None) => {
+                        warn!(
+                            node_id = %node_id,
+                            "No GPU assignments found for node {}",
+                            node_id
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to get GPU model from assignments for node {}: {}",
+                            node_id, e
+                        );
+                    }
+                }
+            }
 
-                let gpu_count = match self
-                    .persistence
-                    .get_node_gpu_count_from_assignments(miner_id, &node_id.to_string())
-                    .await
-                {
-                    Ok(count) => count as usize,
-                    Err(_) => 0,
-                };
+            let gpu_model = gpu_model.unwrap_or_else(|| "UNKNOWN".to_string());
 
-                let gpu_memory_gb = (self
-                    .persistence
-                    .get_node_first_gpu_memory_gb(miner_id, &node_id.to_string())
-                    .await)
-                    .unwrap_or(0.0);
+            let gpu_count = match self
+                .persistence
+                .get_node_gpu_count_from_assignments(miner_id, &node_id.to_string())
+                .await
+            {
+                Ok(count) => count as usize,
+                Err(e) => {
+                    warn!(
+                        "Failed to get GPU count from assignments for node {}: {}, using 0",
+                        node_id, e
+                    );
+                    0
+                }
+            };
 
-                debug!(
+            let gpu_memory_gb = match self
+                .persistence
+                .get_node_first_gpu_memory_gb(miner_id, &node_id.to_string())
+                .await
+            {
+                Ok(mem) => mem,
+                Err(e) => {
+                    warn!(
+                        "Failed to get GPU memory from assignments for node {}: {}, using 0.0",
+                        node_id, e
+                    );
+                    0.0
+                }
+            };
+
+            debug!(
+                    "Node {}: Extracted GPU info - model: {}, count: {}, memory: {}GB, validation_success: {}",
+                    node_id, gpu_model, gpu_count, gpu_memory_gb, log.success
+                );
+
+            (gpu_count, gpu_memory_gb, gpu_model)
+        } else {
+            debug!(
+                "Node {}: No hardware specs in verification log, checking gpu_uuid_assignments",
+                node_id
+            );
+
+            let gpu_model = match self
+                .persistence
+                .get_node_gpu_name_from_assignments(miner_id, &node_id.to_string())
+                .await
+            {
+                Ok(Some(name)) => {
+                    debug!(
+                        "Retrieved GPU model from assignments for node {} (no specs): {}",
+                        node_id, name
+                    );
+                    name
+                }
+                _ => "UNKNOWN".to_string(),
+            };
+
+            let gpu_count = match self
+                .persistence
+                .get_node_gpu_count_from_assignments(miner_id, &node_id.to_string())
+                .await
+            {
+                Ok(count) => count as usize,
+                Err(_) => 0,
+            };
+
+            let gpu_memory_gb = (self
+                .persistence
+                .get_node_first_gpu_memory_gb(miner_id, &node_id.to_string())
+                .await)
+                .unwrap_or(0.0);
+
+            debug!(
                     "Node {}: From assignments only - model: {}, count: {}, memory: {}GB, validation_success: {}",
                     node_id, gpu_model, gpu_count, gpu_memory_gb, log.success
                 );
 
-                (0.0, gpu_count, gpu_memory_gb, 0.0, gpu_model)
-            };
+            (gpu_count, gpu_memory_gb, gpu_model)
+        };
 
         Ok(NodeValidationResult {
             node_id,
             is_valid: log.success,
-            _hardware_score: hardware_score,
             gpu_count,
             gpu_memory_gb,
-            _network_bandwidth_mbps: network_bandwidth_mbps,
             attestation_valid: (log.verification_type == "attestation"
                 || log.verification_type == "ssh_automation")
                 && log.success,
             validation_timestamp: log.timestamp,
             gpu_model,
         })
-    }
-
-    /// Calculate hardware score from specs
-    fn calculate_hardware_score(&self, _specs: &serde_json::Value) -> f64 {
-        1.0
     }
 
     /// Get recent validation results for a miner
@@ -1747,10 +1730,8 @@ mod tests {
             NodeValidationResult {
                 node_id: NodeId::new("").unwrap(),
                 is_valid: true,
-                _hardware_score: 0.8,
                 gpu_count: 2,
                 gpu_memory_gb: 48.0,
-                _network_bandwidth_mbps: 1000.0,
                 attestation_valid: true,
                 validation_timestamp: chrono::Utc::now(),
                 gpu_model: "NVIDIA A100".to_string(),
@@ -1758,10 +1739,8 @@ mod tests {
             NodeValidationResult {
                 node_id: NodeId::new("").unwrap(),
                 is_valid: true,
-                _hardware_score: 0.9,
                 gpu_count: 4,
                 gpu_memory_gb: 96.0,
-                _network_bandwidth_mbps: 10000.0,
                 attestation_valid: true,
                 validation_timestamp: chrono::Utc::now(),
                 gpu_model: "NVIDIA A100".to_string(),
