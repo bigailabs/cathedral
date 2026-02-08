@@ -683,17 +683,11 @@ impl SimplePersistence {
                 esp.test_timestamp
             FROM miner_nodes me
             JOIN miners m ON me.miner_id = m.id
-            LEFT JOIN rentals r ON me.node_id = r.node_id
-                AND r.miner_id = me.miner_id
-                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
-            LEFT JOIN node_reservations nr ON me.node_id = nr.node_id
-                AND datetime(nr.expires_at) > datetime('now')
             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
             LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
-            WHERE r.id IS NULL
-                AND nr.id IS NULL
+            WHERE me.active_rental_id IS NULL
                 AND (me.status IS NULL OR me.status != 'offline')",
         );
 
@@ -829,14 +823,8 @@ impl SimplePersistence {
                 me.node_id,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names
             FROM miner_nodes me
-            LEFT JOIN rentals r ON me.node_id = r.node_id
-                AND r.miner_id = me.miner_id
-                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
-            LEFT JOIN node_reservations nr ON me.node_id = nr.node_id
-                AND datetime(nr.expires_at) > datetime('now')
             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
-            WHERE r.id IS NULL
-                AND nr.id IS NULL
+            WHERE me.active_rental_id IS NULL
                 AND me.miner_id = ?
                 AND (me.status IS NULL OR me.status != 'offline')
                 AND me.last_health_check IS NOT NULL
@@ -901,15 +889,7 @@ impl SimplePersistence {
             JOIN miners m ON me.miner_id = m.id
             LEFT JOIN gpu_uuid_assignments gua
                 ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
-            LEFT JOIN rentals r
-                ON me.node_id = r.node_id
-                AND r.miner_id = me.miner_id
-                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
-            LEFT JOIN node_reservations nr
-                ON me.node_id = nr.node_id
-                AND datetime(nr.expires_at) > datetime('now')
-            WHERE r.id IS NULL
-                AND nr.id IS NULL
+            WHERE me.active_rental_id IS NULL
                 AND (me.status IS NULL OR me.status != 'offline')
                 AND me.last_health_check IS NOT NULL
                 AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
@@ -960,50 +940,87 @@ impl SimplePersistence {
         Ok(candidates)
     }
 
-    /// Reserve a node for a short window to avoid race conditions during rental creation.
-    pub async fn reserve_node(
+    // =========================================================================
+    // Node Claim/Release (active_rental_id lifecycle)
+    // =========================================================================
+    //
+    // The `active_rental_id` column on `miner_nodes` tracks whether a node is
+    // currently claimed for a rental. When NULL the node is available; when set
+    // it holds the rental_id that owns the node.
+    //
+    // INVARIANT: active_rental_id MUST be cleared on EVERY termination path:
+    //   1. stop_rental()                    -- user stops rental
+    //   2. deploy_container failure         -- container deploy fails
+    //   3. finalize_rental failure          -- DB save fails after deploy
+    //   4. ensure_not_banned failure        -- node is banned
+    //   5. require_ssh_endpoint failure     -- SSH endpoint missing
+    //   6. require_node_details failure     -- node details missing
+    //   7. ensure_recent_validation failure -- validation too old
+    //   8. health check timeout             -- monitoring.rs
+    //   9. health check error               -- monitoring.rs
+    //  10. container unhealthy              -- monitoring.rs
+    //  11. restart failure                  -- restart_rental() fails
+    //
+    // There is NO TTL. If release_node is not called, the node stays claimed
+    // forever. This is by design to avoid silent data corruption.
+
+    /// Atomically claim a node for a rental by setting active_rental_id.
+    /// Returns true if the claim succeeded (node was available), false if
+    /// another process already claimed it.
+    ///
+    /// The WHERE clause `active_rental_id IS NULL` guarantees that two
+    /// concurrent callers cannot both succeed — SQLite serialises writes,
+    /// so at most one UPDATE will find the row still NULL.
+    pub async fn claim_node(
         &self,
-        reservation_id: &str,
         node_id: &str,
         miner_id: &str,
         rental_id: &str,
-        expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool, anyhow::Error> {
         let result = sqlx::query(
             r#"
-            INSERT INTO node_reservations (id, node_id, miner_id, rental_id, reserved_at, expires_at)
-            SELECT ?, ?, ?, ?, datetime('now'), ?
-            WHERE NOT EXISTS (
-                SELECT 1 FROM rentals r
-                WHERE r.node_id = ? AND r.miner_id = ?
-                  AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM node_reservations nr
-                WHERE nr.node_id = ? AND datetime(nr.expires_at) > datetime('now')
-            )
+            UPDATE miner_nodes
+            SET active_rental_id = ?, updated_at = datetime('now')
+            WHERE node_id = ? AND miner_id = ?
+              AND active_rental_id IS NULL
             "#,
         )
-        .bind(reservation_id)
-        .bind(node_id)
-        .bind(miner_id)
         .bind(rental_id)
-        .bind(expires_at.to_rfc3339())
         .bind(node_id)
         .bind(miner_id)
-        .bind(node_id)
         .execute(self.pool())
         .await?;
 
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn release_reservation(&self, reservation_id: &str) -> Result<(), anyhow::Error> {
-        sqlx::query("DELETE FROM node_reservations WHERE id = ?")
-            .bind(reservation_id)
-            .execute(self.pool())
-            .await?;
-        Ok(())
+    /// Release a node claim by clearing active_rental_id.
+    /// Only clears if the current active_rental_id matches the given rental_id,
+    /// preventing one process from accidentally clearing another's claim.
+    ///
+    /// See the INVARIANT comment above for the full list of paths that must
+    /// call this function.
+    pub async fn release_node(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+        rental_id: &str,
+    ) -> Result<bool, anyhow::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET active_rental_id = NULL, updated_at = datetime('now')
+            WHERE node_id = ? AND miner_id = ?
+              AND active_rental_id = ?
+            "#,
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .bind(rental_id)
+        .execute(self.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Get miner nodes

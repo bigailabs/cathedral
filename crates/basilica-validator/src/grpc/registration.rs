@@ -129,7 +129,7 @@ impl RegistrationService {
     fn ensure_timestamp_freshness(&self, timestamp: i64) -> Result<(), Status> {
         let submitted_at = self.parse_timestamp(timestamp)?;
         let now = Utc::now();
-        let max_skew_secs = self.auction_config.bid_validity_secs as i64;
+        let max_skew_secs = self.auction_config.rpc_timestamp_tolerance_secs as i64;
         if (now - submitted_at).num_seconds().abs() > max_skew_secs {
             return Err(Status::invalid_argument("timestamp outside allowed window"));
         }

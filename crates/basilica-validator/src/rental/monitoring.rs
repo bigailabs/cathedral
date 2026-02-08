@@ -311,6 +311,22 @@ impl DatabaseHealthMonitor {
                 .await
                 .context("Failed to update rental state")?;
 
+            // INVARIANT: Release node claim so it becomes available again.
+            if matches!(new_state, RentalState::Stopped | RentalState::Failed) {
+                if let Err(e) = self
+                    .persistence
+                    .release_node(&rental.node_id, &rental.miner_id, &rental.rental_id)
+                    .await
+                {
+                    warn!(
+                        rental_id = %rental.rental_id,
+                        node_id = %rental.node_id,
+                        error = %e,
+                        "Failed to release node claim after rental termination"
+                    );
+                }
+            }
+
             // Update metrics when state changes to terminal states
             if matches!(new_state, RentalState::Stopped | RentalState::Failed) {
                 let miner_uid = super::extract_miner_uid(&rental.miner_id);

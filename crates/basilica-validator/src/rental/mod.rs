@@ -98,7 +98,6 @@ struct RentalSelection {
     node_id: String,
     miner_id: String,
     miner_uid: Option<u16>,
-    reservation_id: Option<String>,
     /// Miner bid rate in cents per GPU per hour
     miner_bid_rate_cents: Option<u32>,
 }
@@ -374,13 +373,14 @@ impl RentalManager {
         let selection = self.select_node_from_bids(&request, &rental_id).await?;
 
         // 2. Validate node is not banned
-        self.ensure_not_banned(&selection).await?;
+        self.ensure_not_banned(&selection, &rental_id).await?;
 
         // 3. Ensure node has recent validation (PR #331 requirement)
-        self.ensure_recent_validation(&selection).await?;
+        self.ensure_recent_validation(&selection, &rental_id)
+            .await?;
 
         // 4. Get SSH endpoint and node details
-        let ssh_endpoint = self.require_ssh_endpoint(&selection).await?;
+        let ssh_endpoint = self.require_ssh_endpoint(&selection, &rental_id).await?;
         let node_details = self.require_node_details(&selection, &rental_id).await?;
 
         tracing::info!(
@@ -393,13 +393,10 @@ impl RentalManager {
             selection.miner_id
         );
 
-        // 5. Ensure no active rental on this node
-        self.ensure_no_active_rental(&selection, &rental_id).await?;
-
         let ssh_credentials = self.build_ssh_credentials(&ssh_endpoint);
         let container_client = self.create_container_client(&ssh_credentials)?;
 
-        // 6. Deploy container
+        // 5. Deploy container
         let container_info = self
             .deploy_container_or_log_failure(
                 &container_client,
@@ -413,6 +410,8 @@ impl RentalManager {
         let end_user_ssh_credentials =
             self.resolve_end_user_ssh_credentials(&ssh_endpoint, &container_info);
 
+        // 6. Finalize rental — on success, active_rental_id stays set for the
+        // lifetime of the rental. On failure, release the node claim.
         let finalize_result = self
             .finalize_rental(
                 &request,
@@ -423,11 +422,11 @@ impl RentalManager {
                 &container_info,
             )
             .await;
-        self.release_reservation(&selection.reservation_id).await;
 
         let rental_info = match finalize_result {
             Ok(info) => info,
             Err(e) => {
+                self.release_node(&selection, &rental_id).await;
                 return Err(e);
             }
         };
@@ -487,44 +486,38 @@ impl RentalManager {
             ));
         }
 
-        // Try to reserve nodes
-        const MAX_RESERVATION_ATTEMPTS: usize = 3;
-        for candidate in ordered.into_iter().take(MAX_RESERVATION_ATTEMPTS) {
-            let reservation_id = format!("reserve-{}", Uuid::new_v4());
-            let expires_at = chrono::Utc::now()
-                + chrono::Duration::seconds(self.auction_config.bid_reservation_secs as i64);
-
+        // Try to claim nodes (atomic: sets active_rental_id where NULL)
+        const MAX_CLAIM_ATTEMPTS: usize = 3;
+        for candidate in ordered.into_iter().take(MAX_CLAIM_ATTEMPTS) {
             if self
                 .persistence
-                .reserve_node(
-                    &reservation_id,
-                    &candidate.node_id,
-                    &candidate.miner_id,
-                    rental_id,
-                    expires_at,
-                )
+                .claim_node(&candidate.node_id, &candidate.miner_id, rental_id)
                 .await?
             {
                 return Ok(RentalSelection {
                     node_id: candidate.node_id,
                     miner_id: candidate.miner_id,
                     miner_uid: Some(candidate.miner_uid as u16),
-                    reservation_id: Some(reservation_id),
                     miner_bid_rate_cents: Some(candidate.hourly_rate_cents),
                 });
             }
         }
 
         Err(anyhow::anyhow!(
-            "Failed to reserve any matching node after {} attempts",
-            MAX_RESERVATION_ATTEMPTS
+            "Failed to claim any matching node after {} attempts",
+            MAX_CLAIM_ATTEMPTS
         ))
     }
 
-    async fn release_reservation(&self, reservation_id: &Option<String>) {
-        if let Some(reservation_id) = reservation_id {
-            let _ = self.persistence.release_reservation(reservation_id).await;
-        }
+    /// Release the node claim for the given selection.
+    ///
+    /// INVARIANT: This MUST be called on every error/termination path.
+    /// See persistence::miner_nodes for the full invariant comment.
+    async fn release_node(&self, selection: &RentalSelection, rental_id: &str) {
+        let _ = self
+            .persistence
+            .release_node(&selection.node_id, &selection.miner_id, rental_id)
+            .await;
     }
 
     /// Filter candidates by minimum GPU memory requirement
@@ -614,14 +607,14 @@ impl RentalManager {
         ordered
     }
 
-    async fn ensure_not_banned(&self, selection: &RentalSelection) -> Result<()> {
+    async fn ensure_not_banned(&self, selection: &RentalSelection, rental_id: &str) -> Result<()> {
         if let Some(miner_uid) = selection.miner_uid {
             if let Some(ban_expiry) = self
                 .ban_manager
                 .get_ban_expiry(miner_uid, &selection.node_id)
                 .await?
             {
-                self.release_reservation(&selection.reservation_id).await;
+                self.release_node(selection, rental_id).await;
                 tracing::warn!(
                     node_id = %selection.node_id,
                     miner_id = %selection.miner_id,
@@ -639,7 +632,11 @@ impl RentalManager {
         Ok(())
     }
 
-    async fn require_ssh_endpoint(&self, selection: &RentalSelection) -> Result<String> {
+    async fn require_ssh_endpoint(
+        &self,
+        selection: &RentalSelection,
+        rental_id: &str,
+    ) -> Result<String> {
         let ssh_endpoint = self
             .persistence
             .get_node_ssh_endpoint(&selection.node_id, &selection.miner_id)
@@ -647,7 +644,7 @@ impl RentalManager {
         match ssh_endpoint {
             Some(endpoint) => Ok(endpoint),
             None => {
-                self.release_reservation(&selection.reservation_id).await;
+                self.release_node(selection, rental_id).await;
                 Err(anyhow::anyhow!(
                     "SSH endpoint not found for node {} (miner: {})",
                     selection.node_id,
@@ -669,7 +666,7 @@ impl RentalManager {
         match node_details {
             Some(details) => Ok(details),
             None => {
-                self.release_reservation(&selection.reservation_id).await;
+                self.release_node(selection, rental_id).await;
                 tracing::warn!(
                     node_id = %selection.node_id,
                     miner_uid = selection.miner_uid,
@@ -687,7 +684,11 @@ impl RentalManager {
         }
     }
 
-    async fn ensure_recent_validation(&self, selection: &RentalSelection) -> Result<()> {
+    async fn ensure_recent_validation(
+        &self,
+        selection: &RentalSelection,
+        rental_id: &str,
+    ) -> Result<()> {
         let Some(miner_uid) = selection.miner_uid else {
             return Ok(());
         };
@@ -715,7 +716,7 @@ impl RentalManager {
             .unwrap_or(true);
 
         if is_stale {
-            self.release_reservation(&selection.reservation_id).await;
+            self.release_node(selection, rental_id).await;
             // TODO: Consider auto-triggering a full validation on stale rentals instead of rejecting.
             return Err(anyhow::anyhow!(
                 "Node {} requires a recent full validation before rental (miner_uid: {})",
@@ -724,32 +725,6 @@ impl RentalManager {
             ));
         }
 
-        Ok(())
-    }
-
-    async fn ensure_no_active_rental(
-        &self,
-        selection: &RentalSelection,
-        rental_id: &str,
-    ) -> Result<()> {
-        if self
-            .persistence
-            .has_active_rental(&selection.node_id, &selection.miner_id)
-            .await?
-        {
-            self.release_reservation(&selection.reservation_id).await;
-            tracing::warn!(
-                node_id = %selection.node_id,
-                rental_id = %rental_id,
-                miner_uid = selection.miner_uid,
-                "Node {} already has an active rental, cannot start another",
-                selection.node_id
-            );
-            return Err(anyhow::anyhow!(
-                "Node {} already has an active rental",
-                selection.node_id
-            ));
-        }
         Ok(())
     }
 
@@ -804,7 +779,7 @@ impl RentalManager {
         {
             Ok(info) => Ok(info),
             Err(e) => {
-                self.release_reservation(&selection.reservation_id).await;
+                self.release_node(selection, rental_id).await;
                 tracing::error!(
                     node_id = %selection.node_id,
                     rental_id = %rental_id,
@@ -973,6 +948,12 @@ impl RentalManager {
         updated_rental.updated_at = chrono::Utc::now();
         self.persistence.save_rental(&updated_rental).await?;
 
+        // INVARIANT: Release node claim so it becomes available again.
+        let _ = self
+            .persistence
+            .release_node(&rental_info.node_id, &rental_info.miner_id, rental_id)
+            .await;
+
         // Clear rental metric
         let miner_uid = extract_miner_uid(&rental_info.miner_id);
 
@@ -1039,6 +1020,11 @@ impl RentalManager {
                 updated_rental.state = RentalState::Failed;
                 updated_rental.updated_at = chrono::Utc::now();
                 self.persistence.save_rental(&updated_rental).await?;
+                // INVARIANT: Release node claim on restart failure.
+                let _ = self
+                    .persistence
+                    .release_node(&rental_info.node_id, &rental_info.miner_id, rental_id)
+                    .await;
                 return Err(e);
             }
         };
@@ -1065,6 +1051,14 @@ impl RentalManager {
         updated_rental.state = final_state.clone();
         updated_rental.updated_at = chrono::Utc::now();
         self.persistence.save_rental(&updated_rental).await?;
+
+        // INVARIANT: Release node claim if restart failed and state is terminal.
+        if matches!(final_state, RentalState::Failed) {
+            let _ = self
+                .persistence
+                .release_node(&rental_info.node_id, &rental_info.miner_id, rental_id)
+                .await;
+        }
 
         // Return error if restart failed
         restart_result?;

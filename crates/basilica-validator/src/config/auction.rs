@@ -9,12 +9,10 @@ pub struct AuctionConfig {
     pub price_cache_ttl_secs: u64,
     /// Minimum bid as fraction of baseline (0.0-1.0)
     pub min_bid_floor_fraction: f64,
-    /// Bid validity window in seconds
-    pub bid_validity_secs: u64,
+    /// RPC timestamp tolerance window in seconds (replay protection)
+    pub rpc_timestamp_tolerance_secs: u64,
     /// Max age for node health checks when accepting bids
     pub bid_node_freshness_secs: u64,
-    /// Reservation TTL in seconds for selected nodes
-    pub bid_reservation_secs: u64,
     /// Miner emission share of subnet emissions (0.0-1.0)
     pub miner_emission_share: f64,
     /// Health check interval in seconds (returned to miners in RegisterBidResponse)
@@ -31,9 +29,8 @@ impl Default for AuctionConfig {
             price_api_endpoint: "http://basilica-api:8080/v1/prices/baseline".to_string(),
             price_cache_ttl_secs: 60,
             min_bid_floor_fraction: 0.1,
-            bid_validity_secs: 300,
+            rpc_timestamp_tolerance_secs: 300,
             bid_node_freshness_secs: 300,
-            bid_reservation_secs: 60,
             miner_emission_share: 0.41,
             health_check_interval_secs: 60,
             health_check_miss_threshold: 3,
@@ -62,14 +59,13 @@ impl AuctionConfig {
         if self.price_cache_ttl_secs == 0 {
             return Err(anyhow!("price_cache_ttl_secs must be greater than 0"));
         }
-        if self.bid_validity_secs == 0 {
-            return Err(anyhow!("bid_validity_secs must be greater than 0"));
+        if self.rpc_timestamp_tolerance_secs == 0 {
+            return Err(anyhow!(
+                "rpc_timestamp_tolerance_secs must be greater than 0"
+            ));
         }
         if self.bid_node_freshness_secs == 0 {
             return Err(anyhow!("bid_node_freshness_secs must be greater than 0"));
-        }
-        if self.bid_reservation_secs == 0 {
-            return Err(anyhow!("bid_reservation_secs must be greater than 0"));
         }
         if !self.miner_emission_share.is_finite()
             || !(0.0..=1.0).contains(&self.miner_emission_share)
@@ -122,9 +118,8 @@ mod tests {
         let config = AuctionConfig {
             price_api_endpoint: "http://localhost:50071".to_string(),
             price_cache_ttl_secs: 0,
-            bid_validity_secs: 0,
+            rpc_timestamp_tolerance_secs: 0,
             bid_node_freshness_secs: 0,
-            bid_reservation_secs: 0,
             ..AuctionConfig::default()
         };
         assert!(config.validate().is_err());

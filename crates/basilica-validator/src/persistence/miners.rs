@@ -862,15 +862,11 @@ impl SimplePersistence {
                 me.node_id,
                 me.miner_id,
                 gua.gpu_name,
-                CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END as has_active_rental
+                CASE WHEN me.active_rental_id IS NOT NULL THEN 1 ELSE 0 END as has_active_rental
             FROM miner_nodes me
             INNER JOIN gpu_uuid_assignments gua
                 ON me.node_id = gua.node_id
                 AND me.miner_id = gua.miner_id
-            LEFT JOIN rentals r
-                ON me.node_id = r.node_id
-                AND me.miner_id = r.miner_id
-                AND r.state = 'active'
             WHERE gua.gpu_name IS NOT NULL
             GROUP BY me.node_id, me.miner_id
         "#;
