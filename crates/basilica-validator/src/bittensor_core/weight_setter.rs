@@ -209,7 +209,7 @@ impl WeightSetter {
                     return Ok(());
                 }
                 Err(e) => {
-                    error!("Weight setting attempt {} failed: {}", attempt, e);
+                    error!("Weight setting attempt {} failed: {:?}", attempt, e);
                     if attempt < MAX_RETRIES {
                         warn!(
                             "Retrying weight setting in {} seconds...",

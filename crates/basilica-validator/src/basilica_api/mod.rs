@@ -349,14 +349,18 @@ impl BasilicaApiClient {
 
     async fn signed_get<Q: Serialize>(&self, url: &str, query: &Q) -> Result<reqwest::Response> {
         let (signature, timestamp) = self.signed_headers(query)?;
-        self.http_client
+        debug!(url = url, "Sending signed GET request");
+        let response = self
+            .http_client
             .get(url)
             .header("X-Validator-Signature", signature)
             .header("X-Timestamp", timestamp)
             .query(query)
             .send()
             .await
-            .context("API request failed")
+            .with_context(|| format!("API request to {url} failed"))?;
+        debug!(url = url, status = %response.status(), "Received API response");
+        Ok(response)
     }
 
     fn signed_headers<T: Serialize>(&self, payload: &T) -> Result<(String, String)> {
