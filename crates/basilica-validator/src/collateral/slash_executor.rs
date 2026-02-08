@@ -278,23 +278,23 @@ impl SlashExecutor {
         Ok(())
     }
 
-    fn compute_partial_slash_amount(&self, collateral: U256) -> Option<U256> {
-        if self.config.slash_fraction >= Decimal::ONE {
-            return None;
+    fn compute_slash_amount(&self, collateral: U256) -> U256 {
+        if collateral.is_zero() || self.config.slash_fraction >= Decimal::ONE {
+            return collateral;
         }
-        if collateral.is_zero() {
-            return None;
-        }
-        let numerator_decimal = (self.config.slash_fraction * Decimal::from(10_000u64)).round();
-        let numerator = numerator_decimal.to_u64().unwrap_or(0);
+        let numerator = (self.config.slash_fraction * Decimal::from(10_000u64))
+            .round()
+            .to_u64()
+            .unwrap_or(0);
         if numerator == 0 || numerator >= 10_000 {
-            return None;
+            return collateral;
         }
-        let mut amount = collateral * U256::from(numerator) / U256::from(10_000u64);
+        let amount = collateral * U256::from(numerator) / U256::from(10_000u64);
         if amount.is_zero() {
-            amount = U256::from(1u64);
+            U256::from(1u64)
+        } else {
+            amount
         }
-        Some(amount)
     }
 
     async fn prepare_evidence(
@@ -387,26 +387,16 @@ impl SlashExecutor {
             .await
         {
             Ok(collateral) => {
-                if let Some(amount) = self.compute_partial_slash_amount(collateral) {
-                    info!(
-                        "[SHADOW] Would slash {} alpha (wei) for node {} (hotkey: {}). Evidence: {}",
-                        amount, node_id, miner_hotkey, url
-                    );
-                } else {
-                    info!(
-                        "[SHADOW] Would slash full alpha collateral for node {} (hotkey: {}). Evidence: {}",
-                        node_id, miner_hotkey, url
-                    );
-                }
+                let amount = self.compute_slash_amount(collateral);
+                info!(
+                    "[SHADOW] Would slash {} alpha (wei) for node {} (hotkey: {}). Evidence: {}",
+                    amount, node_id, miner_hotkey, url
+                );
             }
             Err(err) => {
                 warn!(
                     "Failed to fetch on-chain alpha collateral for shadow slash: {}",
                     err
-                );
-                info!(
-                    "[SHADOW] Would slash full alpha collateral for node {} (hotkey: {}). Evidence: {}",
-                    node_id, miner_hotkey, url
                 );
             }
         }
@@ -472,9 +462,7 @@ impl SlashExecutor {
                 node_id,
             )
             .await?;
-        Ok(self
-            .compute_partial_slash_amount(onchain_collateral)
-            .unwrap_or(onchain_collateral))
+        Ok(self.compute_slash_amount(onchain_collateral))
     }
 
     async fn submit_slash(&self, submission: SlashSubmission<'_>) -> Result<()> {
@@ -712,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compute_partial_slash_amount() {
+    async fn test_compute_slash_amount() {
         let temp = tempdir().unwrap();
         let config = CollateralConfig {
             slash_fraction: Decimal::new(5, 1),
@@ -732,7 +720,10 @@ mod tests {
             config.grace_period(),
         ));
         let executor = SlashExecutor::new(config, store, grace_tracker, None, None);
-        let amount = executor.compute_partial_slash_amount(U256::from(1000u64));
-        assert_eq!(amount, Some(U256::from(500u64)));
+        assert_eq!(
+            executor.compute_slash_amount(U256::from(1000u64)),
+            U256::from(500u64)
+        );
+        assert_eq!(executor.compute_slash_amount(U256::ZERO), U256::ZERO);
     }
 }
