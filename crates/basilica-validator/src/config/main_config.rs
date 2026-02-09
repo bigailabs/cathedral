@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use basilica_common::config::{
-    loader, BittensorConfig, ConfigValidation, DatabaseConfig, LoggingConfig, MetricsConfig,
-    ServerConfig,
+    loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig, ServerConfig,
 };
 use basilica_common::error::ConfigurationError;
 
@@ -41,9 +40,6 @@ pub struct ValidatorConfig {
 
     /// Server configuration for API
     pub server: ServerConfig,
-
-    /// Logging configuration
-    pub logging: LoggingConfig,
 
     /// Metrics configuration
     pub metrics: MetricsConfig,
@@ -829,7 +825,6 @@ impl Default for ValidatorConfig {
                 port: 8080,
                 ..Default::default()
             },
-            logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
             bittensor: ValidatorBittensorConfig {
                 common: BittensorConfig {
