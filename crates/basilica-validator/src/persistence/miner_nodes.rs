@@ -321,21 +321,12 @@ impl SimplePersistence {
             let gpu_count: i32 = row.try_get("gpu_count")?;
             let status: String = row.try_get("status")?;
 
-            warn!(
-                "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {}. Resetting GPU count to 0",
-                node_id, miner_id, gpu_count, status
-            );
-
-            sqlx::query(
-                "UPDATE miner_nodes SET gpu_count = 0, updated_at = datetime('now')
-                 WHERE node_id = ? AND miner_id = ?",
-            )
-            .bind(&node_id)
-            .bind(&miner_id)
-            .execute(self.pool())
-            .await?;
-
             if status == "online" || status == "verified" {
+                warn!(
+                    "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {}. Marking offline.",
+                    node_id, miner_id, gpu_count, status
+                );
+
                 sqlx::query(
                     "UPDATE miner_nodes SET status = 'offline', updated_at = datetime('now')
                      WHERE node_id = ? AND miner_id = ?",
@@ -344,10 +335,10 @@ impl SimplePersistence {
                 .bind(&miner_id)
                 .execute(self.pool())
                 .await?;
-
-                info!(
-                    "Marked node {} as offline (claimed {} GPUs but has 0 assignments)",
-                    node_id, gpu_count
+            } else {
+                debug!(
+                    "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {} (already offline/failed)",
+                    node_id, miner_id, gpu_count, status
                 );
             }
         }
@@ -1575,7 +1566,8 @@ impl SimplePersistence {
                 r#"
                 UPDATE miner_nodes
                 SET last_health_check = datetime('now'),
-                    updated_at = datetime('now')
+                    updated_at = datetime('now'),
+                    status = CASE WHEN status IN ('offline', 'unknown') THEN 'online' ELSE status END
                 WHERE miner_id = ?
                 "#,
             )
@@ -1591,7 +1583,8 @@ impl SimplePersistence {
                     r#"
                     UPDATE miner_nodes
                     SET last_health_check = datetime('now'),
-                        updated_at = datetime('now')
+                        updated_at = datetime('now'),
+                        status = CASE WHEN status IN ('offline', 'unknown') THEN 'online' ELSE status END
                     WHERE miner_id = ? AND node_id = ?
                     "#,
                 )
