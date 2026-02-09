@@ -278,6 +278,21 @@ impl ValidationStrategySelector {
             return Ok(true);
         }
 
+        // If node has no GPU assignments, it needs full validation
+        if !self
+            .persistence
+            .node_has_gpu_assignments(miner_id, node_id)
+            .await
+            .unwrap_or(false)
+        {
+            info!(
+                node_id = node_id,
+                miner_id = miner_id,
+                "[EVAL_FLOW] Binary validation needed - node has no GPU UUID assignments"
+            );
+            return Ok(true);
+        }
+
         let last_validation = self.get_last_binary_validation(node_id, miner_uid).await?;
 
         match last_validation {
