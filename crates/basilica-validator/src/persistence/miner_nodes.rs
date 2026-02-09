@@ -853,7 +853,7 @@ impl SimplePersistence {
                 me.node_id,
                 me.miner_id,
                 m.hotkey  AS miner_hotkey,
-                m.uid     AS miner_uid,
+                CAST(REPLACE(m.id, 'miner_', '') AS INTEGER) AS miner_uid,
                 me.hourly_rate_cents,
                 COUNT(DISTINCT gua.gpu_uuid) AS gpu_count,
                 GROUP_CONCAT(gua.gpu_name) AS gpu_names
@@ -868,7 +868,7 @@ impl SimplePersistence {
                 AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
                 AND me.hourly_rate_cents IS NOT NULL
                 AND me.hourly_rate_cents <= ?
-            GROUP BY me.node_id, me.miner_id, m.hotkey, m.uid, me.hourly_rate_cents
+            GROUP BY me.node_id, me.miner_id, m.hotkey, m.id, me.hourly_rate_cents
             HAVING COUNT(DISTINCT gua.gpu_uuid) >= ?
             ORDER BY me.hourly_rate_cents ASC
             LIMIT ?
