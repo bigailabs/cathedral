@@ -158,7 +158,43 @@ DEFAULT_COMMAND = ["/bin/bash"]
 DEFAULT_PYTHON_IMAGE = "python:3.11-slim"
 
 
-__version__ = "0.15.0"
+def _build_inference_health_check(port: int) -> HealthCheckConfig:
+    """Build default health check config for inference servers (vLLM, SGLang).
+
+    Matches the CLI template defaults:
+    - Liveness: 60s initial delay, 30s period, 10s timeout, 3 failures
+    - Readiness: 30s initial delay, 10s period, 5s timeout, 3 failures
+    - Startup: 0s initial delay, 10s period, 5s timeout, 60 failures (10 min)
+    """
+    return HealthCheckConfig(
+        liveness=ProbeConfig(
+            path="/health",
+            port=port,
+            initial_delay_seconds=60,
+            period_seconds=30,
+            timeout_seconds=10,
+            failure_threshold=3,
+        ),
+        readiness=ProbeConfig(
+            path="/health",
+            port=port,
+            initial_delay_seconds=30,
+            period_seconds=10,
+            timeout_seconds=5,
+            failure_threshold=3,
+        ),
+        startup=ProbeConfig(
+            path="/health",
+            port=port,
+            initial_delay_seconds=0,
+            period_seconds=10,
+            timeout_seconds=5,
+            failure_threshold=60,
+        ),
+    )
+
+
+__version__ = "0.17.0"
 __all__ = [
     # Main client
     "BasilicaClient",
@@ -328,6 +364,7 @@ class BasilicaClient:
         public: bool,
         pip_packages: Optional[List[str]],
         topology_spread: Optional[TopologySpreadConfig] = None,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> CreateDeploymentRequest:
         """Build CreateDeploymentRequest from deploy parameters."""
         command = None
@@ -377,6 +414,7 @@ class BasilicaClient:
             public=public,
             storage=storage_spec,
             topology_spread=topology_spread,
+            health_check=health_check,
         )
 
     def deploy(
@@ -399,6 +437,7 @@ class BasilicaClient:
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> Deployment:
         """
         Deploy an application to Basilica.
@@ -438,6 +477,10 @@ class BasilicaClient:
             timeout: Seconds to wait for deployment. Default: 300
             pip_packages: Additional pip packages to install.
                          Auto-detected for FastAPI apps if not specified.
+            health_check: Custom health check configuration.
+                         Use HealthCheckConfig(liveness=..., readiness=..., startup=...)
+                         with ProbeConfig for each probe. Useful for GPU workloads
+                         that need longer startup times (e.g. model downloading).
 
         Returns:
             Deployment: A deployment object with url, logs(), delete(), etc.
@@ -502,6 +545,7 @@ class BasilicaClient:
             public=public,
             pip_packages=pip_packages,
             topology_spread=topology_spread,
+            health_check=health_check,
         )
 
         response = self._client.create_deployment(request)
@@ -537,6 +581,7 @@ class BasilicaClient:
         env: Optional[Dict[str, str]] = None,
         ttl_seconds: Optional[int] = None,
         timeout: int = 600,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> Deployment:
         """
         Deploy a vLLM inference server.
@@ -560,6 +605,8 @@ class BasilicaClient:
             env: Additional environment variables
             ttl_seconds: Auto-delete after this many seconds
             timeout: Wait timeout in seconds
+            health_check: Custom health check configuration. If not provided,
+                         uses sensible defaults for vLLM (10-minute startup tolerance).
 
         Returns:
             Deployment object with .url, .status(), .logs(), .delete() methods
@@ -641,6 +688,9 @@ class BasilicaClient:
             gpus=gpu_spec,
         )
 
+        # Apply default health check for vLLM if not provided
+        effective_health_check = health_check or _build_inference_health_check(port=8000)
+
         # Create the deployment request
         request = CreateDeploymentRequest(
             instance_name=name,
@@ -654,6 +704,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=True,
             storage=storage_spec,
+            health_check=effective_health_check,
         )
 
         # Create deployment
@@ -684,6 +735,7 @@ class BasilicaClient:
         env: Optional[Dict[str, str]] = None,
         ttl_seconds: Optional[int] = None,
         timeout: int = 600,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> Deployment:
         """
         Deploy an SGLang inference server.
@@ -703,6 +755,8 @@ class BasilicaClient:
             env: Additional environment variables
             ttl_seconds: Auto-delete after this many seconds
             timeout: Wait timeout in seconds
+            health_check: Custom health check configuration. If not provided,
+                         uses sensible defaults for SGLang (10-minute startup tolerance).
 
         Returns:
             Deployment object with .url, .status(), .logs(), .delete() methods
@@ -777,6 +831,9 @@ class BasilicaClient:
             gpus=gpu_spec,
         )
 
+        # Apply default health check for SGLang if not provided
+        effective_health_check = health_check or _build_inference_health_check(port=30000)
+
         # Create the deployment request
         request = CreateDeploymentRequest(
             instance_name=name,
@@ -790,6 +847,7 @@ class BasilicaClient:
             ttl_seconds=ttl_seconds,
             public=True,
             storage=storage_spec,
+            health_check=effective_health_check,
         )
 
         # Create deployment
@@ -1041,6 +1099,7 @@ class BasilicaClient:
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment (low-level API).
@@ -1065,6 +1124,7 @@ class BasilicaClient:
             public: Create public URL
             storage: Storage path or StorageSpec
             topology_spread: Topology spread configuration for pod distribution
+            health_check: Custom health check configuration (HealthCheckConfig)
 
         Returns:
             DeploymentResponse with deployment details
@@ -1112,6 +1172,7 @@ class BasilicaClient:
             public=public,
             storage=storage_spec,
             topology_spread=topology_spread,
+            health_check=health_check,
         )
 
         return self._client.create_deployment(request)
@@ -1388,6 +1449,7 @@ class BasilicaClient:
         timeout: int = 300,
         pip_packages: Optional[List[str]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> Deployment:
         """
         Deploy an application asynchronously.
@@ -1413,6 +1475,7 @@ class BasilicaClient:
             public: Create public URL. Default: True
             timeout: Seconds to wait for deployment. Default: 300
             pip_packages: Additional pip packages to install.
+            health_check: Custom health check configuration (HealthCheckConfig).
 
         Returns:
             Deployment: A deployment object with url, logs(), delete(), etc.
@@ -1441,6 +1504,7 @@ class BasilicaClient:
             public=public,
             pip_packages=pip_packages,
             topology_spread=topology_spread,
+            health_check=health_check,
         )
 
         loop = asyncio.get_running_loop()
@@ -1527,6 +1591,7 @@ class BasilicaClient:
         public: bool = True,
         storage: Optional[Union[str, StorageSpec]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
+        health_check: Optional[HealthCheckConfig] = None,
     ) -> DeploymentResponse:
         """
         Create a deployment asynchronously (low-level API).
@@ -1574,6 +1639,7 @@ class BasilicaClient:
             public=public,
             storage=storage_spec,
             topology_spread=topology_spread,
+            health_check=health_check,
         )
 
         loop = asyncio.get_running_loop()

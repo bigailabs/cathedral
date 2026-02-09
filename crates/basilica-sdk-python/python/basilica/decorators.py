@@ -6,10 +6,13 @@ Provides @deployment decorator for declarative function deployments.
 import functools
 import inspect
 import textwrap
-from typing import Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Union
 
 from .spec import DeploymentSpec
 from .volume import Volume
+
+if TYPE_CHECKING:
+    from basilica._basilica import HealthCheckConfig
 
 
 class DeployedFunction:
@@ -76,6 +79,7 @@ class DeployedFunction:
             ttl_seconds=self._spec.ttl_seconds,
             public=self._spec.public,
             timeout=self._spec.timeout,
+            health_check=self._spec.health_check,
         )
         return self._deployment
 
@@ -144,6 +148,7 @@ def deployment(
     ttl_seconds: Optional[int] = None,
     public: bool = True,
     timeout: int = 300,
+    health_check: Optional["HealthCheckConfig"] = None,
 ) -> Callable[[Callable], DeployedFunction]:
     """
     Decorator to mark a function for deployment to Basilica.
@@ -169,6 +174,9 @@ def deployment(
         ttl_seconds: Auto-delete after N seconds
         public: Create public URL. Default: True
         timeout: Seconds to wait for deployment. Default: 300
+        health_check: Custom health check configuration (HealthCheckConfig).
+                     Use HealthCheckConfig(liveness=..., readiness=..., startup=...)
+                     with ProbeConfig for each probe.
 
     Returns:
         DeployedFunction wrapper
@@ -202,6 +210,7 @@ def deployment(
             ttl_seconds=ttl_seconds,
             public=public,
             timeout=timeout,
+            health_check=health_check,
         )
         return DeployedFunction(func, spec)
 

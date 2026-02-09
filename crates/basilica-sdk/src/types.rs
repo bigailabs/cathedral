@@ -505,7 +505,7 @@ pub struct SecureCloudRentalListItem {
     /// Rental ID
     pub rental_id: String,
 
-    /// Provider name (datacrunch, hyperstack, lambda, hydrahost)
+    /// Provider name (verda, hyperstack, lambda, hydrahost)
     pub provider: String,
 
     /// Provider's instance ID

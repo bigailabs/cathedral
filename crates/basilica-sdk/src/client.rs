@@ -416,7 +416,7 @@ impl BasilicaClient {
     // ===== Secure Cloud (GPU Aggregator) =====
 
     /// List secure cloud GPU offerings from datacenter providers
-    /// Returns GPUs available from providers like DataCrunch, Hyperstack, Lambda Labs, etc.
+    /// Returns GPUs available from providers like Verda, Hyperstack, Lambda Labs, etc.
     pub async fn list_secure_cloud_gpus(&self) -> Result<Vec<crate::types::GpuOffering>> {
         let response: crate::types::ListSecureCloudGpusResponse = self
             .get("/secure-cloud/gpu-prices?available_only=true")
@@ -436,7 +436,7 @@ impl BasilicaClient {
 
     /// Start a secure cloud rental
     ///
-    /// Deploys a GPU instance via datacenter provider (DataCrunch, Hyperstack, etc.)
+    /// Deploys a GPU instance via datacenter provider (Verda, Hyperstack, etc.)
     /// and registers it with the billing service for incremental charging.
     pub async fn start_secure_cloud_rental(
         &self,

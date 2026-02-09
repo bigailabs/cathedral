@@ -126,19 +126,35 @@ pub async fn wait_for_ready(
 
         let status = client.get_deployment(name).await.map_err(CliError::Api)?;
 
-        if let Some(ref phase) = status.phase {
-            if last_phase.as_ref() != Some(phase) {
-                complete_spinner_and_clear(spinner);
+        match status.phase.as_ref() {
+            Some(phase) if !phase.trim().is_empty() => {
+                if last_phase.as_ref() != Some(phase) {
+                    complete_spinner_and_clear(spinner);
 
-                let phase_msg = format_phase_message(phase, service_name);
-                print_info(&phase_msg);
-
-                spinner = create_spinner(&format!(
-                    "Phase: {} ({}/{})",
-                    phase, status.replicas.ready, status.replicas.desired
-                ));
-
-                last_phase = Some(phase.clone());
+                    let phase_trimmed = phase.trim();
+                    let phase_msg = format_phase_message(phase_trimmed, service_name);
+                    print_info(&phase_msg);
+                    spinner = create_spinner(&format!(
+                        "Phase: {} ({}/{})",
+                        phase_trimmed, status.replicas.ready, status.replicas.desired
+                    ));
+                    last_phase = Some(phase.clone());
+                }
+            }
+            _ => {
+                if last_phase.is_none() {
+                    complete_spinner_and_clear(spinner);
+                    let state_msg = format!(
+                        "{} state: {} ({}/{})",
+                        service_name, status.state, status.replicas.ready, status.replicas.desired
+                    );
+                    print_info(&state_msg);
+                    spinner = create_spinner(&format!(
+                        "State: {} ({}/{})",
+                        status.state, status.replicas.ready, status.replicas.desired
+                    ));
+                    last_phase = Some(String::new());
+                }
             }
         }
 
@@ -147,7 +163,7 @@ pub async fn wait_for_ready(
             return Ok(WaitResult::Ready(Box::new(status)));
         }
 
-        if status.state == "Failed" {
+        if status.state == "Failed" || status.phase.as_deref() == Some("failed") {
             complete_spinner_and_clear(spinner);
             let reason = status
                 .message

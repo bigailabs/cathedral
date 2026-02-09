@@ -901,6 +901,16 @@ pub enum DeployAction {
         #[command(flatten)]
         sglang: SglangOptions,
     },
+
+    /// Deploy OpenClaw gateway
+    #[command(name = "openclaw")]
+    Openclaw {
+        #[command(flatten)]
+        common: TemplateCommonOptions,
+
+        #[command(flatten)]
+        openclaw: OpenclawOptions,
+    },
 }
 
 /// Share token management actions
@@ -1038,4 +1048,42 @@ pub struct SglangOptions {
     /// Trust remote code from HuggingFace
     #[arg(long)]
     pub trust_remote_code: bool,
+}
+
+/// OpenClaw-specific deployment options
+#[derive(clap::Args, Debug, Clone)]
+pub struct OpenclawOptions {
+    /// Provider preset (openai, anthropic)
+    #[arg(long, value_name = "PROVIDER", default_value = "openai")]
+    pub provider: OpenclawProvider,
+
+    /// Backend URL for OpenClaw (OpenAI-compatible API base URL)
+    #[arg(long, value_name = "URL")]
+    pub backend_url: Option<String>,
+
+    /// Model ID to use (e.g., Qwen/Qwen2.5-7B-Instruct)
+    #[arg(long, value_name = "MODEL_ID")]
+    pub model_id: Option<String>,
+
+    /// Provider ID (default: openai)
+    #[arg(long, value_name = "PROVIDER_ID")]
+    pub provider_id: Option<String>,
+
+    /// Provider API type (default: openai-completions)
+    #[arg(long, value_name = "API")]
+    pub provider_api: Option<String>,
+
+    /// Context window size (default: 32768)
+    #[arg(long, value_name = "TOKENS")]
+    pub context_window: Option<u32>,
+
+    /// Max tokens (default: 8192)
+    #[arg(long, value_name = "TOKENS")]
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OpenclawProvider {
+    Openai,
+    Anthropic,
 }
