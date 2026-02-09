@@ -473,7 +473,7 @@ impl GpuProfileRepository {
             SELECT id, node_id, miner_id
             FROM miner_nodes
             WHERE status IN ('online', 'verified')
-            AND (last_health_check IS NULL OR last_health_check < ?)
+            AND (last_health_check IS NULL OR datetime(last_health_check) < datetime(?))
         "#;
 
         let stale_nodes = sqlx::query(stale_nodes_query)
