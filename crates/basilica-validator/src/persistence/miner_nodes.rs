@@ -24,7 +24,7 @@ pub struct NodeBidCandidate {
     pub gpu_count: i64,
 }
 
-fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
+pub(crate) fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
     use regex::Regex;
     let re = Regex::new(r"(\d+)GB").unwrap();
     if let Some(captures) = re.captures(gpu_name) {

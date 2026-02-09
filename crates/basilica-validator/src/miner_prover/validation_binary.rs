@@ -1294,10 +1294,23 @@ impl BinaryValidator {
                 .unwrap_or("Unknown UUID")
                 .to_string();
 
-            let gpu_memory_gb = gpu_result
+            // FIXME: gpu_memory_gb should be reported properly by the validator binary itself
+            let mut gpu_memory_gb = gpu_result
                 .get("gpu_memory_gb")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
+
+            if gpu_memory_gb == 0.0 {
+                let parsed = crate::persistence::miner_nodes::extract_gpu_memory_gb(&gpu_name);
+                if parsed > 0 {
+                    warn!(
+                        gpu_name = %gpu_name,
+                        parsed_memory_gb = parsed,
+                        "Binary reported gpu_memory_gb=0.0, falling back to GPU name parse"
+                    );
+                    gpu_memory_gb = parsed as f64;
+                }
+            }
 
             let computation_time_ns = gpu_result
                 .get("computation_time_ns")
