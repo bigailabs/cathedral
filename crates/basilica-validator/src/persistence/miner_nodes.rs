@@ -301,46 +301,26 @@ impl SimplePersistence {
             gpu_assignments_cleaned += rows_cleaned;
         }
 
-        let mismatched_gpu_query = r#"
-            SELECT me.node_id, me.miner_id, me.gpu_count, me.status
-            FROM miner_nodes me
-            WHERE me.gpu_count > 0
-            AND NOT EXISTS (
-                SELECT 1 FROM gpu_uuid_assignments ga
-                WHERE ga.node_id = me.node_id AND ga.miner_id = me.miner_id
+        // Mark nodes offline when health check is stale (>5 minutes)
+        let stale_health_check_result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET status = 'offline', updated_at = datetime('now')
+            WHERE status IN ('online', 'verified')
+            AND (
+                (last_health_check IS NOT NULL AND last_health_check < datetime('now', '-5 minutes'))
+                OR (last_health_check IS NULL AND updated_at < datetime('now', '-5 minutes'))
             )
-        "#;
+            "#,
+        )
+        .execute(self.pool())
+        .await?;
 
-        let mismatched_nodes = sqlx::query(mismatched_gpu_query)
-            .fetch_all(self.pool())
-            .await?;
-
-        for row in mismatched_nodes {
-            let node_id: String = row.try_get("node_id")?;
-            let miner_id: String = row.try_get("miner_id")?;
-            let gpu_count: i32 = row.try_get("gpu_count")?;
-            let status: String = row.try_get("status")?;
-
-            if status == "online" || status == "verified" {
-                warn!(
-                    "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {}. Marking offline.",
-                    node_id, miner_id, gpu_count, status
-                );
-
-                sqlx::query(
-                    "UPDATE miner_nodes SET status = 'offline', updated_at = datetime('now')
-                     WHERE node_id = ? AND miner_id = ?",
-                )
-                .bind(&node_id)
-                .bind(&miner_id)
-                .execute(self.pool())
-                .await?;
-            } else {
-                debug!(
-                    "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {} (already offline/failed)",
-                    node_id, miner_id, gpu_count, status
-                );
-            }
+        if stale_health_check_result.rows_affected() > 0 {
+            info!(
+                "Marked {} nodes offline due to stale health check (>5 minutes)",
+                stale_health_check_result.rows_affected()
+            );
         }
 
         let stale_gpu_cleanup_query = r#"
@@ -1402,7 +1382,10 @@ impl SimplePersistence {
             FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
-            AND (last_health_check IS NULL OR last_health_check > datetime('now', '-1 hour'))
+            AND (
+                (last_health_check IS NULL AND updated_at > datetime('now', '-5 minutes'))
+                OR last_health_check > datetime('now', '-5 minutes')
+            )
         "#;
 
         let rows = sqlx::query(query)
