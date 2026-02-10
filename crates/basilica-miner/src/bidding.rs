@@ -92,8 +92,12 @@ impl BidManager {
     /// 1. Validate all nodes have prices
     /// 2. Register with validator
     /// 3. Deploy SSH keys if provided
-    /// 4. Run combined health check + price update loop
-    pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
+    /// 4. Run health check loop
+    pub async fn run(
+        &self,
+        grpc_endpoint: String,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         // 0. Validate all nodes have prices configured
         let nodes = self.node_manager.list_nodes().await?;
 
@@ -120,7 +124,7 @@ impl BidManager {
         let node_registrations = self.build_node_registrations(&nodes);
         let state = self
             .registration_client
-            .register_nodes_with_registrations(node_registrations)
+            .register_nodes_with_registrations(&grpc_endpoint, node_registrations)
             .await?;
 
         info!(
@@ -128,14 +132,14 @@ impl BidManager {
             nodes.len()
         );
 
-        // 2. Deploy validator SSH key if provided
+        // 3. Deploy validator SSH key if provided
         if state.validator_ssh_public_key.is_some() {
             if let Err(e) = self.registration_client.deploy_validator_ssh_key().await {
                 error!("Failed to deploy validator SSH key: {}", e);
             }
         }
 
-        // 3. Run health check loop
+        // 4. Run health check loop
         let health_interval = Duration::from_secs(state.health_check_interval_secs as u64);
         let mut health_ticker = interval(health_interval);
 
@@ -147,7 +151,7 @@ impl BidManager {
         loop {
             tokio::select! {
                 _ = health_ticker.tick() => {
-                    match self.registration_client.send_health_check().await {
+                    match self.registration_client.send_health_check(&grpc_endpoint).await {
                         Ok(nodes_active) => {
                             debug!(nodes_active = nodes_active, "Health check successful");
                         }

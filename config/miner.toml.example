@@ -11,9 +11,6 @@ wallet_name = "YOUR_WALLET_NAME"
 # Your hotkey name (file in ~/.bittensor/wallets/{wallet_name}/hotkeys/)
 hotkey_name = "YOUR_HOTKEY_NAME"
 
-# Coldkey name
-coldkey_name = "default"
-
 # Network: "finney" for mainnet, "test" for testnet
 network = "finney"
 
@@ -53,14 +50,6 @@ enabled = true
 host = "0.0.0.0"
 port = 9090
 path = "/metrics"
-
-# =============================================================================
-# Validator Communications (Miner → Validator Registration)
-# =============================================================================
-[validator_comms]
-# Validator's gRPC endpoint for miner registration (RegisterBid, UpdateBid, HealthCheck)
-validator_registration_endpoint = "http://VALIDATOR_IP:50052"
-request_timeout = 30
 
 # =============================================================================
 # Node Management (GPU Nodes)
@@ -124,7 +113,7 @@ strategy = "highest_stake"
 # =============================================================================
 # Bidding Configuration (GPU Pricing)
 # =============================================================================
-# BidManager runs automatically when validator_registration_endpoint is set.
+# BidManager runs automatically and waits for validator discovery.
 # All GPU categories in your nodes MUST have prices defined here.
 [bidding]
 # Static prices by GPU category (in dollars per GPU-hour)

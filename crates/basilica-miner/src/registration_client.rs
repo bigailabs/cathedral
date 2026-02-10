@@ -11,6 +11,7 @@
 //! is orchestrated by BidManager. This module provides the underlying gRPC calls.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use basilica_protocol::miner_discovery::{
@@ -22,7 +23,6 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
-use crate::config::ValidatorCommsConfig;
 use crate::node_manager::NodeManager;
 
 /// Trait for Bittensor service operations needed for registration
@@ -67,7 +67,7 @@ impl Default for RegistrationState {
 
 /// Miner Registration Client
 pub struct RegistrationClient {
-    config: ValidatorCommsConfig,
+    request_timeout: Duration,
     node_manager: Arc<NodeManager>,
     bittensor_service: Arc<dyn BittensorServiceApi>,
     miner_hotkey: String,
@@ -76,13 +76,13 @@ pub struct RegistrationClient {
 
 impl RegistrationClient {
     pub fn new(
-        config: ValidatorCommsConfig,
+        request_timeout: Duration,
         node_manager: Arc<NodeManager>,
         bittensor_service: Arc<dyn BittensorServiceApi>,
     ) -> Self {
         let miner_hotkey = bittensor_service.get_account_id();
         Self {
-            config,
+            request_timeout,
             node_manager,
             bittensor_service,
             miner_hotkey,
@@ -90,25 +90,11 @@ impl RegistrationClient {
         }
     }
 
-    /// Check if registration endpoint is configured
-    pub fn has_registration_endpoint(&self) -> bool {
-        self.config.validator_registration_endpoint.is_some()
-    }
-
-    /// Get registration endpoint
-    fn get_endpoint(&self) -> Option<&String> {
-        self.config.validator_registration_endpoint.as_ref()
-    }
-
-    /// Connect to the validator's registration service
-    async fn connect(&self) -> Result<MinerRegistrationClient<Channel>> {
-        let endpoint = self
-            .get_endpoint()
-            .ok_or_else(|| anyhow::anyhow!("validator_registration_endpoint not configured"))?;
-
-        let channel = Channel::from_shared(endpoint.clone())
+    /// Connect to the validator's registration service at the given endpoint
+    async fn connect(&self, endpoint: &str) -> Result<MinerRegistrationClient<Channel>> {
+        let channel = Channel::from_shared(endpoint.to_string())
             .context("invalid endpoint URL")?
-            .timeout(self.config.request_timeout)
+            .timeout(self.request_timeout)
             .connect()
             .await
             .context("failed to connect to validator")?;
@@ -175,20 +161,15 @@ impl RegistrationClient {
     /// with prices from BiddingConfig.
     pub async fn register_nodes_with_registrations(
         &self,
+        grpc_endpoint: &str,
         node_registrations: Vec<NodeRegistration>,
     ) -> Result<RegistrationState> {
-        if !self.has_registration_endpoint() {
-            return Err(anyhow::anyhow!(
-                "validator_registration_endpoint not configured"
-            ));
-        }
-
         if node_registrations.is_empty() {
             warn!("No nodes to register");
             return Ok(RegistrationState::default());
         }
 
-        let mut client = self.connect().await?;
+        let mut client = self.connect(grpc_endpoint).await?;
 
         // Build and sign request
         let timestamp = Utc::now().timestamp();
@@ -296,14 +277,14 @@ impl RegistrationClient {
     }
 
     /// Send periodic health check to validator.
-    pub async fn send_health_check(&self) -> Result<u32> {
+    pub async fn send_health_check(&self, grpc_endpoint: &str) -> Result<u32> {
         let state = self.state.read().await;
         if !state.registered {
             return Err(anyhow::anyhow!("not registered yet"));
         }
         drop(state);
 
-        let mut client = self.connect().await?;
+        let mut client = self.connect(grpc_endpoint).await?;
 
         let timestamp = Utc::now().timestamp();
         let node_ids: Vec<String> = vec![]; // Empty = all nodes
@@ -338,14 +319,19 @@ impl RegistrationClient {
     }
 
     /// Update price for a specific node.
-    pub async fn update_node_price(&self, node_id: &str, hourly_rate_cents: u32) -> Result<()> {
+    pub async fn update_node_price(
+        &self,
+        grpc_endpoint: &str,
+        node_id: &str,
+        hourly_rate_cents: u32,
+    ) -> Result<()> {
         let state = self.state.read().await;
         if !state.registered {
             return Err(anyhow::anyhow!("not registered yet"));
         }
         drop(state);
 
-        let mut client = self.connect().await?;
+        let mut client = self.connect(grpc_endpoint).await?;
 
         let timestamp = Utc::now().timestamp();
         let message = self.build_update_bid_message(node_id, hourly_rate_cents, timestamp);
@@ -382,14 +368,14 @@ impl RegistrationClient {
 
     /// Remove nodes from availability.
     /// If node_ids is empty, removes all nodes.
-    pub async fn remove_nodes(&self, node_ids: Vec<String>) -> Result<u32> {
+    pub async fn remove_nodes(&self, grpc_endpoint: &str, node_ids: Vec<String>) -> Result<u32> {
         let state = self.state.read().await;
         if !state.registered {
             return Err(anyhow::anyhow!("not registered yet"));
         }
         drop(state);
 
-        let mut client = self.connect().await?;
+        let mut client = self.connect(grpc_endpoint).await?;
 
         let timestamp = Utc::now().timestamp();
         let message = self.build_remove_bid_message(&node_ids, timestamp);
@@ -445,26 +431,24 @@ mod tests {
 
     #[test]
     fn test_build_register_bid_message() {
-        let config = ValidatorCommsConfig::default();
         let node_manager = Arc::new(NodeManager::new(crate::config::NodeSshConfig::default()));
         let bittensor = Arc::new(MockBittensorService {
             hotkey: "5GrwvaEF".to_string(),
         });
 
-        let client = RegistrationClient::new(config, node_manager, bittensor);
+        let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
         let message = client.build_register_bid_message(1234567890);
         assert_eq!(message, "5GrwvaEF|1234567890");
     }
 
     #[test]
     fn test_build_health_check_message() {
-        let config = ValidatorCommsConfig::default();
         let node_manager = Arc::new(NodeManager::new(crate::config::NodeSshConfig::default()));
         let bittensor = Arc::new(MockBittensorService {
             hotkey: "5GrwvaEF".to_string(),
         });
 
-        let client = RegistrationClient::new(config, node_manager, bittensor);
+        let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
         // Test with empty node_ids (all nodes)
         let message = client.build_health_check_message(&[], 1234567890);
         assert_eq!(message, "5GrwvaEF||1234567890");
@@ -477,26 +461,24 @@ mod tests {
 
     #[test]
     fn test_build_update_bid_message() {
-        let config = ValidatorCommsConfig::default();
         let node_manager = Arc::new(NodeManager::new(crate::config::NodeSshConfig::default()));
         let bittensor = Arc::new(MockBittensorService {
             hotkey: "5GrwvaEF".to_string(),
         });
 
-        let client = RegistrationClient::new(config, node_manager, bittensor);
+        let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
         let message = client.build_update_bid_message("node-1", 250, 1234567890);
         assert_eq!(message, "5GrwvaEF|node-1|250|1234567890");
     }
 
     #[test]
     fn test_build_remove_bid_message() {
-        let config = ValidatorCommsConfig::default();
         let node_manager = Arc::new(NodeManager::new(crate::config::NodeSshConfig::default()));
         let bittensor = Arc::new(MockBittensorService {
             hotkey: "5GrwvaEF".to_string(),
         });
 
-        let client = RegistrationClient::new(config, node_manager, bittensor);
+        let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
         let message = client
             .build_remove_bid_message(&["node-1".to_string(), "node-2".to_string()], 1234567890);
         assert_eq!(message, "5GrwvaEF|node-1,node-2|1234567890");

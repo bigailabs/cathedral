@@ -28,9 +28,6 @@ pub struct MinerConfig {
     /// Metrics configuration
     pub metrics: MetricsConfig,
 
-    /// Validator communications configuration
-    pub validator_comms: ValidatorCommsConfig,
-
     /// Node management configuration
     pub node_management: NodeManagementConfig,
 
@@ -60,9 +57,6 @@ pub struct MinerBittensorConfig {
     #[serde(flatten)]
     pub common: BittensorConfig,
 
-    /// Coldkey name for wallet operations
-    pub coldkey_name: String,
-
     /// Axon server port for Bittensor network
     pub axon_port: u16,
 
@@ -71,19 +65,6 @@ pub struct MinerBittensorConfig {
 
     /// Maximum number of UIDs to set weights for
     pub max_weight_uids: u16,
-}
-
-/// Validator communications configuration
-#[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidatorCommsConfig {
-    /// Validator gRPC endpoint for miner registration
-    /// e.g. http://validator-host:50053
-    pub validator_registration_endpoint: Option<String>,
-
-    /// Request timeout for validator calls
-    #[serde_as(as = "DurationSeconds<u64>")]
-    pub request_timeout: Duration,
 }
 
 /// Node management configuration
@@ -166,7 +147,7 @@ pub struct MinerAdvertisedAddresses {
 /// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
 /// which are converted to cents internally on load.
 ///
-/// BidManager always runs when a validator_registration_endpoint is configured.
+/// BidManager always runs and waits for validator discovery to provide the gRPC endpoint.
 /// All GPU categories in your nodes MUST have prices defined in the static strategy.
 ///
 /// TODO: Add floor_prices when dynamic bidding strategies are implemented.
@@ -232,7 +213,6 @@ impl Default for MinerConfig {
                 ..Default::default()
             },
             metrics: MetricsConfig::default(),
-            validator_comms: ValidatorCommsConfig::default(),
             node_management: NodeManagementConfig::default(),
             security: SecurityConfig::default(),
             ssh_session: NodeSshConfig::default(),
@@ -281,19 +261,9 @@ impl Default for MinerBittensorConfig {
                 weight_interval_secs: 300, // 5 minutes
                 ..Default::default()
             },
-            coldkey_name: "default".to_string(),
             axon_port: 8091,
             external_ip: None,
             max_weight_uids: 256,
-        }
-    }
-}
-
-impl Default for ValidatorCommsConfig {
-    fn default() -> Self {
-        Self {
-            validator_registration_endpoint: None,
-            request_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -431,7 +401,6 @@ impl MinerConfig {
     }
 
     /// Get the advertised gRPC endpoint for validators
-    /// Note: The miner no longer hosts a gRPC server; use validator_registration_endpoint to reach the validator
     pub fn get_advertised_grpc_endpoint(&self) -> Option<String> {
         self.advertised_addresses.grpc_endpoint.clone()
     }
