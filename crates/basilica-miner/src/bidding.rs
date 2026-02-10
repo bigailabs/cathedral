@@ -20,14 +20,12 @@ use basilica_protocol::miner_discovery::NodeRegistration;
 use crate::config::{BiddingConfig, BiddingStrategy};
 use crate::node_manager::{NodeManager, RegisteredNode};
 use crate::registration_client::RegistrationClient;
-use crate::validator_discovery::ValidatorDiscovery;
 
 /// Bid manager that owns the complete registration lifecycle
 pub struct BidManager {
     config: BiddingConfig,
     node_manager: Arc<NodeManager>,
     registration_client: Arc<RegistrationClient>,
-    validator_discovery: Arc<ValidatorDiscovery>,
 }
 
 impl BidManager {
@@ -36,13 +34,11 @@ impl BidManager {
         config: BiddingConfig,
         node_manager: Arc<NodeManager>,
         registration_client: Arc<RegistrationClient>,
-        validator_discovery: Arc<ValidatorDiscovery>,
     ) -> Self {
         Self {
             config,
             node_manager,
             registration_client,
-            validator_discovery,
         }
     }
 
@@ -93,12 +89,15 @@ impl BidManager {
     }
 
     /// Run the bid manager lifecycle:
-    /// 1. Wait for validator discovery to provide a gRPC endpoint
-    /// 2. Validate all nodes have prices
-    /// 3. Register with validator
-    /// 4. Deploy SSH keys if provided
-    /// 5. Run combined health check + price update loop
-    pub async fn run(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
+    /// 1. Validate all nodes have prices
+    /// 2. Register with validator
+    /// 3. Deploy SSH keys if provided
+    /// 4. Run health check loop
+    pub async fn run(
+        &self,
+        grpc_endpoint: String,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         // 0. Validate all nodes have prices configured
         let nodes = self.node_manager.list_nodes().await?;
 
@@ -121,29 +120,7 @@ impl BidManager {
             self.static_prices().len()
         );
 
-        // 1. Wait for validator discovery to provide a gRPC endpoint
-        let grpc_endpoint = loop {
-            if let Some(discovered) = self.validator_discovery.get_discovered_validator().await {
-                info!(
-                    grpc_endpoint = %discovered.grpc_endpoint,
-                    "Using discovered validator gRPC endpoint"
-                );
-                break discovered.grpc_endpoint;
-            }
-
-            info!("Waiting for validator discovery to provide gRPC endpoint...");
-            tokio::select! {
-                _ = tokio::time::sleep(Duration::from_secs(5)) => { continue; }
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        info!("BidManager shutdown requested while waiting for discovery");
-                        return Ok(());
-                    }
-                }
-            }
-        };
-
-        // 2. Register nodes with bid manager prices
+        // 1. Register nodes with bid manager prices
         let node_registrations = self.build_node_registrations(&nodes);
         let state = self
             .registration_client

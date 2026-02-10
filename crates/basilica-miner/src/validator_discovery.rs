@@ -8,8 +8,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::node_manager::{NodeManager, RegisteredNode};
 
@@ -45,7 +44,6 @@ pub struct ValidatorDiscovery {
     node_manager: Arc<NodeManager>,
     assignment_strategy: Box<dyn AssignmentStrategy>,
     netuid: u16,
-    discovered: RwLock<Option<DiscoveredValidator>>,
 }
 
 /// Strategy for assigning nodes to validators
@@ -72,7 +70,6 @@ impl ValidatorDiscovery {
             node_manager,
             assignment_strategy,
             netuid,
-            discovered: RwLock::new(None),
         }
     }
 
@@ -101,8 +98,8 @@ impl ValidatorDiscovery {
         Ok(validators)
     }
 
-    /// Perform discovery and assignment
-    pub async fn run_discovery(&self) -> Result<()> {
+    /// Perform discovery and assignment, returning the discovered validator.
+    pub async fn run_discovery(&self) -> Result<DiscoveredValidator> {
         info!("Starting validator discovery");
 
         // Get active validators
@@ -114,8 +111,7 @@ impl ValidatorDiscovery {
         info!("Found {} available nodes", nodes.len());
 
         if nodes.is_empty() {
-            warn!("No nodes available for assignment");
-            return Ok(());
+            anyhow::bail!("No nodes available for assignment");
         }
 
         // Run assignment strategy to select the validator (all nodes go to selected validator)
@@ -124,48 +120,37 @@ impl ValidatorDiscovery {
             .select_assignment(validators, nodes)
             .await?;
 
-        if let Some(validator) = selected_validator {
-            info!(
-                "Assigning all nodes to validator {} (uid: {})",
-                validator.hotkey, validator.uid
-            );
+        let validator = selected_validator
+            .ok_or_else(|| anyhow::anyhow!("No eligible validators found during discovery"))?;
 
-            // Update assignment in NodeManager (single source of truth)
-            self.node_manager
-                .set_assigned_validator(&validator.hotkey)
-                .await;
+        info!(
+            "Assigning all nodes to validator {} (uid: {})",
+            validator.hotkey, validator.uid
+        );
 
-            // Call the validator's /discovery endpoint to learn the gRPC port
-            if let Some(ref axon_endpoint) = validator.axon_endpoint {
-                match self
-                    .call_discovery_endpoint(axon_endpoint, &validator.hotkey)
-                    .await
-                {
-                    Ok(discovered) => {
-                        info!(
-                            grpc_endpoint = %discovered.grpc_endpoint,
-                            "Discovered validator gRPC endpoint"
-                        );
-                        *self.discovered.write().await = Some(discovered);
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to call /discovery on validator {}: {}",
-                            validator.hotkey, e
-                        );
-                    }
-                }
-            } else {
-                warn!(
-                    "Validator {} has no axon endpoint; cannot discover gRPC port",
-                    validator.hotkey
-                );
-            }
-        } else {
-            info!("No eligible validators found during discovery; no assignment made");
-        }
+        // Update assignment in NodeManager (single source of truth)
+        self.node_manager
+            .set_assigned_validator(&validator.hotkey)
+            .await;
 
-        Ok(())
+        // Call the validator's /discovery endpoint to learn the gRPC port
+        let axon_endpoint = validator.axon_endpoint.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Validator {} has no axon endpoint; cannot discover gRPC port",
+                validator.hotkey
+            )
+        })?;
+
+        let discovered = self
+            .call_discovery_endpoint(axon_endpoint, &validator.hotkey)
+            .await?;
+
+        info!(
+            grpc_endpoint = %discovered.grpc_endpoint,
+            "Discovered validator gRPC endpoint"
+        );
+
+        Ok(discovered)
     }
 
     /// Call the validator's /discovery endpoint and construct the full gRPC URL.
@@ -199,11 +184,6 @@ impl ValidatorDiscovery {
             hotkey: hotkey.to_string(),
             grpc_endpoint,
         })
-    }
-
-    /// Get the currently discovered validator (if any).
-    pub async fn get_discovered_validator(&self) -> Option<DiscoveredValidator> {
-        self.discovered.read().await.clone()
     }
 }
 

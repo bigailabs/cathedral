@@ -45,7 +45,7 @@ pub struct MinerState {
     pub registration_client: Arc<RegistrationClient>,
     pub registration_db: RegistrationDb,
     pub metrics: Option<metrics::MinerMetrics>,
-    pub validator_discovery: Arc<validator_discovery::ValidatorDiscovery>,
+    pub validator_discovery: validator_discovery::ValidatorDiscovery,
     pub bid_manager: Arc<BidManager>,
     pub node_manager: Arc<NodeManager>,
 }
@@ -169,12 +169,12 @@ impl MinerState {
             }
         };
 
-        let validator_discovery = Arc::new(validator_discovery::ValidatorDiscovery::new(
+        let validator_discovery = validator_discovery::ValidatorDiscovery::new(
             chain_registration.get_bittensor_service(),
             node_manager.clone(),
             strategy,
             config.bittensor.common.netuid,
-        ));
+        );
 
         // Initialize registration client for miner→validator communication
         let bittensor_service = chain_registration.get_bittensor_service();
@@ -189,7 +189,6 @@ impl MinerState {
             config.bidding.clone(),
             node_manager.clone(),
             registration_client.clone(),
-            validator_discovery.clone(),
         ));
 
         // Use a placeholder UID that will be updated after chain registration
@@ -241,25 +240,22 @@ impl MinerState {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        // Start validator discovery service
-        let discovery = self.validator_discovery.clone();
-        let discovery_interval = tokio::time::Duration::from_secs(600); // 10 minutes
-        let discovery_handle = tokio::spawn(async move {
-            info!("Starting validator discovery service");
-            loop {
-                if let Err(e) = discovery.run_discovery().await {
-                    error!("Validator discovery error: {}", e);
-                }
-                tokio::time::sleep(discovery_interval).await;
-            }
-        });
+        // One-shot validator discovery at startup
+        let discovered = self.validator_discovery.run_discovery().await?;
+        info!(
+            grpc_endpoint = %discovered.grpc_endpoint,
+            "Validator discovered, starting bid manager"
+        );
 
         // Start bid manager (owns registration lifecycle: register, health checks)
-        // BidManager waits for validator discovery to provide the gRPC endpoint
         let bid_manager = self.bid_manager.clone();
         let bid_manager_shutdown_rx = shutdown_rx.clone();
+        let grpc_endpoint = discovered.grpc_endpoint;
         let bid_manager_handle = tokio::spawn(async move {
-            if let Err(e) = bid_manager.run(bid_manager_shutdown_rx).await {
+            if let Err(e) = bid_manager
+                .run(grpc_endpoint, bid_manager_shutdown_rx)
+                .await
+            {
                 error!("BidManager error: {}", e);
             }
         });
@@ -273,9 +269,6 @@ impl MinerState {
             }
             _ = bid_manager_handle => {
                 error!("BidManager stopped unexpectedly");
-            }
-            _ = discovery_handle => {
-                error!("Validator discovery service stopped unexpectedly");
             }
         }
 
