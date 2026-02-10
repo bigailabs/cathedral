@@ -88,6 +88,12 @@ docker compose logs -f miner
 2. [Architecture](#architecture)
 3. [Prerequisites](#prerequisites)
 4. [Understanding the System](#understanding-the-system)
+    - [Node Identity](#node-identity)
+    - [Authentication Flow](#authentication-flow)
+    - [SSH Key Deployment Mechanism](#ssh-key-deployment-mechanism)
+    - [Validator Assignment Strategies](#validator-assignment-strategies)
+    - [Discovery Process](#discovery-process)
+    - [Bidding & Registration Protocol](#bidding--registration-protocol)
 5. [SSH Key Setup](#ssh-key-setup)
 6. [GPU Node Preparation](#gpu-node-preparation)
 7. [Miner Configuration](#miner-configuration)
@@ -128,34 +134,38 @@ The Basilica miner manages a fleet of GPU nodes and provides validators with **d
 
 ## Architecture
 
-### Direct SSH Access Model
+### Miner-Initiated Bidding Model
 
 ```text
-┌──────────────────┐
-│   Validator      │
-│                  │
-└────────┬─────────┘
-         │
-         │ 1. Discovery Request
-         │    (with SSH public key and signature)
-         ↓
-┌──────────────────┐
-│   Miner (gRPC)   │
-│  - Authenticates │
-│  - Deploys keys  │
-│  - Returns nodes │
-└────────┬─────────┘
-         │
-         │ 2. SSH Key Deployment
-         │    (miner → nodes)
-         |────────────────────────────|────────────────────────────|
-┌──────────────────┐         ┌──────────────────┐         ┌──────────────────┐
-│   GPU Node 1     │         │   GPU Node 2     │         │   GPU Node N     │
-│  (SSH endpoint)  │         │  (SSH endpoint)  │         │  (SSH endpoint)  │
-└────────▲─────────┘         └────────▲─────────┘         └────────▲─────────┘
-         │                            │                            │
-         └────────────────────────────┴────────────────────────────┘
-                            3. Validator connects directly via SSH
+┌──────────────────┐                          ┌──────────────────┐
+│      Miner       │                          │    Validator     │
+│                  │                          │   (gRPC server)  │
+└────────┬─────────┘                          └────────▲─────────┘
+         │                                             │
+         │ 1. Discover validator via metagraph         │
+         │    + /discovery HTTP endpoint               │
+         │                                             │
+         │ 2. RegisterBid gRPC ──────────────────────→ │
+         │    (nodes + SSH details + prices)           │
+         │                                             │
+         │ 3. Response ←─────────────────────────────  │
+         │    (validator SSH public key,               │
+         │     health check interval,                  │
+         │     collateral status)                      │
+         │                                             │
+         │ 4. Deploy validator SSH key                 │
+         │    (miner → nodes)                          │
+         │                                             │
+         │ 5. Periodic HealthCheck gRPC ─────────────→ │
+         │                                             │
+         |─────────────|─────────────|                 │
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│   GPU Node 1     │  │   GPU Node 2     │  │   GPU Node N     │
+│  (SSH endpoint)  │  │  (SSH endpoint)  │  │  (SSH endpoint)  │
+└────────▲─────────┘  └────────▲─────────┘  └────────▲─────────┘
+         │                     │                     │
+         └─────────────────────┴─────────────────────┘
+                  6. Validator connects directly via SSH
 ```
 
 ---
@@ -268,104 +278,52 @@ Generates: `node_id = "a3f2b1c4-5d6e-7f8a-9b0c-1d2e3f4a5b6c"` (deterministic)
 
 ### Authentication Flow
 
-Basilica uses **mutual authentication** between validators and miners:
+All gRPC requests from the miner are signed with the miner's **Bittensor hotkey**. The validator verifies each signature using the miner's public key from the metagraph.
 
-#### Phase 1: Validator → Miner Authentication
+#### Signature Format
 
-1. **Validator sends authentication request:**
+Each RPC has a specific message format that is signed:
 
-   ```rust
-   ValidatorAuthRequest {
-     validator_hotkey: "5G3qVaXz..." (SS58-encoded Bittensor hotkey)
-     signature: Ed25519 signature
-     nonce: "uuid-1234-5678"
-     timestamp: Unix timestamp
-     target_miner_hotkey: "5FHd7..."
-   }
-   ```
+| RPC | Signature payload |
+|---|---|
+| **RegisterBid** | `{hotkey}\|{timestamp}` |
+| **UpdateBid** | `{hotkey}\|{node_id}\|{hourly_rate_cents}\|{timestamp}` |
+| **RemoveBid** | `{hotkey}\|{node_ids_csv}\|{timestamp}` |
+| **HealthCheck** | `{hotkey}\|{node_ids_csv}\|{timestamp}` |
 
-2. **Signature payload:**
+**Example** (RegisterBid):
 
-   ```text
-   BASILICA_AUTH_V1:{nonce}:{target_miner_hotkey}:{timestamp_seconds}
-   ```
+```text
+5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|1718000000
+```
 
-3. **Miner verifies:**
-   - Signature is valid for validator's hotkey
-   - Timestamp is within 5 minutes (prevents replay attacks)
-   - `target_miner_hotkey` matches miner's actual hotkey (prevents MITM)
+#### Verification
 
-#### Phase 2: Miner → Validator Authentication (Mutual)
-
-1. **Miner signs response:**
-
-   ```rust
-   MinerAuthResponse {
-     authenticated: true
-     session_token: "hex-token-32-bytes"
-     expires_at: timestamp + 3600 seconds
-     miner_hotkey: "5FHd7..."
-     miner_signature: Ed25519 signature
-     response_nonce: "uuid-8765-4321"
-   }
-   ```
-
-2. **Miner signature payload:**
-
-   ```text
-   MINER_AUTH_RESPONSE:{validator_hotkey}:{response_nonce}:{session_token}
-   ```
-
-3. **Validator verifies miner's signature** to ensure communication with legitimate miner
+The validator verifies:
+- **Signature validity**: The signature matches the miner's Bittensor hotkey
+- **Timestamp freshness**: Timestamp is within the allowed window (default 300 seconds) to prevent replay attacks
+- **Miner identity**: The hotkey corresponds to a known miner on the subnet
 
 ### SSH Key Deployment Mechanism
 
-**When validator discovers nodes:**
+After a successful `RegisterBid`, the miner receives the validator's SSH public key and deploys it to all managed nodes.
 
-1. **Validator includes SSH public key in discovery request:**
+1. **Miner receives validator's SSH public key** from `RegisterBidResponse.validator_ssh_public_key`
 
-   ```rust
-   DiscoverNodesRequest {
-     validator_hotkey: "5G3qVaXz..."
-     validator_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5..."
-     signature: ...
-     nonce: ...
-   }
-   ```
+2. **Miner validates SSH key format** using OpenSSH key parsing (supports `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-*`)
 
-2. **Miner validates SSH key format:**
-   - Supports: `ssh-rsa`, `ssh-ed25519`, `ecdsa-sha2-*`, `ssh-dss`
-   - Rejects malformed keys
+3. **Miner deploys key with exclusive access** — old validator keys are removed before adding the new one. For each node, the miner SSHes in (using its own key) and atomically rewrites `~/.ssh/authorized_keys`:
+   - Filters out any existing lines containing `validator-`
+   - Appends the new validator key
+   - Preserves the miner's own key and any non-validator keys
 
-3. **Miner deploys key to ALL nodes:**
-
-   ```bash
-   # For each node, miner executes via SSH:
-   mkdir -p ~/.ssh && \
-   echo 'ssh-ed25519 AAAAC3... validator-5G3qVaXz...' >> ~/.ssh/authorized_keys && \
-   chmod 600 ~/.ssh/authorized_keys
-   ```
-
-4. **Key tagging**: Keys are tagged with `validator-{hotkey}` for easy revocation:
+4. **Key tagging**: Keys are normalized with a `validator-{hotkey}` identifier:
 
    ```text
    ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... validator-5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC
    ```
 
-5. **Miner returns node connection details:**
-
-   ```rust
-   NodeConnectionDetails {
-     node_id: "a3f2b1c4-..."
-     host: "192.168.1.100"
-     port: "22"
-     username: "basilica"
-     additional_opts: "-o StrictHostKeyChecking=no"
-     status: "available"
-   }
-   ```
-
-6. **Validator connects directly:**
+5. **Validator connects directly** to nodes using its private key:
 
    ```bash
    ssh -i ~/.basilica/ssh/validator_persistent.pem basilica@192.168.1.100
@@ -413,23 +371,145 @@ validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 
 ### Discovery Process
 
-**Validator's perspective:**
+**Miner's perspective** (miner-initiated):
 
-1. **Query Bittensor metagraph** for miners on subnet
-2. **Extract miner endpoints** from axon data
-3. **Connect to miner's gRPC service** (port 50051 by default)
-4. **Authenticate** using Bittensor hotkey signature
-5. **Send discovery request** with SSH public key
-6. **Receive node connection details**
-7. **SSH directly to nodes** for validation/rental
+1. **Query Bittensor metagraph** for validators with permits on the subnet
+2. **Select validator** using the configured assignment strategy (e.g., `highest_stake`)
+3. **Call validator's `/discovery` HTTP endpoint** (via the axon address from metagraph) to learn the gRPC port for bid registration
+4. **Call `RegisterBid` gRPC** with all nodes, SSH details, and pricing
+5. **Receive validator's SSH public key** + health check interval + collateral status
+6. **Deploy validator SSH key** to all managed nodes
+7. **Enter health check loop** — send periodic `HealthCheck` RPCs to keep registrations active
 
-**Miner's perspective:**
+**Validator's perspective** (passive):
 
-1. **Discover validator** at startup via metagraph + `/discovery` endpoint
-2. **Register nodes** with the discovered validator's gRPC endpoint (with bid prices)
-3. **Deploy validator SSH key** to nodes (if provided in registration response)
-4. **Run health check loop** sending periodic health checks to the validator
-5. **Serve axon** on Bittensor network for validator discovery
+1. **Runs gRPC registration server** listening for `RegisterBid` from miners
+2. **Receives bids** — verifies signature, checks bid floor, checks collateral, upserts nodes into DB
+3. **Returns SSH public key** so the miner can deploy it to nodes
+4. **Tracks health** — expects periodic `HealthCheck` RPCs from the miner (default every 60s)
+5. **Connects directly to nodes via SSH** for validation and rental operations
+
+### Bidding & Registration Protocol
+
+The miner communicates with the validator via the `MinerRegistration` gRPC service. There are four RPCs:
+
+#### 1. RegisterBid
+
+Called **once at startup** after validator discovery. Sends all nodes with SSH connection details and pricing. The validator returns its SSH public key, the health check interval, and collateral status.
+
+```protobuf
+rpc RegisterBid(RegisterBidRequest) returns (RegisterBidResponse);
+
+message RegisterBidRequest {
+  string miner_hotkey = 1;              // Miner's Bittensor hotkey
+  repeated NodeRegistration nodes = 2;  // Nodes with SSH details + prices
+  int64 timestamp = 3;                  // Unix timestamp
+  bytes signature = 4;                  // Signature over "{hotkey}|{timestamp}"
+}
+
+message NodeRegistration {
+  string node_id = 1;               // Deterministic UUID from username@host:port
+  string host = 2;                  // SSH host
+  uint32 port = 3;                  // SSH port
+  string username = 4;              // SSH username
+  string gpu_category = 5;          // "H100", "A100", "B200", etc.
+  uint32 gpu_count = 6;             // Number of GPUs
+  uint32 hourly_rate_cents = 7;     // Price in cents per GPU per hour
+}
+
+message RegisterBidResponse {
+  bool accepted = 1;
+  string registration_id = 2;
+  string validator_ssh_public_key = 3;     // Deploy this to your nodes
+  uint32 health_check_interval_secs = 4;   // How often to send health checks
+  string error_message = 5;
+  CollateralStatus collateral_status = 6;  // Worst status across all nodes
+}
+```
+
+**Validator processing**: Verifies signature → checks timestamp freshness → validates node fields → enforces bid floor → checks collateral → upserts nodes in DB → deactivates any previously-registered nodes not in this request.
+
+#### 2. UpdateBid
+
+Update the hourly rate for a specific node. Can be called at any time after registration.
+
+```protobuf
+rpc UpdateBid(UpdateBidRequest) returns (UpdateBidResponse);
+
+message UpdateBidRequest {
+  string miner_hotkey = 1;
+  string node_id = 2;               // Node to update
+  uint32 hourly_rate_cents = 3;     // New price in cents per GPU per hour
+  int64 timestamp = 4;
+  bytes signature = 5;              // Signature over "{hotkey}|{node_id}|{hourly_rate_cents}|{timestamp}"
+}
+```
+
+#### 3. RemoveBid
+
+Explicitly remove nodes from availability. If `node_ids` is empty, all nodes are removed.
+
+```protobuf
+rpc RemoveBid(RemoveBidRequest) returns (RemoveBidResponse);
+
+message RemoveBidRequest {
+  string miner_hotkey = 1;
+  repeated string node_ids = 2;     // Empty = remove all
+  int64 timestamp = 3;
+  bytes signature = 4;              // Signature over "{hotkey}|{node_ids_csv}|{timestamp}"
+}
+
+message RemoveBidResponse {
+  bool accepted = 1;
+  uint32 nodes_removed = 2;
+  string error_message = 3;
+}
+```
+
+#### 4. HealthCheck
+
+Periodic heartbeat to keep registrations active. The interval is returned by `RegisterBidResponse.health_check_interval_secs` (default 60s). If health checks stop arriving, the validator will eventually filter the miner's nodes from bid selection.
+
+```protobuf
+rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+message HealthCheckRequest {
+  string miner_hotkey = 1;
+  repeated string node_ids = 2;     // Empty = all nodes
+  int64 timestamp = 3;
+  bytes signature = 4;              // Signature over "{hotkey}|{node_ids_csv}|{timestamp}"
+}
+
+message HealthCheckResponse {
+  bool accepted = 1;
+  uint32 nodes_active = 2;
+  string error_message = 3;
+}
+```
+
+#### Collateral Status
+
+The `RegisterBidResponse` includes a `CollateralStatus` message reflecting the **worst** collateral status across all registered nodes:
+
+```protobuf
+message CollateralStatus {
+  double current_alpha = 1;           // Raw Alpha amount deposited
+  double current_usd_value = 2;       // USD value at current price
+  double minimum_usd_required = 3;    // Minimum for this GPU category
+  string status = 4;                  // "sufficient", "warning", "undercollateralized", "excluded"
+  string grace_period_remaining = 5;  // e.g. "23h 45m" or empty
+  string action_required = 6;         // e.g. "Deposit 25 Alpha (~$50) to maintain eligibility"
+  double alpha_usd_price = 7;         // Current Alpha/USD price used
+  bool price_stale = 8;              // True if price data is > 1hr old
+}
+```
+
+| Status | Meaning |
+|---|---|
+| `sufficient` | Collateral meets requirements |
+| `warning` | Collateral is low — action recommended |
+| `undercollateralized` | Below minimum — may be excluded soon |
+| `excluded` | Insufficient collateral — excluded from rentals |
 
 ---
 
@@ -708,17 +788,30 @@ auto_recovery = true
 #### 4b. Bidding Configuration (GPU Pricing)
 
 Pricing is configured separately from nodes in the `[bidding]` section. Every GPU category
-listed in your nodes **must** have a corresponding price entry:
+listed in your nodes **must** have a corresponding price entry. Prices are defined in **dollars per GPU-hour** and are converted to **cents** internally before being sent to the validator.
 
 ```toml
 [bidding]
 # Static prices by GPU category (in dollars per GPU-hour)
 [bidding.strategy.static.static_prices]
-H100 = 2.50    # $2.50/hour per H100 GPU
-A100 = 1.20    # $1.20/hour per A100 GPU
+H100 = 2.50    # $2.50/hour per H100 GPU → sent as 250 cents
+A100 = 1.20    # $1.20/hour per A100 GPU → sent as 120 cents
 ```
 
 The BidManager runs automatically after validator discovery and registers your nodes with these prices.
+
+**Startup validation**: The miner will refuse to start if any GPU category in your `[node_management]` nodes is missing a price entry. For example, if you have a node with `gpu_category = "B200"` but no `B200 = ...` in `static_prices`, the miner will exit with an error.
+
+**Bid floor enforcement**: Validators enforce a minimum bid price (default 10% of the baseline market price for each GPU category). If your bid is below this floor, the `RegisterBid` RPC will be rejected with an error explaining the minimum acceptable price.
+
+**Collateral requirements**: The validator checks your collateral (Alpha token deposit) during registration. The response includes a `CollateralStatus` with one of these states:
+
+| Status | Meaning |
+|---|---|
+| `sufficient` | Collateral meets requirements — no action needed |
+| `warning` | Collateral is low — deposit more Alpha to maintain eligibility |
+| `undercollateralized` | Below minimum — may be excluded from rentals soon |
+| `excluded` | Insufficient collateral — nodes are excluded from rental selection |
 
 #### 5. SSH Access Configuration
 
@@ -1088,95 +1181,85 @@ Understanding how validators access your nodes helps with troubleshooting and se
 
 ### Step-by-Step Flow
 
-#### 1. Validator Discovery
+#### 1. Miner Startup & Validator Discovery
 
-**Validator queries Bittensor metagraph:**
+**Miner queries metagraph and selects a validator:**
 
-```bash
-# Validator perspective (simplified)
-# Query metagraph for miners on subnet 39
-validators_list = bittensor_service.get_neurons(netuid=39, filter="miners")
-
-# Extract miner endpoints
-for miner in validators_list:
-    miner_endpoint = miner.axon.ip + ":" + miner.axon.port
-    # miner_endpoint = "203.0.113.45:50051"
+```text
+Miner starts up
+  → Queries Bittensor metagraph for validators with permits
+  → Applies assignment strategy (e.g., highest_stake)
+  → Calls validator's /discovery HTTP endpoint
+  → Learns the validator's gRPC port for bid registration
 ```
 
-#### 2. gRPC Connection
+The `/discovery` endpoint returns:
 
-**Validator connects to miner's gRPC service:**
-
-```bash
-# Validator connects to miner's gRPC endpoint
-grpc_endpoint = "http://203.0.113.45:50051"
-miner_client = MinerDiscoveryClient(grpc_endpoint)
+```json
+{
+  "bid_grpc_port": 50052,
+  "version": "0.1.0"
+}
 ```
 
-#### 3. Authentication
+The miner constructs the full gRPC endpoint from the validator's axon IP and the returned port (e.g., `http://203.0.113.45:50052`).
 
-**Validator authenticates with Bittensor signature:**
+#### 2. RegisterBid gRPC Call
 
-```python
-# Validator generates signature
-nonce = uuid4()
-timestamp = int(time.time())
-payload = f"BASILICA_AUTH_V1:{nonce}:{miner_hotkey}:{timestamp}"
-signature = validator_keypair.sign(payload.encode())
+**Miner registers all nodes with the validator:**
 
-# Send authentication request
-auth_response = miner_client.authenticate_validator(
-    validator_hotkey=validator_hotkey,
-    signature=signature,
-    nonce=nonce,
-    timestamp=timestamp,
-    target_miner_hotkey=miner_hotkey
-)
+```text
+Miner builds RegisterBidRequest:
+  - miner_hotkey: SS58-encoded Bittensor hotkey
+  - nodes: [{node_id, host, port, username, gpu_category, gpu_count, hourly_rate_cents}, ...]
+  - timestamp: current Unix timestamp
+  - signature: sign("{hotkey}|{timestamp}")
 
-# Verify miner's signature in response
-session_token = auth_response.session_token
+Sends RegisterBid RPC to validator's gRPC endpoint
 ```
 
-#### 4. Node Discovery with SSH Key
+#### 3. Validator Processes Registration
 
-**Validator sends SSH public key:**
+**Validator validates and stores the registration:**
 
-```python
-# Validator's persistent SSH key
-ssh_public_key = load_public_key("~/.basilica/ssh/validator_persistent.pem.pub")
+1. Verifies the miner's signature against its Bittensor hotkey
+2. Checks timestamp freshness (within 300s tolerance)
+3. Validates all node fields (host, port, username, gpu_category, gpu_count, hourly_rate_cents)
+4. Enforces **bid floor** — rejects bids below minimum fraction (default 10%) of the baseline price
+5. Checks **collateral status** — reports whether the miner has sufficient Alpha deposited
+6. Upserts nodes into database; deactivates any previously-registered nodes not in this request
+7. Returns `RegisterBidResponse` with validator's SSH public key, health check interval, and collateral status
 
-# Discover nodes with SSH key
-discovery_response = miner_client.discover_nodes(
-    validator_hotkey=validator_hotkey,
-    validator_public_key=ssh_public_key,
-    signature=signature,
-    nonce=uuid4()
-)
+#### 4. Miner Deploys SSH Key to Nodes
 
-# Response contains node connection details
-nodes = discovery_response.nodes
-# [
-#   NodeConnectionDetails(node_id="a3f2b1c4-...", host="192.168.1.100", port="22", username="basilica"),
-#   NodeConnectionDetails(node_id="b4e3c2d5-...", host="192.168.1.101", port="22", username="basilica")
-# ]
+**Miner deploys the validator's SSH key using exclusive access:**
+
+```text
+For each managed node:
+  1. SSH into node using miner's private key
+  2. Read authorized_keys, filter out existing "validator-" entries
+  3. Append new key: "ssh-ed25519 AAAAC3... validator-{hotkey}"
+  4. Atomically write updated authorized_keys
 ```
 
-#### 5. Miner Deploys SSH Key
+This ensures only the **current** validator has SSH access — previous validator keys are removed.
 
-**Miner automatically deploys validator's SSH key to all nodes:**
+#### 5. Miner Enters Health Check Loop
 
-```bash
-# Miner executes on each node (using miner's SSH key)
-ssh -i ~/.ssh/miner_node_key basilica@192.168.1.100 << 'EOF'
-mkdir -p ~/.ssh
-echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... validator-5G3qVaXz...' >> ~/.ssh/authorized_keys
-chmod 600 ~/.ssh/authorized_keys
-EOF
+**Miner sends periodic HealthCheck RPCs:**
+
+```text
+Every {health_check_interval_secs} seconds (default 60):
+  → Build HealthCheckRequest with miner_hotkey, timestamp, signature
+  → Send HealthCheck RPC to validator
+  → Validator updates last-seen timestamps for all nodes
 ```
 
-#### 6. Validator Connects Directly
+If health checks stop, the validator filters the miner's nodes from bid selection after `health_check_miss_threshold` (default 3) missed intervals.
 
-**Validator establishes direct SSH connection:**
+#### 6. Validator Connects Directly via SSH
+
+**Validator establishes direct SSH connection to nodes:**
 
 ```bash
 # Validator connects to node (using validator's SSH key)
@@ -1188,63 +1271,18 @@ ssh -i ~/.basilica/ssh/validator_persistent.pem basilica@192.168.1.100
 # - Monitor GPU status
 ```
 
-### What Happens Behind the Scenes
-
-**On miner:**
-
-```rust
-// Node manager handles discovery request
-async fn handle_discover_nodes(&self, request: DiscoverNodesRequest) -> Result<Response> {
-    // 1. Validate SSH public key format
-    self.validate_ssh_key(&request.validator_public_key)?;
-
-    // 2. Deploy key to all nodes
-    self.authorize_validator(
-        &request.validator_hotkey,
-        &request.validator_public_key
-    ).await?;
-
-    // 3. Get node list
-    let nodes = self.list_nodes().await?;
-
-    // 4. Return connection details
-    Ok(ListNodeConnectionDetailsResponse { nodes })
-}
-```
-
-**SSH key deployment:**
-
-```rust
-async fn authorize_validator(&self, validator_hotkey: &str, ssh_key: &str) -> Result<()> {
-    for node in self.list_nodes().await? {
-        // Tag key with validator identifier
-        let key_entry = format!("{} validator-{}", ssh_key, validator_hotkey);
-
-        // Deploy via SSH
-        let ssh_command = format!(
-            "mkdir -p ~/.ssh && echo '{}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys",
-            key_entry
-        );
-
-        self.ssh_client.execute_command(&node.connection_details, &ssh_command).await?;
-    }
-    Ok(())
-}
-```
-
 ### Security Considerations
 
-**Validator authentication ensures:**
+**Signature-based authentication ensures:**
 
-- Only validators with valid Bittensor hotkeys can discover nodes
-- Replay attacks prevented by nonce + timestamp
-- Man-in-the-middle attacks prevented by target hotkey verification
-- Mutual authentication (both parties verify each other)
+- Only miners with valid Bittensor hotkeys can register nodes
+- Replay attacks prevented by timestamp freshness checks (default 300s window)
+- Each RPC type has a distinct signature payload to prevent cross-RPC replay
 
 **SSH key management ensures:**
 
-- Only authorized validators' keys deployed to nodes
-- Keys tagged with validator identity for audit/revocation
+- Exclusive access: only the current validator's key is deployed (old keys removed)
+- Keys tagged with `validator-{hotkey}` identifier for auditing
 - Miner controls key deployment (nodes remain passive)
 - Standard SSH security model applies
 
