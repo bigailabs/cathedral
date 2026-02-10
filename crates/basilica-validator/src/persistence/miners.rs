@@ -8,7 +8,6 @@ use crate::persistence::types::{MinerData, MinerHealthData, NodeHealthData, Node
 use crate::persistence::SimplePersistence;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde_json::Value;
 use sqlx::Row;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -69,18 +68,14 @@ impl SimplePersistence {
     ) -> Result<()> {
         let insert_query = r#"
             INSERT INTO miners (
-                id, hotkey, endpoint, verification_score, uptime_percentage,
-                registered_at, updated_at, node_info
-            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
+                id, hotkey, endpoint, updated_at
+            ) VALUES (?, ?, ?, datetime('now'))
         "#;
 
         sqlx::query(insert_query)
             .bind(miner_uid)
             .bind(hotkey)
             .bind(&miner_info.endpoint)
-            .bind(miner_info.verification_score)
-            .bind(100.0)
-            .bind("{}")
             .execute(self.pool())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to insert miner: {}", e))?;
@@ -97,14 +92,13 @@ impl SimplePersistence {
     pub async fn update_miner_data(&self, miner_id: &str, miner_info: &MinerInfo) -> Result<()> {
         let update_query = r#"
             UPDATE miners SET
-                endpoint = ?, verification_score = ?,
+                endpoint = ?,
                 updated_at = datetime('now')
             WHERE id = ?
         "#;
 
         sqlx::query(update_query)
             .bind(&miner_info.endpoint)
-            .bind(miner_info.verification_score)
             .bind(miner_id)
             .execute(self.pool())
             .await
@@ -133,7 +127,7 @@ impl SimplePersistence {
 
             let update_query = r#"
                 UPDATE miners SET
-                    hotkey = ?, endpoint = ?, verification_score = ?,
+                    hotkey = ?, endpoint = ?,
                     updated_at = datetime('now')
                 WHERE id = ?
             "#;
@@ -141,7 +135,6 @@ impl SimplePersistence {
             sqlx::query(update_query)
                 .bind(new_hotkey)
                 .bind(&miner_info.endpoint)
-                .bind(miner_info.verification_score)
                 .bind(miner_uid)
                 .execute(self.pool())
                 .await
@@ -215,7 +208,7 @@ impl SimplePersistence {
             ));
         }
 
-        let old_row = old_miner_row.unwrap();
+        drop(old_miner_row.unwrap());
         debug!("Found old miner record for migration");
 
         debug!(
@@ -262,19 +255,6 @@ impl SimplePersistence {
             true
         };
 
-        let verification_score = old_row
-            .try_get::<f64, _>("verification_score")
-            .unwrap_or(0.0);
-        let uptime_percentage = old_row
-            .try_get::<f64, _>("uptime_percentage")
-            .unwrap_or(100.0);
-        let registered_at = old_row
-            .try_get::<String, _>("registered_at")
-            .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339());
-        let node_info = old_row
-            .try_get::<String, _>("node_info")
-            .unwrap_or_else(|_| "{}".to_string());
-
         debug!("Fetching related node data");
         let get_nodes = "SELECT * FROM miner_nodes WHERE miner_id = ?";
         let nodes = sqlx::query(get_nodes)
@@ -299,19 +279,14 @@ impl SimplePersistence {
             debug!("Creating new miner record: {}", new_miner_uid);
             let insert_new_miner = r#"
                 INSERT INTO miners (
-                    id, hotkey, endpoint, verification_score, uptime_percentage,
-                    registered_at, updated_at, node_info
-                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                    id, hotkey, endpoint, updated_at
+                ) VALUES (?, ?, ?, datetime('now'))
             "#;
 
             sqlx::query(insert_new_miner)
                 .bind(new_miner_uid)
                 .bind(miner_info.hotkey.to_string())
                 .bind(&miner_info.endpoint)
-                .bind(verification_score)
-                .bind(uptime_percentage)
-                .bind(registered_at)
-                .bind(node_info)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create new miner record: {}", e))?;
@@ -527,11 +502,10 @@ impl SimplePersistence {
     ) -> Result<Vec<MinerData>, anyhow::Error> {
         let rows = sqlx::query(
             "SELECT
-                id, hotkey, endpoint, verification_score, uptime_percentage,
-                updated_at, registered_at, node_info,
+                id, hotkey, endpoint, updated_at,
                 (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
              FROM miners
-             ORDER BY registered_at DESC
+             ORDER BY updated_at DESC
              LIMIT ? OFFSET ?",
         )
         .bind(page_size as i64)
@@ -541,18 +515,14 @@ impl SimplePersistence {
 
         let mut miners = Vec::new();
         for row in rows {
-            let node_info_str: String = row.get("node_info");
             let node_count: i64 = row.get("node_count");
             let updated_at_str: String = row.get("updated_at");
-            let registered_at_str: String = row.get("registered_at");
 
             miners.push(MinerData {
                 miner_id: row.get("id"),
                 hotkey: row.get("hotkey"),
                 endpoint: row.get("endpoint"),
                 node_count: node_count as u32,
-                verification_score: row.get("verification_score"),
-                uptime_percentage: row.get("uptime_percentage"),
                 updated_at: chrono::NaiveDateTime::parse_from_str(
                     &updated_at_str,
                     "%Y-%m-%d %H:%M:%S",
@@ -561,17 +531,6 @@ impl SimplePersistence {
                 .or_else(|_| {
                     DateTime::parse_from_rfc3339(&updated_at_str).map(|dt| dt.with_timezone(&Utc))
                 })?,
-                registered_at: chrono::NaiveDateTime::parse_from_str(
-                    &registered_at_str,
-                    "%Y-%m-%d %H:%M:%S",
-                )
-                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
-                .or_else(|_| {
-                    DateTime::parse_from_rfc3339(&registered_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                })?,
-                node_info: serde_json::from_str(&node_info_str)
-                    .unwrap_or(Value::Object(serde_json::Map::new())),
             });
         }
 
@@ -587,7 +546,6 @@ impl SimplePersistence {
         nodes: &[NodeRegistration],
     ) -> Result<(), anyhow::Error> {
         let now = Utc::now().to_rfc3339();
-        let node_info = serde_json::to_string(&nodes)?;
 
         let mut tx = self.pool().begin().await?;
 
@@ -609,15 +567,13 @@ impl SimplePersistence {
         }
 
         sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?)"
+            "INSERT INTO miners (id, hotkey, endpoint, updated_at)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(miner_id)
         .bind(hotkey)
         .bind(endpoint)
         .bind(&now)
-        .bind(&now)
-        .bind(&node_info)
         .execute(&mut *tx)
         .await?;
 
@@ -650,8 +606,7 @@ impl SimplePersistence {
     ) -> Result<Option<MinerData>, anyhow::Error> {
         let row = sqlx::query(
             "SELECT
-                id, hotkey, endpoint, verification_score, uptime_percentage,
-                updated_at, registered_at, node_info,
+                id, hotkey, endpoint, updated_at,
                 (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
              FROM miners
              WHERE id = ?",
@@ -661,18 +616,14 @@ impl SimplePersistence {
         .await?;
 
         if let Some(row) = row {
-            let node_info_str: String = row.get("node_info");
             let node_count: i64 = row.get("node_count");
             let updated_at_str: String = row.get("updated_at");
-            let registered_at_str: String = row.get("registered_at");
 
             Ok(Some(MinerData {
                 miner_id: row.get("id"),
                 hotkey: row.get("hotkey"),
                 endpoint: row.get("endpoint"),
                 node_count: node_count as u32,
-                verification_score: row.get("verification_score"),
-                uptime_percentage: row.get("uptime_percentage"),
                 updated_at: chrono::NaiveDateTime::parse_from_str(
                     &updated_at_str,
                     "%Y-%m-%d %H:%M:%S",
@@ -681,17 +632,6 @@ impl SimplePersistence {
                 .or_else(|_| {
                     DateTime::parse_from_rfc3339(&updated_at_str).map(|dt| dt.with_timezone(&Utc))
                 })?,
-                registered_at: chrono::NaiveDateTime::parse_from_str(
-                    &registered_at_str,
-                    "%Y-%m-%d %H:%M:%S",
-                )
-                .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
-                .or_else(|_| {
-                    DateTime::parse_from_rfc3339(&registered_at_str)
-                        .map(|dt| dt.with_timezone(&Utc))
-                })?,
-                node_info: serde_json::from_str(&node_info_str)
-                    .unwrap_or(Value::Object(serde_json::Map::new())),
             }))
         } else {
             Ok(None)
@@ -766,21 +706,6 @@ impl SimplePersistence {
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;
-            }
-
-            // Also update the node_info JSON in the miners table
-            let node_info = serde_json::to_string(nodes)?;
-            let result =
-                sqlx::query("UPDATE miners SET node_info = ?, updated_at = ? WHERE id = ?")
-                    .bind(&node_info)
-                    .bind(&now)
-                    .bind(miner_id)
-                    .execute(&mut *tx)
-                    .await?;
-
-            if result.rows_affected() == 0 {
-                tx.rollback().await?;
-                return Err(anyhow::anyhow!("Miner not found"));
             }
 
             tx.commit().await?;

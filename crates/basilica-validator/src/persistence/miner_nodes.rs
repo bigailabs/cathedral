@@ -640,8 +640,6 @@ impl SimplePersistence {
                 me.status,
                 me.gpu_count,
                 me.hourly_rate_cents,
-                m.verification_score,
-                m.uptime_percentage,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
@@ -653,7 +651,6 @@ impl SimplePersistence {
                 esp.upload_mbps,
                 esp.test_timestamp
             FROM miner_nodes me
-            JOIN miners m ON me.miner_id = m.id
             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
@@ -767,8 +764,6 @@ impl SimplePersistence {
                 gpu_specs,
                 cpu_specs,
                 location,
-                verification_score: row.get("verification_score"),
-                uptime_percentage: row.get("uptime_percentage"),
                 status: row.get("status"),
                 download_mbps,
                 upload_mbps,

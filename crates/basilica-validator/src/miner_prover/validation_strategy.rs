@@ -1358,17 +1358,13 @@ mod tests {
         let node_id = "node-test-1";
 
         sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, verification_score, uptime_percentage, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO miners (id, hotkey, endpoint, updated_at)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(&miner_id)
         .bind("hotkey")
         .bind("http://127.0.0.1:8091")
-        .bind(0.0)
-        .bind(0.0)
         .bind(Utc::now().to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
-        .bind("{}")
         .execute(persistence.pool())
         .await?;
 

@@ -11,10 +11,6 @@ class AvailabilityInfo:
     """
     @property
     def available_until(self) -> typing.Optional[builtins.str]: ...
-    @property
-    def verification_score(self) -> builtins.float: ...
-    @property
-    def uptime_percentage(self) -> builtins.float: ...
 
 class AvailableNode:
     r"""

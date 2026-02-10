@@ -309,8 +309,8 @@ async fn handle_ls_nodes(
     info!("");
 
     // Format output similar to basilica-cli
-    info!("GPU                                   | Node ID                              | CPU        | RAM    | Score | Uptime");
-    info!("--------------------------------------+--------------------------------------+------------+--------+-------+--------");
+    info!("GPU                                   | Node ID                              | CPU        | RAM");
+    info!("--------------------------------------+--------------------------------------+------------+--------");
 
     for node in response.available_nodes {
         // Format GPU info
@@ -343,7 +343,7 @@ async fn handle_ls_nodes(
         let node_id = node.node.id;
 
         info!(
-            "{:<36} | {:<36} | {:<10} | {:<6} | {:<5.2} | {:<5.1}%",
+            "{:<36} | {:<36} | {:<10} | {:<6}",
             // Truncate GPU info if too long
             if gpu_info.len() > 36 {
                 format!("{}...", &gpu_info[..33])
@@ -353,8 +353,6 @@ async fn handle_ls_nodes(
             node_id,
             format!("{} cores", node.node.cpu_specs.cores),
             format!("{}GB", node.node.cpu_specs.memory_gb),
-            node.availability.verification_score,
-            node.availability.uptime_percentage,
         );
     }
 

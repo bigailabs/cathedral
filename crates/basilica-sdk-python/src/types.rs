@@ -220,18 +220,12 @@ impl From<SdkRentalStatusWithSshResponse> for RentalStatusWithSshResponse {
 pub struct AvailabilityInfo {
     #[pyo3(get)]
     pub available_until: Option<String>,
-    #[pyo3(get)]
-    pub verification_score: f64,
-    #[pyo3(get)]
-    pub uptime_percentage: f64,
 }
 
 impl From<SdkAvailabilityInfo> for AvailabilityInfo {
     fn from(info: SdkAvailabilityInfo) -> Self {
         Self {
             available_until: info.available_until.map(|dt| dt.to_rfc3339()),
-            verification_score: info.verification_score,
-            uptime_percentage: info.uptime_percentage,
         }
     }
 }
