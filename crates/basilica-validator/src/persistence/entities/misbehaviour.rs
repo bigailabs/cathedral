@@ -74,10 +74,8 @@ mod tests {
 pub struct MisbehaviourLog {
     /// Miner UID
     pub miner_uid: u16,
-    /// Executor ID
-    pub executor_id: String,
-    /// GPU UUID that misbehaved
-    pub gpu_uuid: String,
+    /// Node ID that misbehaved
+    pub node_id: String,
     /// When the misbehaviour was recorded
     pub recorded_at: DateTime<Utc>,
     /// Executor endpoint
@@ -96,8 +94,7 @@ impl MisbehaviourLog {
     /// Create a new misbehaviour log entry
     pub fn new(
         miner_uid: u16,
-        executor_id: String,
-        gpu_uuid: String,
+        node_id: String,
         endpoint_executor: String,
         type_of_misbehaviour: MisbehaviourType,
         details: String,
@@ -105,8 +102,7 @@ impl MisbehaviourLog {
         let now = Utc::now();
         Self {
             miner_uid,
-            executor_id,
-            gpu_uuid,
+            node_id,
             recorded_at: now,
             endpoint_executor,
             type_of_misbehaviour,

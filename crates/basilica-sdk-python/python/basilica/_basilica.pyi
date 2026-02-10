@@ -88,6 +88,8 @@ class CpuRentalListItem:
     def accumulated_cost(self) -> typing.Optional[builtins.str]: ...
     @property
     def is_vip(self) -> builtins.bool: ...
+    @property
+    def is_spot(self) -> builtins.bool: ...
 
 class CpuRentalResponse:
     r"""
@@ -107,6 +109,8 @@ class CpuRentalResponse:
     def ssh_command(self) -> typing.Optional[builtins.str]: ...
     @property
     def hourly_cost(self) -> builtins.float: ...
+    @property
+    def is_spot(self) -> builtins.bool: ...
 
 class CpuSpec:
     r"""
@@ -145,6 +149,10 @@ class CreateDeploymentRequest:
     def public(self) -> builtins.bool: ...
     @property
     def storage(self) -> typing.Optional[StorageSpec]: ...
+    @property
+    def topology_spread(self) -> typing.Optional[TopologySpreadConfig]: ...
+    @property
+    def health_check(self) -> typing.Optional[HealthCheckConfig]: ...
     @instance_name.setter
     def instance_name(self, value: builtins.str) -> None: ...
     @image.setter
@@ -167,7 +175,11 @@ class CreateDeploymentRequest:
     def public(self, value: builtins.bool) -> None: ...
     @storage.setter
     def storage(self, value: typing.Optional[StorageSpec]) -> None: ...
-    def __new__(cls, instance_name:builtins.str, image:builtins.str, replicas:builtins.int, port:builtins.int, command:typing.Optional[typing.Sequence[builtins.str]]=None, args:typing.Optional[typing.Sequence[builtins.str]]=None, env:typing.Optional[typing.Mapping[builtins.str, builtins.str]]=None, resources:typing.Optional[ResourceRequirements]=None, ttl_seconds:typing.Optional[builtins.int]=None, public:builtins.bool=True, storage:typing.Optional[StorageSpec]=None) -> CreateDeploymentRequest: ...
+    @topology_spread.setter
+    def topology_spread(self, value: typing.Optional[TopologySpreadConfig]) -> None: ...
+    @health_check.setter
+    def health_check(self, value: typing.Optional[HealthCheckConfig]) -> None: ...
+    def __new__(cls, instance_name:builtins.str, image:builtins.str, replicas:builtins.int, port:builtins.int, command:typing.Optional[typing.Sequence[builtins.str]]=None, args:typing.Optional[typing.Sequence[builtins.str]]=None, env:typing.Optional[typing.Mapping[builtins.str, builtins.str]]=None, resources:typing.Optional[ResourceRequirements]=None, ttl_seconds:typing.Optional[builtins.int]=None, public:builtins.bool=True, storage:typing.Optional[StorageSpec]=None, topology_spread:typing.Optional[TopologySpreadConfig]=None, health_check:typing.Optional[HealthCheckConfig]=None) -> CreateDeploymentRequest: ...
 
 class DeleteDeploymentResponse:
     r"""
@@ -179,6 +191,16 @@ class DeleteDeploymentResponse:
     def state(self) -> builtins.str: ...
     @property
     def message(self) -> builtins.str: ...
+
+class DeleteShareTokenResponse:
+    r"""
+    Response from deleting/revoking a share token
+    """
+    @property
+    def revoked(self) -> builtins.bool:
+        r"""
+        Whether a token was revoked.
+        """
 
 class DeploymentListResponse:
     r"""
@@ -228,6 +250,16 @@ class DeploymentResponse:
     def message(self) -> typing.Optional[builtins.str]: ...
     @property
     def progress(self) -> typing.Optional[DeploymentProgress]: ...
+    @property
+    def share_token(self) -> typing.Optional[builtins.str]:
+        r"""
+        Share token for private deployments (only returned on creation).
+        """
+    @property
+    def share_url(self) -> typing.Optional[builtins.str]:
+        r"""
+        Shareable URL with token query parameter for private deployments.
+        """
 
 class DeploymentSummary:
     r"""
@@ -243,6 +275,11 @@ class DeploymentSummary:
     def replicas(self) -> ReplicaStatus: ...
     @property
     def created_at(self) -> builtins.str: ...
+    @property
+    def public(self) -> builtins.bool:
+        r"""
+        Whether the deployment is publicly accessible.
+        """
 
 class EnvVar:
     r"""
@@ -282,6 +319,8 @@ class GpuOffering:
     def hourly_rate(self) -> builtins.str: ...
     @property
     def availability(self) -> builtins.bool: ...
+    @property
+    def is_spot(self) -> builtins.bool: ...
     @property
     def fetched_at(self) -> builtins.str: ...
 
@@ -335,6 +374,29 @@ class GpuSpec:
     def memory_gb(self) -> builtins.int: ...
     @property
     def compute_capability(self) -> builtins.str: ...
+
+class HealthCheckConfig:
+    r"""
+    Health check configuration for deployments
+    """
+    @property
+    def liveness(self) -> typing.Optional[ProbeConfig]: ...
+    @property
+    def readiness(self) -> typing.Optional[ProbeConfig]: ...
+    @property
+    def startup(self) -> typing.Optional[ProbeConfig]: ...
+    @liveness.setter
+    def liveness(self, value: typing.Optional[ProbeConfig]) -> None: ...
+    @readiness.setter
+    def readiness(self, value: typing.Optional[ProbeConfig]) -> None: ...
+    @startup.setter
+    def startup(self, value: typing.Optional[ProbeConfig]) -> None: ...
+    def __new__(cls, liveness:typing.Optional[ProbeConfig]=None, readiness:typing.Optional[ProbeConfig]=None, startup:typing.Optional[ProbeConfig]=None) -> HealthCheckConfig: ...
+    @staticmethod
+    def vllm_large_model() -> HealthCheckConfig:
+        r"""
+        Create health check config for vLLM large model (1T+ params)
+        """
 
 class HealthCheckResponse:
     r"""
@@ -493,6 +555,56 @@ class PortMappingRequest:
     def protocol(self, value: builtins.str) -> None: ...
     def __new__(cls, container_port:builtins.int, host_port:builtins.int, protocol:typing.Optional[builtins.str]=None) -> PortMappingRequest: ...
 
+class ProbeConfig:
+    r"""
+    HTTP probe configuration for health checks
+    """
+    @property
+    def path(self) -> builtins.str: ...
+    @property
+    def port(self) -> typing.Optional[builtins.int]: ...
+    @property
+    def initial_delay_seconds(self) -> builtins.int: ...
+    @property
+    def period_seconds(self) -> builtins.int: ...
+    @property
+    def timeout_seconds(self) -> builtins.int: ...
+    @property
+    def failure_threshold(self) -> builtins.int: ...
+    @path.setter
+    def path(self, value: builtins.str) -> None: ...
+    @port.setter
+    def port(self, value: typing.Optional[builtins.int]) -> None: ...
+    @initial_delay_seconds.setter
+    def initial_delay_seconds(self, value: builtins.int) -> None: ...
+    @period_seconds.setter
+    def period_seconds(self, value: builtins.int) -> None: ...
+    @timeout_seconds.setter
+    def timeout_seconds(self, value: builtins.int) -> None: ...
+    @failure_threshold.setter
+    def failure_threshold(self, value: builtins.int) -> None: ...
+    def __new__(cls, path:builtins.str, port:typing.Optional[builtins.int]=None, initial_delay_seconds:builtins.int=30, period_seconds:builtins.int=10, timeout_seconds:builtins.int=5, failure_threshold:builtins.int=3) -> ProbeConfig: ...
+    @staticmethod
+    def vllm_large_model() -> ProbeConfig:
+        r"""
+        Create a probe config for vLLM large model loading (30 min startup timeout)
+        """
+
+class RegenerateShareTokenResponse:
+    r"""
+    Response from regenerating a share token for a private deployment
+    """
+    @property
+    def token(self) -> builtins.str:
+        r"""
+        Raw token value. Only returned once, cannot be retrieved later.
+        """
+    @property
+    def share_url(self) -> builtins.str:
+        r"""
+        Full shareable URL with token as query parameter.
+        """
+
 class RentalResponse:
     r"""
     Response from starting a rental
@@ -633,6 +745,8 @@ class SecureCloudRentalListItem:
     def accumulated_cost(self) -> typing.Optional[builtins.str]: ...
     @property
     def is_vip(self) -> builtins.bool: ...
+    @property
+    def is_spot(self) -> builtins.bool: ...
 
 class SecureCloudRentalResponse:
     r"""
@@ -652,6 +766,18 @@ class SecureCloudRentalResponse:
     def ssh_command(self) -> typing.Optional[builtins.str]: ...
     @property
     def hourly_cost(self) -> builtins.float: ...
+    @property
+    def is_spot(self) -> builtins.bool: ...
+
+class ShareTokenStatusResponse:
+    r"""
+    Response for checking share token status
+    """
+    @property
+    def exists(self) -> builtins.bool:
+        r"""
+        Whether a share token exists for this deployment.
+        """
 
 class SshAccess:
     r"""
@@ -795,6 +921,29 @@ class StorageSpec:
     def persistent(self, value: typing.Optional[PersistentStorageSpec]) -> None: ...
     def __new__(cls, persistent:typing.Optional[PersistentStorageSpec]=None) -> StorageSpec: ...
 
+class TopologySpreadConfig:
+    r"""
+    Configuration for pod topology spreading
+    """
+    @property
+    def mode(self) -> SpreadMode: ...
+    @property
+    def max_skew(self) -> builtins.int: ...
+    @property
+    def topology_key(self) -> builtins.str: ...
+    @mode.setter
+    def mode(self, value: SpreadMode) -> None: ...
+    @max_skew.setter
+    def max_skew(self, value: builtins.int) -> None: ...
+    @topology_key.setter
+    def topology_key(self, value: builtins.str) -> None: ...
+    def __new__(cls, mode:SpreadMode=SpreadMode.Preferred, max_skew:builtins.int=1, topology_key:builtins.str='kubernetes.io/hostname') -> TopologySpreadConfig: ...
+    @staticmethod
+    def unique_nodes() -> TopologySpreadConfig:
+        r"""
+        Create config for unique nodes (one pod per node)
+        """
+
 class VolumeMountRequest:
     r"""
     Volume mount request
@@ -813,6 +962,23 @@ class VolumeMountRequest:
     def read_only(self, value: builtins.bool) -> None: ...
     def __new__(cls, host_path:builtins.str, container_path:builtins.str, read_only:builtins.bool=False) -> VolumeMountRequest: ...
 
+class SpreadMode(Enum):
+    r"""
+    Pod spreading mode for controlling how pods are distributed across topology domains
+    """
+    Preferred = ...
+    r"""
+    Best-effort spreading (ScheduleAnyway)
+    """
+    Required = ...
+    r"""
+    Strict spreading (DoNotSchedule)
+    """
+    UniqueNodes = ...
+    r"""
+    One pod per node (pod anti-affinity)
+    """
+
 class StorageBackend(Enum):
     r"""
     Storage backend type
@@ -820,3 +986,4 @@ class StorageBackend(Enum):
     R2 = ...
     S3 = ...
     GCS = ...
+

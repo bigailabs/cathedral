@@ -117,38 +117,11 @@ impl SimplePersistence {
     // Misbehaviour tracking methods for ban system
     // ============================================================================
 
-    /// Get GPU UUID for an executor
-    pub async fn get_gpu_uuid_for_executor(
-        &self,
-        miner_id: &str,
-        executor_id: &str,
-    ) -> Result<Option<String>, anyhow::Error> {
-        let query = r#"
-            SELECT gpu_uuids
-            FROM miner_nodes
-            WHERE miner_id = ? AND node_id = ?
-        "#;
-
-        let result = sqlx::query(query)
-            .bind(miner_id)
-            .bind(executor_id)
-            .fetch_optional(&self.pool)
-            .await?;
-
-        if let Some(row) = result {
-            let gpu_uuids: Option<String> = row.get("gpu_uuids");
-            // Return the first GPU UUID if available
-            Ok(gpu_uuids.and_then(|uuids| uuids.split(',').next().map(|s| s.to_string())))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Get executor endpoint
+    /// Get endpoint for a node
     pub async fn get_executor_endpoint(
         &self,
         miner_id: &str,
-        executor_id: &str,
+        node_id: &str,
     ) -> Result<Option<String>, anyhow::Error> {
         let query = r#"
             SELECT ssh_endpoint
@@ -158,7 +131,7 @@ impl SimplePersistence {
 
         let result = sqlx::query(query)
             .bind(miner_id)
-            .bind(executor_id)
+            .bind(node_id)
             .fetch_optional(&self.pool)
             .await?;
 
@@ -172,15 +145,14 @@ impl SimplePersistence {
     ) -> Result<(), anyhow::Error> {
         let query = r#"
             INSERT INTO executor_misbehaviour_log (
-                miner_uid, executor_id, gpu_uuid, recorded_at,
+                miner_uid, node_id, recorded_at,
                 endpoint_executor, type_of_misbehaviour, details
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
         "#;
 
         sqlx::query(query)
             .bind(log.miner_uid as i64)
-            .bind(&log.executor_id)
-            .bind(&log.gpu_uuid)
+            .bind(&log.node_id)
             .bind(log.recorded_at.to_rfc3339())
             .bind(&log.endpoint_executor)
             .bind(log.type_of_misbehaviour.as_str())
@@ -191,30 +163,30 @@ impl SimplePersistence {
         Ok(())
     }
 
-    /// Get misbehaviour logs for an executor within a time window
+    /// Get misbehaviour logs for a node within a time window
     pub async fn get_misbehaviour_logs(
         &self,
         miner_uid: u16,
-        executor_id: &str,
+        node_id: &str,
         since: Duration,
     ) -> Result<Vec<MisbehaviourLog>, anyhow::Error> {
         let cutoff_time = Utc::now() - since;
 
         let query = r#"
             SELECT
-                miner_uid, executor_id, gpu_uuid, recorded_at,
+                miner_uid, node_id, recorded_at,
                 endpoint_executor, type_of_misbehaviour, details,
                 created_at
             FROM executor_misbehaviour_log
             WHERE miner_uid = ?
-                AND executor_id = ?
+                AND node_id = ?
                 AND recorded_at >= ?
             ORDER BY recorded_at DESC
         "#;
 
         let rows = sqlx::query(query)
             .bind(miner_uid as i64)
-            .bind(executor_id)
+            .bind(node_id)
             .bind(cutoff_time.to_rfc3339())
             .fetch_all(&self.pool)
             .await?;
@@ -222,8 +194,7 @@ impl SimplePersistence {
         let mut logs = Vec::new();
         for row in rows {
             let miner_uid: i64 = row.get("miner_uid");
-            let executor_id: String = row.get("executor_id");
-            let gpu_uuid: String = row.get("gpu_uuid");
+            let node_id: String = row.get("node_id");
             let recorded_at_str: String = row.get("recorded_at");
             let endpoint_executor: String = row.get("endpoint_executor");
             let type_str: String = row.get("type_of_misbehaviour");
@@ -243,8 +214,7 @@ impl SimplePersistence {
 
             logs.push(MisbehaviourLog {
                 miner_uid: miner_uid as u16,
-                executor_id,
-                gpu_uuid,
+                node_id,
                 recorded_at,
                 endpoint_executor,
                 type_of_misbehaviour,
@@ -445,10 +415,14 @@ mod tests {
             .unwrap();
 
         let gpu_uuid = "GPU-550e8400-e29b-41d4-a716-446655440000";
-        sqlx::query("UPDATE miner_nodes SET gpu_uuids = ? WHERE miner_id = ? AND node_id = ?")
+        sqlx::query(
+            "INSERT INTO gpu_uuid_assignments (gpu_uuid, gpu_index, node_id, miner_id, gpu_name, last_verified)
+             VALUES (?, 0, ?, ?, ?, datetime('now'))"
+        )
             .bind(gpu_uuid)
-            .bind("miner1")
             .bind("exec1")
+            .bind("miner1")
+            .bind("NVIDIA A100")
             .execute(&persistence.pool)
             .await
             .unwrap();
@@ -477,7 +451,7 @@ mod tests {
         assert_eq!(count, 2);
 
         let gpu_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM miner_nodes WHERE gpu_uuids = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM gpu_uuid_assignments WHERE gpu_uuid = ?")
                 .bind(gpu_uuid)
                 .fetch_one(&persistence.pool)
                 .await
