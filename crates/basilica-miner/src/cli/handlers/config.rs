@@ -102,8 +102,12 @@ async fn show_config(config: &MinerConfig, show_sensitive: bool) -> Result<()> {
     println!("\n=== Derived Configuration ===");
     println!("Database Type: SQLite");
     println!(
-        "Validator Comms Address: {}:{}",
-        config.validator_comms.host, config.validator_comms.port
+        "Validator Registration Endpoint: {}",
+        config
+            .validator_comms
+            .validator_registration_endpoint
+            .as_deref()
+            .unwrap_or("Not configured")
     );
     println!("Metrics Enabled: {}", config.metrics.enabled);
     println!("Node Count: {}", config.node_management.nodes.len());
@@ -204,18 +208,14 @@ fn validate_database_config(
     }
 }
 
-/// Validate server configuration
+/// Validate validator comms configuration
 fn validate_validator_comms_config(
     config: &crate::config::ValidatorCommsConfig,
-    errors: &mut Vec<String>,
+    _errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
 ) {
-    if config.port < 1024 && config.host != "127.0.0.1" && config.host != "localhost" {
-        errors.push("Using privileged port (<1024) requires elevated permissions".to_string());
-    }
-
-    if config.host == "0.0.0.0" {
-        warnings.push("Binding to 0.0.0.0 exposes service to all network interfaces".to_string());
+    if config.validator_registration_endpoint.is_none() {
+        warnings.push("validator_registration_endpoint not configured - miner will not register with validator".to_string());
     }
 }
 

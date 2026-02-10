@@ -265,7 +265,7 @@ impl SimplePersistence {
         };
 
         sqlx::query(
-            "UPDATE miner_nodes SET gpu_count = ?, status = ?, updated_at = datetime('now')
+            "UPDATE miner_nodes SET gpu_count = ?, status = ?
              WHERE miner_id = ? AND node_id = ?",
         )
         .bind(gpu_count as i32)
@@ -324,6 +324,19 @@ impl SimplePersistence {
         }
 
         Ok(())
+    }
+
+    /// Check whether a node has any entries in gpu_uuid_assignments
+    pub async fn node_has_gpu_assignments(&self, miner_id: &str, node_id: &str) -> Result<bool> {
+        let row = sqlx::query(
+            "SELECT 1 FROM gpu_uuid_assignments WHERE miner_id = ? AND node_id = ? LIMIT 1",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        Ok(row.is_some())
     }
 
     pub async fn get_node_gpu_uuids(&self, miner_id: &str, node_id: &str) -> Result<Vec<String>> {

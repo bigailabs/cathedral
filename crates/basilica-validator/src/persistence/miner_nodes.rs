@@ -13,7 +13,18 @@ use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
+/// A bid candidate sourced directly from `miner_nodes` (epoch-free).
+#[derive(Debug, Clone)]
+pub struct NodeBidCandidate {
+    pub node_id: String,
+    pub miner_id: String,
+    pub miner_hotkey: String,
+    pub miner_uid: i64,
+    pub hourly_rate_cents: u32,
+    pub gpu_count: i64,
+}
+
+pub(crate) fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
     use regex::Regex;
     let re = Regex::new(r"(\d+)GB").unwrap();
     if let Some(captures) = re.captures(gpu_name) {
@@ -116,8 +127,8 @@ impl SimplePersistence {
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, gpu_count,
-                    hourly_rate_cents, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    hourly_rate_cents, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             "#;
 
             let relationship_id = format!("{miner_id}_{node_id}");
@@ -186,7 +197,7 @@ impl SimplePersistence {
                         dup_node_id, dup_id, node_id, miner_id
                     );
 
-                    sqlx::query("UPDATE miner_nodes SET status = 'offline', last_health_check = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+                    sqlx::query("UPDATE miner_nodes SET status = 'offline', last_health_check = datetime('now') WHERE id = ?")
                         .bind(&dup_id)
                         .execute(self.pool())
                         .await
@@ -217,7 +228,7 @@ impl SimplePersistence {
         // Update pricing for all nodes (new and existing) on every discovery
         let result = sqlx::query(
             "UPDATE miner_nodes
-             SET hourly_rate_cents = ?, updated_at = datetime('now')
+             SET hourly_rate_cents = ?
              WHERE miner_id = ? AND node_id = ?",
         )
         .bind(hourly_rate_cents as i64)
@@ -290,55 +301,23 @@ impl SimplePersistence {
             gpu_assignments_cleaned += rows_cleaned;
         }
 
-        let mismatched_gpu_query = r#"
-            SELECT me.node_id, me.miner_id, me.gpu_count, me.status
-            FROM miner_nodes me
-            WHERE me.gpu_count > 0
-            AND NOT EXISTS (
-                SELECT 1 FROM gpu_uuid_assignments ga
-                WHERE ga.node_id = me.node_id AND ga.miner_id = me.miner_id
-            )
-        "#;
+        // Mark nodes offline when health check is stale (>5 minutes)
+        let stale_health_check_result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET status = 'offline'
+            WHERE status IN ('online', 'verified')
+            AND last_health_check < datetime('now', '-5 minutes')
+            "#,
+        )
+        .execute(self.pool())
+        .await?;
 
-        let mismatched_nodes = sqlx::query(mismatched_gpu_query)
-            .fetch_all(self.pool())
-            .await?;
-
-        for row in mismatched_nodes {
-            let node_id: String = row.try_get("node_id")?;
-            let miner_id: String = row.try_get("miner_id")?;
-            let gpu_count: i32 = row.try_get("gpu_count")?;
-            let status: String = row.try_get("status")?;
-
-            warn!(
-                "Node {} (miner: {}) claims {} GPUs but has no assignments, status: {}. Resetting GPU count to 0",
-                node_id, miner_id, gpu_count, status
+        if stale_health_check_result.rows_affected() > 0 {
+            info!(
+                "Marked {} nodes offline due to stale health check (>5 minutes)",
+                stale_health_check_result.rows_affected()
             );
-
-            sqlx::query(
-                "UPDATE miner_nodes SET gpu_count = 0, updated_at = datetime('now')
-                 WHERE node_id = ? AND miner_id = ?",
-            )
-            .bind(&node_id)
-            .bind(&miner_id)
-            .execute(self.pool())
-            .await?;
-
-            if status == "online" || status == "verified" {
-                sqlx::query(
-                    "UPDATE miner_nodes SET status = 'offline', updated_at = datetime('now')
-                     WHERE node_id = ? AND miner_id = ?",
-                )
-                .bind(&node_id)
-                .bind(&miner_id)
-                .execute(self.pool())
-                .await?;
-
-                info!(
-                    "Marked node {} as offline (claimed {} GPUs but has 0 assignments)",
-                    node_id, gpu_count
-                );
-            }
         }
 
         let stale_gpu_cleanup_query = r#"
@@ -350,10 +329,7 @@ impl SimplePersistence {
                     WHERE me.node_id = gpu_uuid_assignments.node_id
                     AND me.miner_id = gpu_uuid_assignments.miner_id
                     AND me.status = 'offline'
-                    AND (
-                        me.last_health_check < datetime('now', '-2 hours')
-                        OR (me.last_health_check IS NULL AND me.updated_at < datetime('now', '-2 hours'))
-                    )
+                    AND me.last_health_check < datetime('now', '-2 hours')
                 )
             )
         "#;
@@ -388,10 +364,7 @@ impl SimplePersistence {
             FROM miner_nodes me
             LEFT JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
             WHERE me.status = 'offline'
-            AND (
-                datetime(me.last_health_check) < datetime('now', '-{cleanup_minutes} minutes')
-                OR (me.last_health_check IS NULL AND datetime(me.updated_at) < datetime('now', '-{cleanup_minutes} minutes'))
-            )
+            AND datetime(me.last_health_check) < datetime('now', '-{cleanup_minutes} minutes')
             GROUP BY me.node_id, me.miner_id
             "#
         );
@@ -496,12 +469,9 @@ impl SimplePersistence {
             r#"
             DELETE FROM miner_nodes
             WHERE status = 'offline'
-            AND (
-                datetime(last_health_check) < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
-            )
+            AND datetime(last_health_check) < datetime('now', '-{} minutes')
             "#,
-            cleanup_minutes, cleanup_minutes
+            cleanup_minutes
         );
 
         info!(
@@ -514,12 +484,9 @@ impl SimplePersistence {
             SELECT node_id, miner_id
             FROM miner_nodes
             WHERE status = 'offline'
-            AND (
-                datetime(last_health_check) < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
-            )
+            AND datetime(last_health_check) < datetime('now', '-{} minutes')
             "#,
-            cleanup_minutes, cleanup_minutes
+            cleanup_minutes
         );
 
         let mut stale_tx = self.pool().begin().await?;
@@ -651,15 +618,13 @@ impl SimplePersistence {
         min_gpu_count: Option<u32>,
         location: Option<basilica_common::LocationProfile>,
     ) -> Result<Vec<AvailableNodeData>, anyhow::Error> {
-        let mut query_str = String::from(
+        let mut query_builder = sqlx::QueryBuilder::new(
             "SELECT
                 me.node_id,
                 me.miner_id,
                 me.status,
                 me.gpu_count,
                 me.hourly_rate_cents,
-                m.verification_score,
-                m.uptime_percentage,
                 GROUP_CONCAT(gua.gpu_name) as gpu_names,
                 ehp.cpu_model,
                 ehp.cpu_cores,
@@ -671,37 +636,45 @@ impl SimplePersistence {
                 esp.upload_mbps,
                 esp.test_timestamp
             FROM miner_nodes me
-            JOIN miners m ON me.miner_id = m.id
-            LEFT JOIN rentals r ON me.node_id = r.node_id
-                AND r.miner_id = me.miner_id
-                AND r.state IN ('Active', 'Provisioning', 'active', 'provisioning')
             LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
             LEFT JOIN node_hardware_profile ehp ON me.node_id = ehp.node_id AND me.miner_id = 'miner_' || ehp.miner_uid
             LEFT JOIN node_network_profile enp ON me.node_id = enp.node_id AND me.miner_id = 'miner_' || enp.miner_uid
             LEFT JOIN node_speedtest_profile esp ON me.node_id = esp.node_id AND me.miner_id = 'miner_' || esp.miner_uid
-            WHERE r.id IS NULL
+            WHERE me.active_rental_id IS NULL
                 AND (me.status IS NULL OR me.status != 'offline')",
         );
 
         if let Some(ref loc) = location {
             if let Some(ref country) = loc.country {
-                query_str.push_str(&format!(" AND LOWER(enp.country) = LOWER('{}')", country));
+                query_builder
+                    .push(" AND LOWER(enp.country) = LOWER(")
+                    .push_bind(country)
+                    .push(")");
             }
             if let Some(ref region) = loc.region {
-                query_str.push_str(&format!(" AND LOWER(enp.region) = LOWER('{}')", region));
+                query_builder
+                    .push(" AND LOWER(enp.region) = LOWER(")
+                    .push_bind(region)
+                    .push(")");
             }
             if let Some(ref city) = loc.city {
-                query_str.push_str(&format!(" AND LOWER(enp.city) = LOWER('{}')", city));
+                query_builder
+                    .push(" AND LOWER(enp.city) = LOWER(")
+                    .push_bind(city)
+                    .push(")");
             }
         }
 
-        query_str.push_str(" GROUP BY me.node_id");
+        query_builder.push(" GROUP BY me.node_id");
 
         if let Some(min_count) = min_gpu_count {
-            query_str.push_str(&format!(" HAVING COUNT(gua.gpu_uuid) >= {}", min_count));
+            query_builder
+                .push(" HAVING COUNT(gua.gpu_uuid) >= ")
+                .push_bind(min_count);
         }
 
-        let rows = sqlx::query(&query_str).fetch_all(self.pool()).await?;
+        // TODO: Consider adding a functional index for LOWER(enp.country/region/city) if this query becomes hot.
+        let rows = query_builder.build().fetch_all(self.pool()).await?;
 
         let mut nodes = Vec::new();
         for row in rows {
@@ -776,8 +749,6 @@ impl SimplePersistence {
                 gpu_specs,
                 cpu_specs,
                 location,
-                verification_score: row.get("verification_score"),
-                uptime_percentage: row.get("uptime_percentage"),
                 status: row.get("status"),
                 download_mbps,
                 upload_mbps,
@@ -787,6 +758,222 @@ impl SimplePersistence {
         }
 
         Ok(nodes)
+    }
+
+    /// Get available nodes for a specific miner, filtered by GPU type/count and freshness.
+    pub async fn get_available_nodes_for_miner(
+        &self,
+        miner_id: &str,
+        gpu_category: &str,
+        min_gpu_count: u32,
+        freshness_secs: u64,
+    ) -> Result<Vec<String>, anyhow::Error> {
+        let query = format!(
+            r#"
+            SELECT
+                me.node_id,
+                GROUP_CONCAT(gua.gpu_name) as gpu_names
+            FROM miner_nodes me
+            LEFT JOIN gpu_uuid_assignments gua ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+            WHERE me.active_rental_id IS NULL
+                AND me.miner_id = ?
+                AND (me.status IS NULL OR me.status != 'offline')
+                AND me.bid_active = 1
+                AND me.last_health_check IS NOT NULL
+                AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
+            GROUP BY me.node_id
+            HAVING COUNT(gua.gpu_uuid) >= ?
+            "#
+        );
+
+        let rows = sqlx::query(&query)
+            .bind(miner_id)
+            .bind(min_gpu_count as i64)
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut nodes = Vec::new();
+        for row in rows {
+            let gpu_names: Option<String> = row.get("gpu_names");
+            if let Some(names) = gpu_names {
+                if !names.is_empty() {
+                    let matches_type = names
+                        .split(',')
+                        .any(|name| name.to_lowercase().contains(&gpu_category.to_lowercase()));
+                    if !matches_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            let node_id: String = row.get("node_id");
+            nodes.push(node_id);
+        }
+
+        Ok(nodes)
+    }
+
+    /// Get bid candidates across all miners, filtered by GPU category/count and freshness.
+    /// Returns nodes ordered by hourly_rate_cents ASC (cheapest first).
+    pub async fn get_node_bid_candidates(
+        &self,
+        gpu_category: &str,
+        min_gpu_count: u32,
+        freshness_secs: u64,
+        max_hourly_rate_cents: u32,
+        limit: u32,
+    ) -> Result<Vec<NodeBidCandidate>, anyhow::Error> {
+        let query = format!(
+            r#"
+            SELECT
+                me.node_id,
+                me.miner_id,
+                m.hotkey  AS miner_hotkey,
+                CAST(REPLACE(m.id, 'miner_', '') AS INTEGER) AS miner_uid,
+                me.hourly_rate_cents,
+                COUNT(DISTINCT gua.gpu_uuid) AS gpu_count,
+                GROUP_CONCAT(gua.gpu_name) AS gpu_names
+            FROM miner_nodes me
+            JOIN miners m ON me.miner_id = m.id
+            LEFT JOIN gpu_uuid_assignments gua
+                ON me.node_id = gua.node_id AND gua.miner_id = me.miner_id
+            WHERE me.active_rental_id IS NULL
+                AND (me.status IS NULL OR me.status != 'offline')
+                AND me.bid_active = 1
+                AND me.last_health_check IS NOT NULL
+                AND datetime(me.last_health_check) >= datetime('now', '-{freshness_secs} seconds')
+                AND me.hourly_rate_cents IS NOT NULL
+                AND me.hourly_rate_cents <= ?
+            GROUP BY me.node_id, me.miner_id, m.hotkey, m.id, me.hourly_rate_cents
+            HAVING COUNT(DISTINCT gua.gpu_uuid) >= ?
+            ORDER BY me.hourly_rate_cents ASC
+            LIMIT ?
+            "#
+        );
+
+        let rows = sqlx::query(&query)
+            .bind(max_hourly_rate_cents as i64)
+            .bind(min_gpu_count as i64)
+            .bind(limit as i64)
+            .fetch_all(self.pool())
+            .await?;
+
+        let mut candidates = Vec::new();
+        for row in rows {
+            let gpu_names: Option<String> = row.get("gpu_names");
+            if let Some(names) = &gpu_names {
+                if !names.is_empty() {
+                    let matches_type = names
+                        .split(',')
+                        .any(|name| name.to_lowercase().contains(&gpu_category.to_lowercase()));
+                    if !matches_type {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+
+            candidates.push(NodeBidCandidate {
+                node_id: row.get("node_id"),
+                miner_id: row.get("miner_id"),
+                miner_hotkey: row.get("miner_hotkey"),
+                miner_uid: row.get("miner_uid"),
+                hourly_rate_cents: row.get::<i64, _>("hourly_rate_cents") as u32,
+                gpu_count: row.get("gpu_count"),
+            });
+        }
+
+        Ok(candidates)
+    }
+
+    // =========================================================================
+    // Node Claim/Release (active_rental_id lifecycle)
+    // =========================================================================
+    //
+    // The `active_rental_id` column on `miner_nodes` tracks whether a node is
+    // currently claimed for a rental. When NULL the node is available; when set
+    // it holds the rental_id that owns the node.
+    //
+    // INVARIANT: active_rental_id MUST be cleared on EVERY termination path:
+    //   1. stop_rental()                    -- user stops rental
+    //   2. deploy_container failure         -- container deploy fails
+    //   3. finalize_rental failure          -- DB save fails after deploy
+    //   4. ensure_not_banned failure        -- node is banned
+    //   5. require_ssh_endpoint failure     -- SSH endpoint missing
+    //   6. require_node_details failure     -- node details missing
+    //   7. ensure_recent_validation failure -- validation too old
+    //   8. health check timeout             -- monitoring.rs
+    //   9. health check error               -- monitoring.rs
+    //  10. container unhealthy              -- monitoring.rs
+    //  11. restart failure                  -- restart_rental() fails
+    //
+    // There is NO TTL. If release_node is not called, the node stays claimed
+    // forever. This is by design to avoid silent data corruption.
+
+    /// Atomically claim a node for a rental by setting active_rental_id.
+    /// Returns true if the claim succeeded (node was available), false if
+    /// another process already claimed it.
+    ///
+    /// The WHERE clause `active_rental_id IS NULL` guarantees that two
+    /// concurrent callers cannot both succeed — SQLite serialises writes,
+    /// so at most one UPDATE will find the row still NULL.
+    pub async fn claim_node(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+        rental_id: &str,
+    ) -> Result<bool, anyhow::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET active_rental_id = ?
+            WHERE node_id = ? AND miner_id = ?
+              AND active_rental_id IS NULL
+            "#,
+        )
+        .bind(rental_id)
+        .bind(node_id)
+        .bind(miner_id)
+        .execute(self.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Release a node claim by clearing active_rental_id.
+    /// Only clears if the current active_rental_id matches the given rental_id,
+    /// preventing one process from accidentally clearing another's claim.
+    ///
+    /// See the INVARIANT comment above for the full list of paths that must
+    /// call this function.
+    pub async fn release_node(
+        &self,
+        node_id: &str,
+        miner_id: &str,
+        rental_id: &str,
+    ) -> Result<bool, anyhow::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET active_rental_id = NULL
+            WHERE node_id = ? AND miner_id = ?
+              AND active_rental_id = ?
+            "#,
+        )
+        .bind(node_id)
+        .bind(miner_id)
+        .bind(rental_id)
+        .execute(self.pool())
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Get miner nodes
@@ -1175,7 +1362,7 @@ impl SimplePersistence {
             FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
-            AND (last_health_check IS NULL OR last_health_check > datetime('now', '-1 hour'))
+            AND last_health_check > datetime('now', '-5 minutes')
         "#;
 
         let rows = sqlx::query(query)
@@ -1212,5 +1399,379 @@ impl SimplePersistence {
         .await?;
 
         Ok(rate_cents.map(|v| v as u32))
+    }
+
+    // =========================================================================
+    // Miner Registration (miner→validator flow) methods
+    // =========================================================================
+
+    /// Upsert a node from RegisterBid request.
+    /// Creates the node if it doesn't exist, updates it if it does.
+    /// Returns true if the node was created (new), false if updated (existing).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_registered_node(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+        host: &str,
+        port: u32,
+        username: &str,
+        gpu_category: &str,
+        gpu_count: u32,
+        hourly_rate_cents: u32,
+    ) -> Result<bool> {
+        // Build ssh_endpoint in the standard format: user@host:port
+        let ssh_endpoint = format!("{}@{}:{}", username, host, port);
+        let relationship_id = format!("{}_{}", miner_id, node_id);
+
+        // Check if this ssh_endpoint is already used by a different miner
+        let existing_miner: Option<String> = sqlx::query_scalar(
+            "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ? LIMIT 1",
+        )
+        .bind(&ssh_endpoint)
+        .bind(miner_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        if let Some(other_miner) = existing_miner {
+            anyhow::bail!(
+                "SSH endpoint {} is already registered to {}",
+                ssh_endpoint,
+                other_miner
+            );
+        }
+
+        // Check if this node already exists for this miner
+        let existing_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_one(self.pool())
+        .await?;
+
+        if existing_count == 0 {
+            // Insert new node
+            sqlx::query(
+                r#"
+                INSERT INTO miner_nodes (
+                    id, miner_id, node_id, ssh_endpoint, gpu_count,
+                    hourly_rate_cents, status, bid_active, last_health_check, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
+                "#,
+            )
+            .bind(&relationship_id)
+            .bind(miner_id)
+            .bind(node_id)
+            .bind(&ssh_endpoint)
+            .bind(gpu_count as i64)
+            .bind(hourly_rate_cents as i64)
+            .execute(self.pool())
+            .await?;
+
+            info!(
+                miner_id = miner_id,
+                node_id = node_id,
+                ssh_endpoint = ssh_endpoint,
+                gpu_category = gpu_category,
+                gpu_count = gpu_count,
+                hourly_rate_cents = hourly_rate_cents,
+                "Registered new node via RegisterBid"
+            );
+            Ok(true)
+        } else {
+            // Update existing node
+            sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET ssh_endpoint = ?,
+                    gpu_count = ?,
+                    hourly_rate_cents = ?,
+                    status = 'online',
+                    bid_active = 1,
+                    last_health_check = datetime('now')
+                WHERE miner_id = ? AND node_id = ?
+                "#,
+            )
+            .bind(&ssh_endpoint)
+            .bind(gpu_count as i64)
+            .bind(hourly_rate_cents as i64)
+            .bind(miner_id)
+            .bind(node_id)
+            .execute(self.pool())
+            .await?;
+
+            info!(
+                miner_id = miner_id,
+                node_id = node_id,
+                hourly_rate_cents = hourly_rate_cents,
+                "Updated existing node via RegisterBid"
+            );
+            Ok(false)
+        }
+    }
+
+    /// Update last_health_check timestamp for nodes (HealthCheck RPC).
+    /// If node_ids is empty, updates all nodes for the miner.
+    /// Returns the number of nodes updated.
+    pub async fn update_nodes_health_check(
+        &self,
+        miner_id: &str,
+        node_ids: &[String],
+    ) -> Result<u32> {
+        let result = if node_ids.is_empty() {
+            // Update all nodes for this miner
+            sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET last_health_check = datetime('now'),
+                    status = CASE WHEN status IN ('offline', 'unknown') THEN 'online' ELSE status END
+                WHERE miner_id = ?
+                "#,
+            )
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?
+        } else {
+            // Build query with IN clause for specific node_ids
+            // Using a transaction to update each node
+            let mut count = 0u64;
+            for node_id in node_ids {
+                let r = sqlx::query(
+                    r#"
+                    UPDATE miner_nodes
+                    SET last_health_check = datetime('now'),
+                        status = CASE WHEN status IN ('offline', 'unknown') THEN 'online' ELSE status END
+                    WHERE miner_id = ? AND node_id = ?
+                    "#,
+                )
+                .bind(miner_id)
+                .bind(node_id)
+                .execute(self.pool())
+                .await?;
+                count += r.rows_affected();
+            }
+            return Ok(count as u32);
+        };
+
+        Ok(result.rows_affected() as u32)
+    }
+
+    /// Update hourly rate for a specific node (UpdateBid RPC).
+    /// Returns true if the node was found and updated.
+    pub async fn update_node_hourly_rate(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+        hourly_rate_cents: u32,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE miner_nodes
+            SET hourly_rate_cents = ?
+            WHERE miner_id = ? AND node_id = ?
+            "#,
+        )
+        .bind(hourly_rate_cents as i64)
+        .bind(miner_id)
+        .bind(node_id)
+        .execute(self.pool())
+        .await?;
+
+        if result.rows_affected() > 0 {
+            info!(
+                miner_id = miner_id,
+                node_id = node_id,
+                hourly_rate_cents = hourly_rate_cents,
+                "Updated node price via UpdateBid"
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Remove nodes from availability (RemoveBid RPC).
+    /// If node_ids is empty, removes all nodes for the miner.
+    /// Returns the number of nodes removed (marked offline).
+    pub async fn remove_registered_nodes(
+        &self,
+        miner_id: &str,
+        node_ids: &[String],
+    ) -> Result<u32> {
+        let result = if node_ids.is_empty() {
+            // Mark all nodes for this miner as offline and bid-inactive
+            sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET status = 'offline',
+                    bid_active = 0
+                WHERE miner_id = ?
+                "#,
+            )
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?
+        } else {
+            // Mark specific nodes as offline and bid-inactive
+            let mut count = 0u64;
+            for node_id in node_ids {
+                let r = sqlx::query(
+                    r#"
+                    UPDATE miner_nodes
+                    SET status = 'offline',
+                        bid_active = 0
+                    WHERE miner_id = ? AND node_id = ?
+                    "#,
+                )
+                .bind(miner_id)
+                .bind(node_id)
+                .execute(self.pool())
+                .await?;
+                count += r.rows_affected();
+            }
+            return Ok(count as u32);
+        };
+
+        let removed = result.rows_affected() as u32;
+        if removed > 0 {
+            info!(
+                miner_id = miner_id,
+                nodes_removed = removed,
+                "Removed nodes via RemoveBid"
+            );
+        }
+        Ok(removed)
+    }
+
+    /// Get nodes with fresh health checks for a miner.
+    /// Used by bid selection to filter available nodes.
+    pub async fn get_healthy_nodes_for_miner(
+        &self,
+        miner_id: &str,
+        health_check_ttl_secs: u64,
+    ) -> Result<Vec<String>> {
+        let query = format!(
+            r#"
+            SELECT node_id
+            FROM miner_nodes
+            WHERE miner_id = ?
+              AND status IN ('online', 'verified')
+              AND bid_active = 1
+              AND last_health_check IS NOT NULL
+              AND datetime(last_health_check) >= datetime('now', '-{} seconds')
+            "#,
+            health_check_ttl_secs
+        );
+
+        let rows = sqlx::query(&query)
+            .bind(miner_id)
+            .fetch_all(self.pool())
+            .await?;
+
+        let nodes: Vec<String> = rows.iter().map(|r| r.get("node_id")).collect();
+        Ok(nodes)
+    }
+
+    /// Check if a miner has any registered nodes (regardless of health check status).
+    pub async fn miner_has_registered_nodes(&self, miner_id: &str) -> Result<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ?")
+            .bind(miner_id)
+            .fetch_one(self.pool())
+            .await?;
+        Ok(count > 0)
+    }
+
+    /// Deactivate bids for nodes not included in the latest RegisterBid.
+    /// Sets bid_active = false for nodes belonging to this miner that are
+    /// NOT in the provided active_node_ids list.
+    /// Active rentals are NOT affected — only future bid eligibility changes.
+    pub async fn deactivate_missing_bids(
+        &self,
+        miner_id: &str,
+        active_node_ids: &[String],
+    ) -> Result<u32> {
+        if active_node_ids.is_empty() {
+            // No nodes in the request — deactivate all for this miner
+            let result = sqlx::query(
+                r#"
+                UPDATE miner_nodes
+                SET bid_active = 0
+                WHERE miner_id = ?
+                "#,
+            )
+            .bind(miner_id)
+            .execute(self.pool())
+            .await?;
+
+            let deactivated = result.rows_affected() as u32;
+            if deactivated > 0 {
+                info!(
+                    miner_id = miner_id,
+                    deactivated = deactivated,
+                    "Deactivated all bids for miner (empty node list)"
+                );
+            }
+            return Ok(deactivated);
+        }
+
+        // Deactivate nodes NOT in the active list
+        // Build a parameterized NOT IN query
+        let placeholders: Vec<&str> = active_node_ids.iter().map(|_| "?").collect();
+        let in_clause = placeholders.join(", ");
+        let query = format!(
+            r#"
+            UPDATE miner_nodes
+            SET bid_active = 0
+            WHERE miner_id = ? AND node_id NOT IN ({})
+            "#,
+            in_clause
+        );
+
+        let mut q = sqlx::query(&query).bind(miner_id);
+        for node_id in active_node_ids {
+            q = q.bind(node_id);
+        }
+        let result = q.execute(self.pool()).await?;
+        let count = result.rows_affected();
+
+        if count > 0 {
+            info!(
+                miner_id = miner_id,
+                deactivated = count,
+                active_count = active_node_ids.len(),
+                "Deactivated bids for nodes not in RegisterBid"
+            );
+        }
+
+        Ok(count as u32)
+    }
+
+    /// Get count of nodes with stale health checks for a miner.
+    /// Used for monitoring/debugging.
+    pub async fn get_stale_node_count(
+        &self,
+        miner_id: &str,
+        health_check_ttl_secs: u64,
+    ) -> Result<u32> {
+        let query = format!(
+            r#"
+            SELECT COUNT(*) as count
+            FROM miner_nodes
+            WHERE miner_id = ?
+              AND (
+                last_health_check IS NULL
+                OR datetime(last_health_check) < datetime('now', '-{} seconds')
+              )
+            "#,
+            health_check_ttl_secs
+        );
+
+        let count: i64 = sqlx::query_scalar(&query)
+            .bind(miner_id)
+            .fetch_one(self.pool())
+            .await?;
+
+        Ok(count as u32)
     }
 }

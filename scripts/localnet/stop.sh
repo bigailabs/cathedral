@@ -50,7 +50,6 @@ docker compose down 2>/dev/null || true
 docker compose --profile network down 2>/dev/null || true
 docker compose --profile validator down 2>/dev/null || true
 docker compose --profile miner down 2>/dev/null || true
-docker compose --profile monitoring down 2>/dev/null || true
 
 if [ "$CLEAN" = true ]; then
     echo ""

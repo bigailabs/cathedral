@@ -5,7 +5,7 @@ use crate::error::CliError;
 use crate::progress::{complete_spinner_and_clear, complete_spinner_error, create_spinner};
 use basilica_common::types::ComputeCategory;
 use basilica_common::types::GpuOffering;
-use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, NodeSelection, RentalState};
+use basilica_sdk::types::{ListAvailableNodesQuery, ListRentalsQuery, RentalState};
 use basilica_sdk::{ApiError, BasilicaClient};
 use basilica_validator::api::types::AvailableNode;
 use color_eyre::eyre::{eyre, Result};
@@ -396,12 +396,24 @@ pub async fn resolve_target_rental_unified(
     Ok((selected.rental_id.clone(), selected.compute_type))
 }
 
+/// Community cloud GPU selection for rental
+pub struct CommunityCloudSelection {
+    /// GPU category (e.g., "H100", "A100")
+    pub gpu_category: String,
+    /// Number of GPUs
+    pub gpu_count: u32,
+    /// Min GPU memory in GB (optional)
+    pub min_memory_gb: Option<u32>,
+    /// Selected node's per-GPU hourly rate in cents, if available
+    pub derived_max_hourly_rate_cents: Option<u32>,
+}
+
 /// Represents a selected offering from either cloud type
 pub enum SelectedOffering {
     /// Secure cloud GPU offering (from aggregator)
     SecureCloud(GpuOffering),
-    /// Community cloud offering (node selection)
-    CommunityCloud(NodeSelection),
+    /// Community cloud offering (GPU category and count for bid-based selection)
+    CommunityCloud(CommunityCloudSelection),
     /// Secure cloud CPU-only offering (no GPU)
     CpuOnly(basilica_sdk::types::CpuOffering),
 }
@@ -789,8 +801,33 @@ pub async fn resolve_offering_unified(
                 .community_node
                 .clone()
                 .ok_or_else(|| eyre!("Internal error: community cloud node data missing"))?;
-            Ok(SelectedOffering::CommunityCloud(NodeSelection::NodeId {
-                node_id: node.node.id,
+
+            // Extract GPU category and count from the selected node
+            let gpu_category = node
+                .node
+                .gpu_specs
+                .first()
+                .map(|gpu| {
+                    use basilica_common::types::GpuCategory;
+                    use std::str::FromStr;
+                    GpuCategory::from_str(&gpu.name)
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|_| gpu.name.clone())
+                })
+                .ok_or_else(|| eyre!("Selected node has no GPU specs"))?;
+
+            let gpu_count = node.node.gpu_specs.len() as u32;
+            let min_memory_gb = node.node.gpu_specs.first().map(|gpu| gpu.memory_gb);
+            let derived_max_hourly_rate_cents = node
+                .node
+                .hourly_rate_cents
+                .and_then(|rate_cents| u32::try_from(rate_cents).ok());
+
+            Ok(SelectedOffering::CommunityCloud(CommunityCloudSelection {
+                gpu_category,
+                gpu_count,
+                min_memory_gb,
+                derived_max_hourly_rate_cents,
             }))
         }
     }

@@ -278,6 +278,21 @@ impl ValidationStrategySelector {
             return Ok(true);
         }
 
+        // If node has no GPU assignments, it needs full validation
+        if !self
+            .persistence
+            .node_has_gpu_assignments(miner_id, node_id)
+            .await
+            .unwrap_or(false)
+        {
+            info!(
+                node_id = node_id,
+                miner_id = miner_id,
+                "[EVAL_FLOW] Binary validation needed - node has no GPU UUID assignments"
+            );
+            return Ok(true);
+        }
+
         let last_validation = self.get_last_binary_validation(node_id, miner_uid).await?;
 
         match last_validation {
@@ -1343,25 +1358,20 @@ mod tests {
         let node_id = "node-test-1";
 
         sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, verification_score, uptime_percentage, last_seen, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO miners (id, hotkey, endpoint, updated_at)
+             VALUES (?, ?, ?, ?)",
         )
         .bind(&miner_id)
         .bind("hotkey")
         .bind("http://127.0.0.1:8091")
-        .bind(0.0)
-        .bind(0.0)
         .bind(Utc::now().to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
-        .bind("{}")
         .execute(persistence.pool())
         .await?;
 
         // Seed miner_nodes so status check doesn't force full validation by itself.
         sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, hourly_rate_cents, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, hourly_rate_cents, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         )
         .bind(format!("{miner_id}_{node_id}"))
         .bind(&miner_id)

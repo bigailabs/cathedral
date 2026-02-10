@@ -138,7 +138,8 @@ impl BasilicaClient {
         let client = Arc::clone(&self.inner);
 
         // Convert Python request to SDK request
-        let request = request.into();
+        let request = basilica_sdk::types::StartRentalApiRequest::try_from(request)
+            .map_err(PyValueError::new_err)?;
 
         let response = py
             .detach(|| {
@@ -628,20 +629,6 @@ impl BasilicaClient {
     }
 }
 
-/// Helper function to create node selection by ID
-#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
-#[pyfunction]
-fn node_by_id(node_id: String) -> types::NodeSelection {
-    types::NodeSelection::NodeId { node_id }
-}
-
-/// Helper function to create node selection by GPU requirements (exact count)
-#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
-#[pyfunction]
-fn node_by_gpu(gpu_requirements: types::GpuRequirements) -> types::NodeSelection {
-    types::NodeSelection::ExactGpuConfiguration { gpu_requirements }
-}
-
 /// Python module for Basilica SDK
 #[pymodule]
 fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -679,7 +666,6 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Request types
     m.add_class::<types::StartRentalApiRequest>()?;
-    m.add_class::<types::NodeSelection>()?;
     m.add_class::<types::GpuRequirements>()?;
     m.add_class::<types::PortMappingRequest>()?;
     m.add_class::<types::ResourceRequirementsRequest>()?;
@@ -729,10 +715,6 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::StopSecureCloudRentalResponse>()?;
     m.add_class::<types::SecureCloudRentalListItem>()?;
     m.add_class::<types::ListSecureCloudRentalsResponse>()?;
-
-    // Helper functions
-    m.add_function(wrap_pyfunction!(node_by_id, m)?)?;
-    m.add_function(wrap_pyfunction!(node_by_gpu, m)?)?;
 
     Ok(())
 }

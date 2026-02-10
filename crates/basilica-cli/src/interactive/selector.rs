@@ -2,14 +2,24 @@
 
 use crate::error::Result;
 use basilica_common::types::GpuCategory;
-use basilica_sdk::types::{ApiRentalListItem, NodeSelection};
-use basilica_sdk::GpuRequirements;
+use basilica_sdk::types::ApiRentalListItem;
 use basilica_validator::api::types::AvailableNode;
 use color_eyre::eyre::eyre;
 use console::Term;
 use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect, Select};
 use std::collections::HashMap;
 use std::str::FromStr;
+
+/// GPU selection result from the interactive selector
+#[derive(Debug, Clone)]
+pub struct GpuSelection {
+    /// GPU category (e.g., "H100", "A100")
+    pub gpu_category: String,
+    /// Number of GPUs
+    pub gpu_count: u32,
+    /// Minimum GPU memory in GB
+    pub min_memory_gb: Option<u32>,
+}
 
 /// Interactive selector for CLI operations
 pub struct InteractiveSelector {
@@ -25,14 +35,14 @@ impl InteractiveSelector {
         Self { theme }
     }
 
-    /// Let user select an node from available options
+    /// Let user select a GPU configuration from available nodes
     pub fn select_node(
         &self,
         nodes: &[AvailableNode],
         use_detailed: bool,
         show_ids: bool,
         gpu_count_filter: Option<u32>,
-    ) -> Result<NodeSelection> {
+    ) -> Result<GpuSelection> {
         if nodes.is_empty() {
             return Err(eyre!("No nodes available").into());
         }
@@ -52,7 +62,7 @@ impl InteractiveSelector {
         nodes: &[AvailableNode],
         show_ids: bool,
         gpu_count_filter: Option<u32>,
-    ) -> Result<NodeSelection> {
+    ) -> Result<GpuSelection> {
         // Filter nodes by exact GPU count if specified
         let filtered_nodes: Vec<&AvailableNode> = if let Some(required_count) = gpu_count_filter {
             nodes
@@ -221,14 +231,27 @@ impl InteractiveSelector {
             None => return Err(eyre!("Selection cancelled").into()),
         };
 
-        // Get the selected node ID
-        let node_id = filtered_nodes[selection].node.id.clone();
-        let node_id = match node_id.split_once("__") {
-            Some((_, second)) => second.to_string(),
-            None => node_id,
+        // Extract GPU info from the selected node
+        let selected_node = filtered_nodes[selection];
+        let (gpu_category, gpu_count, min_memory_gb) = if selected_node.node.gpu_specs.is_empty() {
+            return Err(eyre!("Selected node has no GPUs").into());
+        } else {
+            let gpu = &selected_node.node.gpu_specs[0];
+            let category = GpuCategory::from_str(&gpu.name)
+                .map(|c| c.to_string())
+                .unwrap_or_else(|_| gpu.name.clone());
+            (
+                category,
+                selected_node.node.gpu_specs.len() as u32,
+                Some(gpu.memory_gb),
+            )
         };
 
-        Ok(NodeSelection::NodeId { node_id })
+        Ok(GpuSelection {
+            gpu_category,
+            gpu_count,
+            min_memory_gb,
+        })
     }
 
     /// Select node in grouped mode (group by GPU configuration)
@@ -236,7 +259,7 @@ impl InteractiveSelector {
         &self,
         nodes: &[AvailableNode],
         gpu_count_filter: Option<u32>,
-    ) -> Result<NodeSelection> {
+    ) -> Result<GpuSelection> {
         // Group nodes by GPU configuration
         let mut gpu_groups: HashMap<String, (String, u32, u32)> = HashMap::new();
 
@@ -346,25 +369,17 @@ impl InteractiveSelector {
             return Err(eyre!("Selection cancelled").into());
         }
 
-        // Return GPU requirements for automatic selection
+        // Return GPU selection
         if selected_config.1.is_empty() {
-            // No GPU case - just pick the first available node
-            let node_id = nodes[0].node.id.clone();
-            let node_id = match node_id.split_once("__") {
-                Some((_, second)) => second.to_string(),
-                None => node_id,
-            };
-            Ok(NodeSelection::NodeId { node_id })
-        } else {
-            // Use ExactGpuConfiguration for compact mode to ensure exact GPU count matching
-            Ok(NodeSelection::ExactGpuConfiguration {
-                gpu_requirements: GpuRequirements {
-                    gpu_type: Some(selected_config.1.clone()),
-                    gpu_count: selected_config.2,
-                    min_memory_gb: 0, // We match exact memory from the selection
-                },
-            })
+            // No GPU case
+            return Err(eyre!("Selected configuration has no GPUs").into());
         }
+
+        Ok(GpuSelection {
+            gpu_category: selected_config.1.clone(),
+            gpu_count: selected_config.2,
+            min_memory_gb: Some(selected_config.3),
+        })
     }
 
     /// Let user select a single instance from active instances

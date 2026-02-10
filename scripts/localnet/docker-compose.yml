@@ -3,7 +3,6 @@
 #   docker compose --profile network up -d      # Subtensor only
 #   docker compose --profile validator up -d    # + Validator
 #   docker compose --profile miner up -d        # + Miner
-#   docker compose --profile monitoring up -d   # + Prometheus + Grafana
 #   docker compose up -d                        # Everything
 
 services:
@@ -13,7 +12,7 @@ services:
   subtensor:
     image: ghcr.io/opentensor/subtensor-localnet:devnet-ready
     container_name: basilica-subtensor
-    profiles: ["network", "validator", "miner", "monitoring"]
+    profiles: ["network", "validator", "miner", "all"]
     ports:
       - "9944:9944"
       - "30334:30334"
@@ -36,33 +35,11 @@ services:
         ipv4_address: 172.28.0.10
 
   # =============================================================================
-  # Database Layer - PostgreSQL for Validator
-  # =============================================================================
-  postgres:
-    image: postgres:16-alpine
-    container_name: basilica-postgres
-    profiles: ["monitoring"]
-    environment:
-      POSTGRES_USER: basilica
-      POSTGRES_PASSWORD: basilica
-      POSTGRES_DB: validator
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U basilica -d validator"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      basilica-localnet:
-        ipv4_address: 172.28.0.11
-
-  # =============================================================================
   # Validator Service
   # =============================================================================
   validator:
+    image: basilica-localnet-validator
+    pull_policy: never
     platform: linux/amd64  # Required for validator-binary (x86-64 ELF)
     build:
       context: ../..
@@ -71,7 +48,7 @@ services:
         BITTENSOR_NETWORK: "local"
         METADATA_CHAIN_ENDPOINT: "ws://subtensor:9944"
     container_name: basilica-validator
-    profiles: ["validator", "miner", "monitoring"]
+    profiles: ["validator", "miner"]
     restart: unless-stopped
     depends_on:
       subtensor:
@@ -102,6 +79,8 @@ services:
   # Miner Service
   # =============================================================================
   miner:
+    image: basilica-localnet-miner
+    pull_policy: never
     build:
       context: ../..
       dockerfile: scripts/miner/Dockerfile
@@ -109,7 +88,7 @@ services:
         BITTENSOR_NETWORK: "local"
         METADATA_CHAIN_ENDPOINT: "ws://subtensor:9944"
     container_name: basilica-miner
-    profiles: ["miner", "monitoring"]
+    profiles: ["miner"]
     restart: unless-stopped
     depends_on:
       subtensor:
@@ -134,64 +113,12 @@ services:
         ipv4_address: 172.28.0.30
     command: ["--config", "/app/miner.toml"]
 
-  # =============================================================================
-  # Monitoring - Prometheus
-  # =============================================================================
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: basilica-prometheus
-    profiles: ["monitoring"]
-    restart: unless-stopped
-    depends_on:
-      - validator
-      - miner
-    volumes:
-      - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
-    ports:
-      - "9099:9090"   # Prometheus UI (9099 to avoid conflict with validator metrics)
-    networks:
-      basilica-localnet:
-        ipv4_address: 172.28.0.40
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--web.enable-lifecycle'
-
-  # =============================================================================
-  # Monitoring - Grafana
-  # =============================================================================
-  grafana:
-    image: grafana/grafana:latest
-    container_name: basilica-grafana
-    profiles: ["monitoring"]
-    restart: unless-stopped
-    depends_on:
-      - prometheus
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
-    volumes:
-      - grafana-data:/var/lib/grafana
-    ports:
-      - "3000:3000"
-    networks:
-      basilica-localnet:
-        ipv4_address: 172.28.0.41
-
 networks:
   basilica-localnet:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16
+    external: true
 
 volumes:
   subtensor-data:
-  postgres-data:
   validator-data:
   validator-ssh:
   miner-data:
-  prometheus-data:
-  grafana-data:

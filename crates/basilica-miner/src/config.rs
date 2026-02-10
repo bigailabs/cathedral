@@ -47,6 +47,10 @@ pub struct MinerConfig {
     /// Validator assignment configuration
     #[serde(default)]
     pub validator_assignment: ValidatorAssignmentConfig,
+
+    /// Automatic bidding configuration
+    #[serde(default)]
+    pub bidding: BiddingConfig,
 }
 
 /// Miner-specific Bittensor configuration
@@ -73,11 +77,9 @@ pub struct MinerBittensorConfig {
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValidatorCommsConfig {
-    /// Host to bind the gRPC server to
-    pub host: String,
-
-    /// Port to bind the gRPC server to
-    pub port: u16,
+    /// Validator gRPC endpoint for miner registration
+    /// e.g. http://validator-host:50053
+    pub validator_registration_endpoint: Option<String>,
 
     /// Request timeout for validator calls
     #[serde_as(as = "DurationSeconds<u64>")]
@@ -159,6 +161,68 @@ pub struct MinerAdvertisedAddresses {
     pub metrics_endpoint: Option<String>,
 }
 
+/// Automatic bidding configuration
+///
+/// Note: Config files accept prices in dollars (e.g., 2.50 for $2.50/hour),
+/// which are converted to cents internally on load.
+///
+/// BidManager always runs when a validator_registration_endpoint is configured.
+/// All GPU categories in your nodes MUST have prices defined in the static strategy.
+///
+/// TODO: Add floor_prices when dynamic bidding strategies are implemented.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BiddingConfig {
+    /// Active bidding strategy (single enum variant)
+    #[serde(default)]
+    pub strategy: BiddingStrategy,
+}
+
+/// Bidding strategy configuration (one active variant)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BiddingStrategy {
+    /// Fixed prices by GPU category (in cents)
+    Static {
+        /// Static prices by GPU category in CENTS (converted from dollars in config)
+        /// Config accepts dollars (e.g., 2.50), stored as cents (250)
+        /// Every GPU category in your nodes MUST have a price here.
+        #[serde(
+            default,
+            rename = "static_prices",
+            deserialize_with = "deserialize_dollars_to_cents"
+        )]
+        static_prices_cents: std::collections::HashMap<String, u32>,
+    },
+}
+
+/// Convert dollars (f64) to cents (u32)
+fn dollars_to_cents(dollars: f64) -> u32 {
+    (dollars * 100.0).round() as u32
+}
+
+/// Deserialize a HashMap of dollar values (f64) to cents (u32)
+fn deserialize_dollars_to_cents<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let dollars: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::deserialize(deserializer)?;
+    Ok(dollars
+        .into_iter()
+        .map(|(k, v)| (k, dollars_to_cents(v)))
+        .collect())
+}
+
+impl Default for BiddingStrategy {
+    fn default() -> Self {
+        Self::Static {
+            static_prices_cents: std::collections::HashMap::new(),
+        }
+    }
+}
+
 impl Default for MinerConfig {
     fn default() -> Self {
         Self {
@@ -174,6 +238,7 @@ impl Default for MinerConfig {
             ssh_session: NodeSshConfig::default(),
             advertised_addresses: MinerAdvertisedAddresses::default(),
             validator_assignment: ValidatorAssignmentConfig::default(),
+            bidding: BiddingConfig::default(),
         }
     }
 }
@@ -227,8 +292,7 @@ impl Default for MinerBittensorConfig {
 impl Default for ValidatorCommsConfig {
     fn default() -> Self {
         Self {
-            host: "0.0.0.0".to_string(),
-            port: 50051,
+            validator_registration_endpoint: None,
             request_timeout: Duration::from_secs(30),
         }
     }
@@ -367,17 +431,9 @@ impl MinerConfig {
     }
 
     /// Get the advertised gRPC endpoint for validators
-    pub fn get_advertised_grpc_endpoint(&self) -> String {
-        self.advertised_addresses
-            .grpc_endpoint
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}:{}",
-                    self.validator_comms.host, self.validator_comms.port
-                )
-            })
+    /// Note: The miner no longer hosts a gRPC server; use validator_registration_endpoint to reach the validator
+    pub fn get_advertised_grpc_endpoint(&self) -> Option<String> {
+        self.advertised_addresses.grpc_endpoint.clone()
     }
 
     /// Get the advertised axon endpoint for Bittensor registration
@@ -387,30 +443,13 @@ impl MinerConfig {
         } else if let Some(external_ip) = &self.bittensor.external_ip {
             format!("http://{}:{}", external_ip, self.bittensor.axon_port)
         } else {
-            format!(
-                "http://{}:{}",
-                self.validator_comms.host, self.bittensor.axon_port
-            )
+            format!("http://0.0.0.0:{}", self.bittensor.axon_port)
         }
     }
 
     /// Get the advertised metrics endpoint
-    pub fn get_advertised_metrics_endpoint(&self) -> String {
-        self.advertised_addresses
-            .metrics_endpoint
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                format!(
-                    "http://{}:{}",
-                    self.validator_comms.host,
-                    self.metrics
-                        .prometheus
-                        .as_ref()
-                        .map(|p| p.port)
-                        .unwrap_or(9090)
-                )
-            })
+    pub fn get_advertised_metrics_endpoint(&self) -> Option<String> {
+        self.advertised_addresses.metrics_endpoint.clone()
     }
 
     /// Validate all advertised address configurations

@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use basilica_common::config::{
-    loader, BittensorConfig, ConfigValidation, DatabaseConfig, LoggingConfig, MetricsConfig,
-    ServerConfig,
+    loader, BittensorConfig, ConfigValidation, DatabaseConfig, MetricsConfig, ServerConfig,
 };
 use basilica_common::error::ConfigurationError;
 
@@ -42,9 +41,6 @@ pub struct ValidatorConfig {
     /// Server configuration for API
     pub server: ServerConfig,
 
-    /// Logging configuration
-    pub logging: LoggingConfig,
-
     /// Metrics configuration
     pub metrics: MetricsConfig,
 
@@ -64,6 +60,10 @@ pub struct ValidatorConfig {
     /// API-specific configuration
     pub api: ApiConfig,
 
+    /// gRPC server for bid submission
+    #[serde(default)]
+    pub bid_grpc: basilica_common::config::GrpcServerConfig,
+
     /// SSH session configuration
     pub ssh_session: SshSessionConfig,
 
@@ -71,13 +71,27 @@ pub struct ValidatorConfig {
     #[serde(default)]
     pub emission: super::emission::EmissionConfig,
 
+    /// Bidding configuration (bid registration, health checks, pricing)
+    #[serde(default)]
+    pub bidding: super::bidding::BiddingConfig,
+    /// Token pricing configuration (TAO/Alpha)
+    #[serde(default)]
+    pub pricing: super::pricing::PricingConfig,
+
     /// Database cleanup configuration
     #[serde(default)]
     pub cleanup: crate::persistence::cleanup_task::CleanupConfig,
 
+    /// Basilica API endpoint (used for pricing, delivery, and token data)
+    #[serde(default = "default_api_endpoint")]
+    pub api_endpoint: String,
+
     /// Billing telemetry streaming configuration
     #[serde(default)]
     pub billing: BillingConfig,
+    /// Collateral enforcement configuration (presence = enabled)
+    #[serde(default)]
+    pub collateral: Option<super::collateral::CollateralConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,8 +260,6 @@ pub struct BinaryValidationConfig {
     pub execution_timeout_secs: u64,
     /// Output format for binary execution
     pub output_format: String,
-    /// Binary validation weight in final score calculation
-    pub score_weight: f64,
     /// Default node port for SSH tunnel cleanup
     #[serde(default = "default_node_port")]
     pub node_port: u16,
@@ -422,7 +434,6 @@ impl Default for BinaryValidationConfig {
             executor_binary_path: PathBuf::from("./executor-binary"),
             execution_timeout_secs: 1200,
             output_format: "json".to_string(),
-            score_weight: 0.8,
             node_port: default_node_port(),
             server_mode: ValidationServerConfig::default(),
         }
@@ -547,6 +558,10 @@ fn default_rental_session_duration() -> u64 {
     0
 }
 
+fn default_api_endpoint() -> String {
+    "https://api.basilica.ai".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BillingConfig {
     /// Enable billing telemetry streaming
@@ -556,6 +571,14 @@ pub struct BillingConfig {
     /// Billing service gRPC endpoint
     #[serde(default = "default_billing_endpoint")]
     pub billing_endpoint: String,
+
+    /// Sync interval for miner delivery cache (seconds)
+    #[serde(default = "default_billing_sync_interval_secs")]
+    pub sync_interval_secs: u64,
+
+    /// Lookback window for miner delivery reads (hours)
+    #[serde(default = "default_billing_lookback_hours")]
+    pub lookback_hours: u64,
 
     /// Request timeout in seconds
     #[serde(default = "default_billing_timeout_secs")]
@@ -602,6 +625,14 @@ fn default_billing_endpoint() -> String {
     "http://127.0.0.1:50051".to_string()
 }
 
+fn default_billing_sync_interval_secs() -> u64 {
+    300
+}
+
+fn default_billing_lookback_hours() -> u64 {
+    24
+}
+
 fn default_billing_timeout_secs() -> u64 {
     30
 }
@@ -643,6 +674,8 @@ impl Default for BillingConfig {
         Self {
             enabled: default_billing_enabled(),
             billing_endpoint: default_billing_endpoint(),
+            sync_interval_secs: default_billing_sync_interval_secs(),
+            lookback_hours: default_billing_lookback_hours(),
             timeout_secs: default_billing_timeout_secs(),
             use_tls: default_billing_use_tls(),
             batch_size: default_billing_batch_size(),
@@ -792,7 +825,6 @@ impl Default for ValidatorConfig {
                 port: 8080,
                 ..Default::default()
             },
-            logging: LoggingConfig::default(),
             metrics: MetricsConfig::default(),
             bittensor: ValidatorBittensorConfig {
                 common: BittensorConfig {
@@ -841,10 +873,18 @@ impl Default for ValidatorConfig {
                 bind_address: "0.0.0.0:8080".to_string(),
                 miner_port: default_miner_port(),
             },
+            bid_grpc: basilica_common::config::GrpcServerConfig {
+                listen_address: "0.0.0.0:50052".to_string(),
+                ..Default::default()
+            },
             ssh_session: SshSessionConfig::default(),
             emission: super::emission::EmissionConfig::default(),
+            bidding: super::bidding::BiddingConfig::default(),
+            pricing: super::pricing::PricingConfig::default(),
             cleanup: crate::persistence::cleanup_task::CleanupConfig::default(),
+            api_endpoint: default_api_endpoint(),
             billing: BillingConfig::default(),
+            collateral: None,
         }
     }
 }
@@ -871,6 +911,21 @@ impl ConfigValidation for ValidatorConfig {
                 key: "bittensor.axon_port".to_string(),
                 value: self.bittensor.axon_port.to_string(),
                 reason: "Axon port must be greater than 0".to_string(),
+            });
+        }
+
+        if self.api_endpoint.trim().is_empty() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "api_endpoint".to_string(),
+                value: self.api_endpoint.clone(),
+                reason: "API endpoint must be set for pricing".to_string(),
+            });
+        }
+        if self.api_endpoint == self.billing.billing_endpoint {
+            return Err(ConfigurationError::InvalidValue {
+                key: "api_endpoint".to_string(),
+                value: self.api_endpoint.clone(),
+                reason: "API endpoint must route through API Gateway, not billing gRPC".to_string(),
             });
         }
 
@@ -915,6 +970,33 @@ impl ConfigValidation for ValidatorConfig {
             return Err(ConfigurationError::InvalidValue {
                 key: "emission".to_string(),
                 value: "emission_config".to_string(),
+                reason: e.to_string(),
+            });
+        }
+
+        // Validate bidding configuration
+        if let Err(e) = self.bidding.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "bidding".to_string(),
+                value: "bidding_config".to_string(),
+                reason: e.to_string(),
+            });
+        }
+
+        // Validate pricing configuration
+        if let Err(e) = self.pricing.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "pricing".to_string(),
+                value: "pricing_config".to_string(),
+                reason: e.to_string(),
+            });
+        }
+
+        // Validate bid gRPC configuration
+        if let Err(e) = self.bid_grpc.validate() {
+            return Err(ConfigurationError::InvalidValue {
+                key: "bid_grpc".to_string(),
+                value: "bid_grpc".to_string(),
                 reason: e.to_string(),
             });
         }
@@ -979,6 +1061,17 @@ impl ConfigValidation for ValidatorConfig {
                     key: "verification.binary_validation.executor_binary_path".to_string(),
                     value: executor_path.display().to_string(),
                     reason: "Executor binary path does not exist".to_string(),
+                });
+            }
+        }
+
+        // Validate collateral configuration if present
+        if let Some(ref collateral) = self.collateral {
+            if let Err(e) = collateral.validate() {
+                return Err(ConfigurationError::InvalidValue {
+                    key: "collateral".to_string(),
+                    value: "collateral_config".to_string(),
+                    reason: e.to_string(),
                 });
             }
         }

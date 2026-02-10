@@ -21,13 +21,8 @@ service BillingService {
     rpc IngestTelemetry(stream TelemetryData) returns (IngestResponse);
     rpc GetUsageReport(UsageReportRequest) returns (UsageReportResponse);
 
-    // Miner revenue reconciliation
-    rpc RefreshMinerRevenueSummary(RefreshMinerRevenueSummaryRequest) returns (RefreshMinerRevenueSummaryResponse);
-    rpc GetMinerRevenueSummary(GetMinerRevenueSummaryRequest) returns (GetMinerRevenueSummaryResponse);
-
-    // Miner payment operations
-    rpc GetUnpaidMinerRevenueSummary(GetUnpaidMinerRevenueSummaryRequest) returns (GetUnpaidMinerRevenueSummaryResponse);
-    rpc MarkMinerRevenuePaid(MarkMinerRevenuePaidRequest) returns (MarkMinerRevenuePaidResponse);
+    // Miner delivery aggregation
+    rpc GetMinerDelivery(GetMinerDeliveryRequest) returns (GetMinerDeliveryResponse);
 
     // Rental status lookup (for credit exhaustion monitoring)
     rpc GetRentalStatus(GetRentalStatusRequest) returns (GetRentalStatusResponse);
@@ -87,6 +82,7 @@ message CommunityCloudData {
     uint32 gpu_count = 4;          // Number of GPUs in this rental
     uint32 miner_uid = 5;          // Bittensor miner UID for payment reconciliation
     string miner_hotkey = 6;       // Bittensor miner hotkey for payment reconciliation
+    double markup_percent = 7;
 }
 
 // Secure cloud rental data (direct provider API)
@@ -103,6 +99,7 @@ message SecureCloudData {
     uint32 ram_gb = 9;                // Amount of RAM in GB
     double base_price_per_storage = 10; // Price per GB storage per hour (0 for GPU rentals)
     uint32 storage_gb = 11;             // Amount of storage in GB
+    double markup_percent = 12;
 }
 
 // Orchestrator cloud rental data (K3s UserDeployment billing)
@@ -317,98 +314,25 @@ message ErrorDetail {
     map<string, string> metadata = 3;
 }
 
-// Miner Revenue Reconciliation Messages
+// Miner Delivery Messages
 
-message RefreshMinerRevenueSummaryRequest {
-    string period_start = 1; // Start date in YYYY-MM-DD format (inclusive)
-    string period_end = 2;   // End date in YYYY-MM-DD format (inclusive, must be before today)
-    uint32 computation_version = 3; // Version of computation logic (default: 1)
+message GetMinerDeliveryRequest {
+    int64 since_epoch_seconds = 1;
+    int64 until_epoch_seconds = 2;
+    repeated string miner_hotkeys = 3;
 }
 
-message RefreshMinerRevenueSummaryResponse {
-    bool success = 1;
-    uint32 summaries_created = 2; // Number of summary rows created
-    google.protobuf.Timestamp computed_at = 3;
-    string error_message = 4;
+message MinerDelivery {
+    string miner_hotkey = 1;
+    uint32 miner_uid = 2;
+    double total_hours = 3;
+    double revenue_usd = 4;
+    string gpu_category = 5;
+    reserved 6;
+    reserved 7, 8, 9, 10;
+    string node_id = 11;
 }
 
-message GetMinerRevenueSummaryRequest {
-    // Filter criteria (all optional)
-    repeated string node_ids = 1; // Filter by specific node IDs
-    repeated string validator_ids = 2; // Filter by specific validator IDs
-    string period_start = 3; // Filter by period start (YYYY-MM-DD format)
-    string period_end = 4;   // Filter by period end (YYYY-MM-DD format)
-    google.protobuf.Timestamp computed_at = 5; // Get snapshot from specific computation time
-    bool latest_only = 6; // Only return most recent computation for each (node, validator, period)
-
-    // Pagination
-    uint32 limit = 7;
-    uint32 offset = 8;
-
-    // Filter by miner UIDs
-    repeated uint32 miner_uids = 9; // Filter by specific Bittensor miner UIDs
-
-    // Filter by miner hotkeys
-    repeated string miner_hotkeys = 10; // Filter by specific Bittensor miner hotkeys
-}
-
-message GetMinerRevenueSummaryResponse {
-    repeated MinerRevenueSummary summaries = 1;
-    uint64 total_count = 2;
-}
-
-message MinerRevenueSummary {
-    string id = 1; // UUID
-    string node_id = 2;
-    string validator_id = 3; // Nullable
-    uint32 miner_uid = 16; // Bittensor miner UID (part of grouping key with miner_hotkey)
-    string miner_hotkey = 17; // Bittensor miner hotkey (part of grouping key with miner_uid)
-
-    // Time period
-    google.protobuf.Timestamp period_start = 4;
-    google.protobuf.Timestamp period_end = 5;
-
-    // Aggregated metrics
-    uint32 total_rentals = 6;
-    uint32 completed_rentals = 7;
-    uint32 failed_rentals = 8;
-    string total_revenue = 9; // Decimal string (USD)
-    string total_hours = 10; // Decimal string
-
-    // Computed metrics
-    string avg_hourly_rate = 11; // Decimal string (nullable)
-    string avg_rental_duration_hours = 12; // Decimal string (nullable)
-
-    // Audit fields
-    google.protobuf.Timestamp computed_at = 13;
-    uint32 computation_version = 14;
-    google.protobuf.Timestamp created_at = 15;
-
-    // Payment tracking
-    bool paid = 18;
-    string tx_hash = 19; // Blockchain transaction hash (nullable)
-}
-
-// Miner Payment Messages
-
-message GetUnpaidMinerRevenueSummaryRequest {
-    string period_start = 1; // Start date in YYYY-MM-DD format (inclusive)
-    string period_end = 2;   // End date in YYYY-MM-DD format (inclusive)
-    uint32 limit = 3;
-    uint32 offset = 4;
-}
-
-message GetUnpaidMinerRevenueSummaryResponse {
-    repeated MinerRevenueSummary summaries = 1;
-    uint64 total_count = 2;
-}
-
-message MarkMinerRevenuePaidRequest {
-    string id = 1;      // UUID of the miner_revenue_summary record
-    string tx_hash = 2; // Blockchain transaction hash for this payment
-}
-
-message MarkMinerRevenuePaidResponse {
-    bool success = 1;
-    string error_message = 2;
+message GetMinerDeliveryResponse {
+    repeated MinerDelivery deliveries = 1;
 }

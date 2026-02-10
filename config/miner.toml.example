@@ -55,11 +55,11 @@ port = 9090
 path = "/metrics"
 
 # =============================================================================
-# Validator Communications (gRPC Server)
+# Validator Communications (Miner → Validator Registration)
 # =============================================================================
 [validator_comms]
-host = "0.0.0.0"
-port = 50051
+# Validator's gRPC endpoint for miner registration (RegisterBid, UpdateBid, HealthCheck)
+validator_registration_endpoint = "http://VALIDATOR_IP:50052"
 request_timeout = 30
 
 # =============================================================================
@@ -67,10 +67,11 @@ request_timeout = 30
 # =============================================================================
 [node_management]
 # List your GPU nodes with SSH access details
+# Pricing is configured separately in [bidding.strategy.static.static_prices]
 nodes = [
-    { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+    { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
     # Add more nodes as needed:
-    # { host = "192.168.1.101", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+    # { host = "192.168.1.101", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
 ]
 health_check_interval = 60
 health_check_timeout = 10
@@ -119,3 +120,15 @@ strategy = "highest_stake"
 
 # Only required for "fixed_assignment" strategy:
 # validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
+
+# =============================================================================
+# Bidding Configuration (GPU Pricing)
+# =============================================================================
+# BidManager runs automatically when validator_registration_endpoint is set.
+# All GPU categories in your nodes MUST have prices defined here.
+[bidding]
+# Static prices by GPU category (in dollars per GPU-hour)
+# Example: H100 = 2.50 means $2.50/hour per GPU
+[bidding.strategy.static.static_prices]
+H100 = 2.50
+A100 = 1.20

@@ -7,6 +7,7 @@ use anyhow::Result;
 use basilica_common::ssh::{
     SshConnectionConfig, SshConnectionDetails, SshConnectionManager, StandardSshClient,
 };
+use basilica_common::types::GpuCategory;
 use serde::{Deserialize, Serialize};
 use ssh_key::PublicKey;
 use std::collections::HashMap;
@@ -27,7 +28,7 @@ const SSH_MOVE_TO_AUTHORIZED_KEYS: &str =
     r#"mv -f "$tmp" ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"#;
 
 /// Configuration for a single node
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct NodeConfig {
     /// SSH hostname or IP address
     pub host: String,
@@ -35,10 +36,60 @@ pub struct NodeConfig {
     pub port: u16,
     /// SSH username for validator access
     pub username: String,
-    /// Hourly rental rate in dollars per GPU (e.g., 2.50 for $2.50/hour/GPU)
-    pub hourly_rate_per_gpu: f64,
+    /// GPU category for this node (e.g., "H100", "A100", "RTX4090")
+    pub gpu_category: String,
+    /// Number of GPUs on this node
+    pub gpu_count: u32,
     /// Additional SSH options
     pub additional_opts: Option<String>,
+}
+
+/// Intermediate struct for deserializing NodeConfig
+#[derive(Deserialize)]
+struct NodeConfigRaw {
+    host: String,
+    port: u16,
+    username: String,
+    #[serde(default = "default_gpu_category")]
+    gpu_category: String,
+    #[serde(default = "default_gpu_count")]
+    gpu_count: u32,
+    additional_opts: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for NodeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = NodeConfigRaw::deserialize(deserializer)?;
+
+        // Validate gpu_category is a known GPU type
+        let gpu_cat: GpuCategory = raw.gpu_category.parse().unwrap(); // Infallible
+        if matches!(&gpu_cat, GpuCategory::Other(_)) {
+            return Err(serde::de::Error::custom(format!(
+                "GPU type '{}' is not supported",
+                raw.gpu_category
+            )));
+        }
+
+        Ok(NodeConfig {
+            host: raw.host,
+            port: raw.port,
+            username: raw.username,
+            gpu_category: gpu_cat.to_string(),
+            gpu_count: raw.gpu_count,
+            additional_opts: raw.additional_opts,
+        })
+    }
+}
+
+fn default_gpu_category() -> String {
+    "UNKNOWN".to_string()
+}
+
+fn default_gpu_count() -> u32 {
+    1
 }
 
 impl NodeConfig {
@@ -398,7 +449,8 @@ mod tests {
             host: "192.168.1.100".to_string(),
             port: 22,
             username: "basilica".to_string(),
-            hourly_rate_per_gpu: 2.5,
+            gpu_category: "H100".to_string(),
+            gpu_count: 8,
             additional_opts: None,
         };
 

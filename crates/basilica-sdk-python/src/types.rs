@@ -13,9 +13,9 @@ use basilica_sdk::types::{
     HealthCheckConfig as SdkHealthCheckConfig,
     ListAvailableNodesQuery as SdkListAvailableNodesQuery, ListRentalsQuery as SdkListRentalsQuery,
     ListSecureCloudRentalsResponse as SdkListSecureCloudRentalsResponse,
-    NodeDetails as SdkNodeDetails, NodeSelection as SdkNodeSelection,
-    PortMappingRequest as SdkPortMappingRequest, ProbeConfig as SdkProbeConfig, RentalState,
-    RentalStatus as SdkRentalStatus, RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
+    NodeDetails as SdkNodeDetails, PortMappingRequest as SdkPortMappingRequest,
+    ProbeConfig as SdkProbeConfig, RentalState, RentalStatus as SdkRentalStatus,
+    RentalStatusWithSshResponse as SdkRentalStatusWithSshResponse,
     ResourceRequirementsRequest as SdkResourceRequirementsRequest,
     SecureCloudRentalListItem as SdkSecureCloudRentalListItem,
     SecureCloudRentalResponse as SdkSecureCloudRentalResponse, SshAccess as SdkSshAccess,
@@ -220,18 +220,12 @@ impl From<SdkRentalStatusWithSshResponse> for RentalStatusWithSshResponse {
 pub struct AvailabilityInfo {
     #[pyo3(get)]
     pub available_until: Option<String>,
-    #[pyo3(get)]
-    pub verification_score: f64,
-    #[pyo3(get)]
-    pub uptime_percentage: f64,
 }
 
 impl From<SdkAvailabilityInfo> for AvailabilityInfo {
     fn from(info: SdkAvailabilityInfo) -> Self {
         Self {
             available_until: info.available_until.map(|dt| dt.to_rfc3339()),
-            verification_score: info.verification_score,
-            uptime_percentage: info.uptime_percentage,
         }
     }
 }
@@ -320,28 +314,6 @@ impl From<GpuRequirements> for SdkGpuRequirements {
             gpu_count: req.gpu_count,
             gpu_type: req.gpu_type,
             min_memory_gb: req.min_memory_gb,
-        }
-    }
-}
-
-/// Node selection strategy
-#[cfg_attr(feature = "stub-gen", gen_stub_pyclass_enum)]
-#[pyclass]
-#[derive(Clone)]
-pub enum NodeSelection {
-    NodeId { node_id: String },
-    ExactGpuConfiguration { gpu_requirements: GpuRequirements },
-}
-
-impl From<NodeSelection> for SdkNodeSelection {
-    fn from(selection: NodeSelection) -> Self {
-        match selection {
-            NodeSelection::NodeId { node_id } => SdkNodeSelection::NodeId { node_id },
-            NodeSelection::ExactGpuConfiguration { gpu_requirements } => {
-                SdkNodeSelection::ExactGpuConfiguration {
-                    gpu_requirements: gpu_requirements.into(),
-                }
-            }
         }
     }
 }
@@ -483,15 +455,23 @@ impl From<VolumeMountRequest> for SdkVolumeMountRequest {
     }
 }
 
-/// Start rental API request
+/// Start rental API request with GPU-based selection
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass]
 #[derive(Clone)]
 pub struct StartRentalApiRequest {
     #[pyo3(get, set)]
-    pub node_selection: NodeSelection,
+    pub gpu_category: String,
+    #[pyo3(get, set)]
+    pub gpu_count: u32,
+    #[pyo3(get, set)]
+    pub min_memory_gb: Option<u32>,
+    #[pyo3(get, set)]
+    pub max_hourly_rate: f64,
     #[pyo3(get, set)]
     pub container_image: String,
+    #[pyo3(get, set)]
+    pub ssh_public_key: String,
     #[pyo3(get, set)]
     pub environment: HashMap<String, String>,
     #[pyo3(get, set)]
@@ -508,11 +488,15 @@ pub struct StartRentalApiRequest {
 #[pymethods]
 impl StartRentalApiRequest {
     #[new]
-    #[pyo3(signature = (node_selection, container_image, environment=None, ports=None, resources=None, command=None, volumes=None))]
+    #[pyo3(signature = (gpu_category, container_image, ssh_public_key, max_hourly_rate, gpu_count=1, min_memory_gb=None, environment=None, ports=None, resources=None, command=None, volumes=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        node_selection: NodeSelection,
+        gpu_category: String,
         container_image: String,
+        ssh_public_key: String,
+        max_hourly_rate: f64,
+        gpu_count: u32,
+        min_memory_gb: Option<u32>,
         environment: Option<HashMap<String, String>>,
         ports: Option<Vec<PortMappingRequest>>,
         resources: Option<ResourceRequirementsRequest>,
@@ -520,8 +504,12 @@ impl StartRentalApiRequest {
         volumes: Option<Vec<VolumeMountRequest>>,
     ) -> Self {
         Self {
-            node_selection,
+            gpu_category,
+            gpu_count,
+            min_memory_gb,
+            max_hourly_rate,
             container_image,
+            ssh_public_key,
             environment: environment.unwrap_or_default(),
             ports: ports.unwrap_or_default(),
             resources: resources.unwrap_or_default(),
@@ -531,17 +519,58 @@ impl StartRentalApiRequest {
     }
 }
 
-impl From<StartRentalApiRequest> for SdkStartRentalApiRequest {
-    fn from(req: StartRentalApiRequest) -> Self {
-        Self {
-            node_selection: req.node_selection.into(),
+fn usd_per_gpu_hour_to_cents(value: f64) -> Result<u32, String> {
+    if !value.is_finite() {
+        return Err("max_hourly_rate must be a finite number".to_string());
+    }
+    if value < 0.0 {
+        return Err("max_hourly_rate must be non-negative".to_string());
+    }
+
+    let cents = (value * 100.0).round();
+    if cents < 0.0 || cents > u32::MAX as f64 {
+        return Err("max_hourly_rate is out of supported range".to_string());
+    }
+
+    Ok(cents as u32)
+}
+
+impl TryFrom<StartRentalApiRequest> for SdkStartRentalApiRequest {
+    type Error = String;
+
+    fn try_from(req: StartRentalApiRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            gpu_category: req.gpu_category,
+            gpu_count: req.gpu_count,
+            min_memory_gb: req.min_memory_gb,
+            max_hourly_rate_cents: usd_per_gpu_hour_to_cents(req.max_hourly_rate)?,
             container_image: req.container_image,
+            ssh_public_key: req.ssh_public_key,
             environment: req.environment,
             ports: req.ports.into_iter().map(Into::into).collect(),
             resources: req.resources.into(),
             command: req.command,
             volumes: req.volumes.into_iter().map(Into::into).collect(),
-        }
+        })
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::usd_per_gpu_hour_to_cents;
+
+    #[test]
+    fn rounds_to_nearest_cent() {
+        assert_eq!(usd_per_gpu_hour_to_cents(2.50).unwrap(), 250);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.234).unwrap(), 123);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.235).unwrap(), 124);
+    }
+
+    #[test]
+    fn rejects_invalid_values() {
+        assert!(usd_per_gpu_hour_to_cents(f64::NAN).is_err());
+        assert!(usd_per_gpu_hour_to_cents(f64::NEG_INFINITY).is_err());
+        assert!(usd_per_gpu_hour_to_cents(-0.01).is_err());
     }
 }
 

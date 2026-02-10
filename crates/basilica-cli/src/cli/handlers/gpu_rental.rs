@@ -5,7 +5,8 @@ use crate::cli::handlers::deploy::helpers::stream_logs_to_stdout;
 use crate::cli::handlers::gpu_rental_helpers::{
     active_rentals_query, get_ssh_private_key_path, print_cloud_section_header,
     resolve_offering_unified, resolve_rental_by_id, resolve_rental_with_ssh,
-    resolve_target_rental_unified, with_validator_timeout, RentalWithSsh, SelectedOffering,
+    resolve_target_rental_unified, with_validator_timeout, CommunityCloudSelection, RentalWithSsh,
+    SelectedOffering,
 };
 use crate::cli::handlers::region_mapping::region_matches_country;
 use crate::cli::handlers::ssh_keys::select_and_read_ssh_key;
@@ -21,8 +22,7 @@ use basilica_common::types::{ComputeCategory, GpuCategory};
 use basilica_common::utils::{parse_env_vars, parse_port_mappings};
 use basilica_sdk::types::{
     HistoricalRentalItem, HistoricalRentalsResponse, ListAvailableNodesQuery, ListRentalsQuery,
-    LocationProfile, NodeSelection, RentalState, ResourceRequirementsRequest, SshAccess,
-    StartRentalApiRequest,
+    LocationProfile, RentalState, ResourceRequirementsRequest, SshAccess, StartRentalApiRequest,
 };
 use basilica_sdk::ApiError;
 use color_eyre::eyre::eyre;
@@ -38,6 +38,47 @@ use tracing::{debug, warn};
 
 /// Maximum time to wait for rental to become active and SSH to be ready
 const RENTAL_READY_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn usd_per_gpu_hour_to_cents(value: f64) -> Result<u32, CliError> {
+    if !value.is_finite() {
+        return Err(CliError::Internal(eyre!(
+            "Invalid --max-hourly-rate: value must be a finite number"
+        )));
+    }
+    if value < 0.0 {
+        return Err(CliError::Internal(eyre!(
+            "Invalid --max-hourly-rate: value must be non-negative"
+        )));
+    }
+
+    let cents = (value * 100.0).round();
+    if cents < 0.0 || cents > u32::MAX as f64 {
+        return Err(CliError::Internal(eyre!(
+            "Invalid --max-hourly-rate: value is out of supported range"
+        )));
+    }
+
+    Ok(cents as u32)
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::usd_per_gpu_hour_to_cents;
+
+    #[test]
+    fn rounds_to_nearest_cent() {
+        assert_eq!(usd_per_gpu_hour_to_cents(2.50).unwrap(), 250);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.234).unwrap(), 123);
+        assert_eq!(usd_per_gpu_hour_to_cents(1.235).unwrap(), 124);
+    }
+
+    #[test]
+    fn rejects_invalid_values() {
+        assert!(usd_per_gpu_hour_to_cents(f64::NAN).is_err());
+        assert!(usd_per_gpu_hour_to_cents(f64::INFINITY).is_err());
+        assert!(usd_per_gpu_hour_to_cents(-0.01).is_err());
+    }
+}
 
 /// Enum representing the type of rental offering (GPU or CPU-only)
 enum RentalOffering {
@@ -844,14 +885,28 @@ async fn poll_cpu_rental_status(
     }
 }
 
-/// Handle community cloud rental with a pre-selected node (from unified selector)
+/// Handle community cloud rental with a pre-selected GPU category (from unified selector)
 async fn handle_community_cloud_rental_with_selection(
     api_client: basilica_sdk::BasilicaClient,
-    node_selection: NodeSelection,
+    selection: CommunityCloudSelection,
     options: UpOptions,
     config: &CliConfig,
 ) -> Result<(), CliError> {
     let spinner = create_spinner("Preparing rental request...");
+
+    let user_max_hourly_rate_cents = options
+        .max_hourly_rate
+        .map(usd_per_gpu_hour_to_cents)
+        .transpose()?;
+    let effective_max_hourly_rate_cents = user_max_hourly_rate_cents
+        .or(selection.derived_max_hourly_rate_cents)
+        .ok_or_else(|| {
+            complete_spinner_error(spinner.clone(), "Missing max hourly rate");
+            CliError::Internal(
+                eyre!("Selected Bourse offering does not include pricing information")
+                    .suggestion("Retry with --max-hourly-rate <USD_PER_GPU_HOUR>"),
+            )
+        })?;
 
     // Build rental request
     let container_image = options.image.unwrap_or_else(|| config.image.name.clone());
@@ -878,16 +933,36 @@ async fn handle_community_cloud_rental_with_selection(
         options.command
     };
 
+    // Get SSH public key for the rental
+    let ssh_key = api_client
+        .get_ssh_key()
+        .await
+        .map_err(|e| {
+            complete_spinner_error(spinner.clone(), "Failed to get SSH key");
+            CliError::Internal(eyre!(e))
+        })?
+        .ok_or_else(|| {
+            complete_spinner_error(spinner.clone(), "No SSH key registered");
+            CliError::Internal(
+                eyre!("No SSH key registered with Basilica")
+                    .suggestion("Run 'basilica ssh-keys add' to register your SSH key"),
+            )
+        })?;
+
     let request = StartRentalApiRequest {
-        node_selection,
+        gpu_category: selection.gpu_category,
+        gpu_count: selection.gpu_count,
+        min_memory_gb: selection.min_memory_gb,
+        max_hourly_rate_cents: effective_max_hourly_rate_cents,
         container_image,
+        ssh_public_key: ssh_key.public_key,
         environment: env_vars,
         ports: port_mappings,
         resources: ResourceRequirementsRequest {
             cpu_cores: options.cpu_cores.unwrap_or(0.0),
             memory_mb: options.memory_mb.unwrap_or(0),
             storage_mb: options.storage_mb.unwrap_or(0),
-            gpu_count: options.gpu_count.unwrap_or(0),
+            gpu_count: selection.gpu_count,
             gpu_types: vec![],
         },
         command,
@@ -1011,6 +1086,9 @@ fn validate_no_community_cloud_options(options: &UpOptions) -> Result<(), CliErr
     if options.storage_mb.is_some() {
         invalid_args.push("--storage-mb");
     }
+    if options.max_hourly_rate.is_some() {
+        invalid_args.push("--max-hourly-rate");
+    }
 
     if !invalid_args.is_empty() {
         return Err(CliError::Internal(
@@ -1074,14 +1152,9 @@ pub async fn handle_up(
             )
             .await
         }
-        SelectedOffering::CommunityCloud(node_selection) => {
-            handle_community_cloud_rental_with_selection(
-                api_client,
-                node_selection,
-                options,
-                config,
-            )
-            .await
+        SelectedOffering::CommunityCloud(selection) => {
+            handle_community_cloud_rental_with_selection(api_client, selection, options, config)
+                .await
         }
         SelectedOffering::CpuOnly(offering) => {
             validate_no_community_cloud_options(&options)?;

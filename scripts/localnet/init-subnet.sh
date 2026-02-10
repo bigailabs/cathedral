@@ -10,6 +10,39 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WALLETS_DIR="${SCRIPT_DIR}/wallets"
 NETUID=1
 
+show_help() {
+    echo "Basilica Localnet - Initialize Subnet"
+    echo ""
+    echo "Usage: ./init-subnet.sh [-h|--help]"
+    echo ""
+    echo "Creates wallets, funds them via Alice transfer, and registers"
+    echo "validator and miner neurons on the local Subtensor chain (netuid=1)."
+    echo ""
+    echo "Prerequisites:"
+    echo "  - uv (for btcli):  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo "  - jq:              brew install jq (macOS) or apt install jq (Linux)"
+    echo "  - bc:              brew install bc (macOS) or apt install bc (Linux)"
+    echo "  - Subtensor running: ./start.sh network"
+    echo ""
+    echo "What it does:"
+    echo "  1. Creates validator and miner_1 wallets (coldkey + hotkey)"
+    echo "  2. Creates Alice wallet from known dev seed"
+    echo "  3. Funds wallets via Alice transfer (10,000 TAO each)"
+    echo "  4. Registers validator on netuid=${NETUID}"
+    echo "  5. Registers miner on netuid=${NETUID}"
+    echo ""
+    echo "Options:"
+    echo "  -h, --help   Show this help"
+    echo ""
+    echo "Notes:"
+    echo "  - Idempotent: safe to run multiple times"
+    echo "  - Wallets stored in: ${WALLETS_DIR}"
+    echo ""
+    echo "See also: ./setup.sh, ./start.sh"
+}
+
+[[ "${1:-}" =~ ^(-h|--help)$ ]] && show_help && exit 0
+
 echo "========================================"
 echo "  Basilica Localnet - Subnet Init"
 echo "========================================"
@@ -194,6 +227,32 @@ if [ $reg_exit -ne 0 ]; then
         echo "$reg_out"
         exit 1
     fi
+fi
+
+echo ""
+
+# =============================================================================
+# Stake TAO to Validator (required for validator permit)
+# =============================================================================
+echo "[4.5/5] Staking TAO to validator hotkey for validator permit..."
+
+stake_out=$(uvx --from bittensor-cli btcli stake add \
+    --wallet.name "validator" \
+    --wallet.hotkey "default" \
+    --wallet.path "${WALLETS_DIR}" \
+    --netuid "${NETUID}" \
+    --amount 1000 \
+    --no-safe-staking \
+    --no-mev-protection \
+    --network local \
+    --no-prompt 2>&1)
+stake_exit=$?
+
+if [ $stake_exit -ne 0 ]; then
+    echo "  WARNING: Staking failed (may already be staked)"
+    echo "$stake_out"
+else
+    echo "  Staked 1000 TAO to validator hotkey"
 fi
 
 echo ""

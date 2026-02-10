@@ -1079,8 +1079,6 @@ execution_timeout_secs = 1200  # 20 minutes
 output_format = "json"
 # Enable binary validation
 enabled = true
-# Binary validation score weight
-score_weight = 0.8
 # Default node port for SSH tunnel cleanup
 node_port = 3000
 

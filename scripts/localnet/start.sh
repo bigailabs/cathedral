@@ -6,7 +6,6 @@
 #   network     - Subtensor only
 #   validator   - Subtensor + Validator
 #   miner       - Above + Miner
-#   monitoring  - All + Prometheus + Grafana
 #   all         - Everything (default)
 
 set -euo pipefail
@@ -14,18 +13,55 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
+show_help() {
+    echo "Basilica Localnet - Start Services"
+    echo ""
+    echo "Usage: ./start.sh [profile] [--build] [-h|--help]"
+    echo ""
+    echo "Starts localnet services using Docker Compose profiles."
+    echo "Automatically initializes the subnet (wallets, funding, registration)"
+    echo "after Subtensor is ready."
+    echo ""
+    echo "Profiles:"
+    echo "  network     Subtensor only"
+    echo "  validator   Subtensor + Validator"
+    echo "  miner       Above + Miner"
+    echo "  all         Everything (default)"
+    echo ""
+    echo "Options:"
+    echo "  --build      Rebuild Docker images before starting"
+    echo "  -h, --help   Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  ./start.sh                  # Start all services"
+    echo "  ./start.sh network          # Start Subtensor only"
+    echo "  ./start.sh miner --build    # Rebuild and start up to miner"
+    echo ""
+    echo "Endpoints (when fully started):"
+    echo "  Subtensor:   ws://localhost:9944"
+    echo "  Validator:   http://localhost:8080 (API), :9090/metrics"
+    echo "  Miner:       localhost:8092 (gRPC), :9091/metrics"
+    echo ""
+    echo "See also: ./stop.sh, ./restart.sh, ./test.sh"
+}
+
 # Parse arguments
 PROFILE="${1:-all}"
 BUILD_FLAG=""
 
 for arg in "$@"; do
     case $arg in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
         --build)
             BUILD_FLAG="--build"
             shift
             ;;
         -*)
             echo "Unknown option: $arg"
+            echo "Run './start.sh --help' for usage"
             exit 1
             ;;
     esac
@@ -39,14 +75,8 @@ case "${PROFILE}" in
     validator|val)
         PROFILE="validator"
         ;;
-    miner|min)
+    miner|min|all|"")
         PROFILE="miner"
-        ;;
-    monitoring|monitor|mon)
-        PROFILE="monitoring"
-        ;;
-    all|"")
-        PROFILE="all"
         ;;
     *)
         echo "Unknown profile: ${PROFILE}"
@@ -55,7 +85,6 @@ case "${PROFILE}" in
         echo "  network     - Subtensor only"
         echo "  validator   - Subtensor + Validator"
         echo "  miner       - Above + Miner"
-        echo "  monitoring  - All + Prometheus + Grafana"
         echo "  all         - Everything (default)"
         exit 1
         ;;
@@ -90,6 +119,31 @@ if [ ! -f "${MINER_KEY}" ]; then
     chmod 600 "${MINER_KEY}"
     chmod 644 "${MINER_KEY}.pub"
     echo ""
+fi
+
+# Copy example configs if local configs don't exist
+CONFIG_DIR="$SCRIPT_DIR/configs"
+NEW_CONFIGS=()
+if [ ! -f "$CONFIG_DIR/validator.toml" ]; then
+    echo "Creating validator.toml from example..."
+    cp "$CONFIG_DIR/validator.example.toml" "$CONFIG_DIR/validator.toml"
+    NEW_CONFIGS+=("$CONFIG_DIR/validator.toml")
+fi
+if [ ! -f "$CONFIG_DIR/miner.toml" ]; then
+    echo "Creating miner.toml from example..."
+    cp "$CONFIG_DIR/miner.example.toml" "$CONFIG_DIR/miner.toml"
+    NEW_CONFIGS+=("$CONFIG_DIR/miner.toml")
+fi
+
+if [ ${#NEW_CONFIGS[@]} -gt 0 ]; then
+    echo ""
+    echo "New config files created:"
+    for f in "${NEW_CONFIGS[@]}"; do
+        echo "  - $(basename "$f")"
+    done
+    echo ""
+    echo "Please review and edit them if needed, then press Enter to continue."
+    read -r
 fi
 
 # Function to wait for a service
@@ -136,15 +190,12 @@ wait_for_port() {
 }
 
 # Function to initialize wallets and subnet
-init_subnet_if_needed() {
-    local wallets_dir="${SCRIPT_DIR}/wallets"
-
-    # Check if wallets already exist
-    if [ -f "${wallets_dir}/validator/hotkeys/default" ] && [ -f "${wallets_dir}/miner_1/hotkeys/default" ]; then
-        echo "  Wallets already exist, skipping initialization"
-        return 0
-    fi
-
+# Always runs init-subnet.sh because:
+# - init-subnet.sh is fully idempotent
+# - It checks wallet existence internally and skips creation if they exist
+# - It handles "already registered" errors gracefully
+# - Funding checks balance before transferring
+init_subnet() {
     echo "  Initializing subnet (creating wallets, funding, registering)..."
 
     # Check prerequisites
@@ -164,6 +215,10 @@ init_subnet_if_needed() {
     "${SCRIPT_DIR}/init-subnet.sh"
 }
 
+# Create shared network if it doesn't exist
+docker network create basilica-localnet --subnet 172.28.0.0/16 2>/dev/null && \
+    echo "Created shared network: basilica-localnet" || true
+
 # Two-phase startup: Start subtensor first, init wallets, then start remaining services
 # This prevents race conditions where validator starts before wallets exist
 
@@ -176,7 +231,7 @@ wait_for_service "Subtensor" "http://localhost:9944/health"
 
 echo ""
 echo "[3/4] Initializing subnet..."
-init_subnet_if_needed
+init_subnet
 
 # For network-only profile, we're done
 if [ "${PROFILE}" = "network" ]; then
@@ -186,12 +241,7 @@ else
     echo ""
     echo "[4/4] Starting remaining services for profile: ${PROFILE}..."
 
-    # Start the remaining services for the requested profile
-    if [ "${PROFILE}" = "all" ]; then
-        docker compose up -d ${BUILD_FLAG}
-    else
-        docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
-    fi
+    docker compose --profile "${PROFILE}" up -d ${BUILD_FLAG}
 
     echo ""
     echo "Waiting for services..."
@@ -204,12 +254,6 @@ else
         miner)
             wait_for_service "Validator" "http://localhost:8080/health" 60
             wait_for_port "Miner" "localhost" 8092 60
-            ;;
-        monitoring|all)
-            wait_for_service "Validator" "http://localhost:8080/health" 60
-            wait_for_port "Miner" "localhost" 8092 60
-            wait_for_service "Prometheus" "http://localhost:9099/-/healthy"
-            wait_for_service "Grafana" "http://localhost:3000/api/health"
             ;;
     esac
 fi
@@ -241,15 +285,6 @@ case "${PROFILE}" in
         echo "               http://localhost:9090/metrics"
         echo "  Miner:       localhost:8092 (gRPC)"
         echo "               http://localhost:9091/metrics"
-        ;;
-    monitoring|all)
-        echo "  Subtensor:   ws://localhost:9944"
-        echo "  Validator:   http://localhost:8080 (API)"
-        echo "               http://localhost:9090/metrics"
-        echo "  Miner:       localhost:8092 (gRPC)"
-        echo "               http://localhost:9091/metrics"
-        echo "  Prometheus:  http://localhost:9099"
-        echo "  Grafana:     http://localhost:3000 (admin/admin)"
         ;;
 esac
 
