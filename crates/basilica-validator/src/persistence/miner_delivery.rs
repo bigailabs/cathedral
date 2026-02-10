@@ -1,10 +1,47 @@
 use anyhow::Result;
 use basilica_protocol::billing::MinerDelivery;
 use chrono::{DateTime, Utc};
-use sqlx::{QueryBuilder, Row, Sqlite};
+use serde::{Deserialize, Serialize};
+use sqlx::Row;
 use std::sync::Arc;
 
 use crate::persistence::SimplePersistence;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedDelivery {
+    miner_hotkey: String,
+    miner_uid: u32,
+    gpu_category: String,
+    node_id: String,
+    total_hours: f64,
+    revenue_usd: f64,
+}
+
+impl From<&MinerDelivery> for CachedDelivery {
+    fn from(d: &MinerDelivery) -> Self {
+        Self {
+            miner_hotkey: d.miner_hotkey.clone(),
+            miner_uid: d.miner_uid,
+            gpu_category: d.gpu_category.clone(),
+            node_id: d.node_id.clone(),
+            total_hours: d.total_hours,
+            revenue_usd: d.revenue_usd,
+        }
+    }
+}
+
+impl From<CachedDelivery> for MinerDelivery {
+    fn from(c: CachedDelivery) -> Self {
+        Self {
+            miner_hotkey: c.miner_hotkey,
+            miner_uid: c.miner_uid,
+            gpu_category: c.gpu_category,
+            node_id: c.node_id,
+            total_hours: c.total_hours,
+            revenue_usd: c.revenue_usd,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct MinerDeliveryRepository {
@@ -22,54 +59,24 @@ impl MinerDeliveryRepository {
         period_end: DateTime<Utc>,
         deliveries: &[MinerDelivery],
     ) -> Result<()> {
-        if deliveries.is_empty() {
-            return Ok(());
-        }
+        let cached: Vec<CachedDelivery> = deliveries.iter().map(CachedDelivery::from).collect();
+        let json = serde_json::to_string(&cached)?;
 
-        let period_start_ts = period_start.timestamp();
-        let period_end_ts = period_end.timestamp();
-        let received_at = Utc::now().timestamp();
+        sqlx::query(
+            r#"
+            INSERT INTO miner_delivery_cache (period_start, period_end, deliveries, received_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(period_start, period_end)
+            DO UPDATE SET deliveries = excluded.deliveries, received_at = excluded.received_at
+            "#,
+        )
+        .bind(period_start.timestamp())
+        .bind(period_end.timestamp())
+        .bind(&json)
+        .bind(Utc::now().timestamp())
+        .execute(self.persistence.pool())
+        .await?;
 
-        let mut tx = self.persistence.pool().begin().await?;
-
-        for delivery in deliveries {
-            sqlx::query(
-                r#"
-                INSERT INTO miner_delivery_cache (
-                    miner_hotkey,
-                    miner_uid,
-                    gpu_category,
-                    period_start,
-                    period_end,
-                    total_hours,
-                    revenue_usd,
-                    received_at,
-                    node_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(miner_hotkey, node_id, gpu_category, period_start, period_end)
-                DO UPDATE SET
-                    miner_uid = excluded.miner_uid,
-                    gpu_category = excluded.gpu_category,
-                    total_hours = excluded.total_hours,
-                    revenue_usd = excluded.revenue_usd,
-                    received_at = excluded.received_at,
-                    node_id = excluded.node_id
-                "#,
-            )
-            .bind(&delivery.miner_hotkey)
-            .bind(delivery.miner_uid as i64)
-            .bind(&delivery.gpu_category)
-            .bind(period_start_ts)
-            .bind(period_end_ts)
-            .bind(delivery.total_hours)
-            .bind(delivery.revenue_usd)
-            .bind(received_at)
-            .bind(&delivery.node_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-
-        tx.commit().await?;
         Ok(())
     }
 
@@ -77,103 +84,46 @@ impl MinerDeliveryRepository {
         &self,
         since: DateTime<Utc>,
         until: DateTime<Utc>,
-        miner_hotkeys: Option<Vec<String>>,
+        _miner_hotkeys: Option<Vec<String>>,
     ) -> Result<Vec<MinerDelivery>> {
-        let since_ts = since.timestamp();
-        let until_ts = until.timestamp();
+        let rows = sqlx::query(
+            "SELECT deliveries FROM miner_delivery_cache WHERE period_end >= ? AND period_start <= ?",
+        )
+        .bind(since.timestamp())
+        .bind(until.timestamp())
+        .fetch_all(self.persistence.pool())
+        .await?;
 
-        let mut qb = QueryBuilder::<Sqlite>::new(
-            r#"
-            SELECT
-                miner_hotkey,
-                miner_uid,
-                total_hours,
-                revenue_usd,
-                gpu_category,
-                node_id
-            FROM miner_delivery_cache
-            WHERE period_end >=
-            "#,
-        );
-        qb.push_bind(since_ts);
-        qb.push(" AND period_start <= ");
-        qb.push_bind(until_ts);
-
-        if let Some(hotkeys) = miner_hotkeys {
-            if !hotkeys.is_empty() {
-                qb.push(" AND miner_hotkey IN (");
-                let mut separated = qb.separated(", ");
-                for hotkey in hotkeys {
-                    separated.push_bind(hotkey);
-                }
-                qb.push(")");
-            }
+        let mut result = Vec::new();
+        for row in rows {
+            let json: String = row.get("deliveries");
+            let cached: Vec<CachedDelivery> = serde_json::from_str(&json)?;
+            result.extend(cached.into_iter().map(MinerDelivery::from));
         }
-
-        let rows = qb.build().fetch_all(self.persistence.pool()).await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| MinerDelivery {
-                miner_hotkey: row.get("miner_hotkey"),
-                miner_uid: row.get::<i64, _>("miner_uid") as u32,
-                total_hours: row.get("total_hours"),
-                revenue_usd: row.get("revenue_usd"),
-                gpu_category: row.get("gpu_category"),
-                node_id: row.get("node_id"),
-            })
-            .collect())
+        Ok(result)
     }
 
     pub async fn get_deliveries_for_window(
         &self,
         period_start: DateTime<Utc>,
         period_end: DateTime<Utc>,
-        miner_hotkeys: Option<Vec<String>>,
+        _miner_hotkeys: Option<Vec<String>>,
     ) -> Result<Vec<MinerDelivery>> {
-        let period_start_ts = period_start.timestamp();
-        let period_end_ts = period_end.timestamp();
+        let row = sqlx::query(
+            "SELECT deliveries FROM miner_delivery_cache WHERE period_start = ? AND period_end = ?",
+        )
+        .bind(period_start.timestamp())
+        .bind(period_end.timestamp())
+        .fetch_optional(self.persistence.pool())
+        .await?;
 
-        let mut qb = QueryBuilder::<Sqlite>::new(
-            r#"
-            SELECT
-                miner_hotkey,
-                miner_uid,
-                total_hours,
-                revenue_usd,
-                gpu_category,
-                node_id
-            FROM miner_delivery_cache
-            WHERE period_start =
-            "#,
-        );
-        qb.push_bind(period_start_ts);
-        qb.push(" AND period_end = ");
-        qb.push_bind(period_end_ts);
-
-        if let Some(hotkeys) = miner_hotkeys {
-            if !hotkeys.is_empty() {
-                qb.push(" AND miner_hotkey IN (");
-                let mut separated = qb.separated(", ");
-                for hotkey in hotkeys {
-                    separated.push_bind(hotkey);
-                }
-                qb.push(")");
+        match row {
+            Some(row) => {
+                let json: String = row.get("deliveries");
+                let cached: Vec<CachedDelivery> = serde_json::from_str(&json)?;
+                Ok(cached.into_iter().map(MinerDelivery::from).collect())
             }
+            None => Ok(vec![]),
         }
-
-        let rows = qb.build().fetch_all(self.persistence.pool()).await?;
-
-        Ok(rows
-            .into_iter()
-            .map(|row| MinerDelivery {
-                miner_hotkey: row.get("miner_hotkey"),
-                miner_uid: row.get::<i64, _>("miner_uid") as u32,
-                total_hours: row.get("total_hours"),
-                revenue_usd: row.get("revenue_usd"),
-                gpu_category: row.get("gpu_category"),
-                node_id: row.get("node_id"),
-            })
-            .collect())
     }
 }
