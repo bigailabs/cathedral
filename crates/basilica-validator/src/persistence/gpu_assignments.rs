@@ -265,7 +265,7 @@ impl SimplePersistence {
         };
 
         sqlx::query(
-            "UPDATE miner_nodes SET gpu_count = ?, status = ?, updated_at = datetime('now')
+            "UPDATE miner_nodes SET gpu_count = ?, status = ?
              WHERE miner_id = ? AND node_id = ?",
         )
         .bind(gpu_count as i32)

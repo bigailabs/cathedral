@@ -326,8 +326,8 @@ impl SimplePersistence {
                 INSERT INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, gpu_count,
                     status, last_health_check,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, datetime('now'), datetime('now'))
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, datetime('now'))
             "#;
 
             sqlx::query(insert_node)
@@ -581,15 +581,14 @@ impl SimplePersistence {
             let node_id = Uuid::new_v4().to_string();
 
             sqlx::query(
-                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_id)
             .bind(miner_id)
             .bind(&node.node_id)
             .bind(&node.ssh_endpoint)
             .bind(node.gpu_count as i64)
-            .bind(&now)
             .bind(&now)
             .execute(&mut *tx)
             .await?;
@@ -694,15 +693,14 @@ impl SimplePersistence {
                 let node_id = Uuid::new_v4().to_string();
 
                 sqlx::query(
-                    "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&node_id)
                 .bind(miner_id)
                 .bind(&node.node_id)
                 .bind(&node.ssh_endpoint)
                 .bind(node.gpu_count as i64)
-                .bind(&now)
                 .bind(&now)
                 .execute(&mut *tx)
                 .await?;

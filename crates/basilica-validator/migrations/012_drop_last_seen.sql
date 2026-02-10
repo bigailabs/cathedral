@@ -8,3 +8,7 @@ ALTER TABLE miners DROP COLUMN verification_score;
 ALTER TABLE miners DROP COLUMN uptime_percentage;
 ALTER TABLE miners DROP COLUMN node_info;
 ALTER TABLE miners DROP COLUMN registered_at;
+
+-- Drop updated_at from miner_nodes: every read uses last_health_check (always set on INSERT),
+-- so the last_health_check IS NULL fallback branches were dead code.
+ALTER TABLE miner_nodes DROP COLUMN updated_at;

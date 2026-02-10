@@ -127,8 +127,8 @@ impl SimplePersistence {
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, gpu_count,
-                    hourly_rate_cents, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    hourly_rate_cents, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
             "#;
 
             let relationship_id = format!("{miner_id}_{node_id}");
@@ -197,7 +197,7 @@ impl SimplePersistence {
                         dup_node_id, dup_id, node_id, miner_id
                     );
 
-                    sqlx::query("UPDATE miner_nodes SET status = 'offline', last_health_check = datetime('now'), updated_at = datetime('now') WHERE id = ?")
+                    sqlx::query("UPDATE miner_nodes SET status = 'offline', last_health_check = datetime('now') WHERE id = ?")
                         .bind(&dup_id)
                         .execute(self.pool())
                         .await
@@ -228,7 +228,7 @@ impl SimplePersistence {
         // Update pricing for all nodes (new and existing) on every discovery
         let result = sqlx::query(
             "UPDATE miner_nodes
-             SET hourly_rate_cents = ?, updated_at = datetime('now')
+             SET hourly_rate_cents = ?
              WHERE miner_id = ? AND node_id = ?",
         )
         .bind(hourly_rate_cents as i64)
@@ -305,12 +305,9 @@ impl SimplePersistence {
         let stale_health_check_result = sqlx::query(
             r#"
             UPDATE miner_nodes
-            SET status = 'offline', updated_at = datetime('now')
+            SET status = 'offline'
             WHERE status IN ('online', 'verified')
-            AND (
-                (last_health_check IS NOT NULL AND last_health_check < datetime('now', '-5 minutes'))
-                OR (last_health_check IS NULL AND updated_at < datetime('now', '-5 minutes'))
-            )
+            AND last_health_check < datetime('now', '-5 minutes')
             "#,
         )
         .execute(self.pool())
@@ -332,10 +329,7 @@ impl SimplePersistence {
                     WHERE me.node_id = gpu_uuid_assignments.node_id
                     AND me.miner_id = gpu_uuid_assignments.miner_id
                     AND me.status = 'offline'
-                    AND (
-                        me.last_health_check < datetime('now', '-2 hours')
-                        OR (me.last_health_check IS NULL AND me.updated_at < datetime('now', '-2 hours'))
-                    )
+                    AND me.last_health_check < datetime('now', '-2 hours')
                 )
             )
         "#;
@@ -370,10 +364,7 @@ impl SimplePersistence {
             FROM miner_nodes me
             LEFT JOIN gpu_uuid_assignments ga ON me.node_id = ga.node_id AND me.miner_id = ga.miner_id
             WHERE me.status = 'offline'
-            AND (
-                datetime(me.last_health_check) < datetime('now', '-{cleanup_minutes} minutes')
-                OR (me.last_health_check IS NULL AND datetime(me.updated_at) < datetime('now', '-{cleanup_minutes} minutes'))
-            )
+            AND datetime(me.last_health_check) < datetime('now', '-{cleanup_minutes} minutes')
             GROUP BY me.node_id, me.miner_id
             "#
         );
@@ -478,12 +469,9 @@ impl SimplePersistence {
             r#"
             DELETE FROM miner_nodes
             WHERE status = 'offline'
-            AND (
-                datetime(last_health_check) < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
-            )
+            AND datetime(last_health_check) < datetime('now', '-{} minutes')
             "#,
-            cleanup_minutes, cleanup_minutes
+            cleanup_minutes
         );
 
         info!(
@@ -496,12 +484,9 @@ impl SimplePersistence {
             SELECT node_id, miner_id
             FROM miner_nodes
             WHERE status = 'offline'
-            AND (
-                datetime(last_health_check) < datetime('now', '-{} minutes')
-                OR (last_health_check IS NULL AND datetime(updated_at) < datetime('now', '-{} minutes'))
-            )
+            AND datetime(last_health_check) < datetime('now', '-{} minutes')
             "#,
-            cleanup_minutes, cleanup_minutes
+            cleanup_minutes
         );
 
         let mut stale_tx = self.pool().begin().await?;
@@ -948,7 +933,7 @@ impl SimplePersistence {
         let result = sqlx::query(
             r#"
             UPDATE miner_nodes
-            SET active_rental_id = ?, updated_at = datetime('now')
+            SET active_rental_id = ?
             WHERE node_id = ? AND miner_id = ?
               AND active_rental_id IS NULL
             "#,
@@ -977,7 +962,7 @@ impl SimplePersistence {
         let result = sqlx::query(
             r#"
             UPDATE miner_nodes
-            SET active_rental_id = NULL, updated_at = datetime('now')
+            SET active_rental_id = NULL
             WHERE node_id = ? AND miner_id = ?
               AND active_rental_id = ?
             "#,
@@ -1377,10 +1362,7 @@ impl SimplePersistence {
             FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
-            AND (
-                (last_health_check IS NULL AND updated_at > datetime('now', '-5 minutes'))
-                OR last_health_check > datetime('now', '-5 minutes')
-            )
+            AND last_health_check > datetime('now', '-5 minutes')
         "#;
 
         let rows = sqlx::query(query)
@@ -1474,8 +1456,8 @@ impl SimplePersistence {
                 r#"
                 INSERT INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, gpu_count,
-                    hourly_rate_cents, status, bid_active, last_health_check, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'), datetime('now'))
+                    hourly_rate_cents, status, bid_active, last_health_check, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
                 "#,
             )
             .bind(&relationship_id)
@@ -1507,8 +1489,7 @@ impl SimplePersistence {
                     hourly_rate_cents = ?,
                     status = 'online',
                     bid_active = 1,
-                    last_health_check = datetime('now'),
-                    updated_at = datetime('now')
+                    last_health_check = datetime('now')
                 WHERE miner_id = ? AND node_id = ?
                 "#,
             )
@@ -1544,7 +1525,6 @@ impl SimplePersistence {
                 r#"
                 UPDATE miner_nodes
                 SET last_health_check = datetime('now'),
-                    updated_at = datetime('now'),
                     status = CASE WHEN status IN ('offline', 'unknown') THEN 'online' ELSE status END
                 WHERE miner_id = ?
                 "#,
@@ -1561,7 +1541,6 @@ impl SimplePersistence {
                     r#"
                     UPDATE miner_nodes
                     SET last_health_check = datetime('now'),
-                        updated_at = datetime('now'),
                         status = CASE WHEN status IN ('offline', 'unknown') THEN 'online' ELSE status END
                     WHERE miner_id = ? AND node_id = ?
                     "#,
@@ -1589,8 +1568,7 @@ impl SimplePersistence {
         let result = sqlx::query(
             r#"
             UPDATE miner_nodes
-            SET hourly_rate_cents = ?,
-                updated_at = datetime('now')
+            SET hourly_rate_cents = ?
             WHERE miner_id = ? AND node_id = ?
             "#,
         )
@@ -1627,8 +1605,7 @@ impl SimplePersistence {
                 r#"
                 UPDATE miner_nodes
                 SET status = 'offline',
-                    bid_active = 0,
-                    updated_at = datetime('now')
+                    bid_active = 0
                 WHERE miner_id = ?
                 "#,
             )
@@ -1643,8 +1620,7 @@ impl SimplePersistence {
                     r#"
                     UPDATE miner_nodes
                     SET status = 'offline',
-                        bid_active = 0,
-                        updated_at = datetime('now')
+                        bid_active = 0
                     WHERE miner_id = ? AND node_id = ?
                     "#,
                 )
@@ -1720,7 +1696,7 @@ impl SimplePersistence {
             let result = sqlx::query(
                 r#"
                 UPDATE miner_nodes
-                SET bid_active = 0, updated_at = datetime('now')
+                SET bid_active = 0
                 WHERE miner_id = ?
                 "#,
             )
@@ -1746,7 +1722,7 @@ impl SimplePersistence {
         let query = format!(
             r#"
             UPDATE miner_nodes
-            SET bid_active = 0, updated_at = datetime('now')
+            SET bid_active = 0
             WHERE miner_id = ? AND node_id NOT IN ({})
             "#,
             in_clause

@@ -43,8 +43,8 @@ mod tests {
             // Seed miner_nodes table with online status
             let node_key = format!("{}:{}", &miner_id, &node_id);
             sqlx::query(
-                "INSERT OR REPLACE INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, gpu_uuids, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, gpu_uuids, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_key)
             .bind(&miner_id)
@@ -53,7 +53,6 @@ mod tests {
             .bind(profile.gpu_counts.values().sum::<u32>() as i64)
             .bind("online")
             .bind("") // Empty gpu_uuids, we'll use gpu_uuid_assignments instead
-            .bind(now.to_rfc3339())
             .bind(now.to_rfc3339())
             .execute(persistence.pool())
             .await?;

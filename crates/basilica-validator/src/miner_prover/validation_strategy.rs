@@ -1370,8 +1370,8 @@ mod tests {
 
         // Seed miner_nodes so status check doesn't force full validation by itself.
         sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, hourly_rate_cents, status, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))",
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, hourly_rate_cents, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         )
         .bind(format!("{miner_id}_{node_id}"))
         .bind(&miner_id)
