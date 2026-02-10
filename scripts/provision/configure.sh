@@ -217,7 +217,6 @@ netuid = ${BITTENSOR_NETUID:-39}
 chain_endpoint = "${BITTENSOR_ENDPOINT:-wss://entrypoint-finney.opentensor.ai:443}"
 weight_interval_secs = 300
 uid = 0  # Auto-discovered from chain
-coldkey_name = "${MINER_COLDKEY_NAME:-default}"
 axon_port = ${MINER_AXON_PORT:-8091}
 external_ip = "${MINER_EXTERNAL_IP:-${MINER_HOST}}"
 max_weight_uids = 256

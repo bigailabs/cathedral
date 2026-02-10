@@ -11,9 +11,6 @@ wallet_name = "YOUR_WALLET_NAME"
 # Your hotkey name (file in ~/.bittensor/wallets/{wallet_name}/hotkeys/)
 hotkey_name = "YOUR_HOTKEY_NAME"
 
-# Coldkey name
-coldkey_name = "default"
-
 # Network: "finney" for mainnet, "test" for testnet
 network = "finney"
 

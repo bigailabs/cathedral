@@ -7,7 +7,6 @@
 [bittensor]
 wallet_name = "miner_1"
 hotkey_name = "default"
-coldkey_name = "default"
 network = "local"
 netuid = 1
 chain_endpoint = "ws://subtensor:9944"

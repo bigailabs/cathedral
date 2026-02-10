@@ -57,9 +57,6 @@ pub struct MinerBittensorConfig {
     #[serde(flatten)]
     pub common: BittensorConfig,
 
-    /// Coldkey name for wallet operations
-    pub coldkey_name: String,
-
     /// Axon server port for Bittensor network
     pub axon_port: u16,
 
@@ -264,7 +261,6 @@ impl Default for MinerBittensorConfig {
                 weight_interval_secs: 300, // 5 minutes
                 ..Default::default()
             },
-            coldkey_name: "default".to_string(),
             axon_port: 8091,
             external_ip: None,
             max_weight_uids: 256,

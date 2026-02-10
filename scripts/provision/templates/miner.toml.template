@@ -9,7 +9,6 @@ netuid = ${BITTENSOR_NETUID}
 chain_endpoint = "${BITTENSOR_CHAIN_ENDPOINT}"
 external_ip = "${MINER_EXTERNAL_IP}"
 uid = 0
-coldkey_name = "default"
 axon_port = ${MINER_AXON_PORT}
 max_weight_uids = 256
 
