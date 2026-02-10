@@ -101,14 +101,6 @@ async fn show_config(config: &MinerConfig, show_sensitive: bool) -> Result<()> {
     // Show derived/computed values
     println!("\n=== Derived Configuration ===");
     println!("Database Type: SQLite");
-    println!(
-        "Validator Registration Endpoint: {}",
-        config
-            .validator_comms
-            .validator_registration_endpoint
-            .as_deref()
-            .unwrap_or("Not configured")
-    );
     println!("Metrics Enabled: {}", config.metrics.enabled);
     println!("Node Count: {}", config.node_management.nodes.len());
 
@@ -153,9 +145,6 @@ async fn perform_comprehensive_validation(config: &MinerConfig) -> Result<Valida
 
     // Database configuration validation
     validate_database_config(&config.database, &mut errors, &mut warnings);
-
-    // Validator communications configuration validation
-    validate_validator_comms_config(&config.validator_comms, &mut errors, &mut warnings);
 
     // Bittensor configuration validation
     validate_bittensor_config(
@@ -205,17 +194,6 @@ fn validate_database_config(
 
     if config.max_connections > 50 {
         warnings.push("High max_connections value may impact performance".to_string());
-    }
-}
-
-/// Validate validator comms configuration
-fn validate_validator_comms_config(
-    config: &crate::config::ValidatorCommsConfig,
-    _errors: &mut Vec<String>,
-    warnings: &mut Vec<String>,
-) {
-    if config.validator_registration_endpoint.is_none() {
-        warnings.push("validator_registration_endpoint not configured - miner will not register with validator".to_string());
     }
 }
 

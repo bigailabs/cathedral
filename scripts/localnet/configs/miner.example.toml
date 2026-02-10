@@ -33,14 +33,6 @@ port = 9090
 path = "/metrics"
 
 # =============================================================================
-# Validator Communications (Miner → Validator Registration)
-# =============================================================================
-[validator_comms]
-# Validator's gRPC endpoint for miner registration (RegisterBid, UpdateBid, HealthCheck)
-validator_registration_endpoint = "http://validator:50052"
-request_timeout = 30
-
-# =============================================================================
 # Node Management (GPU Nodes)
 # =============================================================================
 [node_management]
@@ -83,7 +75,7 @@ strategy = "highest_stake"
 # =============================================================================
 # Bidding Configuration (GPU Pricing)
 # =============================================================================
-# BidManager runs automatically when validator_registration_endpoint is set.
+# BidManager runs automatically and waits for validator discovery.
 # All GPU categories in your nodes MUST have prices defined here.
 [bidding]
 # Static prices by GPU category (in dollars per GPU-hour)

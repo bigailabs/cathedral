@@ -179,7 +179,7 @@ impl MinerState {
         // Initialize registration client for miner→validator communication
         let bittensor_service = chain_registration.get_bittensor_service();
         let registration_client = Arc::new(RegistrationClient::new(
-            config.validator_comms.clone(),
+            std::time::Duration::from_secs(30),
             node_manager.clone(),
             bittensor_service,
         ));
@@ -189,6 +189,7 @@ impl MinerState {
             config.bidding.clone(),
             node_manager.clone(),
             registration_client.clone(),
+            validator_discovery.clone(),
         ));
 
         // Use a placeholder UID that will be updated after chain registration
@@ -254,18 +255,14 @@ impl MinerState {
         });
 
         // Start bid manager (owns registration lifecycle: register, health checks)
-        let bid_manager_handle = if self.registration_client.has_registration_endpoint() {
-            let bid_manager = self.bid_manager.clone();
-            let bid_manager_shutdown_rx = shutdown_rx.clone();
-            Some(tokio::spawn(async move {
-                if let Err(e) = bid_manager.run(bid_manager_shutdown_rx).await {
-                    error!("BidManager error: {}", e);
-                }
-            }))
-        } else {
-            info!("validator_registration_endpoint not configured, skipping registration");
-            None
-        };
+        // BidManager waits for validator discovery to provide the gRPC endpoint
+        let bid_manager = self.bid_manager.clone();
+        let bid_manager_shutdown_rx = shutdown_rx.clone();
+        let bid_manager_handle = tokio::spawn(async move {
+            if let Err(e) = bid_manager.run(bid_manager_shutdown_rx).await {
+                error!("BidManager error: {}", e);
+            }
+        });
 
         info!("All miner services started successfully");
 
@@ -274,11 +271,7 @@ impl MinerState {
             _ = signal::ctrl_c() => {
                 info!("Received shutdown signal, stopping miner...");
             }
-            _ = async {
-                if let Some(handle) = bid_manager_handle {
-                    handle.await.ok();
-                }
-            } => {
+            _ = bid_manager_handle => {
                 error!("BidManager stopped unexpectedly");
             }
             _ = discovery_handle => {
