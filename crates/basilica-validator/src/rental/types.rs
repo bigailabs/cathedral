@@ -155,7 +155,7 @@ pub struct ContainerStatus {
 }
 
 /// Resource usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceUsage {
     pub cpu_percent: f64,
     pub memory_mb: i64,
@@ -167,7 +167,7 @@ pub struct ResourceUsage {
 }
 
 /// GPU usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GpuUsage {
     pub gpu_index: u32,
     pub utilization_percent: f64,
