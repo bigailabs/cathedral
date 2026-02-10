@@ -233,8 +233,6 @@ port = ${MINER_GRPC_PORT:-8092}
 max_connections = 1000
 tls_enabled = ${MINER_TLS_ENABLED:-false}
 
-[validator_comms]
-
 [executor_management]
 # Static executor configuration
 executors = [

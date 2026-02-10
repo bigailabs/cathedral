@@ -37,9 +37,6 @@ port = ${MINER_METRICS_PORT}
 path = "/metrics"
 retention_period = { secs = 604800 }
 
-[validator_comms]
-request_timeout = { secs = 30 }
-
 [executor_management]
 health_check_interval = { secs = 60 }
 health_check_timeout = { secs = 10 }

@@ -37,11 +37,11 @@ Bittensor neuron for verification and scoring. Key configuration sections:
 Bittensor neuron that orchestrates GPU node access. Key configuration sections:
 
 - `[bittensor]` - Wallet and network settings (auto-detects UID and chain endpoint)
-- `[node_management]` - GPU node SSH endpoint configuration
-- `[validator_comms]` - Communication with validators including rate limiting
+- `[node_management]` - GPU node SSH endpoint configuration (gpu_category, gpu_count)
+- `[bidding]` - GPU pricing per category (static prices in dollars per GPU-hour)
 - `[ssh_session]` - SSH session orchestration for validator access
 - `[advertised_addresses]` - Service endpoint advertising
-- `[validator_assignment]` - Validator assignment strategy
+- `[validator_assignment]` - Validator assignment strategy (automatic validator discovery)
 
 ### CLI (`cli.toml`)
 

@@ -28,6 +28,7 @@ cp config/miner.toml.example miner.toml
 # Edit miner.toml with your settings:
 # - [bittensor] wallet_name, hotkey_name, external_ip
 # - [node_management] nodes list with your GPU nodes
+# - [bidding.strategy.static.static_prices] prices per GPU category
 # - [ssh_session] miner_node_key_path
 
 # Minimal example configuration:
@@ -44,13 +45,9 @@ chain_endpoint = "wss://entrypoint-finney.opentensor.ai:443"
 [database]
 url = "sqlite:///opt/basilica/data/miner.db"
 
-[validator_comms]
-host = "0.0.0.0"
-port = 50051
-
 [node_management]
 nodes = [
-  { host = "<node_ip>", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+  { host = "<node_ip>", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 ]
 
 [ssh_session]
@@ -59,6 +56,9 @@ default_node_username = "basilica"
 
 [validator_assignment]
 strategy = "highest_stake"
+
+[bidding.strategy.static.static_prices]
+H100 = 2.50
 EOF
 
 # 4. Build and run (with docker compose)
@@ -260,7 +260,7 @@ node_id = UUID_v5_namespace(username@host:port)
 ```toml
 [node_management]
 nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 }
+  { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 }
 ]
 ```
 
@@ -425,13 +425,11 @@ validator_hotkey = "5G3qVaXzKMPDm5AJ3dpzbpUC27kpccBvDwzSWXrq8M6qMmbC"
 
 **Miner's perspective:**
 
-1. **Register nodes** from config at startup
-2. **Start gRPC server** listening on configured port
-3. **Wait for validator connections**
-4. **Verify validator signatures** and authorization
-5. **Deploy validator SSH keys** to nodes automatically
-6. **Return node details** to authorized validators
-7. **Monitor node health** and update status
+1. **Discover validator** at startup via metagraph + `/discovery` endpoint
+2. **Register nodes** with the discovered validator's gRPC endpoint (with bid prices)
+3. **Deploy validator SSH key** to nodes (if provided in registration response)
+4. **Run health check loop** sending periodic health checks to the validator
+5. **Serve axon** on Bittensor network for validator discovery
 
 ---
 
@@ -661,16 +659,18 @@ sudo mkdir -p /opt/basilica/data
 sudo chown $USER:$USER /opt/basilica/data
 ```
 
-#### 3. Validator Communications (gRPC Server)
+#### 3. Validator Discovery (Automatic)
 
-```toml
-[validator_comms]
-host = "0.0.0.0"       # Internal binding (0.0.0.0 = all interfaces)
-port = 50051           # gRPC server port
-request_timeout = 30   # Timeout in seconds
-```
+The miner automatically discovers the validator to register with:
 
-**⚠️ Firewall**: Ensure port 50051 is accessible:
+1. At startup, the miner queries the Bittensor metagraph for validators
+2. Based on the `[validator_assignment]` strategy (e.g., `highest_stake`), it selects a validator
+3. It calls the validator's `/discovery` HTTP endpoint (via the axon address) to learn the gRPC port for bid registration
+4. The BidManager then registers nodes and runs health checks against the discovered gRPC endpoint
+
+No manual `validator_registration_endpoint` configuration is needed.
+
+**⚠️ Firewall**: Ensure the axon port (default 50051) is accessible for Bittensor network registration:
 
 ```bash
 # UFW
@@ -685,9 +685,10 @@ sudo iptables -A INPUT -p tcp --dport 50051 -j ACCEPT
 ```toml
 [node_management]
 # List your GPU compute nodes with SSH access details
+# Pricing is configured separately in [bidding.strategy.static.static_prices]
 nodes = [
-  { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
-  { host = "192.168.1.101", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+  { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+  { host = "192.168.1.101", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
 ]
 health_check_interval = 60   # Health check interval in seconds
 health_check_timeout = 10    # Health check timeout in seconds
@@ -700,8 +701,24 @@ auto_recovery = true
 - `host`: IP address or hostname of GPU node (required)
 - `port`: SSH port, typically 22 (required)
 - `username`: SSH username on the node (required)
-- `hourly_rate_per_gpu`: Hourly rental rate in USD per GPU (required)
+- `gpu_category`: GPU model category, e.g., "H100", "A100", "B200" (required)
+- `gpu_count`: Number of GPUs on this node (required)
 - `additional_opts` (optional): Extra SSH options like `"-o StrictHostKeyChecking=no"`
+
+#### 4b. Bidding Configuration (GPU Pricing)
+
+Pricing is configured separately from nodes in the `[bidding]` section. Every GPU category
+listed in your nodes **must** have a corresponding price entry:
+
+```toml
+[bidding]
+# Static prices by GPU category (in dollars per GPU-hour)
+[bidding.strategy.static.static_prices]
+H100 = 2.50    # $2.50/hour per H100 GPU
+A100 = 1.20    # $1.20/hour per A100 GPU
+```
+
+The BidManager runs automatically after validator discovery and registers your nodes with these prices.
 
 #### 5. SSH Access Configuration
 
@@ -1325,23 +1342,7 @@ sudo ufw enable
 
 #### TLS/Encryption
 
-**For production, consider enabling TLS:**
-
-```toml
-[validator_comms]
-tls_enabled = true
-tls_cert_path = "/opt/basilica/certs/server.crt"
-tls_key_path = "/opt/basilica/certs/server.key"
-```
-
-Generate self-signed certificate:
-
-```bash
-openssl req -x509 -newkey rsa:4096 -nodes \
-  -keyout /opt/basilica/certs/server.key \
-  -out /opt/basilica/certs/server.crt \
-  -days 365 -subj "/CN=miner.basilica.local"
-```
+**For production, consider enabling TLS** on your infrastructure level (e.g., reverse proxy or load balancer in front of the miner's axon port).
 
 ### Access Control
 
@@ -1475,14 +1476,7 @@ sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --set
 sudo iptables -A INPUT -p tcp --dport 22 -m state --state NEW -m recent --update --seconds 60 --hitcount 10 -j DROP
 ```
 
-**Application-level rate limiting** (future enhancement):
-
-```toml
-[validator_comms.rate_limit]
-enabled = true
-requests_per_second = 10
-burst_capacity = 20
-```
+**Application-level rate limiting** may be added in a future release.
 
 ---
 
@@ -1709,9 +1703,9 @@ Error: Address already in use (os error 98)
 # Check what's using the port
 sudo lsof -i :50051
 
-# Kill process or change port in config
-# [validator_comms]
-# port = 50052
+# Kill process or change axon_port in config
+# [bittensor]
+# axon_port = 50052
 ```
 
 #### 2. SSH Connection Issues
@@ -1831,7 +1825,7 @@ WARN: No nodes registered - miner will not be able to serve validators
 # Check node_management config
 # [node_management]
 # nodes = [
-#   { host = "192.168.1.100", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 }
+#   { host = "192.168.1.100", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 }
 # ]
 
 # Verify SSH access to each node
@@ -2003,16 +1997,21 @@ For geo-distributed GPU nodes:
 [node_management]
 nodes = [
     # US East
-    { host = "us-east-1.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
-    { host = "us-east-2.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.50 },
+    { host = "us-east-1.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
+    { host = "us-east-2.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 
     # EU West
-    { host = "eu-west-1.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.80 },
-    { host = "eu-west-2.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.80 },
+    { host = "eu-west-1.example.com", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
+    { host = "eu-west-2.example.com", port = 22, username = "basilica", gpu_category = "A100", gpu_count = 4 },
 
     # Asia Pacific
-    { host = "ap-south-1.example.com", port = 22, username = "basilica", hourly_rate_per_gpu = 2.20 },
+    { host = "ap-south-1.example.com", port = 22, username = "basilica", gpu_category = "H100", gpu_count = 8 },
 ]
+
+# Prices apply uniformly across all regions
+[bidding.strategy.static.static_prices]
+H100 = 2.50
+A100 = 1.20
 ```
 
 **Considerations:**
