@@ -896,6 +896,31 @@ impl RentalManager {
             .await?
             .ok_or_else(|| anyhow::anyhow!("Rental not found"))?;
 
+        // For terminal states, return DB state without Docker queries
+        if matches!(
+            rental_info.state,
+            RentalState::Stopped | RentalState::Failed
+        ) {
+            return Ok(RentalStatus {
+                rental_id: rental_id.to_string(),
+                state: rental_info.state.clone(),
+                container_status: ContainerStatus {
+                    container_id: rental_info.container_id.clone(),
+                    state: if rental_info.state == RentalState::Stopped {
+                        "stopped".to_string()
+                    } else {
+                        "exited".to_string()
+                    },
+                    exit_code: None,
+                    health: "none".to_string(),
+                    started_at: None,
+                    finished_at: None,
+                },
+                created_at: rental_info.created_at,
+                resource_usage: ResourceUsage::default(),
+            });
+        }
+
         // Get container status using validator SSH credentials
         let container_client = self.create_container_client(&rental_info.ssh_credentials)?;
 
@@ -924,6 +949,14 @@ impl RentalManager {
             .load_rental(rental_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Rental not found"))?;
+
+        // Already in terminal state — nothing to do
+        if matches!(
+            rental_info.state,
+            RentalState::Stopped | RentalState::Failed
+        ) {
+            return Ok(());
+        }
 
         // Stop container using validator SSH credentials
         let container_client = self.create_container_client(&rental_info.ssh_credentials)?;
