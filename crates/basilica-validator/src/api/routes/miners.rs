@@ -61,7 +61,7 @@ pub async fn list_miners(
                     total_gpu_count,
                     verification_score: miner_data.verification_score,
                     uptime_percentage: miner_data.uptime_percentage,
-                    last_seen: miner_data.last_seen,
+                    updated_at: miner_data.updated_at,
                     registered_at: miner_data.registered_at,
                 });
             }
@@ -105,7 +105,7 @@ pub async fn get_miner(
                 total_gpu_count,
                 verification_score: miner_data.verification_score,
                 uptime_percentage: miner_data.uptime_percentage,
-                last_seen: miner_data.last_seen,
+                updated_at: miner_data.updated_at,
                 registered_at: miner_data.registered_at,
             }))
         }
@@ -139,7 +139,7 @@ pub async fn get_miner_health(
                 .map(|eh| NodeHealthStatus {
                     node_id: eh.node_id,
                     status: eh.status,
-                    last_seen: eh.last_seen,
+                    last_health_check: eh.last_health_check,
                 })
                 .collect();
 
@@ -199,9 +199,9 @@ pub async fn list_miner_nodes(
 
 fn determine_miner_status(miner_data: &crate::persistence::MinerData) -> MinerStatus {
     let now = Utc::now();
-    let time_since_last_seen = now.signed_duration_since(miner_data.last_seen);
+    let time_since_update = now.signed_duration_since(miner_data.updated_at);
 
-    if time_since_last_seen.num_minutes() > 10 {
+    if time_since_update.num_minutes() > 10 {
         MinerStatus::Offline
     } else if miner_data.verification_score < 0.5 {
         MinerStatus::Suspended

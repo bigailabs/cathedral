@@ -866,13 +866,12 @@ mod tests {
 
             // Seed miners table first (required for foreign key constraint)
             sqlx::query(
-                "INSERT OR REPLACE INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO miners (id, hotkey, endpoint, registered_at, updated_at, node_info)
+                 VALUES (?, ?, ?, ?, ?, ?)"
             )
             .bind(&miner_id)
             .bind(format!("hotkey_{}", profile.miner_uid.as_u16()))
             .bind("127.0.0.1:8080")
-            .bind(now.to_rfc3339())
             .bind(now.to_rfc3339())
             .bind(now.to_rfc3339())
             .bind("{}")
@@ -1119,13 +1118,12 @@ mod tests {
         // Manually insert inconsistent data - same node with different GPU models
         // This shouldn't happen in reality but we handle it defensively
         sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO miners (id, hotkey, endpoint, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?)"
         )
         .bind(&miner_id)
         .bind("hotkey_1")
         .bind("127.0.0.1:8080")
-        .bind(Utc::now().to_rfc3339())
         .bind(Utc::now().to_rfc3339())
         .bind(Utc::now().to_rfc3339())
         .bind("{}")

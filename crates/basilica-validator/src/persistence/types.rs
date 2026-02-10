@@ -43,7 +43,7 @@ pub struct MinerData {
     pub node_count: u32,
     pub verification_score: f64,
     pub uptime_percentage: f64,
-    pub last_seen: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub registered_at: DateTime<Utc>,
     pub node_info: Value,
 }
@@ -60,7 +60,7 @@ pub struct MinerHealthData {
 pub struct NodeHealthData {
     pub node_id: String,
     pub status: String,
-    pub last_seen: DateTime<Utc>,
+    pub last_health_check: DateTime<Utc>,
 }
 
 /// Node details for miner listings

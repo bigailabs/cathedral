@@ -192,7 +192,7 @@ pub struct MinerDetails {
     pub total_gpu_count: u32,
     pub verification_score: f64,
     pub uptime_percentage: f64,
-    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
     pub registered_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -247,7 +247,7 @@ pub struct MinerHealthResponse {
 pub struct NodeHealthStatus {
     pub node_id: String,
     pub status: String,
-    pub last_seen: chrono::DateTime<chrono::Utc>,
+    pub last_health_check: chrono::DateTime<chrono::Utc>,
 }
 
 /// Verification trigger request

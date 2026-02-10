@@ -70,8 +70,8 @@ impl SimplePersistence {
         let insert_query = r#"
             INSERT INTO miners (
                 id, hotkey, endpoint, verification_score, uptime_percentage,
-                last_seen, registered_at, updated_at, node_info
-            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), datetime('now'), ?)
+                registered_at, updated_at, node_info
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), ?)
         "#;
 
         sqlx::query(insert_query)
@@ -98,7 +98,7 @@ impl SimplePersistence {
         let update_query = r#"
             UPDATE miners SET
                 endpoint = ?, verification_score = ?,
-                last_seen = datetime('now'), updated_at = datetime('now')
+                updated_at = datetime('now')
             WHERE id = ?
         "#;
 
@@ -134,7 +134,7 @@ impl SimplePersistence {
             let update_query = r#"
                 UPDATE miners SET
                     hotkey = ?, endpoint = ?, verification_score = ?,
-                    last_seen = datetime('now'), updated_at = datetime('now')
+                    updated_at = datetime('now')
                 WHERE id = ?
             "#;
 
@@ -300,8 +300,8 @@ impl SimplePersistence {
             let insert_new_miner = r#"
                 INSERT INTO miners (
                     id, hotkey, endpoint, verification_score, uptime_percentage,
-                    last_seen, registered_at, updated_at, node_info
-                ) VALUES (?, ?, ?, ?, ?, datetime('now'), ?, datetime('now'), ?)
+                    registered_at, updated_at, node_info
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
             "#;
 
             sqlx::query(insert_new_miner)
@@ -528,7 +528,7 @@ impl SimplePersistence {
         let rows = sqlx::query(
             "SELECT
                 id, hotkey, endpoint, verification_score, uptime_percentage,
-                last_seen, registered_at, node_info,
+                updated_at, registered_at, node_info,
                 (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
              FROM miners
              ORDER BY registered_at DESC
@@ -543,7 +543,7 @@ impl SimplePersistence {
         for row in rows {
             let node_info_str: String = row.get("node_info");
             let node_count: i64 = row.get("node_count");
-            let last_seen_str: String = row.get("last_seen");
+            let updated_at_str: String = row.get("updated_at");
             let registered_at_str: String = row.get("registered_at");
 
             miners.push(MinerData {
@@ -553,13 +553,13 @@ impl SimplePersistence {
                 node_count: node_count as u32,
                 verification_score: row.get("verification_score"),
                 uptime_percentage: row.get("uptime_percentage"),
-                last_seen: chrono::NaiveDateTime::parse_from_str(
-                    &last_seen_str,
+                updated_at: chrono::NaiveDateTime::parse_from_str(
+                    &updated_at_str,
                     "%Y-%m-%d %H:%M:%S",
                 )
                 .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
                 .or_else(|_| {
-                    DateTime::parse_from_rfc3339(&last_seen_str).map(|dt| dt.with_timezone(&Utc))
+                    DateTime::parse_from_rfc3339(&updated_at_str).map(|dt| dt.with_timezone(&Utc))
                 })?,
                 registered_at: chrono::NaiveDateTime::parse_from_str(
                     &registered_at_str,
@@ -609,13 +609,12 @@ impl SimplePersistence {
         }
 
         sqlx::query(
-            "INSERT INTO miners (id, hotkey, endpoint, last_seen, registered_at, updated_at, node_info)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO miners (id, hotkey, endpoint, registered_at, updated_at, node_info)
+             VALUES (?, ?, ?, ?, ?, ?)"
         )
         .bind(miner_id)
         .bind(hotkey)
         .bind(endpoint)
-        .bind(&now)
         .bind(&now)
         .bind(&now)
         .bind(&node_info)
@@ -652,7 +651,7 @@ impl SimplePersistence {
         let row = sqlx::query(
             "SELECT
                 id, hotkey, endpoint, verification_score, uptime_percentage,
-                last_seen, registered_at, node_info,
+                updated_at, registered_at, node_info,
                 (SELECT COUNT(*) FROM miner_nodes WHERE miner_id = miners.id) as node_count
              FROM miners
              WHERE id = ?",
@@ -664,7 +663,7 @@ impl SimplePersistence {
         if let Some(row) = row {
             let node_info_str: String = row.get("node_info");
             let node_count: i64 = row.get("node_count");
-            let last_seen_str: String = row.get("last_seen");
+            let updated_at_str: String = row.get("updated_at");
             let registered_at_str: String = row.get("registered_at");
 
             Ok(Some(MinerData {
@@ -674,13 +673,13 @@ impl SimplePersistence {
                 node_count: node_count as u32,
                 verification_score: row.get("verification_score"),
                 uptime_percentage: row.get("uptime_percentage"),
-                last_seen: chrono::NaiveDateTime::parse_from_str(
-                    &last_seen_str,
+                updated_at: chrono::NaiveDateTime::parse_from_str(
+                    &updated_at_str,
                     "%Y-%m-%d %H:%M:%S",
                 )
                 .map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc))
                 .or_else(|_| {
-                    DateTime::parse_from_rfc3339(&last_seen_str).map(|dt| dt.with_timezone(&Utc))
+                    DateTime::parse_from_rfc3339(&updated_at_str).map(|dt| dt.with_timezone(&Utc))
                 })?,
                 registered_at: chrono::NaiveDateTime::parse_from_str(
                     &registered_at_str,
@@ -829,14 +828,14 @@ impl SimplePersistence {
             let last_health_str: Option<String> = row.get("last_health_check");
             let created_at_str: String = row.get("created_at");
 
-            let last_seen = if let Some(health_str) = last_health_str {
+            let node_last_health_check = if let Some(health_str) = last_health_str {
                 DateTime::parse_from_rfc3339(&health_str)?.with_timezone(&Utc)
             } else {
                 DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc)
             };
 
-            if last_seen > latest_check {
-                latest_check = last_seen;
+            if node_last_health_check > latest_check {
+                latest_check = node_last_health_check;
             }
 
             node_health.push(NodeHealthData {
@@ -844,7 +843,7 @@ impl SimplePersistence {
                 status: row
                     .get::<Option<String>, _>("status")
                     .unwrap_or_else(|| "unknown".to_string()),
-                last_seen,
+                last_health_check: node_last_health_check,
             });
         }
 
