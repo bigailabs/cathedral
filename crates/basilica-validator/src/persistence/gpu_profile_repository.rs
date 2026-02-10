@@ -511,7 +511,7 @@ impl GpuProfileRepository {
 
             let mark_offline = r#"
                 UPDATE miner_nodes
-                SET status = 'offline', updated_at = datetime('now')
+                SET status = 'offline'
                 WHERE id = ?
             "#;
 
