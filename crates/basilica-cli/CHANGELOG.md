@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-02-10
+
+### Changed
+- Community cloud rentals now use GPU-based bid matching instead of targeting specific node IDs.
+
+### Fixed
+- Credits formatting edge case where values could display with inconsistent decimal precision.
+
+
 ## [0.18.0] - 2026-02-08
 
 ### Fixed
