@@ -38,26 +38,15 @@ pub async fn handle_tau_deploy(
     if let Some(token) = tau.bot_token {
         env.insert("TAU_BOT_TOKEN".to_string(), token);
     }
-    if let Some(key) = tau.cursor_api_key {
-        env.insert("CURSOR_API_KEY".to_string(), key);
-    }
-    if let Some(key) = tau.openai_api_key {
-        env.insert("OPENAI_API_KEY".to_string(), key);
+    if let Some(token) = tau.chutes_api_token {
+        env.insert("CHUTES_API_TOKEN".to_string(), token);
     }
     if let Some(model) = tau.chat_model {
-        env.insert("TAU_CURSOR_CHAT_MODEL".to_string(), model);
+        env.insert("TAU_CHAT_MODEL".to_string(), model);
     }
 
     copy_env_if_missing(&mut env, "TAU_BOT_TOKEN");
-    copy_env_if_missing(&mut env, "CURSOR_API_KEY");
-    copy_env_if_missing(&mut env, "OPENAI_API_KEY");
-
-    env.entry("TAU_CHAT_BACKEND".to_string())
-        .or_insert_with(|| "cursor".to_string());
-    env.entry("TAU_CURSOR_CHAT_MODEL".to_string())
-        .or_insert_with(|| "composer-1".to_string());
-    env.entry("TAU_OPENAI_CHAT_MODEL".to_string())
-        .or_insert_with(|| "gpt-4o-mini".to_string());
+    copy_env_if_missing(&mut env, "CHUTES_API_TOKEN");
 
     require_env(
         &env,
@@ -66,13 +55,8 @@ pub async fn handle_tau_deploy(
     )?;
     require_env(
         &env,
-        "CURSOR_API_KEY",
-        "Set it in your environment or pass --env CURSOR_API_KEY=...",
-    )?;
-    require_env(
-        &env,
-        "OPENAI_API_KEY",
-        "Set it in your environment or pass --env OPENAI_API_KEY=...",
+        "CHUTES_API_TOKEN",
+        "Set it in your environment or pass --env CHUTES_API_TOKEN=...",
     )?;
 
     let resources = build_tau_resources();

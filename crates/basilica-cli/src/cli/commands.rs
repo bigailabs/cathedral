@@ -1105,16 +1105,11 @@ pub struct TauOptions {
     #[arg(long, value_name = "TOKEN", env = "TAU_BOT_TOKEN")]
     pub bot_token: Option<String>,
 
-    /// Cursor API key for agent execution
-    /// Generate at: Cursor Dashboard → Integrations → User API Keys
-    #[arg(long, value_name = "KEY", env = "CURSOR_API_KEY")]
-    pub cursor_api_key: Option<String>,
+    /// Chutes API token for Tau's LLM + voice backend
+    #[arg(long, value_name = "TOKEN", env = "CHUTES_API_TOKEN")]
+    pub chutes_api_token: Option<String>,
 
-    /// OpenAI API key for voice transcription / TTS
-    #[arg(long, value_name = "KEY", env = "OPENAI_API_KEY")]
-    pub openai_api_key: Option<String>,
-
-    /// Chat model for Cursor agent (default: composer-1)
-    #[arg(long, value_name = "MODEL")]
+    /// Chat model override for Tau (maps to TAU_CHAT_MODEL)
+    #[arg(long, value_name = "MODEL", env = "TAU_CHAT_MODEL")]
     pub chat_model: Option<String>,
 }

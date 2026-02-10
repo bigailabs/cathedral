@@ -65,8 +65,7 @@ use basilica_validator::api::types::ListAvailableNodesResponse;
 use basilica_validator::rental::RentalResponse;
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{env, sync::Arc, time::Duration};
 
 /// HTTP client for interacting with the Basilica API
 #[derive(Debug)]
@@ -83,10 +82,26 @@ impl BasilicaClient {
         timeout: Duration,
         token_manager: Arc<TokenManager>,
     ) -> Result<Self> {
-        let http_client = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(ApiError::HttpClient)?;
+        let mut http_builder = reqwest::Client::builder().timeout(timeout);
+
+        // On some macOS environments, reqwest's system proxy discovery can panic
+        // in CoreFoundation/SystemConfiguration (NULL dynamic store). Default to
+        // disabling system proxy lookup on macOS, with opt-in override.
+        #[cfg(target_os = "macos")]
+        {
+            let use_system_proxy = env::var("BASILICA_USE_SYSTEM_PROXY")
+                .ok()
+                .map(|v| {
+                    let v = v.trim().to_ascii_lowercase();
+                    matches!(v.as_str(), "1" | "true" | "yes" | "on")
+                })
+                .unwrap_or(false);
+            if !use_system_proxy {
+                http_builder = http_builder.no_proxy();
+            }
+        }
+
+        let http_client = http_builder.build().map_err(ApiError::HttpClient)?;
 
         Ok(Self {
             http_client,

@@ -18,6 +18,7 @@ This directory contains comprehensive documentation for the Basilica decentraliz
 
 - **[Monitoring Guide](monitoring.md)** - Set up metrics and monitoring with Prometheus/Grafana
 - **[Scoring and Weights](scoring-and-weights.md)** - Understand how nodes are scored and weights are calculated
+- **[Tau Production Deployment](tau-production.md)** - Build, push, deploy, and operate Tau on production
 
 ## Documentation Overview
 
