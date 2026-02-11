@@ -90,6 +90,12 @@ pub fn handle_upgrade(version: Option<String>, dry_run: bool) -> Result<(), CliE
         .no_confirm(true)
         .target_version_tag(&target_tag);
 
+    // Change CWD to the binary's directory so that self_replace's
+    // read_link() → relative path resolves correctly
+    if let Some(bin_dir) = resolved_exe.parent() {
+        std::env::set_current_dir(bin_dir).expect("failed to set CWD to binary's parent directory");
+    }
+
     // Build and execute the update
     let status = update_builder
         .build()
