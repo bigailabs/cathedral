@@ -911,6 +911,16 @@ pub enum DeployAction {
         #[command(flatten)]
         openclaw: OpenclawOptions,
     },
+
+    /// Deploy Tau agent
+    #[command(name = "tau")]
+    Tau {
+        #[command(flatten)]
+        common: TemplateCommonOptions,
+
+        #[command(flatten)]
+        tau: TauOptions,
+    },
 }
 
 /// Share token management actions
@@ -1086,4 +1096,29 @@ pub struct OpenclawOptions {
 pub enum OpenclawProvider {
     Openai,
     Anthropic,
+}
+/// Tau-specific deployment options
+#[derive(clap::Args, Debug, Clone)]
+pub struct TauOptions {
+    /// Telegram bot token (from `@BotFather`)
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "TAU_BOT_TOKEN",
+        hide_env_values = true
+    )]
+    pub bot_token: Option<String>,
+
+    /// Chutes API token for Tau's LLM + voice backend
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "CHUTES_API_TOKEN",
+        hide_env_values = true
+    )]
+    pub chutes_api_token: Option<String>,
+
+    /// Chat model override for Tau (maps to TAU_CHAT_MODEL)
+    #[arg(long, value_name = "MODEL", env = "TAU_CHAT_MODEL")]
+    pub chat_model: Option<String>,
 }
