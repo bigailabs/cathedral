@@ -18,7 +18,7 @@ use std::{collections::HashMap, str::FromStr};
 use tabled::{builder::Builder, settings::Style, Table, Tabled};
 
 /// Format RFC3339 timestamp to YY-MM-DD HH:MM:SS format
-fn format_timestamp(timestamp: &str) -> String {
+pub fn format_timestamp(timestamp: &str) -> String {
     DateTime::parse_from_rfc3339(timestamp)
         .ok()
         .map(|dt| {

@@ -145,15 +145,21 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
         return;
     }
 
-    use tabled::{Table, Tabled};
+    use tabled::{settings::Style, Table, Tabled};
 
     #[derive(Tabled)]
     struct Row {
+        #[tabled(rename = "Name")]
         name: String,
+        #[tabled(rename = "State")]
         state: String,
+        #[tabled(rename = "Access")]
         access: String,
+        #[tabled(rename = "Replicas")]
         replicas: String,
+        #[tabled(rename = "URL")]
         url: String,
+        #[tabled(rename = "Created")]
         created: String,
     }
 
@@ -163,18 +169,19 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
             name: d.instance_name.clone(),
             state: d.state.clone(),
             access: if d.public {
-                style("Public").green().to_string()
+                "Public".to_string()
             } else {
-                style("Token").yellow().to_string()
+                "Token".to_string()
             },
             replicas: format!("{}/{}", d.replicas.ready, d.replicas.desired),
-            url: truncate_url(&d.url, 45),
-            created: d.created_at.clone(),
+            url: d.url.clone(),
+            created: crate::output::table_output::format_timestamp(&d.created_at),
         })
         .collect();
 
-    let table = Table::new(rows).to_string();
-    println!("{}", table);
+    let mut table = Table::new(rows);
+    table.with(Style::modern());
+    println!("{table}");
 }
 
 /// Print summons details
@@ -336,15 +343,6 @@ pub async fn stream_logs_to_stdout(
     }
 
     Ok(())
-}
-
-/// Truncate URL for table display
-fn truncate_url(url: &str, max_len: usize) -> String {
-    if url.len() <= max_len {
-        url.to_string()
-    } else {
-        format!("{}...", &url[..max_len - 3])
-    }
 }
 
 /// Truncate string for display (unicode-safe)
