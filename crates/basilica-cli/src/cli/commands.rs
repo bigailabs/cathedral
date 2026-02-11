@@ -1101,11 +1101,21 @@ pub enum OpenclawProvider {
 #[derive(clap::Args, Debug, Clone)]
 pub struct TauOptions {
     /// Telegram bot token (from `@BotFather`)
-    #[arg(long, value_name = "TOKEN", env = "TAU_BOT_TOKEN", hide_env_values = true)]
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "TAU_BOT_TOKEN",
+        hide_env_values = true
+    )]
     pub bot_token: Option<String>,
 
     /// Chutes API token for Tau's LLM + voice backend
-    #[arg(long, value_name = "TOKEN", env = "CHUTES_API_TOKEN", hide_env_values = true)]
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        env = "CHUTES_API_TOKEN",
+        hide_env_values = true
+    )]
     pub chutes_api_token: Option<String>,
 
     /// Chat model override for Tau (maps to TAU_CHAT_MODEL)
