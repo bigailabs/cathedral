@@ -351,6 +351,7 @@ impl BasilicaApiClient {
         let response = self
             .http_client
             .get(url)
+            .header("X-Validator-Hotkey", self.signer.hotkey())
             .header("X-Validator-Signature", signature)
             .header("X-Timestamp", timestamp)
             .query(query)
