@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Deployment list table now uses `Style::modern()` borders, properly cased column headers, formatted timestamps, and full URLs to match `ls`/`ps` table styling
+
 ## [0.18.3] - 2026-02-11
 
 ### Fixed
