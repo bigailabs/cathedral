@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-02-11
+
+### Fixed
+- Update notifications no longer trigger incorrectly during CI releases or when already on the latest version
+
 ## [0.18.2] - 2026-02-11
 
 ### Added
