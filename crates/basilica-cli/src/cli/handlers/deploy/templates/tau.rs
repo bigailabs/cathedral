@@ -59,7 +59,7 @@ pub async fn handle_tau_deploy(
         "Set it in your environment or pass --env CHUTES_API_TOKEN=...",
     )?;
 
-    let resources = build_tau_resources();
+    let resources = build_tau_resources(&common);
 
     let storage = if common.no_storage {
         None
@@ -150,11 +150,10 @@ fn require_env(env: &HashMap<String, String>, key: &str, hint: &str) -> Result<(
     }))
 }
 
-fn build_tau_resources() -> ResourceRequirements {
-    // TODO: Allow resource tuning without reusing TemplateCommonOptions defaults.
+fn build_tau_resources(common: &TemplateCommonOptions) -> ResourceRequirements {
     ResourceRequirements {
         cpu: "2".to_string(),
-        memory: "4Gi".to_string(),
+        memory: common.memory.clone(),
         cpu_request: Some("1".to_string()),
         memory_request: Some("4Gi".to_string()),
         gpus: None,
