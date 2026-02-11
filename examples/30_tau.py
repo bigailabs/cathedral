@@ -65,6 +65,7 @@ response = client.create_deployment(
     instance_name="tau",
     image="ghcr.io/one-covenant/basilica-tau:latest",
     port=8080,
+    command=["/usr/local/bin/basilica-entrypoint.sh"],
     env=env,
     cpu="2",
     memory="16Gi",
