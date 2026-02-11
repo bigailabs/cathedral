@@ -27,7 +27,7 @@ rust_decimal = { workspace = true }
 semver = { workspace = true }
 
 # HTTP client for API communication
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
 eventsource-stream = { workspace = true }
