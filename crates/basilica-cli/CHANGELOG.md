@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-02-11
+
+### Added
+- `basilica summon tau` deployment template
+
 ## [0.18.1] - 2026-02-10
 
 ### Changed
@@ -14,7 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Credits formatting edge case where values could display with inconsistent decimal precision.
-
 
 ## [0.18.0] - 2026-02-08
 
