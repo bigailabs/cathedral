@@ -11,7 +11,15 @@ Usage:
 import os
 import sys
 
-from basilica import BasilicaClient, HealthCheckConfig, ProbeConfig
+from basilica import (
+    BasilicaClient,
+    Deployment,
+    HealthCheckConfig,
+    PersistentStorageSpec,
+    ProbeConfig,
+    StorageBackend,
+    StorageSpec,
+)
 
 bot_token = os.getenv("TAU_BOT_TOKEN")
 chutes_token = os.getenv("CHUTES_API_TOKEN")
@@ -40,21 +48,37 @@ health_probe = ProbeConfig(
     failure_threshold=3,
 )
 
-deployment = client.deploy(
-    name="tau",
+storage = StorageSpec(
+    persistent=PersistentStorageSpec(
+        enabled=True,
+        backend=StorageBackend.R2,
+        bucket="",
+        region="auto",
+        credentials_secret="basilica-r2-credentials",
+        sync_interval_ms=1000,
+        cache_size_mb=2048,
+        mount_path="/data",
+    )
+)
+
+response = client.create_deployment(
+    instance_name="tau",
     image="ghcr.io/one-covenant/basilica-tau:latest",
     port=8080,
     env=env,
     cpu="2",
     memory="16Gi",
-    timeout=600,
-    storage=True,
     public=False,
+    storage=storage,
     health_check=HealthCheckConfig(
         liveness=health_probe,
         readiness=health_probe,
     ),
 )
+
+deployment = Deployment._from_response(client, response)
+deployment.wait_until_ready(timeout=600)
+deployment.refresh()
 
 print(f"Tau deployed: {deployment.url}")
 print("Send a message to your Telegram bot to initialize chat_id.txt")
