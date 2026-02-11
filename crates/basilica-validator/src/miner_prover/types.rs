@@ -82,6 +82,7 @@ impl std::fmt::Display for ValidationType {
 pub struct NodeVerificationResult {
     pub node_id: NodeId, // Using NodeId alias which maps to NodeId
     pub node_ssh_endpoint: String,
+    pub node_ip: String,
     pub verification_score: f64,
     pub ssh_connection_successful: bool,
     pub binary_validation_successful: bool,
@@ -227,6 +228,7 @@ pub struct NodeInfoDetailed {
     pub status: String,
     pub capabilities: Vec<String>,
     pub node_ssh_endpoint: String,
+    pub node_ip: String,
     pub hourly_rate_cents: u32,
 }
 

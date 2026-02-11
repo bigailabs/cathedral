@@ -41,6 +41,7 @@ impl SimplePersistence {
         miner_uid: u16,
         node_id: &str,
         node_ssh_endpoint: &str,
+        node_ip: &str,
         miner_info: &MinerInfo,
         hourly_rate_cents: u32,
     ) -> Result<()> {
@@ -53,13 +54,6 @@ impl SimplePersistence {
         );
 
         let miner_id = format!("miner_{miner_uid}");
-
-        // Extract host from "user@host:port" for uniqueness checks (ignore username and port)
-        let after_at = node_ssh_endpoint
-            .split_once('@')
-            .map_or(node_ssh_endpoint, |(_, hp)| hp);
-        let host = after_at.rsplit_once(':').map_or(after_at, |(h, _)| h);
-        let host_like_pattern = format!("%@{}:%", host);
 
         self.ensure_miner_exists_with_info(miner_info).await?;
 
@@ -75,9 +69,9 @@ impl SimplePersistence {
 
         if count == 0 {
             let existing_miner: Option<String> = sqlx::query_scalar(
-                "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint LIKE ? AND miner_id != ? LIMIT 1",
+                "SELECT miner_id FROM miner_nodes WHERE node_ip = ? AND miner_id != ? LIMIT 1",
             )
-            .bind(&host_like_pattern)
+            .bind(node_ip)
             .bind(&miner_id)
             .fetch_optional(self.pool())
             .await
@@ -133,9 +127,9 @@ impl SimplePersistence {
 
             let insert_query = r#"
                 INSERT OR IGNORE INTO miner_nodes (
-                    id, miner_id, node_id, ssh_endpoint, gpu_count,
+                    id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count,
                     hourly_rate_cents, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             "#;
 
             let relationship_id = format!("{miner_id}_{node_id}");
@@ -145,6 +139,7 @@ impl SimplePersistence {
                 .bind(&miner_id)
                 .bind(node_id)
                 .bind(node_ssh_endpoint)
+                .bind(node_ip)
                 .bind(0)
                 .bind(hourly_rate_cents as i64)
                 .bind("online")
@@ -1361,11 +1356,11 @@ impl SimplePersistence {
     pub async fn get_known_nodes_for_miner(
         &self,
         miner_uid: u16,
-    ) -> Result<Vec<(String, String, i32, String, u32)>, anyhow::Error> {
+    ) -> Result<Vec<(String, String, String, i32, String, u32)>, anyhow::Error> {
         let miner_id = format!("miner_{}", miner_uid);
 
         let query = r#"
-            SELECT node_id, ssh_endpoint, gpu_count, status, hourly_rate_cents
+            SELECT node_id, ssh_endpoint, node_ip, gpu_count, status, hourly_rate_cents
             FROM miner_nodes
             WHERE miner_id = ?
             AND status IN ('online', 'verified')
@@ -1381,12 +1376,14 @@ impl SimplePersistence {
         for row in rows {
             let node_id: String = row.get("node_id");
             let ssh_endpoint: String = row.get("ssh_endpoint");
+            let node_ip: String = row.get("node_ip");
             let gpu_count: i32 = row.get("gpu_count");
             let status: String = row.get("status");
             let hourly_rate_cents: i64 = row.try_get("hourly_rate_cents").unwrap_or(0);
             known_nodes.push((
                 node_id,
                 ssh_endpoint,
+                node_ip,
                 gpu_count,
                 status,
                 hourly_rate_cents as u32,
@@ -1431,12 +1428,11 @@ impl SimplePersistence {
         let ssh_endpoint = format!("{}@{}:{}", username, host, port);
         let relationship_id = format!("{}_{}", miner_id, node_id);
 
-        // Check if this host is already used by a different miner (ignore username and port)
-        let host_like_pattern = format!("%@{}:%", host);
+        // Check if this host is already used by a different miner
         let existing_miner: Option<String> = sqlx::query_scalar(
-            "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint LIKE ? AND miner_id != ? LIMIT 1",
+            "SELECT miner_id FROM miner_nodes WHERE node_ip = ? AND miner_id != ? LIMIT 1",
         )
-        .bind(&host_like_pattern)
+        .bind(host)
         .bind(miner_id)
         .fetch_optional(self.pool())
         .await?;
@@ -1463,15 +1459,16 @@ impl SimplePersistence {
             sqlx::query(
                 r#"
                 INSERT INTO miner_nodes (
-                    id, miner_id, node_id, ssh_endpoint, gpu_count,
+                    id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count,
                     hourly_rate_cents, status, bid_active, last_health_check, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
                 "#,
             )
             .bind(&relationship_id)
             .bind(miner_id)
             .bind(node_id)
             .bind(&ssh_endpoint)
+            .bind(host)
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
             .execute(self.pool())
@@ -1493,6 +1490,7 @@ impl SimplePersistence {
                 r#"
                 UPDATE miner_nodes
                 SET ssh_endpoint = ?,
+                    node_ip = ?,
                     gpu_count = ?,
                     hourly_rate_cents = ?,
                     status = 'online',
@@ -1502,6 +1500,7 @@ impl SimplePersistence {
                 "#,
             )
             .bind(&ssh_endpoint)
+            .bind(host)
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
             .bind(miner_id)

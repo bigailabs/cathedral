@@ -588,13 +588,14 @@ mod tests {
         created_at: DateTime<Utc>,
     ) -> anyhow::Result<()> {
         sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(format!("{}:{}", miner_id, node_id))
         .bind(miner_id)
         .bind(node_id)
         .bind("127.0.0.1:8080")
+        .bind("127.0.0.1")
         .bind(gpu_count)
         .bind("online")
         .bind(created_at.to_rfc3339())
@@ -720,13 +721,14 @@ mod tests {
 
             // Seed miner_nodes table
             sqlx::query(
-                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, status, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_id)
             .bind(&miner_id)
             .bind(&node_id)
             .bind("127.0.0.1:8080")
+            .bind("127.0.0.1")
             .bind(profile.gpu_counts.values().sum::<u32>() as i64)
             .bind("online")
             .bind(now.to_rfc3339())

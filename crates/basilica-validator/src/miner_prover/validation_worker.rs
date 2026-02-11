@@ -373,6 +373,7 @@ impl ValidationWorkerQueue {
         let failed_result = super::types::NodeVerificationResult {
             node_id: item.node_info.id.clone(),
             node_ssh_endpoint: item.node_info.node_ssh_endpoint.clone(),
+            node_ip: item.node_info.node_ip.clone(),
             verification_score: 0.0,
             ssh_connection_successful: false,
             binary_validation_successful: false,
@@ -1230,6 +1231,7 @@ mod tests {
             status: "online".to_string(),
             capabilities: vec!["gpu".to_string()],
             node_ssh_endpoint: format!("http://node-{}.test:8080", id),
+            node_ip: format!("node-{}.test", id),
             hourly_rate_cents: 250, // Test default: $2.50/hour
         }
     }

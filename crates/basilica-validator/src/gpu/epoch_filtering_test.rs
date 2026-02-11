@@ -43,13 +43,14 @@ mod tests {
             // Seed miner_nodes table with online status
             let node_key = format!("{}:{}", &miner_id, &node_id);
             sqlx::query(
-                "INSERT OR REPLACE INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, status, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT OR REPLACE INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, status, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_key)
             .bind(&miner_id)
             .bind(&node_id)
             .bind("root@127.0.0.1:50051")
+            .bind("127.0.0.1")
             .bind(profile.gpu_counts.values().sum::<u32>() as i64)
             .bind("online")
             .bind(now.to_rfc3339())

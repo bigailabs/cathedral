@@ -634,6 +634,7 @@ impl VerificationEngine {
                         miner_uid,
                         &node_result.node_id.to_string(),
                         &node_result.node_ssh_endpoint,
+                        &node_result.node_ip,
                         miner_info,
                         node_result.hourly_rate_cents,
                     )
@@ -1279,12 +1280,12 @@ impl VerificationEngine {
     /// Convert database node data to NodeInfoDetailed
     fn convert_db_data_to_node_info(
         &self,
-        db_data: Vec<(String, String, i32, String, u32)>,
+        db_data: Vec<(String, String, String, i32, String, u32)>,
         miner_uid: u16,
     ) -> Result<Vec<NodeInfoDetailed>> {
         let mut nodes = Vec::new();
 
-        for (node_id, ssh_endpoint, gpu_count, status, hourly_rate_cents) in db_data {
+        for (node_id, ssh_endpoint, node_ip, gpu_count, status, hourly_rate_cents) in db_data {
             let node_id_parsed = NodeId::from_str(&node_id)
                 .map_err(|e| anyhow::anyhow!("Invalid node ID '{}': {}", node_id, e))?;
 
@@ -1298,6 +1299,7 @@ impl VerificationEngine {
                     vec![]
                 },
                 node_ssh_endpoint: ssh_endpoint,
+                node_ip,
                 hourly_rate_cents,
             });
         }
