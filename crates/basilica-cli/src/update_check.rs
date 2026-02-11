@@ -116,16 +116,22 @@ pub fn check_and_notify_update() {
 fn perform_update_check(cache_path: PathBuf) {
     let current_version = cargo_crate_version!();
 
+    // Preserve last_prompt from existing cache
+    let existing_last_prompt = load_cache(&cache_path)
+        .ok()
+        .flatten()
+        .and_then(|c| c.last_prompt);
+
     let cache = match fetch_latest_version_string(current_version) {
         Ok(latest_version) => UpdateCheckCache {
             last_check: Utc::now(),
             latest_version: Some(latest_version),
-            last_prompt: None,
+            last_prompt: existing_last_prompt,
         },
         Err(_) => UpdateCheckCache {
             last_check: Utc::now(),
-            latest_version: None,
-            last_prompt: None,
+            latest_version: Some(current_version.to_string()),
+            last_prompt: existing_last_prompt,
         },
     };
 
