@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.4] - 2026-02-11
+
 ### Fixed
 - `bs upgrade` no longer fails when run from a working directory different from the binary's location
 - Deployment list table now uses `Style::modern()` borders, properly cased column headers, formatted timestamps, and full URLs to match `ls`/`ps` table styling
