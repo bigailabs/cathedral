@@ -135,10 +135,7 @@ fn fetch_cli_releases() -> Result<Vec<GitHubRelease>> {
         .map_err(|e| eyre!("Failed to fetch releases from GitHub: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(eyre!(
-            "GitHub API returned status {}",
-            response.status()
-        ));
+        return Err(eyre!("GitHub API returned status {}", response.status()));
     }
 
     response
