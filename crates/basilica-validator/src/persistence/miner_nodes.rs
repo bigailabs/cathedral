@@ -54,6 +54,13 @@ impl SimplePersistence {
 
         let miner_id = format!("miner_{miner_uid}");
 
+        // Extract host from "user@host:port" for uniqueness checks (ignore username and port)
+        let after_at = node_ssh_endpoint
+            .split_once('@')
+            .map_or(node_ssh_endpoint, |(_, hp)| hp);
+        let host = after_at.rsplit_once(':').map_or(after_at, |(h, _)| h);
+        let host_like_pattern = format!("%@{}:%", host);
+
         self.ensure_miner_exists_with_info(miner_info).await?;
 
         let query = "SELECT COUNT(*) as count FROM miner_nodes WHERE miner_id = ? AND node_id = ?";
@@ -68,9 +75,9 @@ impl SimplePersistence {
 
         if count == 0 {
             let existing_miner: Option<String> = sqlx::query_scalar(
-                "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ? LIMIT 1",
+                "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint LIKE ? AND miner_id != ? LIMIT 1",
             )
-            .bind(node_ssh_endpoint)
+            .bind(&host_like_pattern)
             .bind(&miner_id)
             .fetch_optional(self.pool())
             .await
@@ -1424,11 +1431,12 @@ impl SimplePersistence {
         let ssh_endpoint = format!("{}@{}:{}", username, host, port);
         let relationship_id = format!("{}_{}", miner_id, node_id);
 
-        // Check if this ssh_endpoint is already used by a different miner
+        // Check if this host is already used by a different miner (ignore username and port)
+        let host_like_pattern = format!("%@{}:%", host);
         let existing_miner: Option<String> = sqlx::query_scalar(
-            "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ? LIMIT 1",
+            "SELECT miner_id FROM miner_nodes WHERE ssh_endpoint LIKE ? AND miner_id != ? LIMIT 1",
         )
-        .bind(&ssh_endpoint)
+        .bind(&host_like_pattern)
         .bind(miner_id)
         .fetch_optional(self.pool())
         .await?;
