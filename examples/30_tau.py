@@ -11,7 +11,7 @@ Usage:
 import os
 import sys
 
-from basilica import BasilicaClient
+from basilica import BasilicaClient, HealthCheckConfig, ProbeConfig
 
 bot_token = os.getenv("TAU_BOT_TOKEN")
 chutes_token = os.getenv("CHUTES_API_TOKEN")
@@ -31,15 +31,29 @@ if chat_model:
 
 client = BasilicaClient()
 
+health_probe = ProbeConfig(
+    path="/health",
+    port=8080,
+    initial_delay_seconds=30,
+    period_seconds=10,
+    timeout_seconds=5,
+    failure_threshold=3,
+)
+
 deployment = client.deploy(
     name="tau",
     image="ghcr.io/one-covenant/basilica-tau:latest",
     port=8080,
     env=env,
     cpu="2",
-    memory="4Gi",
+    memory="16Gi",
     timeout=600,
     storage=True,
+    public=False,
+    health_check=HealthCheckConfig(
+        liveness=health_probe,
+        readiness=health_probe,
+    ),
 )
 
 print(f"Tau deployed: {deployment.url}")
