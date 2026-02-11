@@ -4,7 +4,7 @@
 //! - vLLM: OpenAI-compatible LLM inference server
 //! - SGLang: Fast LLM inference with RadixAttention
 //! - OpenClaw: OpenClaw gateway
-//! - Tau: Telegram agent with Cursor CLI
+//! - Tau: Telegram agent with Chutes
 
 pub mod common;
 pub mod model_size;
