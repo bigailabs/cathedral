@@ -7,8 +7,8 @@ use crate::error::{CliError, DeployError};
 use crate::output::print_success;
 use crate::progress::{complete_spinner_and_clear, create_spinner};
 use basilica_sdk::types::{
-    CreateDeploymentRequest, PersistentStorageSpec, ResourceRequirements, StorageBackend,
-    StorageSpec,
+    CreateDeploymentRequest, HealthCheckConfig, PersistentStorageSpec, ProbeConfig,
+    ResourceRequirements, StorageBackend, StorageSpec,
 };
 use basilica_sdk::BasilicaClient;
 use std::collections::HashMap;
@@ -79,7 +79,7 @@ pub async fn handle_tau_deploy(
         ttl_seconds: common.ttl,
         public: false,
         storage,
-        health_check: None,
+        health_check: Some(build_tau_health_check()),
         enable_billing: true,
         queue_name: None,
         suspended: false,
@@ -169,10 +169,27 @@ fn build_tau_storage() -> StorageSpec {
             region: Some("auto".to_string()),
             endpoint: None,
             credentials_secret: Some("basilica-r2-credentials".to_string()),
-            sync_interval_ms: 5000,
-            cache_size_mb: 1024,
+            sync_interval_ms: 1000,
+            cache_size_mb: 2048,
             mount_path: "/data".to_string(),
         }),
+    }
+}
+
+fn build_tau_health_check() -> HealthCheckConfig {
+    let probe = ProbeConfig {
+        path: "/health".to_string(),
+        port: Some(TAU_PORT as u16),
+        initial_delay_seconds: 30,
+        period_seconds: 10,
+        timeout_seconds: 5,
+        failure_threshold: 3,
+    };
+
+    HealthCheckConfig {
+        liveness: Some(probe.clone()),
+        readiness: Some(probe),
+        startup: None,
     }
 }
 
