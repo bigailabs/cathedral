@@ -2,6 +2,7 @@
 //!
 //! This module contains all SQL operations related to miners table management.
 
+#[cfg(test)]
 use crate::api::types::{NodeRegistration, UpdateMinerRequest};
 use crate::miner_prover::types::MinerInfo;
 use crate::persistence::types::{MinerData, MinerHealthData, NodeHealthData, NodeMetricData};
@@ -10,6 +11,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use tracing::{debug, error, info, warn};
+#[cfg(test)]
 use uuid::Uuid;
 
 impl SimplePersistence {
@@ -540,6 +542,7 @@ impl SimplePersistence {
     }
 
     /// Register a new miner
+    #[cfg(test)]
     pub async fn register_miner(
         &self,
         miner_id: &str,
@@ -640,6 +643,7 @@ impl SimplePersistence {
     }
 
     /// Update miner information
+    #[cfg(test)]
     pub async fn update_miner(
         &self,
         miner_id: &str,
