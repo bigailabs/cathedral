@@ -11,12 +11,18 @@ use console::style;
 
 mod create;
 pub mod helpers;
+mod metadata;
 mod share_token;
 pub mod templates;
 mod validation;
 
 /// Handle all deploy subcommands (matches existing handler pattern)
 pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(), CliError> {
+    // Handle unauthenticated commands first
+    if let Some(DeployAction::Metadata { ref name }) = cmd.action {
+        return metadata::handle_get_public_metadata(&config.api.base_url, name, cmd.json).await;
+    }
+
     // Validate request before doing anything
     if cmd.action.is_none() && cmd.source.is_some() {
         validation::validate_deployment_request(&cmd)?;
@@ -49,6 +55,17 @@ pub async fn handle_deploy(cmd: DeployCommand, config: &CliConfig) -> Result<(),
         }
         Some(DeployAction::ShareToken { action }) => {
             share_token::handle_share_token(&client, action).await
+        }
+        Some(DeployAction::EnrollMetadata {
+            name,
+            enable,
+            disable,
+        }) => {
+            let name = helpers::resolve_deployment_name(name, &client).await?;
+            metadata::handle_enroll_metadata(&client, &name, enable, disable).await
+        }
+        Some(DeployAction::Metadata { .. }) => {
+            unreachable!("Metadata handled above before auth")
         }
         Some(DeployAction::Vllm {
             model,
