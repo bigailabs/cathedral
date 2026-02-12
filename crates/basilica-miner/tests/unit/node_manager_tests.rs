@@ -109,6 +109,44 @@ async fn test_unregister_node() {
 }
 
 #[tokio::test]
+async fn test_register_node_rejects_duplicate_ip() {
+    let manager = NodeManager::new(NodeSshConfig::default());
+
+    let original = NodeConfig {
+        host: "192.168.1.100".to_string(),
+        port: 22,
+        username: "basilica".to_string(),
+        gpu_category: "H100".to_string(),
+        gpu_count: 8,
+        additional_opts: None,
+    };
+
+    manager.register_node(original.clone()).await.unwrap();
+
+    let duplicate = NodeConfig {
+        host: "192.168.1.100".to_string(),
+        port: 2222,
+        username: "another-user".to_string(),
+        gpu_category: "A100".to_string(),
+        gpu_count: 4,
+        additional_opts: Some("-o StrictHostKeyChecking=no".to_string()),
+    };
+
+    let result = manager.register_node(duplicate).await;
+    assert!(result.is_err());
+    let error_message = result.unwrap_err().to_string();
+    assert!(error_message.contains("already registered"));
+
+    let existing = manager.get_node("192.168.1.100").await.unwrap();
+    assert!(existing.is_some());
+    let existing = existing.unwrap();
+    assert_eq!(existing.port, 22);
+    assert_eq!(existing.username, "basilica");
+    assert_eq!(existing.gpu_category, "H100");
+    assert_eq!(existing.gpu_count, 8);
+}
+
+#[tokio::test]
 async fn test_validator_assignment_tracking() {
     let manager = NodeManager::new(NodeSshConfig::default());
 

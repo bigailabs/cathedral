@@ -11,6 +11,7 @@ use basilica_common::types::GpuCategory;
 use serde::{Deserialize, Serialize};
 use ssh_key::PublicKey;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,7 +31,7 @@ const SSH_MOVE_TO_AUTHORIZED_KEYS: &str =
 /// Configuration for a single node
 #[derive(Clone, Debug, Serialize)]
 pub struct NodeConfig {
-    /// SSH hostname or IP address
+    /// SSH host IP literal (IPv4 or IPv6)
     pub host: String,
     /// SSH port (typically 22)
     pub port: u16,
@@ -159,9 +160,33 @@ impl NodeManager {
         }
     }
 
-    /// Register a node for availability (keyed by host)
+    /// Register a node for availability (keyed by host IP)
     pub async fn register_node(&self, config: NodeConfig) -> Result<()> {
+        let new_node_ip = config.host.parse::<IpAddr>().map_err(|_| {
+            anyhow::anyhow!(
+                "Invalid node host '{}': must be a valid IPv4 or IPv6 literal",
+                config.host
+            )
+        })?;
+
         let mut nodes = self.nodes.write().await;
+
+        for existing_host in nodes.keys() {
+            let existing_ip = existing_host.parse::<IpAddr>().map_err(|_| {
+                anyhow::anyhow!(
+                    "Invalid existing node host '{}': expected IPv4/IPv6 literal",
+                    existing_host
+                )
+            })?;
+            if existing_ip == new_node_ip {
+                anyhow::bail!(
+                    "Node with IP {} is already registered (existing host: '{}')",
+                    new_node_ip,
+                    existing_host
+                );
+            }
+        }
+
         info!("Registering node at {}:{}", config.host, config.port);
         nodes.insert(config.host.clone(), config);
         Ok(())

@@ -5,7 +5,9 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DurationSeconds};
+use std::collections::BTreeMap;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -340,6 +342,7 @@ impl ConfigValidation for MinerConfig {
                 });
             }
         }
+        validate_unique_node_ips(&self.node_management.nodes)?;
 
         // Validate validator assignment configuration
         if self.validator_assignment.strategy == "fixed_assignment"
@@ -387,6 +390,50 @@ impl ConfigValidation for MinerConfig {
     fn warnings(&self) -> Vec<String> {
         vec![]
     }
+}
+
+fn validate_unique_node_ips(nodes: &[NodeConfig]) -> Result<(), ConfigurationError> {
+    let mut node_indices_by_ip: BTreeMap<IpAddr, Vec<usize>> = BTreeMap::new();
+
+    for (idx, node) in nodes.iter().enumerate() {
+        let parsed_ip =
+            node.host
+                .parse::<IpAddr>()
+                .map_err(|_| ConfigurationError::InvalidValue {
+                    key: format!("node_management.nodes[{}].host", idx),
+                    value: node.host.clone(),
+                    reason: "Node host must be a valid IPv4 or IPv6 literal".to_string(),
+                })?;
+        node_indices_by_ip.entry(parsed_ip).or_default().push(idx);
+    }
+
+    let duplicate_ip_entries: Vec<(IpAddr, Vec<usize>)> = node_indices_by_ip
+        .into_iter()
+        .filter(|(_, indices)| indices.len() > 1)
+        .collect();
+
+    if duplicate_ip_entries.is_empty() {
+        return Ok(());
+    }
+
+    let duplicate_reason = duplicate_ip_entries
+        .iter()
+        .map(|(ip, indices)| {
+            let index_list = indices
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{ip} at indices [{index_list}]")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Err(ConfigurationError::InvalidValue {
+        key: "node_management.nodes".to_string(),
+        value: "contains duplicate node IPs".to_string(),
+        reason: format!("Duplicate node IPs are not allowed: {duplicate_reason}"),
+    })
 }
 
 impl MinerConfig {
@@ -457,6 +504,76 @@ impl SecurityConfig {
                 }
             }
             None => Err(anyhow::anyhow!("private_key_file config is required")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_node(host: &str) -> NodeConfig {
+        NodeConfig {
+            host: host.to_string(),
+            port: 22,
+            username: "basilica".to_string(),
+            gpu_category: "H100".to_string(),
+            gpu_count: 8,
+            additional_opts: None,
+        }
+    }
+
+    #[test]
+    fn validate_unique_node_ips_accepts_unique_ipv4() {
+        let nodes = vec![test_node("192.168.1.10"), test_node("192.168.1.11")];
+        assert!(validate_unique_node_ips(&nodes).is_ok());
+    }
+
+    #[test]
+    fn validate_unique_node_ips_accepts_unique_ipv6() {
+        let nodes = vec![test_node("2001:db8::1"), test_node("2001:db8::2")];
+        assert!(validate_unique_node_ips(&nodes).is_ok());
+    }
+
+    #[test]
+    fn validate_unique_node_ips_rejects_non_ip_host() {
+        let nodes = vec![test_node("gpu-node.local")];
+        let err = validate_unique_node_ips(&nodes).unwrap_err();
+
+        match err {
+            ConfigurationError::InvalidValue { key, reason, .. } => {
+                assert_eq!(key, "node_management.nodes[0].host");
+                assert!(reason.contains("IPv4 or IPv6 literal"));
+            }
+            _ => panic!("expected InvalidValue"),
+        }
+    }
+
+    #[test]
+    fn validate_unique_node_ips_rejects_duplicate_ipv4() {
+        let nodes = vec![test_node("192.168.1.10"), test_node("192.168.1.10")];
+        let err = validate_unique_node_ips(&nodes).unwrap_err();
+
+        match err {
+            ConfigurationError::InvalidValue { key, reason, .. } => {
+                assert_eq!(key, "node_management.nodes");
+                assert!(reason.contains("192.168.1.10 at indices [0, 1]"));
+            }
+            _ => panic!("expected InvalidValue"),
+        }
+    }
+
+    #[test]
+    fn validate_unique_node_ips_rejects_equivalent_ipv6_representations() {
+        let nodes = vec![test_node("2001:db8::1"), test_node("2001:0db8:0:0:0:0:0:1")];
+        let err = validate_unique_node_ips(&nodes).unwrap_err();
+
+        match err {
+            ConfigurationError::InvalidValue { key, reason, .. } => {
+                assert_eq!(key, "node_management.nodes");
+                assert!(reason.contains("at indices [0, 1]"));
+            }
+            _ => panic!("expected InvalidValue"),
         }
     }
 }
