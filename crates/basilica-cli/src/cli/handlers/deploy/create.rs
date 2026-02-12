@@ -96,6 +96,7 @@ pub async fn handle_create(
         suspended: false,
         priority: None,
         topology_spread,
+        public_metadata: cmd.networking.public_metadata,
     };
 
     // 10. Show progress spinner

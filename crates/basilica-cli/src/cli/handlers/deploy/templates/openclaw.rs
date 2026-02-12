@@ -144,6 +144,7 @@ pub async fn handle_openclaw_deploy(
         suspended: false,
         priority: None,
         topology_spread: None,
+        public_metadata: false,
     };
 
     let spinner = create_spinner(&format!("Creating OpenClaw summons '{}'...", name));

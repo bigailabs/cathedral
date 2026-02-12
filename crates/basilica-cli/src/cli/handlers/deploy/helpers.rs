@@ -155,6 +155,8 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
         state: String,
         #[tabled(rename = "Access")]
         access: String,
+        #[tabled(rename = "Verified")]
+        verified: String,
         #[tabled(rename = "Replicas")]
         replicas: String,
         #[tabled(rename = "URL")]
@@ -172,6 +174,11 @@ pub fn print_deployments_table(deployments: &[DeploymentSummary]) {
                 "Public".to_string()
             } else {
                 "Token".to_string()
+            },
+            verified: if d.public_metadata {
+                "Yes".to_string()
+            } else {
+                "-".to_string()
             },
             replicas: format!("{}/{}", d.replicas.ready, d.replicas.desired),
             url: d.url.clone(),
@@ -196,6 +203,11 @@ pub fn print_deployment_details(deployment: &DeploymentResponse, verbose: bool) 
         deployment.replicas.ready, deployment.replicas.desired
     );
     println!("  Created:    {}", deployment.created_at);
+    if deployment.public_metadata {
+        println!("  Public Metadata: Enrolled");
+    } else {
+        println!("  Public Metadata: Not enrolled");
+    }
 
     if let Some(ref updated) = deployment.updated_at {
         println!("  Updated:    {}", updated);
