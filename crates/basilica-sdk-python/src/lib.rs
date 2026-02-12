@@ -23,10 +23,10 @@ use tokio::runtime::Runtime;
 use crate::types::{
     AvailableNode, CpuOffering, CpuRentalResponse, CreateDeploymentRequest,
     DeleteDeploymentResponse, DeleteShareTokenResponse, DeploymentListResponse, DeploymentResponse,
-    HealthCheckResponse, ListAvailableNodesQuery, ListCpuRentalsResponse, ListRentalsQuery,
-    RegenerateShareTokenResponse, RentalResponse, RentalStatusWithSshResponse,
-    ShareTokenStatusResponse, SshKeyResponse, StartCpuRentalRequest, StartRentalApiRequest,
-    StopCpuRentalResponse,
+    EnrollMetadataResponse, HealthCheckResponse, ListAvailableNodesQuery, ListCpuRentalsResponse,
+    ListRentalsQuery, PublicDeploymentMetadataResponse, RegenerateShareTokenResponse,
+    RentalResponse, RentalStatusWithSshResponse, ShareTokenStatusResponse, SshKeyResponse,
+    StartCpuRentalRequest, StartRentalApiRequest, StopCpuRentalResponse,
 };
 
 /// Python wrapper for BasilicaClient
@@ -379,6 +379,74 @@ impl BasilicaClient {
         Ok(response.into())
     }
 
+    // ===== Public Deployment Metadata =====
+
+    /// Enroll or unenroll a deployment in public metadata exposure
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    ///     enabled: Whether to enable or disable metadata enrollment
+    fn enroll_metadata(
+        &self,
+        py: Python,
+        instance_name: String,
+        enabled: bool,
+    ) -> PyResult<EnrollMetadataResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.enroll_metadata(&instance_name, enabled).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Check the current metadata enrollment status of a deployment
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn get_enrollment_status(
+        &self,
+        py: Python,
+        instance_name: String,
+    ) -> PyResult<EnrollMetadataResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime
+                    .block_on(async move { client.get_enrollment_status(&instance_name).await })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
+    /// Fetch public metadata for a deployment (no authentication required)
+    ///
+    /// Args:
+    ///     instance_name: The deployment instance name
+    fn get_public_deployment_metadata(
+        &self,
+        py: Python,
+        instance_name: String,
+    ) -> PyResult<PublicDeploymentMetadataResponse> {
+        let client = Arc::clone(&self.inner);
+
+        let response = py
+            .detach(|| {
+                self.runtime.block_on(async move {
+                    client.get_public_deployment_metadata(&instance_name).await
+                })
+            })
+            .map_err(|e| self.map_error_to_python(e))?;
+
+        Ok(response.into())
+    }
+
     /// Get account balance
     fn get_balance(&self, py: Python) -> PyResult<Py<pyo3::PyAny>> {
         let client = Arc::clone(&self.inner);
@@ -696,6 +764,10 @@ fn _basilica(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::RegenerateShareTokenResponse>()?;
     m.add_class::<types::ShareTokenStatusResponse>()?;
     m.add_class::<types::DeleteShareTokenResponse>()?;
+
+    // Public Metadata types
+    m.add_class::<types::EnrollMetadataResponse>()?;
+    m.add_class::<types::PublicDeploymentMetadataResponse>()?;
 
     // SSH Key types
     m.add_class::<types::SshKeyResponse>()?;
