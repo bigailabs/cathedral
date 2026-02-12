@@ -1964,6 +1964,7 @@ dependencies = [
  "toml",
  "tracing",
  "url",
+ "urlencoding",
  "uuid",
  "webbrowser",
 ]

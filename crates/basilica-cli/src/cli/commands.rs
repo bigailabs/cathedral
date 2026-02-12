@@ -350,8 +350,10 @@ impl Commands {
             | Commands::SshKeys { .. }
             | Commands::Volumes { .. }
             | Commands::Fund { .. }
-            | Commands::Balance
-            | Commands::Deploy(_) => true,
+            | Commands::Balance => true,
+
+            // Deploy commands: most require auth, except Metadata (public endpoint)
+            Commands::Deploy(cmd) => !matches!(cmd.action, Some(DeployAction::Metadata { .. })),
 
             // Authentication commands don't require auth
             Commands::Login { .. } | Commands::Logout | Commands::Upgrade { .. } => false,
@@ -762,6 +764,10 @@ pub struct NetworkingOptions {
     /// Additional pip packages to install
     #[arg(long, num_args = 1..)]
     pub pip: Vec<String>,
+
+    /// Enroll deployment in public metadata for validator verification
+    #[arg(long)]
+    pub public_metadata: bool,
 }
 
 impl NetworkingOptions {
@@ -779,6 +785,7 @@ impl Default for NetworkingOptions {
             private: false,
             env: vec![],
             pip: vec![],
+            public_metadata: false,
         }
     }
 }
@@ -874,6 +881,26 @@ pub enum DeployAction {
     ShareToken {
         #[command(subcommand)]
         action: ShareTokenAction,
+    },
+
+    /// Manage public metadata enrollment for validator verification
+    #[command(name = "enroll-metadata")]
+    EnrollMetadata {
+        /// Deployment name (interactive selection if omitted)
+        name: Option<String>,
+        /// Enable public metadata enrollment
+        #[arg(long)]
+        enable: bool,
+        /// Disable public metadata enrollment
+        #[arg(long, conflicts_with = "enable")]
+        disable: bool,
+    },
+
+    /// View public metadata for a deployment (no authentication required)
+    #[command(name = "metadata")]
+    Metadata {
+        /// Instance name to look up
+        name: String,
     },
 
     /// Deploy vLLM inference server
