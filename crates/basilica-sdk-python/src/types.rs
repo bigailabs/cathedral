@@ -1327,6 +1327,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             suspended: false,
             priority: None,
             topology_spread: req.topology_spread.map(Into::into),
+            public_metadata: false,
         }
     }
 }
