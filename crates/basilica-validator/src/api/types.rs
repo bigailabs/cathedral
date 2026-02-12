@@ -166,6 +166,7 @@ pub struct RegisterMinerRequest {
 pub struct NodeRegistration {
     pub node_id: String,
     pub ssh_endpoint: String,
+    pub node_ip: String,
     pub gpu_count: u32,
     pub gpu_specs: Vec<GpuSpec>,
     pub cpu_specs: CpuSpec,

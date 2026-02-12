@@ -31,9 +31,6 @@ pub struct CollateralStatus {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct NodeRegistration {
-    /// Unique node identifier
-    #[prost(string, tag = "1")]
-    pub node_id: ::prost::alloc::string::String,
     /// SSH host (IP or hostname)
     #[prost(string, tag = "2")]
     pub host: ::prost::alloc::string::String,
@@ -102,18 +99,18 @@ pub struct UpdateBidRequest {
     /// Miner's hotkey for identification
     #[prost(string, tag = "1")]
     pub miner_hotkey: ::prost::alloc::string::String,
-    /// Node to update
-    #[prost(string, tag = "2")]
-    pub node_id: ::prost::alloc::string::String,
     /// New price in cents per GPU per hour
     #[prost(uint32, tag = "3")]
     pub hourly_rate_cents: u32,
     /// Unix timestamp
     #[prost(int64, tag = "4")]
     pub timestamp: i64,
-    /// Signature over miner_hotkey|node_id|hourly_rate_cents|timestamp
+    /// Signature over miner_hotkey|host|hourly_rate_cents|timestamp
     #[prost(bytes = "vec", tag = "5")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
+    /// SSH host (IP or hostname) identifying the node
+    #[prost(string, tag = "6")]
+    pub host: ::prost::alloc::string::String,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -130,15 +127,15 @@ pub struct RemoveBidRequest {
     /// Miner's hotkey for identification
     #[prost(string, tag = "1")]
     pub miner_hotkey: ::prost::alloc::string::String,
-    /// Node IDs to remove (empty = remove all)
-    #[prost(string, repeated, tag = "2")]
-    pub node_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// Unix timestamp
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
-    /// Signature over miner_hotkey|node_ids|timestamp
+    /// Signature over miner_hotkey|hosts|timestamp
     #[prost(bytes = "vec", tag = "4")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
+    /// Hosts to remove (empty = remove all)
+    #[prost(string, repeated, tag = "5")]
+    pub hosts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -158,15 +155,15 @@ pub struct HealthCheckRequest {
     /// Miner's hotkey for identification
     #[prost(string, tag = "1")]
     pub miner_hotkey: ::prost::alloc::string::String,
-    /// Optional: specific nodes to check (empty = all)
-    #[prost(string, repeated, tag = "2")]
-    pub node_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// Unix timestamp
     #[prost(int64, tag = "3")]
     pub timestamp: i64,
-    /// Signature over miner_hotkey|node_ids|timestamp
+    /// Signature over miner_hotkey|hosts|timestamp
     #[prost(bytes = "vec", tag = "4")]
     pub signature: ::prost::alloc::vec::Vec<u8>,
+    /// Optional: specific hosts to check (empty = all)
+    #[prost(string, repeated, tag = "5")]
+    pub hosts: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

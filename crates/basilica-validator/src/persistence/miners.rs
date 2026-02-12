@@ -2,6 +2,7 @@
 //!
 //! This module contains all SQL operations related to miners table management.
 
+#[cfg(test)]
 use crate::api::types::{NodeRegistration, UpdateMinerRequest};
 use crate::miner_prover::types::MinerInfo;
 use crate::persistence::types::{MinerData, MinerHealthData, NodeHealthData, NodeMetricData};
@@ -10,6 +11,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use tracing::{debug, error, info, warn};
+#[cfg(test)]
 use uuid::Uuid;
 
 impl SimplePersistence {
@@ -298,15 +300,16 @@ impl SimplePersistence {
         for node_row in nodes {
             let node_id: String = node_row.get("node_id");
             let ssh_endpoint: String = node_row.get("ssh_endpoint");
+            let node_ip: String = node_row.get("node_ip");
             let gpu_count: i32 = node_row.get("gpu_count");
             let status: String = node_row
                 .try_get("status")
                 .unwrap_or_else(|_| "unknown".to_string());
 
             let existing_check = sqlx::query(
-                "SELECT COUNT(*) as count FROM miner_nodes WHERE ssh_endpoint = ? AND miner_id != ?"
+                "SELECT COUNT(*) as count FROM miner_nodes WHERE node_ip = ? AND miner_id != ?",
             )
-            .bind(&ssh_endpoint)
+            .bind(&node_ip)
             .bind(new_miner_uid)
             .fetch_one(&mut *tx)
             .await?;
@@ -314,8 +317,8 @@ impl SimplePersistence {
             let existing_count: i64 = existing_check.get("count");
             if existing_count > 0 {
                 warn!(
-                    "Skipping node {} during UID migration: ssh_endpoint {} already in use by another miner",
-                    node_id, ssh_endpoint
+                    "Skipping node {} during UID migration: node_ip {} already in use by another miner",
+                    node_id, node_ip
                 );
                 continue;
             }
@@ -324,10 +327,10 @@ impl SimplePersistence {
 
             let insert_node = r#"
                 INSERT INTO miner_nodes (
-                    id, miner_id, node_id, ssh_endpoint, gpu_count,
+                    id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count,
                     status, last_health_check,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, NULL, datetime('now'))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))
             "#;
 
             sqlx::query(insert_node)
@@ -335,6 +338,7 @@ impl SimplePersistence {
                 .bind(new_miner_uid)
                 .bind(&node_id)
                 .bind(&ssh_endpoint)
+                .bind(&node_ip)
                 .bind(gpu_count)
                 .bind(&status)
                 .execute(&mut *tx)
@@ -538,6 +542,7 @@ impl SimplePersistence {
     }
 
     /// Register a new miner
+    #[cfg(test)]
     pub async fn register_miner(
         &self,
         miner_id: &str,
@@ -579,15 +584,15 @@ impl SimplePersistence {
 
         for node in nodes {
             let node_id = Uuid::new_v4().to_string();
-
             sqlx::query(
-                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?)"
+                "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&node_id)
             .bind(miner_id)
             .bind(&node.node_id)
             .bind(&node.ssh_endpoint)
+            .bind(&node.node_ip)
             .bind(node.gpu_count as i64)
             .bind(&now)
             .execute(&mut *tx)
@@ -638,6 +643,7 @@ impl SimplePersistence {
     }
 
     /// Update miner information
+    #[cfg(test)]
     pub async fn update_miner(
         &self,
         miner_id: &str,
@@ -662,13 +668,13 @@ impl SimplePersistence {
             // When updating nodes, we need to handle the miner_nodes table
             let mut tx = self.pool().begin().await?;
 
-            // First, validate that new ssh_endpoints aren't already registered by other miners
+            // First, validate that new node IPs aren't already registered by other miners
             for node in nodes {
                 let existing = sqlx::query(
                     "SELECT COUNT(*) as count FROM miner_nodes
-                     WHERE ssh_endpoint = ? AND miner_id != ?",
+                     WHERE node_ip = ? AND miner_id != ?",
                 )
-                .bind(&node.ssh_endpoint)
+                .bind(&node.node_ip)
                 .bind(miner_id)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -691,15 +697,15 @@ impl SimplePersistence {
             // Insert new nodes
             for node in nodes {
                 let node_id = Uuid::new_v4().to_string();
-
                 sqlx::query(
-                    "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?)"
+                    "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(&node_id)
                 .bind(miner_id)
                 .bind(&node.node_id)
                 .bind(&node.ssh_endpoint)
+                .bind(&node.node_ip)
                 .bind(node.gpu_count as i64)
                 .bind(&now)
                 .execute(&mut *tx)

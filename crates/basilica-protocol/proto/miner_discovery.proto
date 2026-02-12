@@ -37,7 +37,7 @@ message CollateralStatus {
 
 // Node registration details including SSH access info
 message NodeRegistration {
-  string node_id = 1;               // Unique node identifier
+  reserved 1;                       // Previously node_id (now computed server-side from host)
   string host = 2;                  // SSH host (IP or hostname)
   uint32 port = 3;                  // SSH port (typically 22)
   string username = 4;              // SSH username
@@ -67,10 +67,11 @@ message RegisterBidResponse {
 // UpdateBid: Update price for existing registered node
 message UpdateBidRequest {
   string miner_hotkey = 1;          // Miner's hotkey for identification
-  string node_id = 2;               // Node to update
+  reserved 2;                       // Previously node_id (now computed server-side from host)
   uint32 hourly_rate_cents = 3;     // New price in cents per GPU per hour
   int64 timestamp = 4;              // Unix timestamp
-  bytes signature = 5;              // Signature over miner_hotkey|node_id|hourly_rate_cents|timestamp
+  bytes signature = 5;              // Signature over miner_hotkey|host|hourly_rate_cents|timestamp
+  string host = 6;                  // SSH host (IP or hostname) identifying the node
 }
 
 message UpdateBidResponse {
@@ -81,9 +82,10 @@ message UpdateBidResponse {
 // RemoveBid: Explicitly remove node(s) from availability
 message RemoveBidRequest {
   string miner_hotkey = 1;          // Miner's hotkey for identification
-  repeated string node_ids = 2;     // Node IDs to remove (empty = remove all)
+  reserved 2;                       // Previously node_ids (now using hosts)
   int64 timestamp = 3;              // Unix timestamp
-  bytes signature = 4;              // Signature over miner_hotkey|node_ids|timestamp
+  bytes signature = 4;              // Signature over miner_hotkey|hosts|timestamp
+  repeated string hosts = 5;        // Hosts to remove (empty = remove all)
 }
 
 message RemoveBidResponse {
@@ -95,9 +97,10 @@ message RemoveBidResponse {
 // HealthCheck: Lightweight periodic heartbeat
 message HealthCheckRequest {
   string miner_hotkey = 1;          // Miner's hotkey for identification
-  repeated string node_ids = 2;     // Optional: specific nodes to check (empty = all)
+  reserved 2;                       // Previously node_ids (now using hosts)
   int64 timestamp = 3;              // Unix timestamp
-  bytes signature = 4;              // Signature over miner_hotkey|node_ids|timestamp
+  bytes signature = 4;              // Signature over miner_hotkey|hosts|timestamp
+  repeated string hosts = 5;        // Optional: specific hosts to check (empty = all)
 }
 
 message HealthCheckResponse {

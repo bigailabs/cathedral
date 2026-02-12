@@ -799,6 +799,7 @@ impl ValidationNode {
         Ok(NodeVerificationResult {
             node_id: node_info.id.clone(),
             node_ssh_endpoint: node_info.node_ssh_endpoint.clone(),
+            node_ip: node_info.node_ip.clone(),
             verification_score,
             ssh_connection_successful: validation_successful,
             binary_validation_successful: false,
@@ -1220,6 +1221,7 @@ impl ValidationNode {
         Ok(NodeVerificationResult {
             node_id: node_info.id.clone(),
             node_ssh_endpoint: node_info.node_ssh_endpoint.clone(),
+            node_ip: node_info.node_ip.clone(),
             verification_score: combined_score,
             ssh_connection_successful,
             binary_validation_successful: pre_validations_successful
@@ -1370,13 +1372,14 @@ mod tests {
 
         // Seed miner_nodes so status check doesn't force full validation by itself.
         sqlx::query(
-            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, gpu_count, hourly_rate_cents, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+            "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, hourly_rate_cents, status, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
         )
         .bind(format!("{miner_id}_{node_id}"))
         .bind(&miner_id)
         .bind(node_id)
         .bind("root@127.0.0.1:22")
+        .bind("127.0.0.1")
         .bind(1)
         .bind(100)
         .bind("online")
