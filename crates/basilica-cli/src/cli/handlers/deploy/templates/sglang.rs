@@ -97,6 +97,7 @@ pub async fn handle_sglang_deploy(
         suspended: false,
         priority: None,
         topology_spread: None,
+        public_metadata: false,
     };
 
     // Show spinner
