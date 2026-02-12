@@ -587,6 +587,9 @@ mod tests {
         gpu_count: i64,
         created_at: DateTime<Utc>,
     ) -> anyhow::Result<()> {
+        // Derive a unique IP from miner_id to satisfy the UNIQUE index on node_ip
+        let uid: u16 = miner_id.trim_start_matches("miner_").parse().unwrap_or(0);
+        let node_ip = format!("10.0.{}.{}", uid / 256, uid % 256);
         sqlx::query(
             "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, status, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -594,8 +597,8 @@ mod tests {
         .bind(format!("{}:{}", miner_id, node_id))
         .bind(miner_id)
         .bind(node_id)
-        .bind("127.0.0.1:8080")
-        .bind("127.0.0.1")
+        .bind(format!("root@{}:8080", node_ip))
+        .bind(&node_ip)
         .bind(gpu_count)
         .bind("online")
         .bind(created_at.to_rfc3339())
@@ -719,7 +722,9 @@ mod tests {
                 }
             }
 
-            // Seed miner_nodes table
+            // Seed miner_nodes table (unique IP per miner to satisfy UNIQUE index)
+            let uid = profile.miner_uid.as_u16();
+            let node_ip = format!("10.0.{}.{}", uid / 256, uid % 256);
             sqlx::query(
                 "INSERT INTO miner_nodes (id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count, status, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
@@ -727,8 +732,8 @@ mod tests {
             .bind(&node_id)
             .bind(&miner_id)
             .bind(&node_id)
-            .bind("127.0.0.1:8080")
-            .bind("127.0.0.1")
+            .bind(format!("root@{}:8080", node_ip))
+            .bind(&node_ip)
             .bind(profile.gpu_counts.values().sum::<u32>() as i64)
             .bind("online")
             .bind(now.to_rfc3339())

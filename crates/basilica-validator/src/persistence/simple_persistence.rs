@@ -241,7 +241,7 @@ mod tests {
 
         let nodes1 = vec![NodeRegistration {
             node_id: "exec1".to_string(),
-            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "root@192.168.1.1:8080".to_string(),
             node_ip: "192.168.1.1".to_string(),
             gpu_count: 2,
             gpu_specs: vec![GpuSpec {
@@ -263,7 +263,7 @@ mod tests {
 
         let nodes2 = vec![NodeRegistration {
             node_id: "exec2".to_string(),
-            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "root@192.168.1.1:8080".to_string(),
             node_ip: "192.168.1.1".to_string(),
             gpu_count: 1,
             gpu_specs: vec![GpuSpec {
@@ -296,7 +296,7 @@ mod tests {
 
         let nodes1 = vec![NodeRegistration {
             node_id: "exec1".to_string(),
-            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "root@192.168.1.1:8080".to_string(),
             node_ip: "192.168.1.1".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
@@ -314,7 +314,7 @@ mod tests {
 
         let nodes2 = vec![NodeRegistration {
             node_id: "exec2".to_string(),
-            ssh_endpoint: "http://192.168.1.2:8080".to_string(),
+            ssh_endpoint: "root@192.168.1.2:8080".to_string(),
             node_ip: "192.168.1.2".to_string(),
             gpu_count: 1,
             gpu_specs: vec![],
@@ -334,7 +334,7 @@ mod tests {
             endpoint: None,
             nodes: Some(vec![NodeRegistration {
                 node_id: "exec2_updated".to_string(),
-                ssh_endpoint: "http://192.168.1.1:8080".to_string(),
+                ssh_endpoint: "root@192.168.1.1:8080".to_string(),
                 node_ip: "192.168.1.1".to_string(),
                 gpu_count: 1,
                 gpu_specs: vec![],
@@ -363,7 +363,7 @@ mod tests {
 
         let nodes = vec![NodeRegistration {
             node_id: "exec1".to_string(),
-            ssh_endpoint: "http://192.168.1.1:8080".to_string(),
+            ssh_endpoint: "root@192.168.1.1:8080".to_string(),
             node_ip: "192.168.1.1".to_string(),
             gpu_count: 2,
             gpu_specs: vec![],
@@ -383,7 +383,7 @@ mod tests {
             endpoint: Some("http://miner1-updated.com".to_string()),
             nodes: Some(vec![NodeRegistration {
                 node_id: "exec1_updated".to_string(),
-                ssh_endpoint: "http://192.168.1.1:8080".to_string(),
+                ssh_endpoint: "root@192.168.1.1:8080".to_string(),
                 node_ip: "192.168.1.1".to_string(),
                 gpu_count: 3,
                 gpu_specs: vec![],
