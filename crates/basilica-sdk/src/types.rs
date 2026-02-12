@@ -754,6 +754,9 @@ pub struct CreateDeploymentRequest {
     /// Controls how pod replicas are distributed across nodes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topology_spread: Option<TopologySpreadConfig>,
+    /// Opt-in to exposing non-sensitive metadata publicly for validator verification.
+    #[serde(default)]
+    pub public_metadata: bool,
 }
 
 fn default_enable_billing() -> bool {
@@ -805,6 +808,9 @@ pub struct DeploymentResponse {
     /// Shareable URL with token query parameter for private deployments.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_url: Option<String>,
+    /// Whether public metadata enrollment is enabled for this deployment.
+    #[serde(default)]
+    pub public_metadata: bool,
 }
 
 /// Deployment summary for list responses
@@ -819,6 +825,9 @@ pub struct DeploymentSummary {
     /// Whether deployment is publicly accessible (no token required).
     #[serde(default = "default_public")]
     pub public: bool,
+    /// Whether public metadata enrollment is enabled for this deployment.
+    #[serde(default)]
+    pub public_metadata: bool,
 }
 
 /// List deployments response
@@ -862,6 +871,32 @@ pub struct ShareTokenStatusResponse {
 pub struct DeleteShareTokenResponse {
     /// Whether a token was revoked.
     pub revoked: bool,
+}
+
+/// Request to enroll or unenroll a deployment in public metadata exposure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnrollMetadataRequest {
+    pub enabled: bool,
+}
+
+/// Response for metadata enrollment status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrollMetadataResponse {
+    pub public_metadata: bool,
+}
+
+/// Public deployment metadata visible without authentication.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicDeploymentMetadataResponse {
+    pub instance_name: String,
+    pub image: String,
+    pub image_tag: String,
+    pub id: String,
+    pub uptime_seconds: u64,
+    pub replicas: ReplicaStatus,
+    pub state: String,
 }
 
 /// Deployment event from Kubernetes
@@ -1255,6 +1290,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            public_metadata: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(!json.contains("topologySpread"));
@@ -1284,6 +1320,7 @@ mod tests {
                 max_skew: 1,
                 topology_key: "kubernetes.io/hostname".to_string(),
             }),
+            public_metadata: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"topologySpread\""));
