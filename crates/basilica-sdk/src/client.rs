@@ -46,8 +46,9 @@ use crate::{
         ApiKeyInfo, ApiKeyResponse, ApiListRentalsResponse, BalanceResponse, CreateApiKeyRequest,
         CreateDeploymentRequest, CreateDepositAccountResponse, DeleteDeploymentResponse,
         DeleteShareTokenResponse, DeploymentEventsResponse, DeploymentListResponse,
-        DeploymentResponse, DepositAccountResponse, HealthCheckResponse, HistoricalRentalsResponse,
-        ListAvailableNodesQuery, ListDepositsQuery, ListDepositsResponse, ListRentalsQuery,
+        DeploymentResponse, DepositAccountResponse, EnrollMetadataRequest, EnrollMetadataResponse,
+        HealthCheckResponse, HistoricalRentalsResponse, ListAvailableNodesQuery, ListDepositsQuery,
+        ListDepositsResponse, ListRentalsQuery, PublicDeploymentMetadataResponse,
         RegenerateShareTokenResponse, RegisterSshKeyRequest, RentalStatusWithSshResponse,
         RentalUsageResponse, ScaleDeploymentRequest, ShareTokenStatusResponse, SshKeyResponse,
         UsageHistoryResponse, WaitOptions, WaitResult,
@@ -1145,6 +1146,74 @@ impl BasilicaClient {
         self.delete(&path).await
     }
 
+    // ============================================================================
+    // Public Deployment Metadata
+    // ============================================================================
+
+    /// Enroll or unenroll a deployment in public metadata exposure.
+    ///
+    /// When enrolled, non-sensitive deployment metadata becomes publicly queryable
+    /// via the unauthenticated `/public/deployments/:name/metadata` endpoint.
+    ///
+    /// # Arguments
+    /// * `instance_name` - The deployment instance name
+    /// * `enabled` - Whether to enable or disable metadata enrollment
+    ///
+    /// # Errors
+    /// * `ApiError::NotFound` - Deployment not found or not owned by user
+    /// * `ApiError::Conflict` - Another deployment with same instance name already enrolled
+    pub async fn enroll_metadata(
+        &self,
+        instance_name: &str,
+        enabled: bool,
+    ) -> Result<EnrollMetadataResponse> {
+        let path = format!(
+            "/deployments/{}/enroll-metadata",
+            urlencoding::encode(instance_name)
+        );
+        let body = EnrollMetadataRequest { enabled };
+        self.post(&path, &body).await
+    }
+
+    /// Check the current metadata enrollment status of a deployment.
+    ///
+    /// # Arguments
+    /// * `instance_name` - The deployment instance name
+    ///
+    /// # Errors
+    /// * `ApiError::NotFound` - Deployment not found or not owned by user
+    pub async fn get_enrollment_status(
+        &self,
+        instance_name: &str,
+    ) -> Result<EnrollMetadataResponse> {
+        let path = format!(
+            "/deployments/{}/enroll-metadata",
+            urlencoding::encode(instance_name)
+        );
+        self.get(&path).await
+    }
+
+    /// Fetch public metadata for a deployment (no authentication required).
+    ///
+    /// Returns non-sensitive metadata for deployments that have opted-in
+    /// via `enroll_metadata`.
+    ///
+    /// # Arguments
+    /// * `instance_name` - The deployment instance name
+    ///
+    /// # Errors
+    /// * `ApiError::NotFound` - Deployment not found or metadata not enrolled
+    pub async fn get_public_deployment_metadata(
+        &self,
+        instance_name: &str,
+    ) -> Result<PublicDeploymentMetadataResponse> {
+        let path = format!(
+            "/public/deployments/{}/metadata",
+            urlencoding::encode(instance_name)
+        );
+        self.get_public(&path).await
+    }
+
     // ===== Private Helper Methods =====
 
     /// Apply authentication to request
@@ -1166,6 +1235,14 @@ impl BasilicaClient {
         let request = self.http_client.get(&url);
         let request = self.apply_auth(request).await?;
 
+        let response = request.send().await.map_err(ApiError::HttpClient)?;
+        self.handle_response(response).await
+    }
+
+    /// Unauthenticated GET request for public endpoints
+    async fn get_public<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let request = self.http_client.get(&url);
         let response = request.send().await.map_err(ApiError::HttpClient)?;
         self.handle_response(response).await
     }
@@ -1721,6 +1798,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            public_metadata: false,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1758,7 +1836,8 @@ mod tests {
                 },
                 "public": true,
                 "enableBilling": true,
-                "suspended": false
+                "suspended": false,
+                "publicMetadata": false
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(json!({
                 "instanceName": "my-app",
@@ -1805,6 +1884,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            public_metadata: false,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -1854,6 +1934,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            public_metadata: false,
         };
 
         let response = client.create_deployment(request).await.unwrap();
@@ -2073,6 +2154,7 @@ mod tests {
             suspended: false,
             priority: None,
             topology_spread: None,
+            public_metadata: false,
         };
 
         let result = client.create_deployment(request).await;
@@ -2086,5 +2168,192 @@ mod tests {
             }
             e => panic!("Expected InvalidRequest or BadRequest error, got: {:?}", e),
         }
+    }
+
+    #[tokio::test]
+    async fn test_enroll_metadata_enable() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments/my-app/enroll-metadata"))
+            .and(header("Authorization", "Bearer test-token"))
+            .and(body_json(json!({"enabled": true})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"publicMetadata": true})))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.enroll_metadata("my-app", true).await.unwrap();
+        assert!(response.public_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_enroll_metadata_disable() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments/my-app/enroll-metadata"))
+            .and(header("Authorization", "Bearer test-token"))
+            .and(body_json(json!({"enabled": false})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"publicMetadata": false})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.enroll_metadata("my-app", false).await.unwrap();
+        assert!(!response.public_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_get_enrollment_status() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/deployments/my-app/enroll-metadata"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"publicMetadata": true})))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client.get_enrollment_status("my-app").await.unwrap();
+        assert!(response.public_metadata);
+    }
+
+    #[tokio::test]
+    async fn test_get_public_deployment_metadata() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/public/deployments/my-app/metadata"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "instanceName": "my-app",
+                "image": "nginx",
+                "imageTag": "latest",
+                "id": "dep-123",
+                "uptimeSeconds": 3600,
+                "replicas": {"desired": 2, "ready": 2},
+                "state": "Active"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let response = client
+            .get_public_deployment_metadata("my-app")
+            .await
+            .unwrap();
+        assert_eq!(response.instance_name, "my-app");
+        assert_eq!(response.image, "nginx");
+        assert_eq!(response.image_tag, "latest");
+        assert_eq!(response.id, "dep-123");
+        assert_eq!(response.uptime_seconds, 3600);
+        assert_eq!(response.replicas.desired, 2);
+        assert_eq!(response.replicas.ready, 2);
+        assert_eq!(response.state, "Active");
+    }
+
+    #[tokio::test]
+    async fn test_enroll_metadata_conflict() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments/my-app/enroll-metadata"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "error": {
+                    "code": "BASILICA_API_CONFLICT",
+                    "message": "Another deployment with instance name 'my-app' is already enrolled",
+                    "timestamp": "2024-01-01T00:00:00Z",
+                    "retryable": false
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let result = client.enroll_metadata("my-app", true).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ApiError::Conflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_create_deployment_with_public_metadata() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/deployments"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "instanceName": "my-app",
+                "userId": "user123",
+                "namespace": "u-user123",
+                "state": "Pending",
+                "url": "http://example.com/deployments/my-app/",
+                "replicas": {"desired": 1, "ready": 0},
+                "createdAt": "2025-01-01T00:00:00Z",
+                "publicMetadata": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = ClientBuilder::default()
+            .base_url(mock_server.uri())
+            .with_tokens("test-token", "refresh-token")
+            .build()
+            .unwrap();
+
+        let request = CreateDeploymentRequest {
+            instance_name: "my-app".to_string(),
+            image: "nginx:latest".to_string(),
+            replicas: 1,
+            port: 80,
+            command: None,
+            args: None,
+            env: None,
+            resources: None,
+            ttl_seconds: None,
+            public: true,
+            storage: None,
+            health_check: None,
+            enable_billing: true,
+            queue_name: None,
+            suspended: false,
+            priority: None,
+            topology_spread: None,
+            public_metadata: true,
+        };
+
+        let json_body = serde_json::to_string(&request).unwrap();
+        assert!(json_body.contains("\"publicMetadata\":true"));
+
+        let response = client.create_deployment(request).await.unwrap();
+        assert!(response.public_metadata);
     }
 }
