@@ -107,7 +107,7 @@ impl NodeConfig {
 
 /// Manages nodes available for rental
 pub struct NodeManager {
-    /// Map of node_id to node configuration
+    /// Map of host to node configuration
     nodes: Arc<RwLock<HashMap<String, NodeConfig>>>,
     /// Currently assigned validator hotkey (single-assignment model)
     current_assigned_validator: Arc<RwLock<Option<String>>>,
@@ -117,10 +117,9 @@ pub struct NodeManager {
     ssh_config: NodeSshConfig,
 }
 
-/// Node configuration with generated ID
+/// Node with its configuration (identified by host)
 #[derive(Clone, Debug)]
 pub struct RegisteredNode {
-    pub node_id: String,
     pub config: NodeConfig,
 }
 
@@ -160,44 +159,40 @@ impl NodeManager {
         }
     }
 
-    /// Register a node for availability with an auto-generated node_id
-    pub async fn register_node(&self, node_id: String, config: NodeConfig) -> Result<()> {
+    /// Register a node for availability (keyed by host)
+    pub async fn register_node(&self, config: NodeConfig) -> Result<()> {
         let mut nodes = self.nodes.write().await;
-        info!(
-            "Registering node {} at {}:{}",
-            node_id, config.host, config.port
-        );
-        nodes.insert(node_id, config);
+        info!("Registering node at {}:{}", config.host, config.port);
+        nodes.insert(config.host.clone(), config);
         Ok(())
     }
 
-    /// Remove a node from availability
-    pub async fn unregister_node(&self, node_id: &str) -> Result<()> {
+    /// Remove a node from availability by host
+    pub async fn unregister_node(&self, host: &str) -> Result<()> {
         let mut nodes = self.nodes.write().await;
-        if nodes.remove(node_id).is_some() {
-            info!("Unregistered node {}", node_id);
+        if nodes.remove(host).is_some() {
+            info!("Unregistered node {}", host);
         } else {
-            warn!("Attempted to unregister unknown node {}", node_id);
+            warn!("Attempted to unregister unknown node {}", host);
         }
         Ok(())
     }
 
-    /// Get all available nodes with their IDs
+    /// Get all available nodes
     pub async fn list_nodes(&self) -> Result<Vec<RegisteredNode>> {
         let nodes = self.nodes.read().await;
         Ok(nodes
-            .iter()
-            .map(|(node_id, config)| RegisteredNode {
-                node_id: node_id.clone(),
+            .values()
+            .map(|config| RegisteredNode {
                 config: config.clone(),
             })
             .collect())
     }
 
-    /// Get a specific node by ID
-    pub async fn get_node(&self, node_id: &str) -> Result<Option<NodeConfig>> {
+    /// Get a specific node by host
+    pub async fn get_node(&self, host: &str) -> Result<Option<NodeConfig>> {
         let nodes = self.nodes.read().await;
-        Ok(nodes.get(node_id).cloned())
+        Ok(nodes.get(host).cloned())
     }
 
     /// Normalize SSH public key by extracting algorithm + key and adding our identifier
@@ -272,7 +267,7 @@ impl NodeManager {
         for registered_node in &nodes {
             info!(
                 "Setting exclusive SSH access for validator {} on node {}",
-                validator_hotkey, registered_node.node_id
+                validator_hotkey, registered_node.config.host
             );
 
             // Build SSH connection details
@@ -283,7 +278,7 @@ impl NodeManager {
             // Set exclusive validator key (removes all other validators, adds current one)
             self.set_exclusive_validator_key_on_node(
                 &connection_details,
-                &registered_node.node_id,
+                &registered_node.config.host,
                 validator_hotkey,
                 &normalized_key,
             )
@@ -325,7 +320,7 @@ impl NodeManager {
         for registered_node in &nodes {
             info!(
                 "Removing all validator keys from node {} (revoking validator {})",
-                registered_node.node_id, validator_hotkey
+                registered_node.config.host, validator_hotkey
             );
 
             // Build SSH connection details
@@ -335,12 +330,15 @@ impl NodeManager {
 
             // Remove all validator keys from the node
             if let Err(e) = self
-                .remove_all_validator_keys_on_node(&connection_details, &registered_node.node_id)
+                .remove_all_validator_keys_on_node(
+                    &connection_details,
+                    &registered_node.config.host,
+                )
                 .await
             {
                 warn!(
                     "Failed to remove validator keys from node {}: {}",
-                    registered_node.node_id, e
+                    registered_node.config.host, e
                 );
             }
         }
@@ -375,9 +373,9 @@ impl NodeManager {
     async fn remove_all_validator_keys_on_node(
         &self,
         connection_details: &SshConnectionDetails,
-        node_id: &str,
+        host: &str,
     ) -> Result<()> {
-        debug!("Removing all validator keys from node {}", node_id);
+        debug!("Removing all validator keys from node {}", host);
 
         let ssh_command = format!(
             "{} && {}",
@@ -388,17 +386,10 @@ impl NodeManager {
             .execute_command(connection_details, &ssh_command, true)
             .await
             .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to remove validator keys from node {}: {}",
-                    node_id,
-                    e
-                )
+                anyhow::anyhow!("Failed to remove validator keys from node {}: {}", host, e)
             })?;
 
-        debug!(
-            "Successfully removed all validator keys from node {}",
-            node_id
-        );
+        debug!("Successfully removed all validator keys from node {}", host);
         Ok(())
     }
 
@@ -406,7 +397,7 @@ impl NodeManager {
     async fn set_exclusive_validator_key_on_node(
         &self,
         connection_details: &SshConnectionDetails,
-        node_id: &str,
+        host: &str,
         validator_hotkey: &str,
         normalized_key: &str,
     ) -> Result<()> {
@@ -424,14 +415,14 @@ impl NodeManager {
             .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to set exclusive validator key on node {}: {}",
-                    node_id,
+                    host,
                     e
                 )
             })?;
 
         info!(
             "Successfully set exclusive access for validator {} on node {}",
-            validator_hotkey, node_id
+            validator_hotkey, host
         );
         Ok(())
     }
@@ -454,17 +445,13 @@ mod tests {
             additional_opts: None,
         };
 
-        let node_id = "test-node-1".to_string();
-        manager
-            .register_node(node_id.clone(), config.clone())
-            .await
-            .unwrap();
+        manager.register_node(config.clone()).await.unwrap();
 
         let nodes = manager.list_nodes().await.unwrap();
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].node_id, "test-node-1");
+        assert_eq!(nodes[0].config.host, "192.168.1.100");
 
-        let node = manager.get_node("test-node-1").await.unwrap();
+        let node = manager.get_node("192.168.1.100").await.unwrap();
         assert!(node.is_some());
         assert_eq!(node.unwrap().host, "192.168.1.100");
     }

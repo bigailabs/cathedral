@@ -176,7 +176,7 @@ impl RegistrationService {
         format!(
             "{}|{}|{}|{}",
             req.miner_hotkey.trim(),
-            req.node_id.trim(),
+            req.host.trim(),
             req.hourly_rate_cents,
             req.timestamp,
         )
@@ -184,22 +184,22 @@ impl RegistrationService {
 
     /// Build the message to verify for RemoveBid signature
     fn build_remove_bid_message(&self, req: &RemoveBidRequest) -> String {
-        let node_ids_str = req.node_ids.join(",");
+        let hosts_str = req.hosts.join(",");
         format!(
             "{}|{}|{}",
             req.miner_hotkey.trim(),
-            node_ids_str,
+            hosts_str,
             req.timestamp,
         )
     }
 
     /// Build the message to verify for HealthCheck signature
     fn build_health_check_message(&self, req: &HealthCheckRequest) -> String {
-        let node_ids_str = req.node_ids.join(",");
+        let hosts_str = req.hosts.join(",");
         format!(
             "{}|{}|{}",
             req.miner_hotkey.trim(),
-            node_ids_str,
+            hosts_str,
             req.timestamp
         )
     }
@@ -271,11 +271,9 @@ impl MinerRegistration for RegistrationService {
 
         // Upsert each node
         let mut worst_collateral_status: Option<CollateralStatus> = None;
+        let mut active_node_ids: Vec<String> = Vec::new();
         for node in &req.nodes {
             // Validate node fields
-            if node.node_id.trim().is_empty() {
-                return Err(Status::invalid_argument("node_id is required"));
-            }
             if node.host.trim().is_empty() {
                 return Err(Status::invalid_argument("host is required"));
             }
@@ -325,11 +323,17 @@ impl MinerRegistration for RegistrationService {
                 }
             }
 
-            // Upsert node
+            // Compute node_id server-side from host (deterministic, not trusting miner)
+            let node_id = basilica_common::node_identity::NodeId::new(&node.host)
+                .map_err(|e| Status::internal(format!("failed to compute node_id: {e}")))?
+                .uuid
+                .to_string();
+            active_node_ids.push(node_id.clone());
+
+            // Upsert node (node_id computed server-side from host)
             self.persistence
                 .upsert_registered_node(
                     &miner_id,
-                    &node.node_id,
                     &node.host,
                     node.port,
                     &node.username,
@@ -345,7 +349,7 @@ impl MinerRegistration for RegistrationService {
                 let (state, status) = manager
                     .get_collateral_status(
                         &req.miner_hotkey,
-                        &node.node_id,
+                        &node_id,
                         &node.gpu_category,
                         node.gpu_count,
                     )
@@ -357,7 +361,6 @@ impl MinerRegistration for RegistrationService {
         }
 
         // Deactivate bids for nodes NOT in this RegisterBid request
-        let active_node_ids: Vec<String> = req.nodes.iter().map(|n| n.node_id.clone()).collect();
         self.persistence
             .deactivate_missing_bids(&miner_id, &active_node_ids)
             .await
@@ -394,8 +397,8 @@ impl MinerRegistration for RegistrationService {
         if req.miner_hotkey.trim().is_empty() {
             return Err(Status::invalid_argument("miner_hotkey is required"));
         }
-        if req.node_id.trim().is_empty() {
-            return Err(Status::invalid_argument("node_id is required"));
+        if req.host.trim().is_empty() {
+            return Err(Status::invalid_argument("host is required"));
         }
         if req.hourly_rate_cents == 0 {
             return Err(Status::invalid_argument(
@@ -416,10 +419,16 @@ impl MinerRegistration for RegistrationService {
         // Resolve miner ID
         let miner_id = self.resolve_miner_id(&req.miner_hotkey).await?;
 
+        // Compute node_id server-side from host
+        let node_id = basilica_common::node_identity::NodeId::new(&req.host)
+            .map_err(|e| Status::internal(format!("failed to compute node_id: {e}")))?
+            .uuid
+            .to_string();
+
         // Update node price
         let updated = self
             .persistence
-            .update_node_hourly_rate(&miner_id, &req.node_id, req.hourly_rate_cents)
+            .update_node_hourly_rate(&miner_id, &node_id, req.hourly_rate_cents)
             .await
             .map_err(|e| Status::internal(format!("failed to update node: {e}")))?;
 
@@ -429,7 +438,7 @@ impl MinerRegistration for RegistrationService {
 
         info!(
             miner_hotkey = %req.miner_hotkey,
-            node_id = %req.node_id,
+            host = %req.host,
             hourly_rate_cents = req.hourly_rate_cents,
             "Updated node price via UpdateBid"
         );
@@ -464,10 +473,20 @@ impl MinerRegistration for RegistrationService {
         // Resolve miner ID
         let miner_id = self.resolve_miner_id(&req.miner_hotkey).await?;
 
+        // Compute node_ids server-side from hosts
+        let node_ids: Vec<String> = req
+            .hosts
+            .iter()
+            .map(|host| {
+                basilica_common::node_identity::NodeId::new(host).map(|id| id.uuid.to_string())
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|e| Status::internal(format!("failed to compute node_ids: {e}")))?;
+
         // Remove nodes
         let removed = self
             .persistence
-            .remove_registered_nodes(&miner_id, &req.node_ids)
+            .remove_registered_nodes(&miner_id, &node_ids)
             .await
             .map_err(|e| Status::internal(format!("failed to remove nodes: {e}")))?;
 
@@ -508,10 +527,20 @@ impl MinerRegistration for RegistrationService {
         // Resolve miner ID
         let miner_id = self.resolve_miner_id(&req.miner_hotkey).await?;
 
+        // Compute node_ids server-side from hosts
+        let node_ids: Vec<String> = req
+            .hosts
+            .iter()
+            .map(|host| {
+                basilica_common::node_identity::NodeId::new(host).map(|id| id.uuid.to_string())
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|e| Status::internal(format!("failed to compute node_ids: {e}")))?;
+
         // Update health check timestamp
         let updated = self
             .persistence
-            .update_nodes_health_check(&miner_id, &req.node_ids)
+            .update_nodes_health_check(&miner_id, &node_ids)
             .await
             .map_err(|e| Status::internal(format!("failed to update health check: {e}")))?;
 
@@ -600,16 +629,16 @@ mod tests {
 
         let req = UpdateBidRequest {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
-            node_id: "node-1".to_string(),
             hourly_rate_cents: 250,
             timestamp: 1234567890,
             signature: vec![],
+            host: "192.168.1.1".to_string(),
         };
 
         let message = service.build_update_bid_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1|250|1234567890"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|192.168.1.1|250|1234567890"
         );
     }
 
@@ -619,15 +648,15 @@ mod tests {
 
         let req = RemoveBidRequest {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
-            node_ids: vec!["node-1".to_string(), "node-2".to_string()],
             timestamp: 1234567890,
             signature: vec![],
+            hosts: vec!["192.168.1.1".to_string(), "192.168.1.2".to_string()],
         };
 
         let message = service.build_remove_bid_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1,node-2|1234567890"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|192.168.1.1,192.168.1.2|1234567890"
         );
     }
 
@@ -635,12 +664,12 @@ mod tests {
     async fn test_build_health_check_message() {
         let service = create_test_service().await;
 
-        // Test with empty node_ids (all nodes)
+        // Test with empty hosts (all nodes)
         let req = HealthCheckRequest {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
-            node_ids: vec![],
             timestamp: 1234567890,
             signature: vec![],
+            hosts: vec![],
         };
 
         let message = service.build_health_check_message(&req);
@@ -649,18 +678,18 @@ mod tests {
             "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY||1234567890"
         );
 
-        // Test with specific node_ids
+        // Test with specific hosts
         let req = HealthCheckRequest {
             miner_hotkey: "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY".to_string(),
-            node_ids: vec!["node-1".to_string(), "node-2".to_string()],
             timestamp: 1234567890,
             signature: vec![],
+            hosts: vec!["192.168.1.1".to_string(), "192.168.1.2".to_string()],
         };
 
         let message = service.build_health_check_message(&req);
         assert_eq!(
             message,
-            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|node-1,node-2|1234567890"
+            "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY|192.168.1.1,192.168.1.2|1234567890"
         );
     }
 }

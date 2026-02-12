@@ -51,7 +51,7 @@ impl BidManager {
                 anyhow::bail!(
                     "Node '{}' has GPU category '{}' but no price configured in [bidding.strategy.static.static_prices]. \
                      Add `{} = <price>` to your miner.toml",
-                    node.node_id,
+                    node.config.host,
                     category,
                     category
                 );
@@ -75,7 +75,6 @@ impl BidManager {
             .map(|n| {
                 let price = self.get_node_price(&n.config.gpu_category);
                 NodeRegistration {
-                    node_id: n.node_id.clone(),
                     host: n.config.host.clone(),
                     port: n.config.port as u32,
                     username: n.config.username.clone(),

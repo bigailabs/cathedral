@@ -68,19 +68,20 @@ impl SimplePersistence {
         let count: i64 = row.get("count");
 
         if count == 0 {
+            let relationship_id = format!("{miner_id}_{node_id}");
             let existing_miner: Option<String> = sqlx::query_scalar(
-                "SELECT miner_id FROM miner_nodes WHERE node_ip = ? AND miner_id != ? LIMIT 1",
+                "SELECT miner_id FROM miner_nodes WHERE node_ip = ? AND id != ? LIMIT 1",
             )
             .bind(node_ip)
-            .bind(&miner_id)
+            .bind(&relationship_id)
             .fetch_optional(self.pool())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to check ssh_endpoint uniqueness: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to check node_ip uniqueness: {}", e))?;
 
             if let Some(other_miner) = existing_miner {
                 return Err(anyhow::anyhow!(
-                    "Cannot create node relationship: ssh_endpoint {} is already registered to {}",
-                    node_ssh_endpoint,
+                    "Cannot create node relationship: host {} is already registered to {}",
+                    node_ip,
                     other_miner
                 ));
             }
@@ -131,8 +132,6 @@ impl SimplePersistence {
                     hourly_rate_cents, status, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
             "#;
-
-            let relationship_id = format!("{miner_id}_{node_id}");
 
             sqlx::query(insert_query)
                 .bind(&relationship_id)
@@ -1416,7 +1415,6 @@ impl SimplePersistence {
     pub async fn upsert_registered_node(
         &self,
         miner_id: &str,
-        node_id: &str,
         host: &str,
         port: u32,
         username: &str,
@@ -1424,25 +1422,26 @@ impl SimplePersistence {
         gpu_count: u32,
         hourly_rate_cents: u32,
     ) -> Result<bool> {
+        // Compute node_id deterministically from host (validator-side, not trusting miner)
+        let node_id = basilica_common::node_identity::NodeId::new(host)?
+            .uuid
+            .to_string();
+
         // Build ssh_endpoint in the standard format: user@host:port
         let ssh_endpoint = format!("{}@{}:{}", username, host, port);
         let relationship_id = format!("{}_{}", miner_id, node_id);
 
-        // Check if this host is already used by a different miner
+        // Check if this host is already used by any other node
         let existing_miner: Option<String> = sqlx::query_scalar(
-            "SELECT miner_id FROM miner_nodes WHERE node_ip = ? AND miner_id != ? LIMIT 1",
+            "SELECT miner_id FROM miner_nodes WHERE node_ip = ? AND id != ? LIMIT 1",
         )
         .bind(host)
-        .bind(miner_id)
+        .bind(&relationship_id)
         .fetch_optional(self.pool())
         .await?;
 
         if let Some(other_miner) = existing_miner {
-            anyhow::bail!(
-                "SSH endpoint {} is already registered to {}",
-                ssh_endpoint,
-                other_miner
-            );
+            anyhow::bail!("Host {} is already registered to {}", host, other_miner);
         }
 
         // Check if this node already exists for this miner
@@ -1450,7 +1449,7 @@ impl SimplePersistence {
             "SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
         )
         .bind(miner_id)
-        .bind(node_id)
+        .bind(&node_id)
         .fetch_one(self.pool())
         .await?;
 
@@ -1466,7 +1465,7 @@ impl SimplePersistence {
             )
             .bind(&relationship_id)
             .bind(miner_id)
-            .bind(node_id)
+            .bind(&node_id)
             .bind(&ssh_endpoint)
             .bind(host)
             .bind(gpu_count as i64)
@@ -1504,7 +1503,7 @@ impl SimplePersistence {
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
             .bind(miner_id)
-            .bind(node_id)
+            .bind(&node_id)
             .execute(self.pool())
             .await?;
 

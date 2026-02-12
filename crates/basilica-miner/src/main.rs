@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use basilica_common::identity::{Hotkey, MinerUid};
-use basilica_common::node_identity::NodeIdentity;
+use basilica_common::node_identity::NodeId;
 use basilica_common::types::GpuCategory;
 use clap::Parser;
 use collateral_contract::collaterals;
@@ -16,7 +16,6 @@ use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::watch;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 mod bidding;
 mod bittensor_core;
@@ -83,45 +82,20 @@ impl MinerState {
         // Initialize node manager with SSH config
         let node_manager = Arc::new(NodeManager::new(config.ssh_session.clone()));
 
-        // Register all configured nodes with auto-generated deterministic IDs
+        // Register all configured nodes (keyed by host)
         info!(
             "Registering {} configured nodes",
             config.node_management.nodes.len()
         );
         for node_config in &config.node_management.nodes {
-            // Generate deterministic node_id from SSH credentials
-            let node_id = match registration_db
-                .get_or_create_node_id(&node_config.username, &node_config.host, node_config.port)
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => {
-                    error!(
-                        "Failed to generate node ID for {}@{}:{}: {}",
-                        node_config.username, node_config.host, node_config.port, e
-                    );
-                    continue;
-                }
-            };
-
-            match node_manager
-                .register_node(node_id.to_string(), node_config.clone())
-                .await
-            {
+            match node_manager.register_node(node_config.clone()).await {
                 Ok(_) => info!(
-                    "Registered node {} at {}@{}:{}",
-                    node_id.uuid(),
-                    node_config.username,
-                    node_config.host,
-                    node_config.port
+                    "Registered node at {}@{}:{}",
+                    node_config.username, node_config.host, node_config.port
                 ),
                 Err(e) => error!(
-                    "Failed to register node {} at {}@{}:{}: {}",
-                    node_id.uuid(),
-                    node_config.username,
-                    node_config.host,
-                    node_config.port,
-                    e
+                    "Failed to register node at {}@{}:{}: {}",
+                    node_config.username, node_config.host, node_config.port, e
                 ),
             }
         }
@@ -303,7 +277,7 @@ async fn log_collateral_status(miner_hotkey: &str, nodes: &[RegisteredNode]) -> 
     let mut actions = Vec::new();
 
     for node in nodes {
-        let node_uuid = Uuid::parse_str(&node.node_id)?;
+        let node_uuid = NodeId::new(&node.config.host)?.uuid;
         let amount = collaterals(hotkey_bytes, node_uuid.into_bytes(), &network_config).await?;
         let alpha_amount = alpha_from_wei(amount);
         // Parse to GpuCategory for consistent handling (validation done at config load time)
@@ -348,7 +322,7 @@ async fn log_collateral_status(miner_hotkey: &str, nodes: &[RegisteredNode]) -> 
         let gpu_label = format!("{} ({}x)", node.config.gpu_category, node.config.gpu_count);
 
         rows.push(CollateralRow {
-            node: node.node_id.clone(),
+            node: node.config.host.clone(),
             gpu: gpu_label,
             alpha: format_alpha(alpha_amount),
             usd: usd_display,
@@ -356,7 +330,7 @@ async fn log_collateral_status(miner_hotkey: &str, nodes: &[RegisteredNode]) -> 
         });
 
         if let Some(action) = action {
-            actions.push(format!("{}: {}", node.node_id, action));
+            actions.push(format!("{}: {}", node.config.host, action));
         }
     }
 

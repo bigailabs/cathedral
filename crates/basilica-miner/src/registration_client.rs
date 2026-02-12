@@ -110,39 +110,29 @@ impl RegistrationClient {
     /// Build and sign the message for UpdateBid
     fn build_update_bid_message(
         &self,
-        node_id: &str,
+        host: &str,
         hourly_rate_cents: u32,
         timestamp: i64,
     ) -> String {
         format!(
             "{}|{}|{}|{}",
             self.miner_hotkey.trim(),
-            node_id.trim(),
+            host.trim(),
             hourly_rate_cents,
             timestamp,
         )
     }
 
     /// Build and sign the message for RemoveBid
-    fn build_remove_bid_message(&self, node_ids: &[String], timestamp: i64) -> String {
-        let node_ids_str = node_ids.join(",");
-        format!(
-            "{}|{}|{}",
-            self.miner_hotkey.trim(),
-            node_ids_str,
-            timestamp,
-        )
+    fn build_remove_bid_message(&self, hosts: &[String], timestamp: i64) -> String {
+        let hosts_str = hosts.join(",");
+        format!("{}|{}|{}", self.miner_hotkey.trim(), hosts_str, timestamp,)
     }
 
     /// Build and sign the message for HealthCheck
-    fn build_health_check_message(&self, node_ids: &[String], timestamp: i64) -> String {
-        let node_ids_str = node_ids.join(",");
-        format!(
-            "{}|{}|{}",
-            self.miner_hotkey.trim(),
-            node_ids_str,
-            timestamp
-        )
+    fn build_health_check_message(&self, hosts: &[String], timestamp: i64) -> String {
+        let hosts_str = hosts.join(",");
+        format!("{}|{}|{}", self.miner_hotkey.trim(), hosts_str, timestamp)
     }
 
     /// Sign a message using the miner's hotkey
@@ -287,13 +277,13 @@ impl RegistrationClient {
         let mut client = self.connect(grpc_endpoint).await?;
 
         let timestamp = Utc::now().timestamp();
-        let node_ids: Vec<String> = vec![]; // Empty = all nodes
-        let message = self.build_health_check_message(&node_ids, timestamp);
+        let hosts: Vec<String> = vec![]; // Empty = all nodes
+        let message = self.build_health_check_message(&hosts, timestamp);
         let signature = self.sign_message(&message)?;
 
         let request = HealthCheckRequest {
             miner_hotkey: self.miner_hotkey.clone(),
-            node_ids,
+            hosts,
             timestamp,
             signature,
         };
@@ -322,7 +312,7 @@ impl RegistrationClient {
     pub async fn update_node_price(
         &self,
         grpc_endpoint: &str,
-        node_id: &str,
+        host: &str,
         hourly_rate_cents: u32,
     ) -> Result<()> {
         let state = self.state.read().await;
@@ -334,15 +324,15 @@ impl RegistrationClient {
         let mut client = self.connect(grpc_endpoint).await?;
 
         let timestamp = Utc::now().timestamp();
-        let message = self.build_update_bid_message(node_id, hourly_rate_cents, timestamp);
+        let message = self.build_update_bid_message(host, hourly_rate_cents, timestamp);
         let signature = self.sign_message(&message)?;
 
         let request = UpdateBidRequest {
             miner_hotkey: self.miner_hotkey.clone(),
-            node_id: node_id.to_string(),
             hourly_rate_cents,
             timestamp,
             signature,
+            host: host.to_string(),
         };
 
         let response = client
@@ -359,7 +349,7 @@ impl RegistrationClient {
         }
 
         info!(
-            node_id = node_id,
+            host = host,
             hourly_rate_cents = hourly_rate_cents,
             "Updated node price"
         );
@@ -367,8 +357,8 @@ impl RegistrationClient {
     }
 
     /// Remove nodes from availability.
-    /// If node_ids is empty, removes all nodes.
-    pub async fn remove_nodes(&self, grpc_endpoint: &str, node_ids: Vec<String>) -> Result<u32> {
+    /// If hosts is empty, removes all nodes.
+    pub async fn remove_nodes(&self, grpc_endpoint: &str, hosts: Vec<String>) -> Result<u32> {
         let state = self.state.read().await;
         if !state.registered {
             return Err(anyhow::anyhow!("not registered yet"));
@@ -378,14 +368,14 @@ impl RegistrationClient {
         let mut client = self.connect(grpc_endpoint).await?;
 
         let timestamp = Utc::now().timestamp();
-        let message = self.build_remove_bid_message(&node_ids, timestamp);
+        let message = self.build_remove_bid_message(&hosts, timestamp);
         let signature = self.sign_message(&message)?;
 
         let request = RemoveBidRequest {
             miner_hotkey: self.miner_hotkey.clone(),
-            node_ids,
             timestamp,
             signature,
+            hosts,
         };
 
         let response = client
@@ -449,14 +439,16 @@ mod tests {
         });
 
         let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
-        // Test with empty node_ids (all nodes)
+        // Test with empty hosts (all nodes)
         let message = client.build_health_check_message(&[], 1234567890);
         assert_eq!(message, "5GrwvaEF||1234567890");
 
-        // Test with specific node_ids
-        let message = client
-            .build_health_check_message(&["node-1".to_string(), "node-2".to_string()], 1234567890);
-        assert_eq!(message, "5GrwvaEF|node-1,node-2|1234567890");
+        // Test with specific hosts
+        let message = client.build_health_check_message(
+            &["192.168.1.1".to_string(), "192.168.1.2".to_string()],
+            1234567890,
+        );
+        assert_eq!(message, "5GrwvaEF|192.168.1.1,192.168.1.2|1234567890");
     }
 
     #[test]
@@ -467,8 +459,8 @@ mod tests {
         });
 
         let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
-        let message = client.build_update_bid_message("node-1", 250, 1234567890);
-        assert_eq!(message, "5GrwvaEF|node-1|250|1234567890");
+        let message = client.build_update_bid_message("192.168.1.1", 250, 1234567890);
+        assert_eq!(message, "5GrwvaEF|192.168.1.1|250|1234567890");
     }
 
     #[test]
@@ -479,8 +471,10 @@ mod tests {
         });
 
         let client = RegistrationClient::new(Duration::from_secs(30), node_manager, bittensor);
-        let message = client
-            .build_remove_bid_message(&["node-1".to_string(), "node-2".to_string()], 1234567890);
-        assert_eq!(message, "5GrwvaEF|node-1,node-2|1234567890");
+        let message = client.build_remove_bid_message(
+            &["192.168.1.1".to_string(), "192.168.1.2".to_string()],
+            1234567890,
+        );
+        assert_eq!(message, "5GrwvaEF|192.168.1.1,192.168.1.2|1234567890");
     }
 }
