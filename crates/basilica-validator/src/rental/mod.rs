@@ -22,7 +22,6 @@ pub use types::*;
 use crate::ban_system::BanManager;
 use crate::billing::BillingClient;
 use crate::collateral::{CollateralManager, CollateralPreference};
-use crate::config::bidding::BiddingConfig;
 use crate::metrics::ValidatorPrometheusMetrics;
 use crate::persistence::entities::MisbehaviourType;
 use crate::persistence::miner_nodes::NodeBidCandidate;
@@ -49,8 +48,6 @@ pub struct RentalManager {
     ban_manager: Arc<BanManager>,
     /// Collateral manager for bid selection and eligibility
     collateral_manager: Option<Arc<CollateralManager>>,
-    /// Bidding configuration for bid-based selection
-    bidding_config: BiddingConfig,
     /// Max age for full validation before allowing a rental
     pre_rental_full_validation_max_age: std::time::Duration,
 }
@@ -189,7 +186,6 @@ impl RentalManager {
             metrics,
             ban_manager,
             collateral_manager: None,
-            bidding_config: BiddingConfig::default(),
             // TODO: Wire this from config for callers using `new`.
             pre_rental_full_validation_max_age: std::time::Duration::from_secs(12 * 60 * 60),
         }
@@ -257,7 +253,6 @@ impl RentalManager {
             metrics,
             ban_manager,
             collateral_manager,
-            bidding_config: config.bidding.clone(),
             pre_rental_full_validation_max_age: config.verification.node_validation_interval,
         })
     }
@@ -460,7 +455,6 @@ impl RentalManager {
             .get_node_bid_candidates(
                 &request.gpu_category,
                 request.gpu_count,
-                self.bidding_config.bid_node_freshness_secs,
                 request.max_hourly_rate_cents,
                 50,
             )

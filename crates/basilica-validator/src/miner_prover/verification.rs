@@ -569,12 +569,13 @@ impl VerificationEngine {
         // Update node status
         if let Err(e) = sqlx::query(
             "UPDATE miner_nodes
-             SET status = ?, last_health_check = ?
-             WHERE node_id = ?",
+             SET status = ?, last_node_check = ?
+             WHERE node_id = ? AND miner_id = ?",
         )
         .bind(&status)
         .bind(&now)
         .bind(&verification_log.node_id)
+        .bind(&miner_id)
         .execute(&mut *tx)
         .await
         {

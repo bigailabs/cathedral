@@ -568,12 +568,13 @@ fn determine_strategy(node: &Node, last_validation: Option<Timestamp>) -> Strate
    ssh -i ephemeral_key.pem -o ConnectTimeout=10 basilica@node echo "ok"
    ```
 
-2. **Update Timestamp**:
+2. **Update Node Verification Timestamp**:
 
    ```sql
-   UPDATE verification_logs
-   SET last_health_check = NOW()
-   WHERE node_id = ?;
+   UPDATE miner_nodes
+   SET status = 'online',
+       last_node_check = NOW()
+   WHERE node_id = ? AND miner_id = ?;
    ```
 
 3. **Score Reuse**:
@@ -2058,12 +2059,13 @@ ssh -i /tmp/validator_ssh_keys/ephemeral_550e8400.pem \
     echo "ok"
 ```
 
-**5b.2: Timestamp Update**:
+**5b.2: Node Verification Timestamp Update**:
 
 ```sql
-UPDATE verification_logs
-SET last_health_check = NOW()
-WHERE node_id = '550e8400...';
+UPDATE miner_nodes
+SET status = 'online',
+    last_node_check = NOW()
+WHERE node_id = '550e8400...' AND miner_id = 'miner_5';
 ```
 
 **5b.3: Score Reuse**:

@@ -328,7 +328,7 @@ impl SimplePersistence {
             let insert_node = r#"
                 INSERT INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count,
-                    status, last_health_check,
+                    status, last_node_check,
                     created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'))
             "#;
@@ -738,7 +738,7 @@ impl SimplePersistence {
         miner_id: &str,
     ) -> Result<Option<MinerHealthData>, anyhow::Error> {
         let rows = sqlx::query(
-            "SELECT node_id, status, last_health_check, created_at
+            "SELECT node_id, status, last_node_check, created_at
              FROM miner_nodes
              WHERE miner_id = ?",
         )
@@ -754,13 +754,25 @@ impl SimplePersistence {
         let mut latest_check = Utc::now() - chrono::Duration::hours(24);
 
         for row in rows {
-            let last_health_str: Option<String> = row.get("last_health_check");
+            let node_id: String = row.get("node_id");
+            let last_health_str: Option<String> = row.get("last_node_check");
             let created_at_str: String = row.get("created_at");
-
-            let node_last_health_check = if let Some(health_str) = last_health_str {
-                DateTime::parse_from_rfc3339(&health_str)?.with_timezone(&Utc)
-            } else {
-                DateTime::parse_from_rfc3339(&created_at_str)?.with_timezone(&Utc)
+            let created_at = Self::parse_datetime(&created_at_str)?;
+            let node_last_health_check = match last_health_str.as_deref() {
+                Some(health_str) => match Self::parse_datetime(health_str) {
+                    Ok(parsed) => parsed,
+                    Err(e) => {
+                        warn!(
+                            miner_id = %miner_id,
+                            node_id = %node_id,
+                            raw_timestamp = %health_str,
+                            error = %e,
+                            "Failed to parse last_node_check timestamp; falling back to created_at"
+                        );
+                        created_at
+                    }
+                },
+                None => created_at,
             };
 
             if node_last_health_check > latest_check {
@@ -768,7 +780,7 @@ impl SimplePersistence {
             }
 
             node_health.push(NodeHealthData {
-                node_id: row.get("node_id"),
+                node_id,
                 status: row
                     .get::<Option<String>, _>("status")
                     .unwrap_or_else(|| "unknown".to_string()),
