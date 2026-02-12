@@ -674,8 +674,8 @@ use basilica_sdk::types::{
     DeleteDeploymentResponse as SdkDeleteDeploymentResponse,
     DeploymentListResponse as SdkDeploymentListResponse,
     DeploymentProgress as SdkDeploymentProgress, DeploymentResponse as SdkDeploymentResponse,
-    DeploymentSummary as SdkDeploymentSummary, EnvVar as SdkEnvVar,
-    GpuRequirementsSpec as SdkGpuRequirementsSpec,
+    DeploymentSummary as SdkDeploymentSummary, EnrollMetadataResponse as SdkEnrollMetadataResponse,
+    EnvVar as SdkEnvVar, GpuRequirementsSpec as SdkGpuRequirementsSpec,
     PersistentStorageSpec as SdkPersistentStorageSpec, PodInfo as SdkPodInfo,
     ReplicaStatus as SdkReplicaStatus, ResourceRequirements as SdkResourceRequirements,
     SpreadMode as SdkSpreadMode, StorageBackend as SdkStorageBackend,
@@ -1266,13 +1266,15 @@ pub struct CreateDeploymentRequest {
     pub topology_spread: Option<TopologySpreadConfig>,
     #[pyo3(get, set)]
     pub health_check: Option<HealthCheckConfig>,
+    #[pyo3(get, set)]
+    pub public_metadata: bool,
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
 #[pymethods]
 impl CreateDeploymentRequest {
     #[new]
-    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None, topology_spread=None, health_check=None))]
+    #[pyo3(signature = (instance_name, image, replicas, port, command=None, args=None, env=None, resources=None, ttl_seconds=None, public=true, storage=None, topology_spread=None, health_check=None, public_metadata=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         instance_name: String,
@@ -1288,6 +1290,7 @@ impl CreateDeploymentRequest {
         storage: Option<StorageSpec>,
         topology_spread: Option<TopologySpreadConfig>,
         health_check: Option<HealthCheckConfig>,
+        public_metadata: bool,
     ) -> Self {
         Self {
             instance_name,
@@ -1303,6 +1306,7 @@ impl CreateDeploymentRequest {
             storage,
             topology_spread,
             health_check,
+            public_metadata,
         }
     }
 }
@@ -1327,7 +1331,7 @@ impl From<CreateDeploymentRequest> for SdkCreateDeploymentRequest {
             suspended: false,
             priority: None,
             topology_spread: req.topology_spread.map(Into::into),
-            public_metadata: false,
+            public_metadata: req.public_metadata,
         }
     }
 }
@@ -1390,6 +1394,8 @@ pub struct DeploymentResponse {
     /// Shareable URL with token query parameter for private deployments.
     #[pyo3(get)]
     pub share_url: Option<String>,
+    #[pyo3(get)]
+    pub public_metadata: bool,
 }
 
 impl From<SdkDeploymentResponse> for DeploymentResponse {
@@ -1411,6 +1417,7 @@ impl From<SdkDeploymentResponse> for DeploymentResponse {
             progress: response.progress.map(Into::into),
             share_token: response.share_token,
             share_url: response.share_url,
+            public_metadata: response.public_metadata,
         }
     }
 }
@@ -1433,6 +1440,8 @@ pub struct DeploymentSummary {
     /// Whether the deployment is publicly accessible.
     #[pyo3(get)]
     pub public: bool,
+    #[pyo3(get)]
+    pub public_metadata: bool,
 }
 
 impl From<SdkDeploymentSummary> for DeploymentSummary {
@@ -1444,6 +1453,7 @@ impl From<SdkDeploymentSummary> for DeploymentSummary {
             replicas: summary.replicas.into(),
             created_at: summary.created_at,
             public: summary.public,
+            public_metadata: summary.public_metadata,
         }
     }
 }
@@ -2058,6 +2068,64 @@ impl From<SdkDeleteShareTokenResponse> for DeleteShareTokenResponse {
     fn from(response: SdkDeleteShareTokenResponse) -> Self {
         Self {
             revoked: response.revoked,
+        }
+    }
+}
+
+// ============================================================================
+// Public Deployment Metadata Types
+// ============================================================================
+
+use basilica_sdk::types::PublicDeploymentMetadataResponse as SdkPublicDeploymentMetadataResponse;
+
+/// Response for metadata enrollment status
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct EnrollMetadataResponse {
+    #[pyo3(get)]
+    pub public_metadata: bool,
+}
+
+impl From<SdkEnrollMetadataResponse> for EnrollMetadataResponse {
+    fn from(response: SdkEnrollMetadataResponse) -> Self {
+        Self {
+            public_metadata: response.public_metadata,
+        }
+    }
+}
+
+/// Public deployment metadata visible without authentication
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass]
+#[derive(Clone)]
+pub struct PublicDeploymentMetadataResponse {
+    #[pyo3(get)]
+    pub instance_name: String,
+    #[pyo3(get)]
+    pub image: String,
+    #[pyo3(get)]
+    pub image_tag: String,
+    #[pyo3(get)]
+    pub id: String,
+    #[pyo3(get)]
+    pub uptime_seconds: u64,
+    #[pyo3(get)]
+    pub replicas: ReplicaStatus,
+    #[pyo3(get)]
+    pub state: String,
+}
+
+impl From<SdkPublicDeploymentMetadataResponse> for PublicDeploymentMetadataResponse {
+    fn from(response: SdkPublicDeploymentMetadataResponse) -> Self {
+        Self {
+            instance_name: response.instance_name,
+            image: response.image,
+            image_tag: response.image_tag,
+            id: response.id,
+            uptime_seconds: response.uptime_seconds,
+            replicas: response.replicas.into(),
+            state: response.state,
         }
     }
 }

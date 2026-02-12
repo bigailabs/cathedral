@@ -96,6 +96,8 @@ from basilica._basilica import (
     StorageSpec,
     TopologySpreadConfig,
     VolumeMountRequest,
+    EnrollMetadataResponse,
+    PublicDeploymentMetadataResponse,
 )
 
 # GpuRequirementsSpec may not be available in older binaries
@@ -273,6 +275,9 @@ __all__ = [
     "StartSecureCloudRentalRequest",
     "StopSecureCloudRentalResponse",
     "ListSecureCloudRentalsResponse",
+    # Public metadata types
+    "EnrollMetadataResponse",
+    "PublicDeploymentMetadataResponse",
 ]
 
 
@@ -1100,6 +1105,7 @@ class BasilicaClient:
         storage: Optional[Union[str, StorageSpec]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
         health_check: Optional[HealthCheckConfig] = None,
+        public_metadata: bool = False,
     ) -> DeploymentResponse:
         """
         Create a deployment (low-level API).
@@ -1125,6 +1131,7 @@ class BasilicaClient:
             storage: Storage path or StorageSpec
             topology_spread: Topology spread configuration for pod distribution
             health_check: Custom health check configuration (HealthCheckConfig)
+            public_metadata: Enable public metadata enrollment for validator verification
 
         Returns:
             DeploymentResponse with deployment details
@@ -1173,6 +1180,7 @@ class BasilicaClient:
             storage=storage_spec,
             topology_spread=topology_spread,
             health_check=health_check,
+            public_metadata=public_metadata,
         )
 
         return self._client.create_deployment(request)
@@ -1188,6 +1196,35 @@ class BasilicaClient:
     def list_deployments(self) -> DeploymentListResponse:
         """List all deployments."""
         return self._client.list_deployments()
+
+    def enroll_metadata(
+        self, instance_name: str, enabled: bool
+    ) -> EnrollMetadataResponse:
+        """Toggle public metadata enrollment for a deployment.
+
+        Args:
+            instance_name: Deployment name
+            enabled: True to enroll, False to unenroll
+        """
+        return self._client.enroll_metadata(instance_name, enabled)
+
+    def get_enrollment_status(self, instance_name: str) -> EnrollMetadataResponse:
+        """Check public metadata enrollment status for a deployment.
+
+        Args:
+            instance_name: Deployment name
+        """
+        return self._client.get_enrollment_status(instance_name)
+
+    def get_public_deployment_metadata(
+        self, instance_name: str
+    ) -> PublicDeploymentMetadataResponse:
+        """Fetch public metadata for a deployment (no authentication required).
+
+        Args:
+            instance_name: Deployment name
+        """
+        return self._client.get_public_deployment_metadata(instance_name)
 
     def get_deployment_logs(
         self, instance_name: str, follow: bool = False, tail: Optional[int] = None
@@ -1592,6 +1629,7 @@ class BasilicaClient:
         storage: Optional[Union[str, StorageSpec]] = None,
         topology_spread: Optional[TopologySpreadConfig] = None,
         health_check: Optional[HealthCheckConfig] = None,
+        public_metadata: bool = False,
     ) -> DeploymentResponse:
         """
         Create a deployment asynchronously (low-level API).
@@ -1640,6 +1678,7 @@ class BasilicaClient:
             storage=storage_spec,
             topology_spread=topology_spread,
             health_check=health_check,
+            public_metadata=public_metadata,
         )
 
         loop = asyncio.get_running_loop()
@@ -1665,6 +1704,33 @@ class BasilicaClient:
         """List all deployments asynchronously."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._client.list_deployments)
+
+    async def enroll_metadata_async(
+        self, instance_name: str, enabled: bool
+    ) -> EnrollMetadataResponse:
+        """Toggle public metadata enrollment asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self._client.enroll_metadata(instance_name, enabled)
+        )
+
+    async def get_enrollment_status_async(
+        self, instance_name: str
+    ) -> EnrollMetadataResponse:
+        """Check public metadata enrollment status asynchronously."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._client.get_enrollment_status, instance_name
+        )
+
+    async def get_public_deployment_metadata_async(
+        self, instance_name: str
+    ) -> PublicDeploymentMetadataResponse:
+        """Fetch public metadata asynchronously (no authentication required)."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, self._client.get_public_deployment_metadata, instance_name
+        )
 
     async def get_deployment_logs_async(
         self, instance_name: str, follow: bool = False, tail: Optional[int] = None

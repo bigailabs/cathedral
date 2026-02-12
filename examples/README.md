@@ -62,6 +62,9 @@ Using `@basilica.deployment` decorator:
 | `25_kimi_k2_5.py` | Kimi-K2-Instruct 1T MoE (8x H200) | `python3 25_kimi_k2_5.py` |
 | `28_openclaw.py` | OpenClaw gateway | `python3 28_openclaw.py` |
 | `29_deploy_sglang_health_check.py` | SGLang with custom health check probes | `python3 29_deploy_sglang_health_check.py` |
+| `31_public_metadata.py` | Public metadata enrollment via Python SDK | `python3 31_public_metadata.py` |
+| `31_public_metadata.sh` | Public metadata enrollment lifecycle via CLI | `./31_public_metadata.sh` |
+| `32_public_metadata_cli/` | Public metadata CLI reference | See directory README |
 
 ## Large Model Deployment Notes
 
