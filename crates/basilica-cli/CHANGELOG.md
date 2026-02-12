@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-02-12
+
+### Added
+- `basilica deploy enroll-metadata` subcommand for toggling public metadata enrollment
+- `basilica deploy metadata` subcommand for unauthenticated public metadata lookup
+- `--public-metadata` flag for `deploy` command to enable enrollment at creation time
+- "Verified" column in deployment list table showing enrollment status
+- Public metadata line in deployment detail view
+
 ## [0.18.4] - 2026-02-11
 
 ### Fixed

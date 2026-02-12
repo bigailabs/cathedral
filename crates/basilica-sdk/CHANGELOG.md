@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-02-12
+
+### Added
+- `enroll_metadata()` method for toggling public metadata enrollment (authenticated POST)
+- `get_enrollment_status()` method for checking enrollment state (authenticated GET)
+- `get_public_deployment_metadata()` method for unauthenticated public metadata lookup
+- `public_metadata` field on `CreateDeploymentRequest`, `DeploymentResponse`, and `DeploymentSummary`
+- `EnrollMetadataResponse` and `PublicDeploymentMetadataResponse` types
+- `get_public()` helper for requests that skip authentication headers
+
 ## [0.17.0] - 2026-02-04
 ### Changed
 - Replaced `DataCrunch` provider with `Verda` in CloudProvider enum
