@@ -27,20 +27,28 @@ use basilica_common::types::GpuCategory;
 use chrono::Utc;
 use futures::future::join_all;
 use serde_json;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
-const GPU_DECLARATION_MISMATCH_REASON: &str = "gpu_declaration_mismatch";
-
 fn normalize_gpu_category(input: &str) -> String {
     match GpuCategory::from_str(input) {
         Ok(category) => category.to_string(),
         Err(infallible) => match infallible {},
     }
+}
+
+struct GpuDeclarationMismatchContext {
+    miner_uid: u16,
+    node_id: String,
+    mismatch_reason: String,
+    declared_gpu_category: Option<String>,
+    declared_gpu_count: Option<u32>,
+    detected_gpu_category: Option<String>,
+    detected_gpu_count: u32,
 }
 
 #[derive(Clone)]
@@ -1311,17 +1319,11 @@ impl VerificationEngine {
         let node_id = node_result.node_id.to_string();
         let miner_id = format!("miner_{miner_uid}");
 
-        let detected_gpu_infos = &validation_result.gpu_infos;
-        let detected_gpu_count = detected_gpu_infos.len() as u32;
-        let detected_gpu_names: Vec<String> = detected_gpu_infos
-            .iter()
-            .map(|gpu| gpu.gpu_name.clone())
-            .collect();
-        let detected_categories: BTreeSet<String> = detected_gpu_infos
-            .iter()
-            .map(|gpu| normalize_gpu_category(&gpu.gpu_name))
-            .collect();
-        let detected_categories_vec: Vec<String> = detected_categories.iter().cloned().collect();
+        let detected_gpu_count = validation_result.gpu_infos.len() as u32;
+        let detected_gpu_category = validation_result
+            .gpu_infos
+            .first()
+            .map(|gpu| normalize_gpu_category(&gpu.gpu_name));
 
         let declared_metadata = self
             .persistence
@@ -1329,12 +1331,10 @@ impl VerificationEngine {
             .await?;
 
         let mut declared_gpu_count: Option<u32> = None;
-        let mut declared_gpu_category_raw: Option<String> = None;
-        let mut declared_gpu_category_normalized: Option<String> = None;
+        let mut declared_gpu_category: Option<String> = None;
 
         let mismatch_reason = if let Some(metadata) = declared_metadata {
             declared_gpu_count = Some(metadata.gpu_count);
-            declared_gpu_category_raw = Some(metadata.gpu_category.clone());
 
             let declared_category_trimmed = metadata.gpu_category.trim();
             if declared_category_trimmed.is_empty() {
@@ -1342,7 +1342,7 @@ impl VerificationEngine {
             } else {
                 let normalized_declared_category =
                     normalize_gpu_category(declared_category_trimmed);
-                declared_gpu_category_normalized = Some(normalized_declared_category.clone());
+                declared_gpu_category = Some(normalized_declared_category.clone());
 
                 if normalized_declared_category == "OTHER" {
                     Some(format!(
@@ -1351,23 +1351,26 @@ impl VerificationEngine {
                     ))
                 } else if metadata.gpu_count == 0 {
                     Some("declared gpu_count must be greater than 0".to_string())
-                } else if detected_categories_vec.len() != 1 {
-                    Some(format!(
-                        "detected mixed GPU categories: [{}]",
-                        detected_categories_vec.join(", ")
-                    ))
                 } else if detected_gpu_count != metadata.gpu_count {
                     Some(format!(
                         "detected gpu_count {} does not match declared {}",
                         detected_gpu_count, metadata.gpu_count
                     ))
-                } else if detected_categories_vec[0] != normalized_declared_category {
-                    Some(format!(
-                        "detected gpu_category '{}' does not match declared '{}'",
-                        detected_categories_vec[0], normalized_declared_category
-                    ))
                 } else {
-                    None
+                    match detected_gpu_category.as_deref() {
+                        Some(detected_category)
+                            if detected_category == normalized_declared_category =>
+                        {
+                            None
+                        }
+                        Some(detected_category) => Some(format!(
+                            "detected gpu_category '{}' does not match declared '{}'",
+                            detected_category, normalized_declared_category
+                        )),
+                        None => Some(
+                            "detected gpu_category is missing from validation result".to_string(),
+                        ),
+                    }
                 }
             }
         } else {
@@ -1376,16 +1379,16 @@ impl VerificationEngine {
 
         if let Some(reason) = mismatch_reason {
             self.mark_gpu_declaration_mismatch(
-                miner_uid,
-                &node_id,
                 node_result,
-                &reason,
-                declared_gpu_category_raw.as_deref(),
-                declared_gpu_category_normalized.as_deref(),
-                declared_gpu_count,
-                &detected_gpu_names,
-                &detected_categories_vec,
-                detected_gpu_count,
+                GpuDeclarationMismatchContext {
+                    miner_uid,
+                    node_id,
+                    mismatch_reason: reason,
+                    declared_gpu_category,
+                    declared_gpu_count,
+                    detected_gpu_category,
+                    detected_gpu_count,
+                },
             )
             .await;
         }
@@ -1393,32 +1396,34 @@ impl VerificationEngine {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn mark_gpu_declaration_mismatch(
         &self,
-        miner_uid: u16,
-        node_id: &str,
         node_result: &mut NodeVerificationResult,
-        mismatch_reason: &str,
-        declared_gpu_category_raw: Option<&str>,
-        declared_gpu_category_normalized: Option<&str>,
-        declared_gpu_count: Option<u32>,
-        detected_gpu_names: &[String],
-        detected_categories: &[String],
-        detected_gpu_count: u32,
+        context: GpuDeclarationMismatchContext,
     ) {
+        let GpuDeclarationMismatchContext {
+            miner_uid,
+            node_id,
+            mismatch_reason,
+            declared_gpu_category,
+            declared_gpu_count,
+            detected_gpu_category,
+            detected_gpu_count,
+        } = context;
+
         node_result.binary_validation_successful = false;
         node_result.verification_score = 0.0;
         node_result.validation_details.binary_score = 0.0;
         node_result.validation_details.combined_score = 0.0;
+        let mismatch_reason_tag = MisbehaviourType::GpuDeclarationMismatch.as_str();
         if !node_result
             .failure_reasons
             .iter()
-            .any(|reason| reason == GPU_DECLARATION_MISMATCH_REASON)
+            .any(|reason| reason == mismatch_reason_tag)
         {
             node_result
                 .failure_reasons
-                .push(GPU_DECLARATION_MISMATCH_REASON.to_string());
+                .push(mismatch_reason_tag.to_string());
         }
         node_result.error = Some(format!("GPU declaration mismatch: {}", mismatch_reason));
 
@@ -1426,12 +1431,10 @@ impl VerificationEngine {
             "reason": mismatch_reason,
             "node_id": node_id,
             "miner_uid": miner_uid,
-            "declared_gpu_category": declared_gpu_category_raw,
-            "declared_gpu_category_normalized": declared_gpu_category_normalized,
+            "declared_gpu_category": declared_gpu_category,
             "declared_gpu_count": declared_gpu_count,
             "detected_gpu_count": detected_gpu_count,
-            "detected_gpu_categories": detected_categories,
-            "detected_gpu_names": detected_gpu_names,
+            "detected_gpu_category": detected_gpu_category,
         })
         .to_string();
 
@@ -1445,7 +1448,7 @@ impl VerificationEngine {
         if let Err(log_error) = ban_manager
             .log_misbehaviour(
                 miner_uid,
-                node_id,
+                &node_id,
                 MisbehaviourType::GpuDeclarationMismatch,
                 &details,
             )
@@ -1453,7 +1456,7 @@ impl VerificationEngine {
         {
             warn!(
                 miner_uid = miner_uid,
-                node_id = node_id,
+                node_id = &node_id,
                 error = %log_error,
                 "Failed to log GPU declaration mismatch misbehaviour"
             );
@@ -1462,11 +1465,11 @@ impl VerificationEngine {
         warn!(
             security = true,
             miner_uid = miner_uid,
-            node_id = node_id,
-            mismatch_reason = mismatch_reason,
+            node_id = &node_id,
+            mismatch_reason = &mismatch_reason,
             declared_gpu_count = declared_gpu_count.unwrap_or(0),
             detected_gpu_count = detected_gpu_count,
-            detected_categories = ?detected_categories,
+            detected_gpu_category = detected_gpu_category.as_deref().unwrap_or("unknown"),
             "Full validation failed due to GPU declaration mismatch"
         );
     }
@@ -1893,7 +1896,8 @@ mod node_profile_wiring_tests {
         assert_eq!(verification_result.verification_score, 1.0);
         assert!(!verification_result
             .failure_reasons
-            .contains(&GPU_DECLARATION_MISMATCH_REASON.to_string()));
+            .iter()
+            .any(|reason| reason == MisbehaviourType::GpuDeclarationMismatch.as_str()));
 
         let logs = persistence
             .get_misbehaviour_logs(miner_uid, &node_id, chrono::Duration::days(7))
@@ -1925,7 +1929,8 @@ mod node_profile_wiring_tests {
         assert_eq!(verification_result.validation_details.combined_score, 0.0);
         assert!(verification_result
             .failure_reasons
-            .contains(&GPU_DECLARATION_MISMATCH_REASON.to_string()));
+            .iter()
+            .any(|reason| reason == MisbehaviourType::GpuDeclarationMismatch.as_str()));
         assert!(verification_result
             .error
             .as_deref()
@@ -1960,7 +1965,8 @@ mod node_profile_wiring_tests {
         assert!(!verification_result.binary_validation_successful);
         assert!(verification_result
             .failure_reasons
-            .contains(&GPU_DECLARATION_MISMATCH_REASON.to_string()));
+            .iter()
+            .any(|reason| reason == MisbehaviourType::GpuDeclarationMismatch.as_str()));
 
         let logs = persistence
             .get_misbehaviour_logs(miner_uid, &node_id, chrono::Duration::days(7))
@@ -1975,14 +1981,14 @@ mod node_profile_wiring_tests {
     }
 
     #[tokio::test]
-    async fn full_validation_gpu_claim_check_fails_on_mixed_detected_categories() -> Result<()> {
+    async fn full_validation_gpu_claim_check_uses_first_detected_gpu_for_category() -> Result<()> {
         let (engine, persistence) = create_test_engine().await?;
         let miner_uid = 204u16;
         let node_id =
             register_declared_node(&persistence, miner_uid, "10.0.20.4", "A100", 2).await?;
         let mut verification_result = build_full_verification_result(
             &node_id,
-            &["NVIDIA A100", "NVIDIA H100"],
+            &["NVIDIA H100", "NVIDIA A100"],
             ValidationType::Full,
         );
 
@@ -1993,7 +1999,8 @@ mod node_profile_wiring_tests {
         assert!(!verification_result.binary_validation_successful);
         assert!(verification_result
             .failure_reasons
-            .contains(&GPU_DECLARATION_MISMATCH_REASON.to_string()));
+            .iter()
+            .any(|reason| reason == MisbehaviourType::GpuDeclarationMismatch.as_str()));
 
         let logs = persistence
             .get_misbehaviour_logs(miner_uid, &node_id, chrono::Duration::days(7))
@@ -2003,7 +2010,7 @@ mod node_profile_wiring_tests {
             logs[0].type_of_misbehaviour,
             MisbehaviourType::GpuDeclarationMismatch
         );
-        assert!(logs[0].details.contains("mixed GPU categories"));
+        assert!(logs[0].details.contains("detected gpu_category"));
 
         Ok(())
     }
@@ -2025,7 +2032,8 @@ mod node_profile_wiring_tests {
         assert!(!verification_result.binary_validation_successful);
         assert!(verification_result
             .failure_reasons
-            .contains(&GPU_DECLARATION_MISMATCH_REASON.to_string()));
+            .iter()
+            .any(|reason| reason == MisbehaviourType::GpuDeclarationMismatch.as_str()));
 
         let logs = persistence
             .get_misbehaviour_logs(miner_uid, &node_id, chrono::Duration::days(7))
@@ -2056,7 +2064,8 @@ mod node_profile_wiring_tests {
         assert_eq!(verification_result.verification_score, 1.0);
         assert!(!verification_result
             .failure_reasons
-            .contains(&GPU_DECLARATION_MISMATCH_REASON.to_string()));
+            .iter()
+            .any(|reason| reason == MisbehaviourType::GpuDeclarationMismatch.as_str()));
 
         let logs = persistence
             .get_misbehaviour_logs(miner_uid, &node_id, chrono::Duration::days(7))
