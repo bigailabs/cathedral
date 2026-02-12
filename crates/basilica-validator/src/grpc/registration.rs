@@ -232,9 +232,6 @@ impl MinerRegistration for RegistrationService {
         if req.miner_hotkey.trim().is_empty() {
             return Err(Status::invalid_argument("miner_hotkey is required"));
         }
-        if req.nodes.is_empty() {
-            return Err(Status::invalid_argument("at least one node is required"));
-        }
         if req.signature.is_empty() {
             return Err(Status::invalid_argument("signature is required"));
         }
@@ -424,6 +421,62 @@ impl MinerRegistration for RegistrationService {
             .map_err(|e| Status::internal(format!("failed to compute node_id: {e}")))?
             .uuid
             .to_string();
+
+        // Load stored node metadata to enforce bid floor for UpdateBid.
+        let node_metadata = self
+            .persistence
+            .get_node_bid_metadata(&miner_id, &node_id)
+            .await
+            .map_err(|e| Status::internal(format!("failed to fetch node metadata: {e}")))?
+            .ok_or_else(|| Status::not_found("node not found"))?;
+
+        let gpu_category = node_metadata.gpu_category.trim();
+        if gpu_category.is_empty() {
+            return Err(Status::failed_precondition(
+                "node missing gpu_category; re-register via RegisterBid",
+            ));
+        }
+
+        let gpu_cat: GpuCategory = gpu_category.parse().unwrap(); // Infallible
+        if matches!(&gpu_cat, GpuCategory::Other(_)) {
+            return Err(Status::failed_precondition(format!(
+                "unsupported GPU type '{}' for node; re-register via RegisterBid",
+                gpu_category
+            )));
+        }
+
+        let api_client = self.api_client.as_ref().ok_or_else(|| {
+            Status::failed_precondition(
+                "baseline price client unavailable; cannot enforce UpdateBid floor",
+            )
+        })?;
+
+        let baseline_prices = api_client.get_baseline_prices().await.map_err(|e| {
+            Status::unavailable(format!(
+                "failed to fetch baseline prices for UpdateBid floor check: {e}"
+            ))
+        })?;
+
+        let category_key = gpu_cat.to_string();
+        let baseline_dollars = baseline_prices.get(&category_key).copied().ok_or_else(|| {
+            Status::failed_precondition(format!(
+                "no baseline price available for category '{}'; cannot enforce UpdateBid floor",
+                category_key
+            ))
+        })?;
+
+        let floor_cents =
+            (baseline_dollars * 100.0 * self.bidding_config.min_bid_floor_fraction).round() as u32;
+        if floor_cents > 0 && req.hourly_rate_cents < floor_cents {
+            return Err(Status::invalid_argument(format!(
+                "hourly_rate_cents {} is below minimum floor {} ({:.0}% of baseline ${:.2}/hr) for {}",
+                req.hourly_rate_cents,
+                floor_cents,
+                self.bidding_config.min_bid_floor_fraction * 100.0,
+                baseline_dollars,
+                category_key,
+            )));
+        }
 
         // Update node price
         let updated = self

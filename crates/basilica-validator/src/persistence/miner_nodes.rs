@@ -24,6 +24,13 @@ pub struct NodeBidCandidate {
     pub gpu_count: i64,
 }
 
+/// Stored bid metadata for a registered node.
+#[derive(Debug, Clone)]
+pub struct RegisteredNodeBidMetadata {
+    pub gpu_category: String,
+    pub gpu_count: u32,
+}
+
 pub(crate) fn extract_gpu_memory_gb(gpu_name: &str) -> u32 {
     use regex::Regex;
     let re = Regex::new(r"(\d+)GB").unwrap();
@@ -1407,6 +1414,38 @@ impl SimplePersistence {
         Ok(rate_cents.map(|v| v as u32))
     }
 
+    /// Get bid metadata for a specific node owned by a miner.
+    pub async fn get_node_bid_metadata(
+        &self,
+        miner_id: &str,
+        node_id: &str,
+    ) -> Result<Option<RegisteredNodeBidMetadata>> {
+        let row = sqlx::query(
+            r#"
+            SELECT gpu_category, gpu_count
+            FROM miner_nodes
+            WHERE miner_id = ? AND node_id = ?
+            LIMIT 1
+            "#,
+        )
+        .bind(miner_id)
+        .bind(node_id)
+        .fetch_optional(self.pool())
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let gpu_category: Option<String> = row.try_get("gpu_category")?;
+        let gpu_count: i64 = row.get("gpu_count");
+
+        Ok(Some(RegisteredNodeBidMetadata {
+            gpu_category: gpu_category.unwrap_or_default(),
+            gpu_count: gpu_count as u32,
+        }))
+    }
+
     // =========================================================================
     // Miner Registration (miner→validator flow) methods
     // =========================================================================
@@ -1462,8 +1501,8 @@ impl SimplePersistence {
                 r#"
                 INSERT INTO miner_nodes (
                     id, miner_id, node_id, ssh_endpoint, node_ip, gpu_count,
-                    hourly_rate_cents, status, bid_active, last_node_check, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
+                    hourly_rate_cents, gpu_category, status, bid_active, last_node_check, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'online', 1, datetime('now'), datetime('now'))
                 "#,
             )
             .bind(&relationship_id)
@@ -1473,6 +1512,7 @@ impl SimplePersistence {
             .bind(host)
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
+            .bind(gpu_category)
             .execute(self.pool())
             .await?;
 
@@ -1495,6 +1535,7 @@ impl SimplePersistence {
                     node_ip = ?,
                     gpu_count = ?,
                     hourly_rate_cents = ?,
+                    gpu_category = ?,
                     status = 'online',
                     bid_active = 1,
                     last_node_check = datetime('now')
@@ -1505,6 +1546,7 @@ impl SimplePersistence {
             .bind(host)
             .bind(gpu_count as i64)
             .bind(hourly_rate_cents as i64)
+            .bind(gpu_category)
             .bind(miner_id)
             .bind(&node_id)
             .execute(self.pool())
@@ -1806,6 +1848,7 @@ mod tests {
 
         assert!(columns.contains("last_node_check"));
         assert!(columns.contains("last_miner_health_check"));
+        assert!(columns.contains("gpu_category"));
         assert!(!columns.contains("last_health_check"));
 
         let index_rows = sqlx::query("PRAGMA index_list('miner_nodes')")
@@ -2047,5 +2090,195 @@ mod tests {
         .await
         .expect("failed to count rented gpu assignments");
         assert_eq!(rented_gpu_exists, 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_registered_node_persists_bid_metadata() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+        let host = "10.0.1.10";
+
+        insert_test_miner(&persistence, miner_id).await;
+
+        let created = persistence
+            .upsert_registered_node(miner_id, host, 22, "root", "A100", 4, 1200)
+            .await
+            .expect("upsert should succeed");
+        assert!(created);
+
+        let metadata = persistence
+            .get_node_bid_metadata(
+                miner_id,
+                &basilica_common::node_identity::NodeId::new(host)
+                    .expect("valid host")
+                    .uuid
+                    .to_string(),
+            )
+            .await
+            .expect("metadata query should succeed")
+            .expect("metadata should exist");
+        assert_eq!(metadata.gpu_category, "A100");
+        assert_eq!(metadata.gpu_count, 4);
+
+        let updated = persistence
+            .upsert_registered_node(miner_id, host, 22, "root", "H100", 8, 2200)
+            .await
+            .expect("upsert update should succeed");
+        assert!(!updated);
+
+        let metadata_after = persistence
+            .get_node_bid_metadata(
+                miner_id,
+                &basilica_common::node_identity::NodeId::new(host)
+                    .expect("valid host")
+                    .uuid
+                    .to_string(),
+            )
+            .await
+            .expect("metadata query should succeed")
+            .expect("metadata should exist");
+        assert_eq!(metadata_after.gpu_category, "H100");
+        assert_eq!(metadata_after.gpu_count, 8);
+    }
+
+    #[tokio::test]
+    async fn get_node_bid_metadata_returns_empty_category_for_legacy_rows() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+        let node_id = "legacy_node";
+
+        insert_test_miner(&persistence, miner_id).await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            node_id,
+            "10.0.0.10",
+            "online",
+            1,
+            Some("2000-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+
+        let metadata = persistence
+            .get_node_bid_metadata(miner_id, node_id)
+            .await
+            .expect("metadata query should succeed")
+            .expect("metadata should exist for existing node");
+        assert!(metadata.gpu_category.is_empty());
+        assert_eq!(metadata.gpu_count, 1);
+    }
+
+    #[tokio::test]
+    async fn deactivate_missing_bids_selective_deactivation() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+        let active_node = "active_node";
+        let removed_node = "removed_node";
+
+        insert_test_miner(&persistence, miner_id).await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            active_node,
+            "10.0.0.11",
+            "online",
+            1,
+            Some("2000-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            removed_node,
+            "10.0.0.12",
+            "online",
+            1,
+            Some("2000-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+
+        let deactivated = persistence
+            .deactivate_missing_bids(miner_id, &[active_node.to_string()])
+            .await
+            .expect("deactivation should succeed");
+        assert_eq!(deactivated, 1);
+
+        let active_bid: i64 = sqlx::query_scalar(
+            "SELECT bid_active FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(active_node)
+        .fetch_one(persistence.pool())
+        .await
+        .expect("active node should exist");
+        assert_eq!(active_bid, 1);
+
+        let removed_bid: i64 = sqlx::query_scalar(
+            "SELECT bid_active FROM miner_nodes WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(miner_id)
+        .bind(removed_node)
+        .fetch_one(persistence.pool())
+        .await
+        .expect("removed node should exist");
+        assert_eq!(removed_bid, 0);
+    }
+
+    #[tokio::test]
+    async fn deactivate_missing_bids_with_empty_list_deactivates_all() {
+        let persistence = create_test_persistence().await;
+        let miner_id = "miner_1";
+
+        insert_test_miner(&persistence, miner_id).await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_a",
+            "10.0.0.13",
+            "online",
+            1,
+            Some("2000-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+        insert_test_node(
+            &persistence,
+            miner_id,
+            "node_b",
+            "10.0.0.14",
+            "online",
+            1,
+            Some("2000-01-01 00:00:00"),
+            None,
+            None,
+            1000,
+        )
+        .await;
+
+        let deactivated = persistence
+            .deactivate_missing_bids(miner_id, &[])
+            .await
+            .expect("deactivation should succeed");
+        assert_eq!(deactivated, 2);
+
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miner_nodes WHERE miner_id = ? AND bid_active = 1",
+        )
+        .bind(miner_id)
+        .fetch_one(persistence.pool())
+        .await
+        .expect("count query should succeed");
+        assert_eq!(active_count, 0);
     }
 }

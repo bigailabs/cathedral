@@ -154,11 +154,6 @@ impl RegistrationClient {
         grpc_endpoint: &str,
         node_registrations: Vec<NodeRegistration>,
     ) -> Result<RegistrationState> {
-        if node_registrations.is_empty() {
-            warn!("No nodes to register");
-            return Ok(RegistrationState::default());
-        }
-
         let mut client = self.connect(grpc_endpoint).await?;
 
         // Build and sign request
@@ -179,6 +174,9 @@ impl RegistrationClient {
             node_count = node_count,
             "Registering nodes with validator"
         );
+        if node_count == 0 {
+            warn!("Sending zero-node RegisterBid to deactivate all existing bids");
+        }
 
         let response = client
             .register_bid(request)
