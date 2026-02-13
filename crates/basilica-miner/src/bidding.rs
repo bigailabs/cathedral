@@ -129,7 +129,6 @@ impl BidManager {
             self.static_prices().len()
         );
 
-        // 1. Register nodes with bid manager prices
         let node_registrations = self.build_node_registrations(&nodes);
         let state = self
             .registration_client

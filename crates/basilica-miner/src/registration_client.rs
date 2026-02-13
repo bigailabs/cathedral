@@ -181,7 +181,13 @@ impl RegistrationClient {
         let response = client
             .register_bid(request)
             .await
-            .context("RegisterBid RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "RegisterBid RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
@@ -289,7 +295,13 @@ impl RegistrationClient {
         let response = client
             .health_check(request)
             .await
-            .context("HealthCheck RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "HealthCheck RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
@@ -336,7 +348,13 @@ impl RegistrationClient {
         let response = client
             .update_bid(request)
             .await
-            .context("UpdateBid RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "UpdateBid RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
@@ -379,7 +397,13 @@ impl RegistrationClient {
         let response = client
             .remove_bid(request)
             .await
-            .context("RemoveBid RPC failed")?
+            .map_err(|status| {
+                anyhow::anyhow!(
+                    "RemoveBid RPC failed (code: {}, message: {})",
+                    status.code(),
+                    status.message(),
+                )
+            })?
             .into_inner();
 
         if !response.accepted {
