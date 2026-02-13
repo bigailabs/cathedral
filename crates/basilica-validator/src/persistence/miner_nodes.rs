@@ -356,7 +356,7 @@ impl SimplePersistence {
                     AND me.miner_id = gpu_uuid_assignments.miner_id
                     AND me.status = 'offline'
                     AND me.active_rental_id IS NULL
-                    AND me.last_node_check < datetime('now', '-2 hours')
+                    AND datetime(me.last_node_check) < datetime('now', '-2 hours')
                 )
             )
         "#;
@@ -1909,7 +1909,10 @@ mod tests {
 
         assert_eq!(status, "offline");
         assert_eq!(last_node_check.as_deref(), Some(original_node_check));
-        assert!(last_miner_health_check.is_some());
+        let heartbeat = last_miner_health_check.expect("last_miner_health_check should be set");
+        assert!(!heartbeat.contains('T'));
+        chrono::NaiveDateTime::parse_from_str(&heartbeat, "%Y-%m-%d %H:%M:%S")
+            .expect("heartbeat should use SQLite datetime format");
     }
 
     #[tokio::test]

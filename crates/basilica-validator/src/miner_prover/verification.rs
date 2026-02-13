@@ -589,11 +589,10 @@ impl VerificationEngine {
         // Update node status
         if let Err(e) = sqlx::query(
             "UPDATE miner_nodes
-             SET status = ?, last_node_check = ?
+             SET status = ?, last_node_check = datetime('now')
              WHERE node_id = ? AND miner_id = ?",
         )
         .bind(&status)
-        .bind(&now)
         .bind(&verification_log.node_id)
         .bind(&miner_id)
         .execute(&mut *tx)
@@ -2071,6 +2070,53 @@ mod node_profile_wiring_tests {
             .get_misbehaviour_logs(miner_uid, &node_id, chrono::Duration::days(7))
             .await?;
         assert!(logs.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_node_verification_result_sets_last_node_check_in_sqlite_format() -> Result<()> {
+        let (engine, persistence) = create_test_engine().await?;
+        let miner_uid = 207u16;
+        let node_id =
+            register_declared_node(&persistence, miner_uid, "10.0.20.7", "A100", 1).await?;
+
+        let verification_result =
+            build_full_verification_result(&node_id, &["NVIDIA A100"], ValidationType::Full);
+        let miner_info = MinerInfo {
+            uid: MinerUid::new(miner_uid),
+            hotkey: Hotkey::new("5DAAnrj7VHTznn2AWBemMuyBwZWs6FNFjdyVXUeYum3PTXFy".to_string())
+                .expect("valid hotkey"),
+            endpoint: "http://127.0.0.1:9090".to_string(),
+            is_validator: false,
+            stake_tao: 100.0,
+            last_verified: None,
+            verification_score: 0.0,
+        };
+
+        engine
+            .store_node_verification_result_with_miner_info(
+                miner_uid,
+                &verification_result,
+                &miner_info,
+            )
+            .await?;
+
+        let miner_id = format!("miner_{miner_uid}");
+        let last_node_check: Option<String> = sqlx::query_scalar(
+            "SELECT last_node_check
+             FROM miner_nodes
+             WHERE miner_id = ? AND node_id = ?",
+        )
+        .bind(&miner_id)
+        .bind(&node_id)
+        .fetch_one(persistence.pool())
+        .await?;
+
+        let timestamp = last_node_check.expect("last_node_check should be set");
+        assert!(!timestamp.contains('T'));
+        chrono::NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%d %H:%M:%S")
+            .expect("timestamp should use SQLite datetime format");
 
         Ok(())
     }
